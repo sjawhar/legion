@@ -784,11 +784,11 @@ claim's pod and the image probe's.
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
   Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
   check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is a
-  complete one, the route this cluster runs on and the Go live harnesses prove: a `models.yml` and a
-  settings overlay from a ConfigMap, and a projected token its key command reads. Its
-  `apply.sh` creates the durable ConfigMap `pod.yml` mounts; its README answers whether a second
-  project needs its own ServiceAccount and audience (it does not), and how `pod` and `provider_keys`
-  compose.
+  complete one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
+  ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
+  and how `pod` and `provider_keys` compose; its `apply.sh` creates the ConfigMap. Both files are
+  mounted by `subPath`, which the kubelet never refreshes, so a changed ConfigMap reaches only pods
+  created after the change.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback

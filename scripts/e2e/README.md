@@ -418,16 +418,16 @@ the harness reads into memory. The harness decodes it there and mints the implem
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
 
-Every pod carries the operator fixture's pod,
+Every pod carries the operator route's pod,
 [`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
-audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
+audience `middleman-legion`, and a ConfigMap holding the route's `models.yml` (anthropic through
 the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
 `overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
 gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
 none of it. Before the harness runs, the script creates the run's own copy of that ConfigMap as the
 operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
-`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the fixture's `${LEGION_E2E_MODEL_GATEWAY_URL}`
+`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the route's `${MODEL_BASE_URL}`
 placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
 delete this one's route. It also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the

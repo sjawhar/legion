@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Creates or updates the durable ConfigMap this directory's pod.yml mounts, so every Legion pod in
-# the namespace reads the operator's model route. Idempotent: re-run it to change the route.
+# Creates or updates the ConfigMap this directory's pod.yml mounts, holding the operator's
+# models.yml and overlay.yml.
 #
-#   deploy/kubernetes/operator-route/apply.sh --base-url https://<gateway>/anthropic \
-#     [--context <kubectl context>] [--namespace legion] [--name legion-operator-route] [--dry-run]
+#   deploy/kubernetes/operator-route/apply.sh --context <kubectl context> --base-url https://<endpoint> \
+#     [--namespace legion] [--name legion-operator-route] [--dry-run]
 #
-# --base-url is the operator's model gateway endpoint, which replaces models.yml's placeholder; the
-# repository carries no default, and nothing else in the pair is substituted. The ConfigMap is
-# applied with no legion.dev/project label, so a live harness run's teardown — which deletes by that
-# label — leaves it alone.
+# --context is required: kubectl's current context is never assumed, since more than one cluster can
+# hold a namespace of the same name. The line reporting what was applied, or with --dry-run what
+# would have been, names the cluster that context points at.
+# --base-url is the model endpoint, which replaces models.yml's placeholder; the repository carries
+# no default, and nothing else in the pair is substituted.
+#
+# Re-running it updates the ConfigMap, but pod.yml mounts both files by subPath, which the kubelet
+# never refreshes: a change reaches only pods created after it. The ConfigMap carries no
+# legion.dev/project label; a live harness run deletes only objects labelled with its own run's
+# project, so it leaves this one alone.
 #
 # Stdout says what was applied. A refusal names what is wrong and exits 1; bad arguments exit 2.
 set -euo pipefail
@@ -35,7 +41,7 @@ dry_run=
 while [ $# -gt 0 ]; do
   case "$1" in
   --base-url)
-    [ $# -ge 2 ] || refuse "--base-url needs the model gateway endpoint"
+    [ $# -ge 2 ] || refuse "--base-url needs the model endpoint"
     base_url=$2
     shift 2
     ;;
@@ -65,7 +71,8 @@ done
 # The same shape lib/model-gateway-url.sh holds the harnesses to: the value becomes a plain YAML
 # scalar in models.yml, so a character outside :/._~- or a trailing colon would change what YAML
 # reads.
-[ -n "$base_url" ] || refuse "--base-url is required: the model gateway endpoint models.yml's provider calls"
+[ -n "$context" ] || refuse "--context is required: name the kubectl context whose cluster should hold the route"
+[ -n "$base_url" ] || refuse "--base-url is required: the model endpoint models.yml's provider calls"
 case "$base_url" in
 *[!A-Za-z0-9:/._~-]*) refuse "--base-url holds a character other than letters, digits and :/._~-" ;;
 *:) refuse "--base-url ends in a colon, which YAML reads as a mapping key" ;;
@@ -79,9 +86,11 @@ work=$(mktemp -d /tmp/legion-operator-route.XXXXXXXX)
 trap 'rm -rf "$work"' EXIT
 printf '%s\n' "${models//"$placeholder"/"$base_url"}" >"$work/models.yml"
 
-kube=(kubectl)
-[ -z "$context" ] || kube+=(--context "$context")
-kube+=(--namespace "$namespace")
+cluster=$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$context\")].context.cluster}") ||
+  fail "could not read the kubeconfig to resolve --context $context"
+[ -n "$cluster" ] || fail "--context $context names no context in the kubeconfig"
+target="namespace $namespace of cluster $cluster (context $context)"
+kube=(kubectl --context "$context" --namespace "$namespace")
 
 "${kube[@]}" create configmap "$name" \
   --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$here/overlay.yml" \
@@ -89,10 +98,10 @@ kube+=(--namespace "$namespace")
 
 if [ -n "$dry_run" ]; then
   cat "$work/configmap.yaml"
-  echo "$me: --dry-run: ConfigMap $name for namespace $namespace was not applied"
+  echo "$me: --dry-run: ConfigMap $name for $target was not applied"
   exit 0
 fi
 
 "${kube[@]}" apply -f "$work/configmap.yaml" >/dev/null ||
-  fail "could not apply ConfigMap $name in namespace $namespace"
-echo "$me: applied ConfigMap $name in namespace $namespace: models.yml (baseUrl $base_url) and overlay.yml"
+  fail "could not apply ConfigMap $name in $target"
+echo "$me: applied ConfigMap $name in $target: models.yml (baseUrl $base_url) and overlay.yml"
