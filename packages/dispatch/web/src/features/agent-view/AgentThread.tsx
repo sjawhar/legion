@@ -126,9 +126,11 @@ export function AgentThread({
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
       <ErrorBoundary region="this conversation" resetKey={resetKey}>
+        {/* `mt-3`: the scroller clips a turn at its top edge, and without a gap that clipped
+            line sat against the page's note above it and read as overlapping text. */}
         <ThreadPrimitive.Viewport
           autoScroll
-          className="min-h-0 flex-1 overflow-y-auto pr-1"
+          className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1"
           data-testid="agent-thread"
         >
           <ThreadPrimitive.Empty>
