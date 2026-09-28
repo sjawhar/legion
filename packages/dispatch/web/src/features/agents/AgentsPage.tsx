@@ -65,6 +65,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
+import { matchingSelection, selectionSummary, toggleMatching } from "./selection";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -747,7 +748,9 @@ function AgentRow({
 }
 
 /** A collapsed `<label> (N)` disclosure over rows the page keeps out of the way; absent when
- * empty, closed on every load, and open only while this page stays mounted. */
+ * empty, closed on every load, and open only while this page stays mounted. Once any of its
+ * rows is selected it reads `<label> (N, K selected)`, so the header checkbox never selects a
+ * row out of sight without saying so. */
 function AgentFold({
   agents,
   label,
@@ -767,13 +770,14 @@ function AgentFold({
 }): ReactNode {
   const [expanded, setExpanded] = useState(false);
   if (agents.length === 0) return null;
+  const { selectedMatching } = matchingSelection(agents, selected);
   return (
     // A block wrapper, not a fragment: the global `button { display: inline-flex }` would
     // otherwise let two collapsed toggles share one line below the desktop breakpoint.
     <div className="space-y-3">
       <DisclosureToggle
         expanded={expanded}
-        label={`${label} (${agents.length})`}
+        label={`${label} (${agents.length}${selectedMatching === 0 ? "" : `, ${selectedMatching} selected`})`}
         onToggle={() => setExpanded((open) => !open)}
       />
       {expanded ? (
@@ -816,32 +820,6 @@ export function filterAgents(agents: readonly Agent[], filters: AgentFilters): A
       (filters.role === "" || agent.roles.includes(filters.role)) &&
       (dir === "" || agent.dir.toLowerCase().includes(dir))
   );
-}
-
-export type ShownSelectionState = "none" | "some" | "all";
-
-/** How much of what the filters show is selected, which is the header checkbox's state and
- *  count. A selected session the filters hide counts toward neither. */
-export function shownSelection(
-  shown: readonly Agent[],
-  selected: ReadonlySet<string>
-): { selectedShown: number; state: ShownSelectionState } {
-  let selectedShown = 0;
-  for (const agent of shown) if (selected.has(agent.session_id)) selectedShown += 1;
-  const state = selectedShown === 0 ? "none" : selectedShown === shown.length ? "all" : "some";
-  return { selectedShown, state };
-}
-
-/** The header checkbox's click: select every shown session unless all of them already are,
- *  and otherwise unselect them. Selected sessions the filters hide stay selected either way. */
-export function toggleShown(shown: readonly Agent[], selected: ReadonlySet<string>): Set<string> {
-  const next = new Set(selected);
-  const selectAll = shownSelection(shown, selected).state !== "all";
-  for (const agent of shown) {
-    if (selectAll) next.add(agent.session_id);
-    else next.delete(agent.session_id);
-  }
-  return next;
 }
 
 /** A session a broadcast would leave out, worded the way the server reports it, so the
@@ -947,25 +925,23 @@ function AgentFilterBar({
 }
 
 /**
- * The list's select-all checkbox, in a row directly above the rows and aligned with their
- * checkboxes (the rows' 1 px border plus their 12 px padding). Shown means every row the
- * filters match, folded sections included. Its state is theirs - unchecked, checked, or mixed
- * when some are selected - and a click selects all of them unless all already are, and
- * otherwise unselects them. `Clear selection` empties the whole selection, rows the filters
- * hide included.
+ * The list's select-all checkbox. Its 13 px inset lines it up with the rows' checkboxes (their
+ * 1 px border plus 12 px padding). Matching means every row the filters match, folded sections
+ * included, and `Clear selection` also empties the selected rows the filters hide.
  */
 function SelectionHeader({
   onClear,
   onToggle,
   selected,
-  shown,
+  matching,
 }: {
   onClear: () => void;
   onToggle: () => void;
   selected: ReadonlySet<string>;
-  shown: readonly Agent[];
+  matching: readonly Agent[];
 }): ReactNode {
-  const { selectedShown, state } = shownSelection(shown, selected);
+  const selection = matchingSelection(matching, selected);
+  const { state } = selection;
   const checkbox = useRef<HTMLInputElement>(null);
   const countId = useId();
   // `indeterminate` is a DOM property with no attribute, so React cannot render it.
@@ -973,25 +949,23 @@ function SelectionHeader({
     if (checkbox.current !== null) checkbox.current.indeterminate = state === "some";
   }, [state]);
   return (
-    <div className="mb-2 flex min-h-11 flex-wrap items-center gap-x-2 px-[13px] md:min-h-8">
+    <div className="mb-2 flex min-h-11 items-center gap-x-2 px-[13px] md:min-h-8">
       <input
         aria-describedby={countId}
-        aria-label="Select all shown agents"
+        aria-label="Select all matching agents"
         checked={state === "all"}
         className={`size-4 shrink-0 ${checkboxAccent}`}
-        disabled={shown.length === 0}
+        disabled={matching.length === 0}
         onChange={onToggle}
         ref={checkbox}
         type="checkbox"
       />
-      <span className={`text-xs ${textMutedOnCanvas}`} id={countId}>
-        {state === "none"
-          ? `${shown.length} shown`
-          : `${selectedShown} of ${shown.length} selected`}
+      <span className={`min-w-0 flex-1 text-xs ${textMutedOnCanvas}`} id={countId}>
+        {selectionSummary(matching.length, selection)}
       </span>
       {selected.size === 0 ? null : (
         <button
-          className={`min-h-11 rounded-lg border px-2 text-xs font-medium md:min-h-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+          className={`min-h-11 shrink-0 rounded-lg border px-2 text-xs font-medium md:min-h-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
           onClick={onClear}
           type="button"
         >
@@ -1006,7 +980,9 @@ function SelectionHeader({
  * The broadcast a selection is waiting to become: one body, one mode, and one message per
  * recipient. Selection is what the human ticked, so a recipient that a later filter hides is
  * still listed here rather than silently dropped; every selected session is named, including
- * the ones this mode leaves out.
+ * the ones this mode leaves out. It follows the list and sticks to the viewport's bottom, so
+ * appearing costs no layout above the rows: the checkbox that summoned it stays under the
+ * pointer. A long recipient list scrolls inside it rather than growing it past half the screen.
  */
 function BroadcastComposer({
   agents,
@@ -1049,7 +1025,7 @@ function BroadcastComposer({
   return (
     <section
       aria-label="Broadcast"
-      className={`mb-4 rounded-xl border p-3 ${card} ${borderDefault}`}
+      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 ${card} ${borderDefault}`}
     >
       <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>
         Broadcast to {recipients.length} of {selected.size} selected
@@ -1152,11 +1128,11 @@ export function AgentsPage(): ReactNode {
   // list after ticking a row must not quietly drop that row from the send. Every selected
   // session is named in the composer, so nothing is hidden either way.
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
-  const listed = filterAgents(agents, filters);
+  const matching = filterAgents(agents, filters);
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
   const { active, quiet, inactive } = partitionAgents(
-    listed,
+    matching,
     pinned,
     needsYouBySession,
     Date.now()
@@ -1197,21 +1173,13 @@ export function AgentsPage(): ReactNode {
       ) : (
         <>
           <AgentFilterBar agents={agents} filters={filters} onFilters={setFilters} />
-          {selected.size === 0 ? null : (
-            <BroadcastComposer
-              agents={agents}
-              onDeselect={(sessionID) => select(sessionID, false)}
-              onSent={() => setSelected(new Set())}
-              selected={selected}
-            />
-          )}
           <SelectionHeader
             onClear={() => setSelected(new Set())}
-            onToggle={() => setSelected((current) => toggleShown(listed, current))}
+            onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}
-            shown={listed}
+            matching={matching}
           />
-          {listed.length === 0 ? (
+          {matching.length === 0 ? (
             <EmptyState
               label="Agents filtered empty state"
               message="No agent matches these filters."
@@ -1249,6 +1217,14 @@ export function AgentsPage(): ReactNode {
                 selected={selected}
               />
             </div>
+          )}
+          {selected.size === 0 ? null : (
+            <BroadcastComposer
+              agents={agents}
+              onDeselect={(sessionID) => select(sessionID, false)}
+              onSent={() => setSelected(new Set())}
+              selected={selected}
+            />
           )}
         </>
       )}

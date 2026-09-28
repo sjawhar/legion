@@ -430,7 +430,7 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
   }
 });
 
-test("the header checkbox selects and clears only the rows the filters show, by pointer and by Space", async ({
+test("the header checkbox selects and clears only the rows the filters match, by pointer and by Space", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the selection rule");
@@ -455,51 +455,67 @@ test("the header checkbox selects and clears only the rows the filters show, by 
     const page = await alice.newPage();
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
-    const header = agents.getByRole("checkbox", { name: "Select all shown agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
     const row = (title: string) =>
       agents.getByRole("checkbox", { name: `Select ${title} for broadcast` });
-    const chips = page
-      .getByRole("region", { name: "Broadcast" })
-      .getByRole("list", { name: "Selected agents" })
-      .getByRole("button");
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const chips = composer.getByRole("list", { name: "Selected agents" }).getByRole("button");
+    // The count is the header checkbox's own description, so these reads are exact and cannot
+    // match the composer's `Broadcast to X of Y selected` heading.
+    const count = (text: string) => expect(header).toHaveAccessibleDescription(text);
+
     // Every session is silent, so every row is under the collapsed fold, and the header still
-    // counts them: shown means what the filters match, folded or not.
-    await expect(agents.getByText("4 shown")).toBeVisible();
+    // counts them: matching means what the filters match, folded or not. Selecting them says so
+    // on the fold, so nothing is picked out of sight.
+    await count("4 matching");
     await expect(agents.getByRole("button", { name: /^Select all/ })).toHaveCount(0);
+    await header.click();
+    await count("4 of 4 matching selected");
+    await expect(
+      agents.getByRole("button", { name: "No Dispatch activity (4, 4 selected)" })
+    ).toBeVisible();
+    await agents.getByRole("button", { name: "Clear selection" }).click();
+    await count("4 matching");
     await agents.getByRole("button", { name: "No Dispatch activity (4)" }).click();
 
     // A row ticked under no filter, which the role filter below hides.
     await row("Reviewer").check();
+    await expect(
+      agents.getByRole("button", { name: "No Dispatch activity (4, 1 selected)" })
+    ).toBeVisible();
     await agents.getByRole("combobox", { name: "Role" }).selectOption("planner");
     await expect(row("Reviewer")).toHaveCount(0);
-    await expect(agents.getByText("2 shown")).toBeVisible();
+    await count("2 matching · 1 selected outside the filter");
     await expect(header).not.toBeChecked();
 
     await header.click();
+    // The send set is the two matching planners plus the hand-ticked Reviewer, never the Tester
+    // the filter hides: a select-all over the unfiltered list would read `Send to 4` here.
+    await expect(composer.getByRole("button", { name: "Send to 3" })).toBeVisible();
     await expect(row("Planner A")).toBeChecked();
     await expect(row("Planner B")).toBeChecked();
     await expect(header).toBeChecked();
-    await expect(agents.getByText("2 of 2 selected")).toBeVisible();
+    await count("2 of 2 matching selected · 1 more selected outside the filter");
     await expect(chips).toHaveText(["Reviewer ✕", "Planner A ✕", "Planner B ✕"]);
 
     await row("Planner B").uncheck();
     await expect(header).toBeChecked({ indeterminate: true });
     await expect(header).toHaveJSProperty("indeterminate", true);
-    await expect(agents.getByText("1 of 2 selected")).toBeVisible();
+    await count("1 of 2 matching selected · 1 more selected outside the filter");
 
-    // Space on the focused header toggles it like a click: mixed becomes all shown.
+    // Space on the focused header toggles it like a click: mixed becomes all matching.
     await header.focus();
     await page.keyboard.press("Space");
     await expect(header).toBeChecked();
     await expect(row("Planner B")).toBeChecked();
-    await expect(agents.getByText("2 of 2 selected")).toBeVisible();
+    await count("2 of 2 matching selected · 1 more selected outside the filter");
 
-    // Once more clears the shown rows and nothing else: the Reviewer stays selected and named.
+    // Once more clears the matching rows and nothing else: the Reviewer stays selected and named.
     await page.keyboard.press("Space");
     await expect(header).not.toBeChecked();
     await expect(row("Planner A")).not.toBeChecked();
     await expect(row("Planner B")).not.toBeChecked();
-    await expect(agents.getByText("2 shown")).toBeVisible();
+    await count("2 matching · 1 selected outside the filter");
     await expect(chips).toHaveText(["Reviewer ✕"]);
 
     await header.click();
@@ -509,7 +525,47 @@ test("the header checkbox selects and clears only the rows the filters show, by 
 
     // Clear selection takes the hidden row too.
     await agents.getByRole("button", { name: "Clear selection" }).click();
-    await expect(page.getByRole("region", { name: "Broadcast" })).toHaveCount(0);
+    await expect(composer).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("the header checkbox stays under the pointer on a phone when its click opens the composer", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+  await setLiveSessions(
+    ["a", "b", "c"].map((id) => ({
+      capabilities: ["aside", "btw"],
+      dir: `/workspaces/${id}`,
+      machine_id: "build-host",
+      roles: ["planner"],
+      session_id: `${id}-session`,
+      title: `Planner ${id.toUpperCase()}`,
+    }))
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 664, width: 390 });
+    await page.goto("/agents");
+    const header = page
+      .getByRole("region", { name: "Agents" })
+      .getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    await expect(header).toBeVisible();
+    const before = await header.boundingBox();
+    expect(before).not.toBeNull();
+
+    // The composer appears and goes away with alternate clicks; the header never moves.
+    for (const opened of [true, false, true]) {
+      await header.click();
+      await expect(composer).toHaveCount(opened ? 1 : 0);
+      expect(await header.boundingBox()).toEqual(before);
+    }
+    await expect(header).toBeInViewport();
   } finally {
     await alice.close();
   }
