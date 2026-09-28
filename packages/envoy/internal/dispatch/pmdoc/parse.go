@@ -96,9 +96,18 @@ func Parse(markdown string) (*Node, error) {
 // markdown names on two blocks is refused (ErrSchema) instead of repaired, since the repair would
 // silently give the id to whichever block comes first. live is the document the markdown replaces
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
-// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
+// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A document
+// whose rendering, the markdown it is stored as, reads back otherwise is refused
+// (RefuseMisreadWrite).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	return parseForWrite(markdown, live, true)
+	doc, err := parseForWrite(markdown, live, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := RefuseMisreadWrite(nil, doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
 }
 
 // ParseFragment parses markdown a caller writes into a document, rather than one that begins it,

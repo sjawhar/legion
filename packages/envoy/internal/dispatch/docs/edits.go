@@ -872,6 +872,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
 			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
 		}
+		// What is stored is the document's rendering, so an insert that leaves it reading back
+		// otherwise than it did would store another document than the one it wrote.
+		if err := pmdoc.RefuseMisreadWrite(tree, out); err != nil {
+			return nil, invalidSchemaOp("markdown", err)
+		}
 		return out, nil
 	case "delete_row":
 		if op.Block == "" {

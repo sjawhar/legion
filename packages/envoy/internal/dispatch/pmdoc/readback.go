@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"slices"
 	"sort"
@@ -45,14 +46,19 @@ func ReadBack(doc *Node) (*Node, error) {
 // another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
 // parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
 // or not after parses: the checks that read each changed block alone still refuse one the write
-// leaves unreadable. A panic reading either back (ErrPanic) is this package's bug, not a misread,
-// and is the error.
+// leaves unreadable. A nil before is a whole document the write makes, so every block that reads
+// back otherwise is the write's, and an after whose markdown the parser refuses is named by that
+// refusal. A panic reading either back (ErrPanic) is this package's bug, not a misread, and is the
+// error.
 func NewMisread(before, after *Node) (string, error) {
 	backAfter, err := ReadBack(after)
 	if errors.Is(err, ErrPanic) {
 		return "", err
 	}
 	if err != nil {
+		if before == nil {
+			return err.Error(), nil
+		}
 		if _, beforeErr := ReadBack(before); beforeErr != nil {
 			if errors.Is(beforeErr, ErrPanic) {
 				return "", beforeErr
@@ -62,8 +68,15 @@ func NewMisread(before, after *Node) (string, error) {
 		return err.Error(), nil
 	}
 	written := StripAnchorMarks(after)
-	if readDifference(written, backAfter, skip{}) == "" {
+	difference := readDifference(written, backAfter, skip{})
+	if difference == "" {
 		return "", nil
+	}
+	if before == nil {
+		if found := misreads(written, backAfter, skip{}); len(found) > 0 {
+			return found[0].reason, nil
+		}
+		return difference, nil
 	}
 	backBefore, err := ReadBack(before)
 	if errors.Is(err, ErrPanic) {
@@ -85,6 +98,23 @@ func NewMisread(before, after *Node) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// RefuseMisreadWrite refuses (ErrSchema) a write whose document reads back otherwise where before
+// did not (NewMisread; a nil before for a whole document): what is stored is its rendering, which
+// the next read would give back as another document or refuse. The rules that read a shape refuse
+// what they know first, so a refusal here names a shape none of them reads, and is logged. A panic
+// reading it back (ErrPanic) is the error.
+func RefuseMisreadWrite(before, after *Node) error {
+	misread, err := NewMisread(before, after)
+	if err != nil {
+		return err
+	}
+	if misread == "" {
+		return nil
+	}
+	slog.Warn("pmdoc: refused a write whose markdown reads back otherwise", "misread", misread)
+	return fmt.Errorf("%w: the markdown the document would be stored as reads back otherwise (%s)", ErrSchema, misread)
 }
 
 // misread is a block that reads back otherwise: its id, what differs (the same for the same
