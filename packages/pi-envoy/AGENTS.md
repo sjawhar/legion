@@ -55,7 +55,7 @@ environment variable the TypeScript daemon sets on a pane that this extension re
 `LEGION_CONTROL_SUBJECT`, `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`,
 `ENVOY_NATS_URL`, `ENVOY_URL`, `ENVOY_TOKEN_FILE` (the listener bearer, read by
 `@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), `NATS_NKEY_SEED_FILE` (the
-`legion-pane` NATS nkey seed; contract 9, LEGION-279), and the `LEGION_*` identity
+`legion-pane` NATS nkey seed; contract 8, LEGION-279), and the `LEGION_*` identity
 variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/`LEGION_WORKSPACE`/
 `LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
 `extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant
@@ -91,7 +91,7 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 8) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 10) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
@@ -137,6 +137,12 @@ the Go `legion controller start` sets it to the operator file's `nats_nkey_seed_
 extension's Envoy connections read the seed from it (`@legion/envoy-client`'s `nats-auth.ts`), so
 they authenticate as that nkey user once production NATS stops admitting credential-less clients.
 With no seed there is no pointer, and the connections carry no credential, as before.
+Contract 9 adds the daemon's own agent-secrets machine login state (`agentSecretsLogin`) to
+`GET /legion/v1/state` (AGENTC-393). Contract 10 adds `POST /legion/v1/roots/close`
+(`LegionGoRootCloseRequest`: `grantId`, `issue`, `reason`), the Go `legion` tool's `close_root`: a
+root architect ends its tree while the root is admitted and no phase has started, and the daemon
+posts the reason on the issue before it writes `done`. A plugin at 9 offers no `close_root`, and
+one at 10 against a daemon at 9 would call a route that daemon does not have.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
@@ -162,7 +168,8 @@ so no phase worker is woken by an architect's notice); and `claims/ready`,
 retried three times a second apart on a 5xx or transport failure only. The tool-call hook mints a
 fresh grant into the pane's `LEGION_GRANT_FILE` before every call that redeems one (see the grant
 file row below). It also registers the Go `legion` tool: architects register gates, release
-children, request a backward move, choose retry or escalation, sign off, and read records; phase
+children, request a backward move, choose retry or escalation, sign off, close an admitted root
+tree (a root architect only), and read records; phase
 workers request a backward move and read records.
 Control directives remain out because the Go daemon does not set `LEGION_CONTROL_SUBJECT`, as
 does a `claims/exit` report at shutdown because a daemon-requested suspend ends the session but
@@ -249,6 +256,31 @@ sent follow-up stays quiet until the next Envoy delivery or assignment. The stat
 transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
 (`LEGION_TEST_OMP`).
+
+## The pane guard: filesystem and signals (LEGION-121)
+
+`src/legion/pane-guard.ts` holds a phase worker's and a root architect's pane (and its `task`
+subagents: the check runs in the `tool_call` hook ahead of the subagent exemption, beside
+`PANE_RULES`) to the boundary `docs/deployment.md` "The pane guard" describes: no deletion, move,
+truncation, overwrite of an existing file, or recursive mode or owner change outside
+`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, and the
+tmux and ssh socket directories. The guard cannot tell which allowed `/tmp` directory belongs to
+the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and whose bash is one `legion`
+command, gets the `/tmp` root alone. No signal reaches a process that is not a descendant of the
+pane's Oh My Pi process (`/proc` read at check time). It reads the variables both daemons set on
+every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORKSPACE`, `HOME`), so
+it adds nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser,
+bundled into `dist/legion.js`) and walked as bash would run them: word expansion with quoting,
+tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path), `cd`, brace expansion,
+command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`, `timeout`, ...),
+and the scripts a command runs, whose refusal names the script and line. `src/legion/pane-guard-code.ts`
+tokenizes Python and JavaScript for known deletion, move, overwrite, signal, and shell-out calls
+whose arguments it can evaluate; an argument it cannot evaluate is let through, where a shell
+target it cannot resolve, and a command `unbash` reports as malformed, are refused. Command tables
+are `Set`/`Map`, never object literals, since their keys come from the command (`constructor` would
+otherwise match). `src/legion/pane-guard.test.ts` holds the family matrix, the incident's script,
+the signal cases, and the eval tool; `extensions/legion.test.ts` proves the hook refuses the
+incident's script through a booted worker.
 
 ## Native Dispatch tools
 
@@ -407,4 +439,4 @@ state never nudges.
 - `spawnWorker` in `src/legion/daemon-client.ts` carries the caller's `requestId` (minted once per `legion` `spawn_worker` call in `src/legion/tools.ts`) and retries only a `fetch` that rejected — never a `LegionDaemonApiError`, whatever its status, and never a response-shape error — up to `SPAWN_WORKER_ATTEMPTS` (3) with `SPAWN_WORKER_RETRY_DELAYS_MS` between attempts, the same id every time so the daemon's ledger dedupes it; the last rejected fetch is a `LegionDaemonTransportError` naming the cause, attempts, and id. A response whose headers arrived but body cannot be read is not retried because `fetch` fulfilled; it is a `LegionDaemonResponseReadError` with the same request id and `legion state` guidance. The 403 recovery above composes with both paths unchanged (LEGION-102).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
-- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider.
+- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. A Legion pane cannot run their default tmux cleanup under the pane guard; do not edit the smoke to bypass that refusal. LEGION-300 owns a pane-safe smoke path.

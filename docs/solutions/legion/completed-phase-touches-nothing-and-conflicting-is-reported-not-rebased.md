@@ -24,7 +24,9 @@ LEGION-41's implementer pushed its round-5 fix at 11:33Z and reported completion
 No `Tests` run appeared for either round-5 head. The implementer investigated, found GitHub
 reporting the PR `CONFLICTING` (LEGION-20, #975, had landed on `main` touching the same
 `up.sh` lines), and — because the skill allows a rebase for exactly that condition — ran
-`jj rebase -s 'roots(main@origin..@)' -d main@origin` in `$LEGION_WORKSPACE` at 11:44–11:45Z.
+`jj rebase -s 'roots(main@origin..@)' -d main@origin` (superseded 2026-09-27 by LEGION-118 —
+resolve with a forward merge instead, `skills/legion-worker/SKILL.md`) in `$LEGION_WORKSPACE` at
+11:44–11:45Z.
 
 The tester's phase had been active since 11:42Z. A Legion issue has **one** jj workspace shared
 by every role; a rebase rewrites every commit in the chain, and jj moves the working copy with

@@ -133,11 +133,15 @@ not exist. In order:
      - no `main` at all: a repository whose default branch is another, with no way out printed.
 
      TypeScript still adds `main` by name.
-3. `git worktree prune`, then the add. On `already registered|exists` (jj still registers the
-   workspace but its directory is gone): `jj workspace forget <name> -R <clone>` (Go adds
-   `--ignore-working-copy`), prune,
-   the same add again at the same revision. A brand-new workspace and a forgotten registration
-   start from the same resolution — the two paths no longer differ in where they start.
+3. Delete this workspace's own stale git worktree entry, then the add. On `already
+   registered|exists` (jj still registers the workspace but its directory is gone):
+   `jj workspace forget <name> -R <clone>` (Go adds `--ignore-working-copy`), then the same add
+   again at the same revision. Provisioning then locks the workspace's git worktree entry, as it
+   does for a workspace it finds already there. The deleted and the locked entry are each the one
+   whose `gitdir` names the workspace; never a bare `git worktree prune`
+   (docs/solutions/daemon/jj-git-worktree-interop.md). A brand-new workspace and a forgotten
+   registration start from the same resolution — the two paths no longer differ in where they
+   start.
 4. `jj bookmark set legion/<KEY> -r @` in the new workspace **only when it starts at main**: when
    nothing resolved, or, in Go, when the bookmark was set aside (step 1), where main resolved and
    the bookmark is still created on the fresh working copy. In TypeScript, one `console.error` line
@@ -147,8 +151,9 @@ not exist. In order:
    nothing. Go logs no line for a forgotten registration; its one provisioning log line is the
    set-aside's.
 
-An existing workspace gets `update-stale`, the fetch, the credential config writes, and nothing
-with `bookmark` in it. The reactivation test's complete expected argv list is that check.
+An existing workspace gets `update-stale`, the fetch, its git worktree entry restored if a prune
+deleted it (`jj log` and `git read-tree`, only then) and locked, the credential config writes, and
+nothing with `bookmark` in it. The reactivation test's complete expected argv list is that check.
 
 ## The silent-fallback shape both review edge cases had
 

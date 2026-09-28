@@ -71,7 +71,8 @@ func TestAGateFactThatDoesNotCommitLogsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := engine.Apply(context.Background(), tx, intake.GateRegistered{Issue: "LEGION-1", ArtifactID: "art-1", Version: 2}); err != nil {
+	applied, _ := intake.WithCommitHooks(context.Background())
+	if _, err := engine.Apply(applied, tx, intake.GateRegistered{Issue: "LEGION-1", ArtifactID: "art-1", Version: 2}); err != nil {
 		t.Fatalf("apply the registration: %v", err)
 	}
 	if err := tx.Rollback(context.Background()); err != nil {

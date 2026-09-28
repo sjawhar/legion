@@ -25,13 +25,13 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
 	}
-	logged := e.logOnCommit("workflow: design gate registered", "issue", issue.Key, "artifact", fact.ArtifactID,
+	e.logOnCommit(ctx, "workflow: design gate registered", "issue", issue.Key, "artifact", fact.ArtifactID,
 		"version", fact.Version, "open", classify.DesignGateOpen(gate), "policy", e.cfg.DesignGate)
 	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err
 	}
 	if !classify.DesignGateOpen(gate) {
-		return logged, nil
+		return intake.Result{}, nil
 	}
 	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
 		return intake.Result{}, err
@@ -39,7 +39,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
 		return intake.Result{}, err
 	}
-	return logged, nil
+	return intake.Result{}, nil
 }
 
 // dispatchArtifact applies an artifact event to the gate registered for that document: an approval
@@ -57,16 +57,15 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 		return intake.Result{}, err
 	}
 	isOpen := classify.DesignGateOpen(updated)
-	var logged intake.Result
 	switch {
 	case isOpen != wasOpen:
 		verb := "closed"
 		if isOpen {
 			verb = "opened"
 		}
-		logged = e.logOnCommit("workflow: design gate "+verb, "issue", fact.Key, "artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version)
+		e.logOnCommit(ctx, "workflow: design gate "+verb, "issue", fact.Key, "artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version)
 	case fact.Kind == intake.DispatchArtifactChangesRequested:
-		logged = e.logOnCommit("workflow: design gate changes requested", "issue", fact.Key, "artifact", fact.ArtifactID, "version", fact.Version)
+		e.logOnCommit(ctx, "workflow: design gate changes requested", "issue", fact.Key, "artifact", fact.ArtifactID, "version", fact.Version)
 	}
 	if fact.Kind == intake.DispatchArtifactChangesRequested {
 		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
@@ -88,11 +87,5 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 	if err := e.advancePendingReady(ctx, tx, fact.Key, updated); err != nil {
 		return intake.Result{}, err
 	}
-	return logged, nil
-}
-
-// logOnCommit is a result that writes one Info line once the fact's transaction commits
-// (intake.Result.AfterCommit), so a fact retried after a failed commit writes it once.
-func (e *Engine) logOnCommit(msg string, args ...any) intake.Result {
-	return intake.Result{AfterCommit: []func(){func() { e.log.Info(msg, args...) }}}
+	return intake.Result{}, nil
 }

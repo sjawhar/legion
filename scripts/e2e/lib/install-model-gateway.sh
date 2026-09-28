@@ -3,31 +3,35 @@
 # own identity, so a tmux stage proof's panes reach Anthropic with no provider key: the route every
 # devbox agent session uses (~/.omp/agent/models.yml: `X-Api-Key: !hawk-token`).
 #
-#   scripts/e2e/lib/install-model-gateway.sh --profile <name> --dest <dir> --cache-dir <dir>
+#   scripts/e2e/lib/install-model-gateway.sh --profile <name> --home <dir> --dest <dir> --cache-dir <dir>
+#
+# --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh): the
+# profile's files go under <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
 #
 # LEGION_E2E_MODEL_GATEWAY_URL is required: the gateway's Anthropic endpoint, the one hawk-token's
 # default HAWK_API_URL mints for, checked by lib/model-gateway-url.sh.
 #
 # Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
 #   <dir>/hawk-token      the key command the profile names: hawk-token, run with the caller's
-#                         session bus address and XDG base directories for that one command
+#                         HOME, session bus address and XDG base directories for that one command
 #   <dir>/hawk-token.log  one line per invocation, one per mint, and hawk-token's own stderr
 #   <cache-dir>/hawk-token.key   the minted key, 0600, kept until shortly before it expires
 #   the profile's agent/models.yml and agent/config.yml (see the heredocs below)
 #
 # A pane cannot run hawk-token itself. Its XDG base directories are the daemon's own, under
-# <state_dir>/home (LEGION-206 P1), so mise finds no global config and the `uv` hawk-token runs has
-# no version; and it carries no DBUS_SESSION_BUS_ADDRESS, the only address the keyring client reads
-# (jeepney/bus.py find_session_bus), so the hawk login is out of reach. Handing the key command
-# both, and only it, keeps every pane's environment as it is: panes run as the operator's uid and
-# can reach /run/user/<uid>/bus anyway, so the command gains nothing a pane lacks.
+# <state_dir>/home (LEGION-206 P1), and its HOME is the run's own (make_omp_home), so mise finds no
+# global config and the `uv` hawk-token runs has no version; and it carries no
+# DBUS_SESSION_BUS_ADDRESS, the only address the keyring client reads (jeepney/bus.py
+# find_session_bus), so the hawk login is out of reach. Handing the key command all of them, and
+# only it, keeps every pane's environment as it is: panes run as the operator's uid and can reach
+# /run/user/<uid>/bus anyway, so the command gains nothing a pane lacks.
 #
-# Run it before the caller moves an XDG directory of its own (the stage proofs point
-# XDG_STATE_HOME at their work directory): the key command takes the caller's values at this
-# moment, and a variable the caller has unset stays unset for it. Its first mint, here, is the
-# preflight: a locked keyring (every reboot locks it; the unlock-keyring skill) is refused by name
-# before any pane exists, and hawk-token's periodic self-refresh, which can outlast OMP's ten-second
-# budget for a `!command`, runs now rather than inside a pane's first model call.
+# Run it under the operator's own HOME, before the caller moves an XDG directory of its own (the
+# stage proofs point XDG_STATE_HOME at their work directory): the key command takes the caller's
+# values at this moment, and a variable the caller has unset stays unset for it. Its first mint,
+# here, is the preflight: a locked keyring (every reboot locks it; the unlock-keyring skill) is
+# refused by name before any pane exists, and hawk-token's periodic self-refresh, which can outlast
+# OMP's ten-second budget for a `!command`, runs now rather than inside a pane's first model call.
 set -euo pipefail
 
 me=install-model-gateway
@@ -44,9 +48,11 @@ fail() {
 }
 
 profile=
+home=
 dest=
 cache_dir=
 have_profile=
+have_home=
 have_dest=
 have_cache_dir=
 while [ $# -gt 0 ]; do
@@ -54,6 +60,11 @@ while [ $# -gt 0 ]; do
   --profile)
     [ $# -ge 2 ] || refuse "--profile needs a value: the OMP profile to route"
     profile=$2 have_profile=1
+    shift 2
+    ;;
+  --home)
+    [ $# -ge 2 ] || refuse "--home needs a value: the HOME Oh My Pi runs under for the profile"
+    home=$2 have_home=1
     shift 2
     ;;
   --dest)
@@ -66,10 +77,11 @@ while [ $# -gt 0 ]; do
     cache_dir=$2 have_cache_dir=1
     shift 2
     ;;
-  *) refuse "unknown argument: $1 (usage: $0 --profile <name> --dest <dir> --cache-dir <dir>)" ;;
+  *) refuse "unknown argument: $1 (usage: $0 --profile <name> --home <dir> --dest <dir> --cache-dir <dir>)" ;;
   esac
 done
 [ -n "$have_profile" ] || refuse "--profile is required: the OMP profile to route"
+[ -n "$have_home" ] || refuse "--home is required: the HOME Oh My Pi runs under for the profile"
 [ -n "$have_dest" ] || refuse "--dest is required: the directory the key command is written to"
 [ -n "$have_cache_dir" ] || refuse "--cache-dir is required: the private directory the minted key is kept in"
 
@@ -80,7 +92,13 @@ trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
 if [ -z "$trimmed" ] || [ "$trimmed" = default ]; then
   refuse "--profile '$profile' is OMP's default profile, the one plain \`omp\` uses; name a dedicated profile"
 fi
-agent=$HOME/.omp/profiles/$profile/agent
+# The profile goes under the run's own home, never the caller's (the same rule, and the same
+# refusal of an unset or empty HOME, as install-plugin-profile.sh).
+[ -n "${HOME:-}" ] || refuse "HOME is unset or empty, so --home cannot be checked against it"
+home=$(realpath -m -- "$home")
+[ "$home" != "$(realpath -m -- "$HOME")" ] || refuse "--home $home is your own HOME; give the profile a home of its own (make_omp_home, lib/omp-home.sh)"
+[ -d "$home/.omp" ] || refuse "--home $home has no .omp directory; make it with make_omp_home (lib/omp-home.sh)"
+agent=$home/.omp/profiles/$profile/agent
 for file in models.yml config.yml; do
   [ ! -e "$agent/$file" ] || refuse "$agent/$file exists; this installs a fresh profile's model route only"
 done
@@ -114,15 +132,15 @@ chmod 0700 "$cache_dir"
 
 # env takes every -u before any assignment.
 unsets=()
-sets=("DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS")
+sets=("HOME=$HOME" "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS")
 for name in XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR; do
   if [ -n "${!name+set}" ]; then sets+=("$name=${!name}"); else unsets+=(-u "$name"); fi
 done
 {
   cat <<'EOF'
 #!/bin/bash
-# Written by scripts/e2e/lib/install-model-gateway.sh: hawk-token under the operator's session bus
-# and XDG base directories, for this one command. Stdout is the gateway key.
+# Written by scripts/e2e/lib/install-model-gateway.sh: hawk-token under the operator's HOME, session
+# bus and XDG base directories, for this one command. Stdout is the gateway key.
 #
 # Each hawk-token run reads the hawk login from the keyring over the session bus, and the devbox's
 # keyring daemon has died serving such a read, relocking the keyring until the operator unlocks it.

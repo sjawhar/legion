@@ -278,6 +278,8 @@ test("ProofDocument highlights a routed search term again after route and docume
 
 test("ProofDocument opens a hover card for a dispatch:// link in the live editor and navigates in-app", async () => {
   const issue: IssueDetails = {
+    route_status: null,
+    route_holder: null,
     artifacts: [],
     children: [],
     closed_at: null,

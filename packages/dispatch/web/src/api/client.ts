@@ -133,20 +133,25 @@ export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
 
-// A launcher-credential machine-lookup record never carries a `code` UI; a broker deployed
-// without credential requests configured answers every credential route with this 404 —
-// definitive like an auth outcome (retrying changes nothing), and the one case the inbox's
-// credential section treats as "not configured", never as a failure.
+// A broker deployed without credential requests configured (no DISPATCH_AGENT_SECRETS_URL)
+// answers every credential route with this 404 — the same class as the architecture-source
+// 404 above it: retrying changes nothing, and every credential query (the Inbox's requests
+// section, Settings' approver keys) treats it as "not configured" rather than a failure.
 export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
 
-// The retry policy every query in the app shares: an auth outcome (401/403) or a missing
-// architecture source is definitive and retrying it changes nothing; any other failure (dropped
-// connection, 5xx) is worth a couple of automatic attempts before surfacing a Retry affordance
-// to the user.
+// The retry policy every query in the app shares: an auth outcome (401/403), a missing
+// architecture source, or an unconfigured credential broker is definitive and retrying it
+// changes nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic
+// attempts before surfacing a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
-  return !isUnauthorized(error) && !isForbidden(error) && !isSourceNotFound(error);
+  return (
+    !isUnauthorized(error) &&
+    !isForbidden(error) &&
+    !isSourceNotFound(error) &&
+    !isCredentialFeatureOff(error)
+  );
 }
 
 // The reason to show a reader for a failed write: the server's own message when it answered

@@ -6,7 +6,7 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
@@ -141,8 +141,10 @@ What it stands up, all of it the run's own:
   and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
   names.
 - **The plugin**: this checkout's `pi-legion-envoy`, packed as the release packs it, installed into
-  the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`. The daemons run
-  with `OMP_PROFILE` naming it, so the gate and every pane load it.
+  the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`, under the run's
+  own Oh My Pi home `<work>/omp-home` ([`lib/omp-home.sh`](#libomp-homesh)). The daemons run with
+  that `HOME` and with `OMP_PROFILE` naming the profile, so the gate and every pane load it, and the
+  operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks that last.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
   `packages/daemon/src/daemon/omp-pin.ts`. At boot the daemon asks `mise where <pin>` for the
   configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
@@ -152,7 +154,7 @@ What it stands up, all of it the run's own:
   cannot replace the configured build while mise still supplies the tool's activation.
 - **The model route**: Anthropic through the Hawk model gateway, installed into the profile by
   [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) at setup, while the script's shell
-  still holds the operator's XDG directories. Its preflight mint refuses a locked keyring by name.
+  still holds the operator's HOME and XDG directories. Its preflight mint refuses a locked keyring by name.
   Every model role of every pane is `anthropic/claude-opus-4-8`, and `anthropic` is the one
   provider a pane may use, keyed by the operator's hawk login through
   `<work>/model-gateway/hawk-token`, whose log records each mint; no Anthropic key reaches a pane.
@@ -279,7 +281,9 @@ tester, reviewer, retro, merger READY, the ordinary human squash merge, producti
 architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
 the round returns to implementing only once the reviewer's handoff is recorded, authored and
-committed by the review App — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
+committed by the review App, and each review, like the final approval, names the commit carrying
+that round's reviewer handoff, the head the reviewer's own handoff push made (the order the Go
+reviewer prompt gives; the proof names only the decision) — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
 correction counts only in that file's patch on the pull request) and reaching testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's
@@ -287,7 +291,12 @@ handoff for that round when the issue reaches testing, and the commit carrying e
 implementer, tester, and reviewer handoff is authored and committed by that role's own App, read
 from the issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
-worker after its launch budget and the architect's retry relaunching it, restart during
+worker after its launch budget and the architect's retry relaunching it, a root whose human
+decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
+architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
+it writes `done`, every status write on the issue is the daemon's, the freed slot goes to the next
+waiting root, and the journal has the gate's changes request, the close, the linger, the slot
+release and the architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
 `<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
@@ -305,8 +314,15 @@ architect's session where they are written.
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
-loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
+loop before Stage 7, so the reviewer, as its Go prompt says and with no approval sent by the proof, approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
+From the proof's merge until that cleanup passes, the run holds the smoke `main`: an exclusive
+`flock` on `/tmp/legion-e2e-smoke-main.<owner>-<repo>.lock`, shared by every Stage 3 and Stage 4b
+run on the box (`hold_smoke_main` in `lib/workflow.sh`). Another run's merge inside that window
+adds the same `.legion/` paths and GitHub refuses it as unmergeable. A run that finds the lock
+held names the holder, says every minute how long it has waited, and fails after 45 minutes
+naming it. The lock is on an open descriptor, so a holder that dies or is killed frees it with no
+stale lock left behind.
 Each check is named in the transcript;
 seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
 and worker-notice assertions reject deliberately corrupted observations before the captured
@@ -644,7 +660,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
-| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches it; `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3 is held by one of its planner claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its planner's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's delete, registration, death and charge; a deleted pod that is still starting can register, and even take its task, before it is stopped. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
+| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3 is held by one of its planner claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its planner's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's delete, registration, death and charge; a deleted pod that is still starting can register, and even take its task, before it is stopped. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
 | `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
@@ -820,21 +836,23 @@ changed goes unseen. Every caller runs the helper right after its build.
 
 Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
 release packs it, so a stage proof or a boot-gate test runs the branch-built plugin and the user's
-default profile is never touched.
+own profiles are never touched.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
-manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --dest "$(mktemp -d)")
-# → ~/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json
+. scripts/e2e/lib/omp-home.sh && make_omp_home "$work/omp-home"
+manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/plugin")
+# → $work/omp-home/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json
 ```
 
 | flag | meaning |
 | :--- | :--- |
 | `--profile <name>` | the OMP profile to install into (`OMP_PROFILE=<name>`). Refused when OMP would read it as its default profile — empty, all whitespace, or `default` — since that is the profile every plain `omp` uses. Any other name goes to OMP as given, and OMP refuses one it cannot use. |
+| `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, which is then `<dir>/.omp/profiles/<name>`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
 | `--dest <dir>` | where the tarball is unpacked. `omp plugin install` links this directory into the profile rather than copying it, so it **is** the installed plugin and must outlive the run. Refused inside the checkout (jj would snapshot it, symlinks resolved first) and when it exists and is not an empty directory (an unpack over an earlier build would keep that build's stale files). |
 
-Both flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
-installed manifest's path as `OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
+All three flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
+installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
 the manifest both daemons' contract gates read under the same profile — the TypeScript daemon's
 (`getPluginsNodeModules()`, `packages/daemon/src/daemon/boot-probes.ts`) and the Go daemon's
 (`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
@@ -860,6 +878,10 @@ because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` t
 7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
    enabled, and resolving to `<dir>`.
 
+Steps 6 and 7 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
+`HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
+there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
+
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them.
 
@@ -881,9 +903,9 @@ rewritten saves that rewrite as its "before" and puts it back at its own exit: b
 jj snapshots the rewritten `package.json`. `go test ./...` runs package test binaries in parallel,
 so two callers at once is the expected case.
 
-The script creates the profile and `<dir>` and removes neither; the caller does, with
-`rm -rf ~/.omp/profiles/<name> <dir>` (the profile holds `plugins/` — the link and
-`omp-plugins.lock.json` — and OMP's `logs/`).
+The script creates the profile and `<dir>` and removes neither; the caller does, with its work
+directory, which holds both (the profile holds `plugins/` — the link and `omp-plugins.lock.json` —
+and OMP's `logs/`).
 
 ### The natives download
 
@@ -892,8 +914,10 @@ OMP's native modules (`pi_natives.linux-x64-{baseline,modern}.node`, ~350 MB) li
 exists — and every profile under that `HOME` shares them (`getNativesDir`,
 `@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes them
 on its first run under a `HOME` that has not run this OMP version, and in this script that run is
-`omp plugin install`. So a fresh CI runner, a container, or a newly bumped OMP pin pays ~350 MB there,
-once; on a box where the pinned OMP has already run, a fresh profile pays nothing. Measured on the
+`omp plugin install`. The run's own home links `.omp/natives` to the operator's
+([`lib/omp-home.sh`](#libomp-homesh)), so a fresh CI runner, a container, or a newly bumped OMP pin
+pays ~350 MB there, once, into the operator's cache; on a box where the pinned OMP has already run,
+a fresh profile pays nothing. Measured on the
 devbox with OMP 18.2.2: build, pack, install and verify took 2 s into a new profile, the profile got
 no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.
 
@@ -920,11 +944,12 @@ that use it print that the route comes from the variable, not the URL.
 Routes a named OMP profile's model turns to the Hawk model gateway (middleman) on the operator's
 own hawk login, the route every devbox agent session uses (`~/.omp/agent/models.yml`:
 `X-Api-Key: !hawk-token`), so the tmux stage proofs' panes reach Anthropic with no provider key.
-Stage 2 and Stage 3 run it before they move any XDG directory of their own.
+Stage 2 and Stage 3 run it under the operator's own `HOME`, before they move any XDG directory of
+their own.
 
 ```sh
 export LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
-key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache")
+key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache")
 # → $work/model-gateway/hawk-token
 ```
 
@@ -935,12 +960,13 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 | flag | meaning |
 | :--- | :--- |
 | `--profile <name>` | the OMP profile to route. Refused when OMP would read it as its default profile (empty, all whitespace, or `default`), and when its `agent/models.yml` or `agent/config.yml` already exists. |
+| `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, whose files then go under `<dir>/.omp/profiles/<name>/agent`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
 | `--dest <dir>` | where the key command and its log are written; created `0700`. Refused when it exists and is not an empty directory, and when its path holds a character other than letters, digits, `/`, `.`, `_` or `-`, since it is written into YAML as one `!command` word. |
 | `--cache-dir <dir>` | where the key command keeps the key it minted; created `0700`. Refused when it exists and is not an empty directory, so a key left there is never served. A private directory of the run, never its evidence: the key is a live gateway credential. |
 
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
-caller's `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset is
-unset for it), for that one command. It appends one line per invocation, one per mint, and
+caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
+is unset for it), for that one command. It appends one line per invocation, one per mint, and
 `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's
 `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
 and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
@@ -955,7 +981,9 @@ running `hawk-token` under that OMP process's exact environment: it fails on mis
 set for shim: uv`), because the pane's `XDG_CONFIG_HOME` is the daemon's own (LEGION-206 P1) and
 mise's global config is not there; with the operator's XDG directories it fails on the login (`no
 usable hawk login`), because the pane carries no `DBUS_SESSION_BUS_ADDRESS`, the only address the
-keyring client reads (`jeepney/bus.py`, `find_session_bus`); with both it mints. Panes run as the
+keyring client reads (`jeepney/bus.py`, `find_session_bus`); with both it mints. A pane's `HOME` is
+the run's own ([`lib/omp-home.sh`](#libomp-homesh)), where neither mise's global config nor the hawk
+login is, so the command gets the operator's `HOME` too. Panes run as the
 operator's uid and can reach `/run/user/<uid>/bus` anyway, so the command gains nothing a pane
 lacks, and every pane's environment stays as it is.
 
@@ -993,7 +1021,7 @@ tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/s
 has a fresh parent process.)
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
-caller does, with `rm -rf ~/.omp/profiles/<name> <dir> <cache-dir>`.
+caller does, with its work directory and `<cache-dir>`.
 
 ## lib/check-model-route.sh
 
@@ -1005,7 +1033,7 @@ process has stopped and before it copies the transcripts, then again over the co
 hold the same turns, sessions and subagents.
 
 ```sh
-bash scripts/e2e/lib/check-model-route.sh --sessions ~/.omp/profiles/<profile>/agent/sessions --control "$work/model-route-control"
+bash scripts/e2e/lib/check-model-route.sh --sessions "$work/omp-home/.omp/profiles/<profile>/agent/sessions" --control "$work/model-route-control"
 # → 74 assistant turns in 5 agent sessions (0 of them subagents'), every one on the anthropic provider (the gateway); negative control: … refused
 ```
 
@@ -1051,6 +1079,55 @@ timed-out wait runs before it fails), and defines `note` and `fail`, which exits
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
 | `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
+
+## lib/omp-home.sh
+
+The run's own `HOME` for Oh My Pi, so a stage proof's isolated profile lives in its work directory
+and the operator's `~/.omp/profiles` is never written or deleted. Stage 2, Stage 3, the 4b.13b
+acceptance, Stage 4b's controller and the controller proof source it.
+
+```sh
+. "$root/scripts/e2e/lib/omp-home.sh"     # sourced, never run
+make_omp_home "$work/omp-home"
+```
+
+Oh My Pi places a profile from the home directory alone: `os.homedir()/.omp/profiles/<name>`
+(`getProfileConfigRoot`, `@oh-my-pi/pi-utils` `dirs.ts`). `XDG_DATA_HOME` moves only a named
+profile's data, and only once `$XDG_DATA_HOME/omp/profiles/<name>` exists, so the profile's
+`agent/models.yml` and `config.yml` would stay in the operator's home; `PI_CONFIG_DIR` reaches no
+pane, since neither daemon's pane allow-list carries it. So the driver runs every Oh My Pi process
+of the run under `HOME=<dir>`: the daemon, and through the pane allow-list every pane, the
+controller, and each `omp` the libs run (`--home`).
+
+`make_omp_home DIR` creates `DIR/.omp` and links `DIR/.omp/natives` to the operator's native module
+cache ([The natives download](#the-natives-download)), so the run downloads nothing and removing
+`DIR` removes the link, never the cache. A second call on the same `DIR` replaces the link rather
+than writing one inside the cache through it (`ln -sfT`), and a real directory at `DIR/.omp/natives`
+fails the call. It first exports `MISE_DATA_DIR` and `XDG_CONFIG_HOME` as
+the operator's own, the paths each already resolves to, so what the daemon itself runs under `DIR`
+finds what it did under the operator's `HOME`: `mise` the same pinned Oh My Pi, `secrets` its
+secretsd config (the daemon resolves `provider_keys` with it), gh and jj their config. Panes are
+unaffected, since the daemon moves their four XDG base directories under `<state_dir>/home`
+(LEGION-206 P1).
+
+jj reads a leading `~/` in a config value against `HOME`, which is `DIR` once the daemon runs. An
+operator's `signing.key = "~/.ssh/<key>.pub"` would then name a key inside `DIR`, where there is
+none. With `signing.behavior = "own"`, the first commit of every workspace clone the daemon makes is
+authored by the operator, so it fails to sign, and no pane ever starts: the daemon log shows each
+provision failing with `Couldn't load public key <dir>/.ssh/...`, and the run fails
+`panes-pinned-to-the-rig-before-any-agent-turn` waiting for the architect to register. So
+`make_omp_home` pins every `~/` value of the operator's jj config, in
+`DIR/.jjconfig-operator-paths.toml`, to the path it names under the operator's `HOME`. It exports
+`JJ_CONFIG` as the operator's own config files (`jj config path --user`, which names jj's default
+files when `JJ_CONFIG` is unset), with that overlay last, so the daemon's jj signs as the
+operator's does. A second call leaves its own overlay out when it reads the operator's config. A
+`~/` value it cannot pin, inside an array or a table or under a quoted key, fails the call, naming
+the key. Panes commit as their App's identity (`JJ_USER` and `JJ_EMAIL`), which `"own"` never
+signs.
+
+A proof's panes and controller therefore see none of the operator's `~/.gitconfig`, `~/.claude`,
+`~/.codex` or `~/.aws`, which is what a Sandbox pod sees. The gateway key command alone runs under
+the operator's `HOME` ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
 
 ## lib/leftovers.sh
 

@@ -305,3 +305,67 @@ test("status bands stay expandable and the project key sits beside its name", as
     await alice.close();
   }
 });
+
+// A row's key and title are one reference. Below 1280 px every link is an inline-flex box, which
+// made the key and the title two flex columns: the key broke mid-key (`CORE-` over `1`) and a
+// long title wrapped in whatever the key and the timestamp left, about 130 px on a phone.
+test("a list row keeps its key whole and gives the title the row's width", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    title:
+      "Smoke rig checkpoints 5 and 7 assert the retired commit-identity and handoff-cleanup design: implementer+ses_identity, Legion-Session trailer, and the reviewer App authoring the .legion/ deletion",
+  });
+  await patchIssue(issue.key, { labels: ["smoke"], priority: 2, status: "todo" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width: 1280 });
+  }
+
+  try {
+    await page.goto("/projects/CORE/issues");
+    const row = page.getByRole("listitem", { name: new RegExp(`^${issue.key} `) });
+    await expect(row).toBeVisible();
+    const layout = await row.evaluate((node) => {
+      const link = node.querySelector("a");
+      const key = link?.querySelector(".font-semibold");
+      const title = key?.nextElementSibling;
+      const time = node.querySelector("time");
+      if (!link || !key || !title || !time) {
+        throw new Error("the row has no key, title or timestamp");
+      }
+      const rects = (element: Element) => {
+        const range = node.ownerDocument.createRange();
+        range.selectNodeContents(element);
+        return [...range.getClientRects()];
+      };
+      const titleRects = rects(title);
+      const timeBox = time.getBoundingClientRect();
+      return {
+        keyLines: new Set(rects(key).map((rect) => Math.round(rect.top))).size,
+        rowWidth: node.getBoundingClientRect().width,
+        titleOverlapsTime: titleRects.some(
+          (rect) =>
+            rect.right > timeBox.left &&
+            rect.left < timeBox.right &&
+            rect.bottom > timeBox.top &&
+            rect.top < timeBox.bottom
+        ),
+        titleWidth:
+          Math.max(...titleRects.map((rect) => rect.right)) -
+          Math.min(...titleRects.map((rect) => rect.left)),
+      };
+    });
+    expect(layout.keyLines).toBe(1);
+    expect(layout.titleOverlapsTime).toBe(false);
+    // The title wraps across the row, not in a column beside the key and the timestamp.
+    expect(layout.titleWidth).toBeGreaterThanOrEqual(layout.rowWidth * 0.8);
+    await expectNoHorizontalOverflow(page);
+  } finally {
+    await alice.close();
+  }
+});

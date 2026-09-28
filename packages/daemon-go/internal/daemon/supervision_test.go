@@ -401,6 +401,7 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	}
 	before := d.claim(token)
 	d.stop()
+	rebindHeldPorts(t, &cfg)
 	sh.closed()
 
 	second := fake.NewRuntime()
@@ -520,6 +521,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 
 	d.stop()
+	rebindHeldPorts(t, &cfg)
 	second := fake.NewRuntime()
 	second.FailReconcileOrphans(errors.New("tmux list-panes timed out again"))
 	secondOverrides := fakeRuntime(second, &built{})
@@ -540,6 +542,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 
 	restarted.stop()
+	rebindHeldPorts(t, &cfg)
 	third := fake.NewRuntime()
 	thirdOverrides := fakeRuntime(third, &built{})
 	thirdOverrides.orphanSweep = 20 * time.Millisecond
@@ -556,7 +559,9 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 // A boot reconciliation retried after boot reads the claims as they are at the retry, never as
 // the boot read them. Under the sandbox runtime the sweep deletes every Sandbox no known claim
 // owns, with no grace at boot, so a retry told the boot's snapshot would delete the Sandbox — and
-// with a root's, the tree volume — of a claim launched and suspended since.
+// with a root's, the tree volume — of a claim launched and suspended since. The attempt that
+// succeeds must know that claim; whether it saw the claim before or after the suspension committed
+// is scheduling, and either keeps its Sandbox.
 func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) {
 	cfg := testConfig(t)
 	project, _ := claim.ProjectToken(cfg.Project)
@@ -583,27 +588,32 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 	if c := d.claim(suspended); c.State != string(supervise.StateSuspended) || c.Locator != nil {
 		t.Fatalf("the claim launched after boot is %s with locator %+v, want suspended with none", c.State, c.Locator)
 	}
-	cleared := len(rt.CallsOf("ReconcileOrphans"))
 	rt.FailReconcileOrphans(nil)
 
 	testwait.Eventually(t, "the unfinished launch to be released by a successful retry", func() bool { return len(rt.CallsOf("Spawn")) == 2 })
+	// The attempt that succeeded is the last boot reconciliation (grace 0; the sweep's is two
+	// minutes) before the unfinished launch's Spawn, which waited on it.
 	var retry *fake.Call
-	for _, call := range rt.CallsOf("ReconcileOrphans")[cleared:] {
-		if call.Grace == 0 {
+	spawns := 0
+	for _, call := range rt.Calls() {
+		if call.Method == "Spawn" {
+			if spawns++; spawns == 2 {
+				break
+			}
+		}
+		if call.Method == "ReconcileOrphans" && call.Grace == 0 {
 			retry = &call
-			break
 		}
 	}
 	if retry == nil {
-		t.Fatal("no boot reconciliation ran after the failure cleared")
+		t.Fatal("no boot reconciliation ran before the unfinished launch was released")
 	}
-	known := map[claim.Token]*runtime.Locator{}
 	for _, entry := range retry.Known {
-		known[entry.Claim] = entry.Locator
+		if entry.Claim == suspended {
+			return
+		}
 	}
-	if locator, ok := known[suspended]; !ok || locator != nil {
-		t.Fatalf("the retried boot reconciliation knows %v; want the claim suspended since boot, with no locator", retry.Known)
-	}
+	t.Fatalf("the boot reconciliation that released the unfinished launch knows %v, without %s, the claim spawned after boot", retry.Known, suspended)
 }
 
 // A pane's secret files live exactly as long as its process: boot removes every file no live

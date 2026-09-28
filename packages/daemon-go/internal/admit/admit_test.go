@@ -109,9 +109,14 @@ func TestApplyFactAdmitsOrphanAndLogsOnce(t *testing.T) {
 	if orphan.Parent == nil || *orphan.Parent != "LEGION-MISSING" || orphan.Tree != orphan.Key {
 		t.Fatalf("orphan record = %#v, want root tree preserving missing parent", orphan)
 	}
-	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, `msg="admission orphan"`) {
+			lines = append(lines, line)
+		}
+	}
 	if len(lines) != 1 || !strings.Contains(lines[0], "LEGION-ORPHAN") || !strings.Contains(lines[0], "LEGION-MISSING") {
-		t.Fatalf("orphan logs = %q, want exactly one line naming orphan and parent", logs.String())
+		t.Fatalf("orphan logs = %q, want exactly one orphan line naming orphan and parent", logs.String())
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: orphan.Key, Index: 0, AdmittedAt: fixedNow}})
 }

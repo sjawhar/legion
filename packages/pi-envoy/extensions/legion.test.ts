@@ -2474,7 +2474,7 @@ describe("Legion OMP extension", () => {
       requests.filter((request) => request.path === "/legion/v1/grants").length;
     const mintsBefore = mints();
     // The spec's negatives plus the exact commands the legion-worker skill has every role run:
-    // the rebase revset, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
+    // the conflict merge, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
     const allowed = [
       "jj restore src/x.ts",
       'jj -R "$LEGION_WORKSPACE" restore packages/pi-envoy/extensions/legion.ts',
@@ -2482,7 +2482,7 @@ describe("Legion OMP extension", () => {
       'jj -R "$LEGION_WORKSPACE" op log -n 5',
       "jj op show",
       'jj describe -m "undo this"',
-      "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin",
+      'jj -R "$LEGION_WORKSPACE" new legion/LEGION-1 main@origin -m "merge: resolve conflict against main@origin"',
       'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
       'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
       'jj -R "$LEGION_WORKSPACE" log -r \'description(glob:"undo*")\'',
@@ -2627,6 +2627,90 @@ describe("Legion OMP extension", () => {
     for (const phrase of ["hub: jj undo", "every Legion issue workspace shares"]) {
       expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
+  });
+  test("refuses running the LEGION-121 incident's probe script, whose last line removes its work dir together with $HOME", async () => {
+    // The shape of the 2026-09-13 incident: a probe run from a script file (the jj guard pushes
+    // probes into files), whose cleanup line kept "$HOME" after an edit stopped overriding it.
+    const workspace = await createJjWorkspace();
+    // Outside /tmp, as the operator's home is: /tmp is the pane's scratch root. Nothing runs, so
+    // the directory need not exist. Set after boot, whose fixture points HOME elsewhere.
+    const home = `/nonexistent-legion-guard-home-${process.pid}`;
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "legion-guard-probe-"));
+    temporaryPaths.push(scratch);
+    const script = path.join(scratch, "probe.sh");
+    await writeFile(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'work="$(mktemp -d)"',
+        'cd "$work"',
+        "jj git init --colocate >/dev/null",
+        "jj config set --repo git.keep-unreachable false",
+        "echo probe > f.txt",
+        "jj log -r @ --no-graph",
+        'rm -rf "$work" "$HOME"',
+        "",
+      ].join("\n")
+    );
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      sessionId: "ses_implementer_incident_probe",
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ grantId: "grant-probe", expiresAt: "2099-01-01T00:00:00.000Z" })
+          : undefined,
+    });
+    process.env.HOME = home;
+    const result = await toolCall(
+      { toolName: "bash", toolCallId: "call-incident-probe", input: { command: `bash ${script}` } },
+      context
+    );
+    expect(result).toEqual({ block: true, reason: expect.stringContaining('"$HOME"') });
+    expect(result).toEqual({ block: true, reason: expect.stringContaining(home) });
+    expect(result).toEqual({ block: true, reason: expect.stringContaining(script) });
+  });
+  test("holds a phase worker's eval code, hub process starts, and the bash call's own cwd and env to the pane guard", async () => {
+    const workspace = await createJjWorkspace();
+    const home = `/nonexistent-legion-guard-home-${process.pid}`;
+    const { toolCall, context } = await bootWorker({
+      role: "tester",
+      workspace,
+      sessionId: "ses_tester_pane_guard",
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ grantId: "grant-guard", expiresAt: "2099-01-01T00:00:00.000Z" })
+          : undefined,
+    });
+    process.env.HOME = home;
+    const call = (toolName: string, input: Record<string, unknown>) =>
+      toolCall({ toolName, toolCallId: `call-guard-${toolName}`, input }, context);
+    const refusedTarget = { block: true, reason: expect.stringContaining(home) };
+    expect(
+      await call("eval", {
+        language: "py",
+        code: 'import shutil, os\nshutil.rmtree(os.environ["HOME"])',
+      })
+    ).toEqual(refusedTarget);
+    expect(
+      await call("hub", { op: "start", name: "x", application: "rm", args: ["-rf", home] })
+    ).toEqual(refusedTarget);
+    expect(await call("bash", { command: "rm -rf .ssh", cwd: home })).toEqual(refusedTarget);
+    expect(await call("bash", { command: 'rm -rf "$TARGET"', env: { TARGET: home } })).toEqual(
+      refusedTarget
+    );
+    expect(await call("bash", { command: "pkill -x sleep" })).toEqual({
+      block: true,
+      reason: expect.stringContaining("by name or pattern"),
+    });
+    // Inside the workspace and /tmp scratch, the call goes on to its grant as before.
+    expect(
+      await call("bash", { command: 'rm -rf "$LEGION_WORKSPACE/build" /tmp/legion-guard-x' })
+    ).toBeUndefined();
+    expect(
+      await call("eval", { language: "py", code: 'print(read(".legion/plan.json"))' })
+    ).toBeUndefined();
   });
   test("refuses `legion handoff complete` in a phase worker's bash, eval code, and hub input, and leaves the shell's write and read alone", async () => {
     // The phase stall closes only on the tool's handoff_complete; a completion run from bash

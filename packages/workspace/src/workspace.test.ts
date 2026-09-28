@@ -1,9 +1,20 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, watch } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  issueWorkspaceDir,
   ownCommitsRevset,
   provisionIssueWorkspace,
   type RunResult,
@@ -42,26 +53,40 @@ function whenPathExists(watchedDir: string, target: string): Promise<void> {
   }
   return promise;
 }
-/** The environment provisioning hands its clone and fetch, exactly: the askpass script and the
- * token it answers with, no terminal prompt, and the five pairs that reset the clone's
- * credential-helper chain and re-enable askpass for that one command (LEGION-178). The exact key
- * set is the contract — the token travels only through `LEGION_PROVISIONING_TOKEN`, never as
- * inline config; that half of the rule dates from the commit that introduced the askpass design
- * (PR #753, squash 9278a29c), which pinned `GIT_CONFIG_COUNT` absent instead. */
+/** The environment provisioning hands its clone and fetch on the tmux runtime, exactly: the token
+ * the one-shot helper answers with, no askpass and no terminal prompt, no reachable global or
+ * system git configuration and no ambient GIT_CONFIG_PARAMETERS, and the pairs that reset the
+ * clone's credential-helper chain (LEGION-178) and then name that helper for https://github.com
+ * alone. The exact key set is the contract: the token travels only through
+ * `LEGION_PROVISIONING_TOKEN`, never as inline config. */
 function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
   const env = call.opts?.env;
   if (!env) throw new Error("Provisioning command did not receive an environment");
   expect(env).toEqual({
-    GIT_ASKPASS: expect.stringMatching(/provisioning-credential-.+\/askpass$/),
+    GIT_ASKPASS: "",
     GIT_TERMINAL_PROMPT: "0",
+    GIT_ALLOW_PROTOCOL: "https",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_PARAMETERS: "",
     LEGION_PROVISIONING_TOKEN: "installation-token",
-    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_COUNT: "3",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "credential.interactive",
-    GIT_CONFIG_VALUE_1: "true",
+    GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+    GIT_CONFIG_VALUE_1: expect.stringMatching(/^!'.+\/provisioning-credential-[^/]+\/helper'$/),
+    GIT_CONFIG_KEY_2: "core.hooksPath",
+    GIT_CONFIG_VALUE_2: "/dev/null",
   });
   return env;
+}
+/** The one-shot helper's path, reversed out of the `!'<path>'` the environment names it by
+ * (`createProvisioningCredential`'s own escaping: every `'` in the path becomes `'\''`). */
+function provisioningHelper(env: Readonly<Record<string, string>>): string {
+  const value = env.GIT_CONFIG_VALUE_1 ?? "";
+  const match = /^!'(.*)'$/.exec(value);
+  if (!match) throw new Error(`not a one-shot helper value: ${JSON.stringify(value)}`);
+  return match[1].replaceAll("'\\''", "'");
 }
 
 const temporaryDirectories: string[] = [];
@@ -101,15 +126,17 @@ async function runCommand(command: string[], options?: RunCall["opts"]): Promise
 }
 async function fillCredential(
   gitDir: string,
-  env: Readonly<Record<string, string>>
+  env: Readonly<Record<string, string>>,
+  url = "https://github.com"
 ): Promise<RunResult> {
   const child = Bun.spawn(
     [
       "sh",
       "-c",
-      `printf 'protocol=https\\nhost=github.com\\n\\n' | ${SYSTEM_GIT} --git-dir="$1" credential fill`,
+      `printf 'url=%s\\n\\n' "$2" | ${SYSTEM_GIT} --git-dir="$1" credential fill`,
       "sh",
       gitDir,
+      url,
     ],
     {
       env: { ...process.env, ...env },
@@ -123,6 +150,73 @@ async function fillCredential(
     child.exited,
   ]);
   return { exitCode, stdout, stderr };
+}
+/** A TLS stand-in for a host a tree agent controls. It answers every request with a 401 and a Basic
+ * challenge, so a git that holds a credential for it sends one, and it records the path and any
+ * Authorization header of every request. */
+async function plantedHost() {
+  const dir = await temporaryDirectory();
+  const key = path.join(dir, "key.pem");
+  const cert = path.join(dir, "cert.pem");
+  const made = await runCommand([
+    "openssl",
+    "req",
+    "-x509",
+    "-newkey",
+    "ec",
+    "-pkeyopt",
+    "ec_paramgen_curve:P-256",
+    "-nodes",
+    "-keyout",
+    key,
+    "-out",
+    cert,
+    "-days",
+    "1",
+    "-subj",
+    "/CN=127.0.0.1",
+  ]);
+  expect(made.exitCode, made.stderr).toBe(0);
+  const requests: string[] = [];
+  const authorizations: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { key: Bun.file(key), cert: Bun.file(cert) },
+    fetch(request) {
+      requests.push(new URL(request.url).pathname);
+      const authorization = request.headers.get("authorization");
+      if (authorization) authorizations.push(authorization);
+      return new Response("", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="planted"' },
+      });
+    },
+  });
+  return {
+    url: `https://127.0.0.1:${server.port}`,
+    requests,
+    authorizations,
+    stop: () => server.stop(true),
+  };
+}
+/** Runs `body` with the global git configuration at `file` and no system configuration, as a host
+ * whose user configuration is exactly that file; the process environment is restored after. */
+async function withGlobalGitConfig<T>(file: string, body: () => Promise<T>): Promise<T> {
+  const saved = {
+    GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+    GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+  };
+  process.env.GIT_CONFIG_GLOBAL = file;
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  try {
+    return await body();
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 }
 function credentialConfigCommands(gitDir: string, helper: string): string[][] {
   return [
@@ -161,6 +255,18 @@ function bookmarkRowsCommand(bookmark: string, repoCloneDir: string): string[] {
     "--ignore-working-copy",
     "-R",
     repoCloneDir,
+  ];
+}
+/** The credentialed fetch provisioning runs: no working-copy snapshot, jj's pinned git. */
+function fetchCommand(repoCloneDir: string): string[] {
+  return [
+    "jj",
+    "git",
+    "fetch",
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+    "--config=git.executable-path=git",
   ];
 }
 /** The read provisioning runs after the clone step and before every fetch: the clone's per-repo
@@ -220,8 +326,10 @@ function workspaceListCommand(repoCloneDir: string): string[] {
     repoCloneDir,
   ];
 }
-/** `git worktree list --porcelain` rows are `worktree <path>`: the directories git still knows. */
-async function gitWorktrees(repoCloneDir: string): Promise<string[]> {
+/** Every linked worktree git registers in the clone, by path, and whether it is locked: git's own
+ * account (`git worktree list --porcelain`), one block per worktree after the clone's own, which
+ * git always lists first. */
+async function gitWorktreeLocks(repoCloneDir: string): Promise<Record<string, boolean>> {
   const listed = await runCommand([
     SYSTEM_GIT,
     `--git-dir=${path.join(repoCloneDir, ".git")}`,
@@ -230,10 +338,37 @@ async function gitWorktrees(repoCloneDir: string): Promise<string[]> {
     "--porcelain",
   ]);
   expect(listed.exitCode, listed.stderr).toBe(0);
-  return listed.stdout
-    .split("\n")
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length));
+  const locks: Record<string, boolean> = {};
+  for (const block of listed.stdout.trim().split("\n\n").slice(1)) {
+    const [first = "", ...rest] = block.split("\n");
+    if (!first.startsWith("worktree ")) throw new Error(`git worktree list printed ${block}`);
+    locks[first.slice("worktree ".length)] = rest.some(
+      (line) => line === "locked" || line.startsWith("locked ")
+    );
+  }
+  return locks;
+}
+/** What git answers for the top of the working tree in `dir`, failing the test when it cannot. */
+async function gitToplevel(dir: string): Promise<string> {
+  const toplevel = await runCommand([SYSTEM_GIT, "rev-parse", "--show-toplevel"], { cwd: dir });
+  expect(toplevel.exitCode, `git rev-parse in ${dir}: ${toplevel.stderr}`).toBe(0);
+  return toplevel.stdout.trim();
+}
+/** The admin directory the workspace at `dir` names in its `.git` file. The pointer is relative to
+ * `dir` when git writes relative worktree paths (jj asks for them; git 2.48 and later honour it). */
+async function gitWorktreeAdmin(dir: string): Promise<string> {
+  const pointer = (await readFile(path.join(dir, ".git"), "utf8")).trim();
+  expect(pointer, `${dir}/.git`).toStartWith("gitdir: ");
+  return path.resolve(dir, pointer.slice("gitdir: ".length));
+}
+/** Deletes the lock of the git worktree the workspace at `dir` names in its `.git` file, leaving
+ * the entry as a process that locks nothing leaves it, and fails the test unless git then reports
+ * the worktree unlocked. */
+async function unlockGitWorktree(repoCloneDir: string, dir: string): Promise<void> {
+  await rm(path.join(await gitWorktreeAdmin(dir), "locked"), { force: true });
+  expect(await gitWorktreeLocks(repoCloneDir), `${dir} after unlocking it`).toMatchObject({
+    [dir]: false,
+  });
 }
 
 const JJ_BINARIES = [
@@ -246,7 +381,28 @@ const JJ_BINARIES = [
  * `jj` as `command` and records every command line it is asked to run. Every jj invocation — the
  * rig's own and provisioning's — carries a commit identity through `JJ_USER`/`JJ_EMAIL`: the CI
  * runner has no jj user config, and `jj git push` refuses a commit with no author. */
-async function realJjRig(command: readonly string[], stateDir: string) {
+type RealJjRig = Awaited<ReturnType<typeof realJjRig>>;
+
+/** Sets key to value in the git configuration of the clone at repoCloneDir. */
+async function gitConfig(repoCloneDir: string, key: string, value: string): Promise<void> {
+  const set = await runCommand([
+    SYSTEM_GIT,
+    `--git-dir=${path.join(repoCloneDir, ".git")}`,
+    "config",
+    key,
+    value,
+  ]);
+  expect(set.exitCode, set.stderr).toBe(0);
+}
+
+/** A shared clone whose origin is a local bare repository standing in for GitHub. With `allowFile`
+ * (the default), every command it runs may also use git's file transport, which the credentialed
+ * fetch otherwise refuses: the stand-in is a local path. */
+async function realJjRig(
+  command: readonly string[],
+  stateDir: string,
+  { allowFile = true }: { allowFile?: boolean } = {}
+) {
   const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
   const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
   const remoteDir = path.join(stateDir, "remote");
@@ -270,9 +426,18 @@ async function realJjRig(command: readonly string[], stateDir: string) {
     commandTimeoutMs,
     run: (cmd: string[], opts?: RunCall["opts"]) => {
       calls.push(cmd);
+      // Widen the transport for the credentialed clone and fetch alone — identified by the
+      // provisioning token in their environment, not by GIT_ALLOW_PROTOCOL's mere presence, so a
+      // dropped pin fails this assertion instead of silently passing the env through untouched.
+      const isCredentialed = opts?.env?.LEGION_PROVISIONING_TOKEN !== undefined;
+      if (isCredentialed) expect(opts?.env?.GIT_ALLOW_PROTOCOL).toBe("https");
+      const transported =
+        allowFile && isCredentialed
+          ? { ...opts, env: { ...opts?.env, GIT_ALLOW_PROTOCOL: "https:file" } }
+          : opts;
       return cmd[0] === "jj"
-        ? runCommand([...command, ...cmd.slice(1)], withIdentity(opts))
-        : runCommand(cmd, opts);
+        ? runCommand([...command, ...cmd.slice(1)], withIdentity(transported))
+        : runCommand(cmd, transported);
     },
   };
   await mkdir(path.dirname(repoCloneDir), { recursive: true });
@@ -375,7 +540,7 @@ describe("provisionIssueWorkspace", () => {
     // The credential reaches the clone and the fetch, never the settings read or write.
     expect(read.opts?.env).toBeUndefined();
     expect(write.opts?.env).toBeUndefined();
-    expect(existsSync(cloneEnv.GIT_ASKPASS)).toBeFalse();
+    expect(existsSync(provisioningHelper(cloneEnv))).toBeFalse();
     expect(calls.map((call) => call.cmd)).toEqual([
       [
         "jj",
@@ -383,12 +548,12 @@ describe("provisionIssueWorkspace", () => {
         "clone",
         "https://github.com/acme/widgets",
         expect.stringMatching(new RegExp(`^${escapeRegExp(repoCloneDir)}\\.clone-`)),
+        "--config=git.executable-path=git",
       ],
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand(bookmark, repoCloneDir),
-      ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
@@ -535,9 +700,8 @@ describe("provisionIssueWorkspace", () => {
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand(bookmark, repoCloneDir),
-      ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -717,14 +881,15 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(failedCredential.stderr).toContain("pinned helper failed");
   });
 
-  test("a fetch on a clone that carries the pane helper and credential.interactive=false gets the askpass credential without running the helper", async () => {
+  test("a fetch on a clone that carries the pane helper gets the one-shot credential for github.com alone, without running the pane helper", async () => {
     // The clone's persisted config is the pane's: `credential.helper` and the github.com-specific
     // entry name the pane helper, and `credential.interactive=false` keeps a pane's git from ever
-    // prompting. Provisioning's own clone and fetch run with no grant, so that helper fails
-    // there, and from git 2.44 on `credential.interactive=false` then forbids the askpass
-    // fallback too: `fatal: unable to get password from user` on every second provisioning of a
-    // clone (LEGION-178). The environment provisioning hands the fetch must reset the helper
-    // chain and re-enable askpass for that command alone, leaving the persisted config as it is.
+    // prompting. Provisioning's own clone and fetch run with no grant, so that helper fails there
+    // (LEGION-178). The environment provisioning hands the fetch resets the helper chain and names
+    // the one-shot helper for https://github.com, for that command alone, leaving the persisted
+    // config as it is. git asks that helper for every repository on github.com, whatever
+    // credential.useHttpPath says (an operator's global configuration can set it), and never for
+    // another scheme, host or port.
     const stateDir = path.join(await temporaryDirectory(), "state");
     const helperDir = await temporaryDirectory();
     const issue = "WIDGETS-42";
@@ -744,28 +909,36 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect((await runCommand([SYSTEM_GIT, "init", "--bare", gitDir])).exitCode).toBe(0);
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
     await mkdir(workspaceDir, { recursive: true });
-    // `credential.interactive` exists from git 2.44 on: an older git ignores the setting, so on
-    // it only the helper-chain half of the contract is observable. The version is printed so a
-    // run's evidence says which half it proved; nothing is gated on it.
-    const gitVersionLine = (await runCommand([SYSTEM_GIT, "--version"])).stdout.trim();
-    const versionMatch = /^git version (\d+)\.(\d+)/.exec(gitVersionLine);
-    if (!versionMatch) throw new Error(`Unrecognised git version output: ${gitVersionLine}`);
-    const gitHonoursCredentialInteractive =
-      Number(versionMatch[1]) > 2 ||
-      (Number(versionMatch[1]) === 2 && Number(versionMatch[2]) >= 44);
-    // Every fill below runs under this isolation: no global, system, or inherited command-scope
-    // config (a developer shell may carry GIT_CONFIG_COUNT pairs that reset the github.com
-    // helper) and the fixture directory as home, so the box's own credential settings take no
-    // part.
-    const isolation = {
+    // Every fill below runs under this isolation: no system or inherited command-scope config (a
+    // developer shell may carry GIT_CONFIG_COUNT pairs that reset the github.com helper), a
+    // global config of the test's own, and the fixture directory as home, so the box's own
+    // credential settings take no part.
+    const globals = await temporaryDirectory();
+    const isolation = (useHttpPath: boolean) => ({
       GIT_CONFIG_COUNT: "0",
-      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_GLOBAL: path.join(globals, `use-http-path-${useHttpPath}`),
       GIT_CONFIG_NOSYSTEM: "1",
       HOME: helperDir,
       XDG_CONFIG_HOME: helperDir,
-    };
+    });
+    for (const useHttpPath of [false, true]) {
+      await writeFile(
+        isolation(useHttpPath).GIT_CONFIG_GLOBAL,
+        `[credential]\n\tuseHttpPath = ${useHttpPath}\n`
+      );
+    }
+    const urls = [
+      { url: "https://github.com", answered: true },
+      { url: "https://github.com/acme/widgets", answered: true },
+      { url: "https://github.com/acme/other", answered: true },
+      { url: "http://github.com/acme/widgets", answered: false },
+      { url: "https://evil.example/acme/widgets", answered: false },
+      { url: "https://github.com.evil.example/acme/widgets", answered: false },
+      { url: "https://github.com:8443/acme/widgets", answered: false },
+    ];
+    type Fill = { readonly url: string; readonly useHttpPath: boolean; readonly result: RunResult };
     let observed:
-      | { readonly fill: RunResult; readonly markerAfterFill: boolean; readonly control: RunResult }
+      | { readonly fills: Fill[]; readonly markerAfterFill: boolean; readonly control: RunResult }
       | undefined;
     let observeFetch = false;
     const calls: RunCall[] = [];
@@ -780,23 +953,32 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         if (cmd[0] === "git") return runCommand([SYSTEM_GIT, ...cmd.slice(1)], opts);
         if (observeFetch && cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") {
           // jj is stubbed here; stand in for the git its fetch spawns with exactly the fetch's
-          // environment, while the askpass script still exists (provisioning removes it once the
-          // fetch returns).
+          // environment, while the one-shot helper still exists (provisioning removes it once
+          // the fetch returns).
           const env = opts?.env;
           if (!env) throw new Error("the fetch did not receive an environment");
-          // The fetch env's own GIT_CONFIG_COUNT=2 (the five pairs) wins over the isolation's 0.
-          const fill = await fillCredential(gitDir, { ...isolation, ...env });
+          const fills: Fill[] = [];
+          for (const useHttpPath of [false, true]) {
+            for (const { url } of urls) {
+              // The fetch env's own GIT_CONFIG_COUNT=3 wins over the isolation's 0.
+              const result = await fillCredential(
+                gitDir,
+                { ...isolation(useHttpPath), ...env },
+                url
+              );
+              fills.push({ url, useHttpPath, result });
+            }
+          }
           const markerAfterFill = existsSync(marker);
-          // The control is the bug: the environment provisioning handed the fetch before
-          // LEGION-178 — the askpass credential and no terminal prompt, nothing about the
+          // The control is LEGION-178: the environment without the pairs, so nothing about the
           // clone's helper chain.
           const control = await fillCredential(gitDir, {
-            GIT_ASKPASS: env.GIT_ASKPASS as string,
+            GIT_ASKPASS: "",
             GIT_TERMINAL_PROMPT: "0",
             LEGION_PROVISIONING_TOKEN: env.LEGION_PROVISIONING_TOKEN as string,
-            ...isolation,
+            ...isolation(false),
           });
-          observed = { fill, markerAfterFill, control };
+          observed = { fills, markerAfterFill, control };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
@@ -809,7 +991,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const persisted = async (...args: string[]) =>
       (
         await runCommand([SYSTEM_GIT, `--git-dir=${gitDir}`, "config", ...args], {
-          env: isolation,
+          env: isolation(false),
         })
       ).stdout;
     expect(await persisted("--get-all", "credential.helper")).toBe(`\n!${paneHelper}\n`);
@@ -823,33 +1005,219 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     calls.length = 0;
     await provisionIssueWorkspace(issue, deps);
     if (!observed) throw new Error("the fetch was not observed");
-    console.log(
-      `[workspace.test] ${gitVersionLine}; credential.interactive honoured by this git: ${gitHonoursCredentialInteractive ? "yes" : "no"}`
-    );
-    expect(observed.fill.stderr).not.toContain(stubLine);
+    for (const { url, useHttpPath, result } of observed.fills) {
+      const label = `useHttpPath ${useHttpPath}, ${url}`;
+      expect(result.stderr, label).not.toContain(stubLine);
+      if (urls.find((u) => u.url === url)?.answered) {
+        expect(result.exitCode, `${label}\n${result.stderr}`).toBe(0);
+        expect(result.stdout, label).toContain(
+          "username=x-access-token\npassword=installation-token\n"
+        );
+      } else {
+        expect(result.exitCode, label).not.toBe(0);
+        expect(result.stdout, label).not.toContain("password=");
+      }
+    }
     expect(observed.markerAfterFill).toBeFalse();
-    expect(observed.fill.exitCode).toBe(0);
-    expect(observed.fill.stdout).toContain(
-      "username=x-access-token\npassword=installation-token\n"
-    );
-    // Without the pairs the pane helper runs (and fails); a git that honours
-    // `credential.interactive` then refuses the askpass fallback as well.
+    // Without the pairs the pane helper runs, and fails.
     expect(existsSync(marker)).toBeTrue();
     expect(observed.control.stderr).toContain(stubLine);
-    if (gitHonoursCredentialInteractive) {
-      expect(observed.control.exitCode).not.toBe(0);
-      expect(observed.control.stderr).toContain("unable to get password from user");
-    }
+    expect(observed.control.exitCode).not.toBe(0);
     // The persisted config is exactly what the first provisioning wrote: the pane's.
     expect(await persisted("--get-all", "credential.helper")).toBe(`\n!${paneHelper}\n`);
     expect(await persisted("--get", "credential.interactive")).toBe("false\n");
-    // And the fetch that produced the fill received exactly the provisioning environment.
+    // And the fetch that produced the fills received exactly the provisioning environment.
     const fetch = calls.find(
       ({ cmd }) => cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch"
     );
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
     provisioningEnv(fetch);
-  });
+  }, 60_000);
+
+  /** Runs a full `provisionIssueWorkspace` against a fresh, already-`.jj`'d clone with every
+   * command stubbed to succeed, and returns exactly the environment its credentialed fetch
+   * received: the production environment `createProvisioningCredential` builds, not a test rig's
+   * approximation of it. */
+  async function capturedFetchEnv(): Promise<Readonly<Record<string, string>>> {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    let fetchEnv: Readonly<Record<string, string>> | undefined;
+    await provisionIssueWorkspace(issue, {
+      repo: "acme/widgets" as const,
+      stateDir,
+      provisioningToken: async () => "installation-token",
+      credentialHelper,
+      commandTimeoutMs,
+      run: async (cmd: string[], opts?: RunCall["opts"]) => {
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") fetchEnv = opts?.env;
+        if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+          await mkdir(workspaceDir, { recursive: true });
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+    if (!fetchEnv) throw new Error("provisioning did not fetch");
+    return fetchEnv;
+  }
+
+  test("core.askPass never answers the credentialed fetch's fill, and the pin is what stops it", async () => {
+    // A dedicated bare repository with NO persisted configuration at all — not even
+    // credential.interactive — so GIT_ASKPASS is the only variable in play. That absence is
+    // load-bearing, not an oversight: credential.interactive=false is removable by exactly the
+    // adversary the pin exists for — the shared clone's configuration is tree-writable (this PR's
+    // own threat model), so an agent that can plant core.askPass can also run `git config
+    // --unset credential.interactive`; an attacker does not leave the mitigation standing while
+    // exploiting the hole beside it. (It is also true that credential.interactive=false, on git
+    // >= 2.44, blocks the askpass fallback by itself, indistinguishable from GIT_ASKPASS doing
+    // the same job on a fetch of an already-provisioned clone — confirmed against real git: 2.43
+    // ignores it and answers regardless, 2.47, the worker image's, does not — but that is a
+    // secondary confound this fixture happens to sidestep, not the reason for it. And the
+    // credentialed *clone*, unlike the fetch, always runs against exactly this fixture's
+    // configuration state — `ensureRepoClone` clones into a fresh `mkdtemp` sibling with no
+    // persisted configuration at all — though that state has never been adversarial either,
+    // since nothing has had the chance to plant core.askPass into a directory that did not exist
+    // a moment before; it is fidelity to production, not a second load-bearing ground.) Giving
+    // this fixture a persisted clone's configuration to look more "realistic" is exactly the
+    // change that would make the witness blind again.
+    const fetchEnv = await capturedFetchEnv();
+    const askpassGitDir = path.join(await temporaryDirectory(), "askpass-repo.git");
+    expect((await runCommand([SYSTEM_GIT, "init", "--bare", askpassGitDir])).exitCode).toBe(0);
+    const sink = path.join(await temporaryDirectory(), "askpass.log");
+    const askpassStub = path.join(await temporaryDirectory(), "askpass");
+    await writeFile(
+      askpassStub,
+      `#!/bin/sh\nprintf 'askpass token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nprintf 'leaked\\n'\n`,
+      { mode: 0o700 }
+    );
+    expect(
+      (
+        await runCommand([
+          SYSTEM_GIT,
+          `--git-dir=${askpassGitDir}`,
+          "config",
+          "core.askPass",
+          askpassStub,
+        ])
+      ).exitCode
+    ).toBe(0);
+
+    const pinned = await fillCredential(askpassGitDir, fetchEnv, "http://github.com/acme/widgets");
+    expect(pinned.exitCode).not.toBe(0);
+    expect(pinned.stdout).not.toContain("password=");
+    expect(existsSync(sink) ? await readFile(sink, "utf8") : "").toBe("");
+
+    // Positive control: the identical route with GIT_ASKPASS omitted must run the program — proof
+    // that the fixture can detect the leak at all, and that removing the pin is what changes the
+    // outcome, not some other difference between this fill and the pinned one above.
+    const { GIT_ASKPASS: _pinned, ...withoutAskpass } = fetchEnv;
+    const unpinned = await fillCredential(
+      askpassGitDir,
+      withoutAskpass,
+      "http://github.com/acme/widgets"
+    );
+    expect(unpinned.stdout).toContain("password=leaked");
+    expect(await readFile(sink, "utf8")).toContain("askpass token=set");
+  }, 60_000);
+
+  test("closes an ambient GIT_CONFIG_PARAMETERS that would otherwise reach a credential helper the numbered reset does not see", async () => {
+    // git reads GIT_CONFIG_PARAMETERS after the GIT_CONFIG_COUNT/_KEY_n/_VALUE_n pairs, so a
+    // tree, an operator's shell, or an inherited process could set it to reach a credential.helper
+    // the reset above never touches. GIT_CONFIG_PARAMETERS: "" closes it: git parses the empty
+    // string as zero pairs, so it cannot add one, whatever the ambient value already was, because
+    // the production environment is spread last over anything already in the process's own.
+    const fetchEnv = await capturedFetchEnv();
+    const evilGitDir = path.join(await temporaryDirectory(), "evil-repo.git");
+    expect((await runCommand([SYSTEM_GIT, "init", "--bare", evilGitDir])).exitCode).toBe(0);
+    const sink = path.join(await temporaryDirectory(), "evil.log");
+    const evilHelper = path.join(await temporaryDirectory(), "evil");
+    await writeFile(
+      evilHelper,
+      `#!/bin/sh\n[ "$1" = get ] || exit 0\nprintf 'EVIL-HELPER-RAN token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nprintf 'username=x-access-token\\npassword=leaked\\n'\n`,
+      { mode: 0o700 }
+    );
+    const ambientBypass = `'credential.helper'='!${evilHelper}'`;
+
+    const pinned = await fillCredential(
+      evilGitDir,
+      { GIT_CONFIG_PARAMETERS: ambientBypass, ...fetchEnv },
+      "https://evil.example/acme/widgets"
+    );
+    expect(pinned.stdout).not.toContain("password=leaked");
+    expect(existsSync(sink) ? await readFile(sink, "utf8") : "").not.toContain("EVIL-HELPER-RAN");
+
+    // Positive control: the identical ambient bypass, without the production override, does reach
+    // the helper — proof the scenario is real and the pin is what closes it.
+    const { GIT_CONFIG_PARAMETERS: _pinned, ...withoutPin } = fetchEnv;
+    const unpinned = await fillCredential(
+      evilGitDir,
+      { GIT_CONFIG_PARAMETERS: ambientBypass, ...withoutPin },
+      "https://evil.example/acme/widgets"
+    );
+    expect(unpinned.stdout).toContain("password=leaked");
+    expect(await readFile(sink, "utf8")).toContain("EVIL-HELPER-RAN token=set");
+  }, 60_000);
+
+  // A URL rewrite a tree agent wrote sends provisioning's credentialed fetch to a host of its own.
+  // The one-shot credential answers https://github.com alone, so a rewrite in the shared clone's
+  // own configuration, which every agent of the tree can write, gets that host no credential.
+  test("a remote a rewrite in the shared clone's configuration sends elsewhere gets that host no credential", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const host = await plantedHost();
+      try {
+        const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
+        const target = [`--file=${path.join(rig.repoCloneDir, ".git", "config")}`];
+        for (const [key, value] of [
+          [`url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir],
+          ["http.sslVerify", "false"],
+        ] as const) {
+          const set = await runCommand([SYSTEM_GIT, "config", ...target, key, value]);
+          expect(set.exitCode, set.stderr).toBe(0);
+        }
+        await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
+          "jj git fetch"
+        );
+        // The rewrite took the fetch to the planted host, which then got no credential.
+        expect(host.requests.length, name).toBeGreaterThan(0);
+        expect(host.authorizations, name).toEqual([]);
+      } finally {
+        host.stop();
+      }
+    }
+  }, 60_000);
+
+  // On the tmux runtime, a rewrite in the daemon user's global configuration, which every pane
+  // shares, does not even reach the credentialed fetch: GIT_CONFIG_GLOBAL=/dev/null and
+  // GIT_CONFIG_NOSYSTEM=1 make that file invisible to it, whatever it contains.
+  test("a remote a rewrite in the daemon user's global configuration on the tmux runtime never reaches the credentialed fetch at all", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const host = await plantedHost();
+      try {
+        const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
+        const global = path.join(await temporaryDirectory(), "gitconfig");
+        await writeFile(global, "");
+        for (const [key, value] of [
+          [`url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir],
+          ["http.sslVerify", "false"],
+        ] as const) {
+          const set = await runCommand([SYSTEM_GIT, "config", `--file=${global}`, key, value]);
+          expect(set.exitCode, set.stderr).toBe(0);
+        }
+        await withGlobalGitConfig(global, async () => {
+          await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).resolves.toEqual({
+            repoCloneDir: rig.repoCloneDir,
+            workspaceDir: rig.workspaceDir,
+            bookmark: "legion/WIDGETS-42",
+          });
+        });
+        expect(host.requests.length, name).toBe(0);
+      } finally {
+        host.stop();
+      }
+    }
+  }, 60_000);
 
   test("does not add a second workspace or run a bookmark command when an issue is reactivated", async () => {
     const stateDir = await temporaryDirectory();
@@ -889,7 +1257,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ["jj", "workspace", "update-stale"],
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir],
+      fetchCommand(repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
     ]);
@@ -1148,12 +1516,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       expect(firstProvisioning, name).toEqual([
         readKeepUnreachableCommitsCommand(repoCloneDir),
         writeKeepUnreachableCommitsCommand(repoCloneDir),
-        ["jj", "git", "fetch", "-R", repoCloneDir],
+        fetchCommand(repoCloneDir),
       ]);
       expect(calls, name).toEqual([
         ["jj", "workspace", "update-stale"],
         readKeepUnreachableCommitsCommand(repoCloneDir),
-        ["jj", "git", "fetch", "-R", repoCloneDir],
+        fetchCommand(repoCloneDir),
         ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
         ...identityProbeCommands(repoCloneDir),
       ]);
@@ -1291,6 +1659,178 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       (error: Error) => error.message
     );
   }
+
+  // Each case plants, in the shared clone's configuration, a program the credentialed fetch would
+  // otherwise run, and the program records whether the token was in its environment. Two of
+  // createProvisioningCredential's pins keep every case from running: the https transport alone,
+  // and jj's pinned git.
+  for (const { route, plant } of [
+    {
+      route: "an upload-pack program on a local-path remote",
+      plant: async (rig: RealJjRig, witness: string) =>
+        gitConfig(rig.repoCloneDir, "remote.origin.uploadpack", witness),
+    },
+    {
+      route: "an ssh command behind an ssh rewrite",
+      plant: async (rig: RealJjRig, witness: string) => {
+        await gitConfig(
+          rig.repoCloneDir,
+          "url.ssh://evil.invalid/acme/widgets.insteadOf",
+          rig.remoteDir
+        );
+        await gitConfig(rig.repoCloneDir, "core.sshCommand", witness);
+      },
+    },
+    {
+      route: "an ext:: command behind a rewrite, with protocol.ext.allow",
+      plant: async (rig: RealJjRig, witness: string) => {
+        await gitConfig(rig.repoCloneDir, "protocol.ext.allow", "always");
+        await gitConfig(rig.repoCloneDir, `url.ext::${witness} %S.insteadOf`, rig.remoteDir);
+      },
+    },
+    {
+      route: "jj's repository git.executable-path",
+      plant: async (rig: RealJjRig, witness: string) => {
+        await rig.jj([
+          "config",
+          "set",
+          "--repo",
+          "git.executable-path",
+          witness,
+          "-R",
+          rig.repoCloneDir,
+        ]);
+      },
+    },
+  ]) {
+    test(`the credentialed fetch does not run ${route}`, async () => {
+      for (const { name, command } of JJ_BINARIES) {
+        const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"), {
+          allowFile: false,
+        });
+        const sink = path.join(await temporaryDirectory(), "witness.log");
+        const witness = path.join(await temporaryDirectory(), "witness");
+        await writeFile(
+          witness,
+          `#!/bin/sh\nprintf 'witness token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nexit 1\n`,
+          { mode: 0o700 }
+        );
+        await plant(rig, witness);
+        await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
+          "jj git fetch"
+        );
+        const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
+        expect(recorded, `${name}, ${route}`).not.toContain("token=set");
+      }
+    }, 60_000);
+  }
+
+  // A snapshot runs the programs jj's configuration names on the working copy: a working-copy
+  // filter on every changed file, a signing program for the commit it writes. The shared clone's
+  // working copy and configuration are the tree's to write, repo-scoped or through a legacy
+  // `.jj/workspace-config.toml` jj migrates. The credentialed fetch takes no snapshot, so neither
+  // planted program runs with the token in its environment; each still runs, without it, in the
+  // uncredentialed `jj workspace add`, so the test cannot pass by planting nothing. Filters are the
+  // jj fork's (the worker image's, which CI puts on PATH); stock jj has none, so this refuses it.
+  test("the credentialed fetch takes no snapshot of the shared clone's working copy", async () => {
+    const probe = await runCommand(
+      ["jj", "config", "list", "--include-defaults", "git.filter.enabled"],
+      {
+        env: {
+          JJ_CONFIG: path.join(await temporaryDirectory(), "none.toml"),
+          XDG_CONFIG_HOME: await temporaryDirectory(),
+          HOME: await temporaryDirectory(),
+        },
+      }
+    );
+    expect(
+      probe.stdout.trim(),
+      "this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs on PATH through .github/actions/install-jj"
+    ).not.toBe("");
+    const rig = await realJjRig(["jj"], path.join(await temporaryDirectory(), "state"));
+    const witness = async (label: string, tail: string) => {
+      const sink = path.join(await temporaryDirectory(), `${label}.log`);
+      const script = path.join(await temporaryDirectory(), label);
+      await writeFile(
+        script,
+        `#!/bin/sh\nprintf '${label} token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\n${tail}\n`,
+        { mode: 0o700 }
+      );
+      return { sink, script };
+    };
+    const filter = await witness("filter", "exec cat");
+    const signer = await witness("signer", "exit 1");
+    await writeFile(
+      path.join(rig.repoCloneDir, ".jj", "workspace-config.toml"),
+      `[git.filter]\nenabled = true\n[git.filter.drivers.planted]\nclean = [${JSON.stringify(filter.script)}]\nsmudge = ["cat"]\nrequired = false\n`
+    );
+    for (const [key, value] of [
+      ["signing.behavior", "force"],
+      ["signing.backend", "gpg"],
+      ["signing.backends.gpg.program", signer.script],
+    ]) {
+      await rig.jj(["config", "set", "--repo", key, value, "-R", rig.repoCloneDir]);
+    }
+    await writeFile(path.join(rig.repoCloneDir, ".gitattributes"), "*.txt filter=planted\n");
+    await writeFile(path.join(rig.repoCloneDir, "planted.txt"), "a tree's change\n");
+
+    const failure = await provisionIssueWorkspace("WIDGETS-42", rig.deps).then(
+      () => "provisioned",
+      (error: Error) => error.message
+    );
+    for (const { sink } of [filter, signer]) {
+      const ran = (existsSync(sink) ? await readFile(sink, "utf8") : "").trim().split("\n");
+      expect(
+        ran.filter((line) => line.endsWith("token=set")),
+        sink
+      ).toEqual([]);
+      expect(ran[0], sink).toMatch(/ token=$/);
+    }
+    // The planted signer refuses to sign, so provisioning fails in the uncredentialed workspace
+    // add, after the fetch.
+    expect(failure).toContain("jj workspace add");
+  }, 60_000);
+
+  test("the credentialed fetch runs no hook the shared clone carries, in .git/hooks or under a configured core.hooksPath", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      for (const placement of ["hooks directory", "core.hooksPath"] as const) {
+        const label = `${name}, ${placement}`;
+        const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
+        const { repoCloneDir, remoteDir, jj, deps } = rig;
+        // A hook git runs on the fetch's ref update, recording whether the provisioning token was
+        // in its environment: what a tree could plant in the shared clone it writes.
+        const sink = path.join(await temporaryDirectory(), "hook.log");
+        const hooks =
+          placement === "hooks directory"
+            ? path.join(repoCloneDir, ".git", "hooks")
+            : path.join(await temporaryDirectory(), "planted-hooks");
+        await mkdir(hooks, { recursive: true });
+        const hook = path.join(hooks, "reference-transaction");
+        await writeFile(
+          hook,
+          `#!/bin/sh\nprintf 'hook token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\ncat >/dev/null\n`,
+          { mode: 0o700 }
+        );
+        if (placement === "core.hooksPath") {
+          const set = await runCommand([
+            SYSTEM_GIT,
+            `--git-dir=${path.join(repoCloneDir, ".git")}`,
+            "config",
+            "core.hooksPath",
+            hooks,
+          ]);
+          expect(set.exitCode, `${label}: ${set.stderr}`).toBe(0);
+        }
+        // origin's main moves, so the fetch updates a ref and git runs the hook if it may.
+        await jj(["commit", "-m", "upstream"], { cwd: remoteDir });
+        await jj(["bookmark", "set", "main", "-r", "@-"], { cwd: remoteDir });
+
+        await provisionIssueWorkspace("WIDGETS-42", deps);
+        const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
+        expect(recorded, label).not.toContain("token=set");
+      }
+    }
+  }, 120_000);
 
   test("adopts an issue branch only origin has: tracks it and adds the workspace at its commit", async () => {
     for (const { name, command } of JJ_BINARIES) {
@@ -1762,12 +2302,10 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -1822,12 +2360,10 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@"],
       ...credentialConfigCommands(gitDir, credentialHelper),
@@ -1876,12 +2412,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         `Keep one of its added commits: \`jj bookmark set legion/WIDGETS-42 -r <commit> -R ${repoCloneDir}\`. ` +
         `Start from main instead: \`jj bookmark delete legion/WIDGETS-42 -R ${repoCloneDir}\`, and the next provisioning starts at main.`
     );
-    // The resolution is the last command: no prune, no add, nothing registered for the next
+    // The resolution is the last command: no add, nothing registered for the next
     // resume to adopt.
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
     ]);
     expect(existsSync(workspaceDir)).toBeFalse();
@@ -1942,14 +2478,14 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ).rejects.toThrow(
         refusal(bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir).join(" "), workspaceDir)
       );
-      // Nothing is guessed from a failed read: no prune, no add, no bookmark write.
+      // Nothing is guessed from a failed read: no add, no bookmark write.
       expect(
         calls.map((call) => call.cmd),
         name
       ).toEqual([
         readKeepUnreachableCommitsCommand(repoCloneDir),
         writeKeepUnreachableCommitsCommand(repoCloneDir),
-        ["jj", "git", "fetch", "-R", repoCloneDir],
+        fetchCommand(repoCloneDir),
         bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
       ]);
       expect(existsSync(workspaceDir), name).toBeFalse();
@@ -2146,7 +2682,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
             ? { exitCode: 1, stdout: "", stderr: "fatal: x" }
             : { exitCode: 0, stdout: "", stderr: "" },
       })
-    ).rejects.toThrow(`Command failed (exit 1): jj git fetch -R ${repoCloneDir}\nfatal: x`);
+    ).rejects.toThrow(
+      `Command failed (exit 1): jj git fetch --ignore-working-copy -R ${repoCloneDir} --config=git.executable-path=git\nfatal: x`
+    );
   });
 
   test("stops before the fetch when the settings write fails", async () => {
@@ -2261,12 +2799,11 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           repoCloneDir,
         ],
         ["jj", "workspace", "forget", "widgets-42", "--ignore-working-copy", "-R", repoCloneDir],
-        ["git", `--git-dir=${path.join(repoCloneDir, ".git")}`, "worktree", "prune"],
       ]);
       expect(existsSync(workspaceDir), name).toBeFalse();
       expect(await workspaceNames(), name).not.toContain("widgets-42");
       expect(await workspaceNames(), name).toContain("widgets-43");
-      expect(await gitWorktrees(repoCloneDir), name).not.toContain(workspaceDir);
+      expect(Object.keys(await gitWorktreeLocks(repoCloneDir)), name).not.toContain(workspaceDir);
       const afterRemoval = await logB();
       expect(afterRemoval, name).not.toContain(aWork);
       expect(afterRemoval, name).not.toContain(aWorkingCopy);
@@ -2359,7 +2896,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     }
   }, 60_000);
 
-  test("repairs the shape a crash between the directory deletion and the forget leaves: the next provisioning forgets, prunes, and re-adds the still-registered workspace", async () => {
+  test("repairs the shape a crash between the directory deletion and the forget leaves: the next provisioning forgets and re-adds the still-registered workspace", async () => {
     for (const { name, command } of JJ_BINARIES) {
       const stateDir = path.join(await temporaryDirectory(), "state");
       const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
@@ -2384,8 +2921,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         workspaceDir,
         bookmark,
       });
-      // `createWorkspace`'s `already registered|exists` branch on a real binary: forget, prune,
-      // add again at the bookmark's commit (the bookmark survived, so no bookmark write).
+      // `createWorkspace`'s `already registered|exists` branch on a real binary: forget, then add
+      // again at the bookmark's commit (the bookmark survived, so no bookmark write).
       expect(calls, name).toContainEqual([
         "jj",
         "workspace",
@@ -2401,5 +2938,235 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       expect(existsSync(workspaceDir), name).toBeTrue();
       expect(await commitOf("@-", workspaceDir), name).toBe(bookmarkCommit);
     }
+  }, 60_000);
+
+  test("touches only its own git worktree in the shared clone, even another whose directory this process cannot see, and locks each workspace it adds", async () => {
+    // Stock jj 0.44 colocates no workspace, so there is no git worktree to lose.
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, calls, deps } = await realJjRig(command, stateDir);
+    const other = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-41");
+    await provisionIssueWorkspace("WIDGETS-41", deps);
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [other]: true });
+    // An entry another process added carries no lock; this one is out of view, as another host's
+    // or another tree's is: a bare `git worktree prune` here would take it for stale.
+    await unlockGitWorktree(repoCloneDir, other);
+    const elsewhere = path.join(await temporaryDirectory(), "elsewhere");
+    await rename(other, elsewhere);
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    // Registered but gone, the shape a crash inside removal leaves: forgotten and added again.
+    await rm(workspaceDir, { recursive: true, force: true });
+    calls.length = 0;
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(calls, name).toContainEqual([
+      "jj",
+      "workspace",
+      "forget",
+      "widgets-42",
+      "-R",
+      repoCloneDir,
+    ]);
+    expect((await gitWorktreeLocks(repoCloneDir))[workspaceDir], name).toBeTrue();
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    await removeIssueWorkspace("WIDGETS-42", deps);
+    expect(Object.keys(await gitWorktreeLocks(repoCloneDir)), name).not.toContain(workspaceDir);
+
+    await rename(elsewhere, other);
+    expect(await gitToplevel(other), name).toBe(other);
+  }, 60_000);
+
+  test("locks the git worktree of an existing workspace provisioned before provisioning locked any, adding nothing", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, calls, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await unlockGitWorktree(repoCloneDir, workspaceDir);
+    calls.length = 0;
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(
+      calls.some((cmd) => cmd[1] === "workspace" && cmd[2] === "add"),
+      name
+    ).toBeFalse();
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
+  }, 60_000);
+
+  test("finds its own git worktree through a symlinked repos directory: locks it, re-adds the workspace after its directory went, and removal deletes it", async () => {
+    // git writes a relative worktree pointer between real paths.
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    await mkdir(stateDir, { recursive: true });
+    await symlink(await temporaryDirectory(), path.join(stateDir, "repos"));
+    const { repoCloneDir, workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
+    await rm(workspaceDir, { recursive: true, force: true });
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    await removeIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({});
+  }, 60_000);
+
+  test("restores a git worktree entry a bare prune deleted, at the working copy's parent with a matching index and the working copy untouched, and locks it", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, jj, commitOf, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await writeFile(path.join(workspaceDir, "tracked.txt"), "committed\n", "utf8");
+    await jj(["commit", "-m", "tracked"], { cwd: workspaceDir });
+    const parent = await commitOf("@-", workspaceDir);
+    await writeFile(path.join(workspaceDir, "notes.txt"), "in progress\n", "utf8");
+    await rm(await gitWorktreeAdmin(workspaceDir), { recursive: true, force: true });
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[];
+    try {
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      logged = errorSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      errorSpy.mockRestore();
+    }
+    const git = (args: string[]) => runCommand([SYSTEM_GIT, ...args], { cwd: workspaceDir });
+    expect((await git(["rev-parse", "HEAD"])).stdout.trim(), name).toBe(parent);
+    expect((await git(["status", "--porcelain"])).stdout.trim(), name).toBe("?? notes.txt");
+    expect(await readFile(path.join(workspaceDir, "notes.txt"), "utf8"), name).toBe(
+      "in progress\n"
+    );
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
+    expect(logged, name).toEqual([expect.stringContaining(`restored it at ${parent}`)]);
+  }, 60_000);
+
+  test("cleans up a failed restore so the next provisioning still finds the entry gone, rather than skipping it because a half-written one exists", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    await rm(admin, { recursive: true, force: true });
+
+    const failingReadTree = {
+      ...deps,
+      run: async (cmd: string[], opts?: RunCall["opts"]): Promise<RunResult> => {
+        if (cmd[0] === "git" && cmd.includes("read-tree")) {
+          return { exitCode: 1, stdout: "", stderr: "forced read-tree failure for test" };
+        }
+        return deps.run(cmd, opts);
+      },
+    };
+    await expect(provisionIssueWorkspace("WIDGETS-42", failingReadTree), name).rejects.toThrow();
+    expect(existsSync(admin), name).toBeFalse();
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+  }, 60_000);
+
+  test("refuses by name a git pointer outside the shared clone's worktrees, creating nothing there", async () => {
+    const [{ command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const elsewhere = path.join(await temporaryDirectory(), "worktrees", "widgets-42");
+    await writeFile(path.join(workspaceDir, ".git"), `gitdir: ${elsewhere}\n`, "utf8");
+    await expect(provisionIssueWorkspace("WIDGETS-42", deps)).rejects.toThrow(
+      "outside the shared clone's"
+    );
+    expect(existsSync(elsewhere)).toBeFalse();
+  }, 60_000);
+
+  test("refuses a workspace's .git through a symlinked worktrees directory, writing nothing there", async () => {
+    const [{ command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    const worktreesDir = path.dirname(admin);
+    await rm(worktreesDir, { recursive: true, force: true });
+    const elsewhere = path.join(await temporaryDirectory(), "elsewhere");
+    await mkdir(elsewhere, { recursive: true });
+    await symlink(elsewhere, worktreesDir);
+    const evil = path.join(worktreesDir, "evil");
+    await writeFile(path.join(workspaceDir, ".git"), `gitdir: ${evil}\n`, "utf8");
+
+    await expect(provisionIssueWorkspace("WIDGETS-42", deps)).rejects.toThrow(
+      "outside the shared clone's"
+    );
+    expect(await readdir(elsewhere)).toEqual([]);
+  }, 60_000);
+
+  test("restores cleanly after a kill between the writes, sweeping the unrelated stale temporary sibling", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    await rm(admin, { recursive: true, force: true });
+    // A process killed after mkdtemp but before every write, or before the rename, leaves exactly
+    // this: a temporary sibling with partial or stale content, and no entry at admin itself. Its
+    // randomized name means a later attempt cannot find or clear it by name until that attempt's
+    // own restore succeeds, at which point it sweeps every such sibling: nothing else can still be
+    // using one, since TmuxRuntime's provisionQueue serializes this whole call by repository.
+    const stale = path.join(path.dirname(admin), `.${path.basename(admin)}.restore-stale`);
+    await mkdir(stale, { recursive: true });
+    await writeFile(path.join(stale, "HEAD"), "stale\n", "utf8");
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    expect(existsSync(stale), name).toBeFalse();
+  }, 60_000);
+
+  test("restores a workspace with no real parent commit using jj's own unborn ref and an empty index", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, jj, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    // Rebasing @ onto root() directly is not anything Legion's own provisioning does; it stands in
+    // for a workspace whose working copy has never had a real parent commit.
+    await jj(["rebase", "-r", "@", "-d", "root()"], { cwd: workspaceDir });
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    await rm(admin, { recursive: true, force: true });
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[];
+    try {
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      logged = errorSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    expect(await readFile(path.join(admin, "HEAD"), "utf8"), name).toBe("ref: refs/jj/root\n");
+    const status = await runCommand([SYSTEM_GIT, "status", "--porcelain"], { cwd: workspaceDir });
+    expect(status.stdout.trim(), name).toBe("");
+    expect(logged, name).toEqual([expect.stringContaining("fresh, with no real commit yet")]);
+  }, 60_000);
+
+  test("does not collide with a second workspace named like its temporary restore entry", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await rm(await gitWorktreeAdmin(workspaceDir), { recursive: true, force: true });
+
+    const collidingDir = issueWorkspaceDir(stateDir, "acme/widgets", "WIDGETS-42.TMP");
+    await provisionIssueWorkspace("WIDGETS-42.TMP", deps);
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(collidingDir), name).toBe(collidingDir);
+  }, 60_000);
+
+  test("removal deletes the git worktree entry a crash after its forget left, with the workspace neither registered nor present", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, jj, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await rm(workspaceDir, { recursive: true, force: true });
+    await jj(["workspace", "forget", "widgets-42", "--ignore-working-copy", "-R", repoCloneDir]);
+    expect(Object.keys(await gitWorktreeLocks(repoCloneDir)), name).toEqual([workspaceDir]);
+    await expect(removeIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+      workspaceDir,
+      removed: false,
+      abandoned: [],
+    });
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({});
   }, 60_000);
 });

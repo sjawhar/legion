@@ -19,6 +19,7 @@ import {
 } from "../../theme/classes";
 import { ClaimChip } from "../issue/ClaimChip";
 import { PriorityControl } from "../issue/PriorityControl";
+import { UnreachableRouteMarker } from "../issue/RouteReach";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -32,40 +33,52 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
       aria-label={`${issue.key} ${issue.title}`}
       className={`border-t py-3 first:border-t-0 ${borderDefault}`}
     >
-      <div className="flex flex-wrap items-start justify-between gap-2">
+      {/* One grid, two arrangements. From `sm` the reference and the timestamp share the first
+          line and the metadata runs below. On a phone the reference takes the whole first line
+          and the timestamp moves down beside the metadata: beside the title it would leave the
+          title a column about 130 px wide. */}
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
         <Link
-          className={`min-w-0 flex-1 text-sm ${linkText} ${linkHoverText}`}
+          className={`col-span-2 row-start-1 min-w-0 text-sm sm:col-span-1 ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: issue.key, kind: "issue" })}
           {...referenceTriggerProps({ key: issue.key, kind: "issue" })}
         >
-          <span className="font-semibold">{issue.key}</span>
-          <span className={`ml-2 ${textPrimaryOnCanvas}`}>{issue.title}</span>
+          {/* Below 1280 px a link is an inline-flex box (`styles.css`), so the key and the title
+              would be two flex columns. One wrapper keeps them one run of text that wraps across
+              the row, and the key never breaks at its hyphen. */}
+          <span className="min-w-0 break-words">
+            <span className="font-semibold whitespace-nowrap">{issue.key}</span>
+            <span className={`ml-2 ${textPrimaryOnCanvas}`}>{issue.title}</span>
+          </span>
         </Link>
-        <div className={`flex items-center gap-2 text-xs ${textMutedOnCanvas}`}>
+        <div
+          className={`col-start-2 row-start-2 flex items-center gap-2 self-center text-xs sm:row-start-1 sm:self-start ${textMutedOnCanvas}`}
+        >
           {unread ? <UnreadDot /> : null}
           {issue.open_asks === 0 ? null : <AttentionBadge count={issue.open_asks} />}
           <Timestamp at={issue.updated_at} />
         </div>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <PriorityControl
-          disabled={issue.status === "done"}
-          issueKey={issue.key}
-          priority={issue.priority}
-        />
-        <ClaimChip claim={issue.claim} />
-        {(issue.labels ?? []).map((label) => (
-          <LabelPill key={label}>{label}</LabelPill>
-        ))}
-        {issue.parent === null ? null : (
-          <Link
-            className={`${pillClassName("label")} border ${borderDefault} ${cardHoverBorder}`}
-            to={buildIssuePath({ key: issue.parent, kind: "issue" })}
-            {...referenceTriggerProps({ key: issue.parent, kind: "issue" })}
-          >
-            {issue.parent}
-          </Link>
-        )}
+        <div className="col-start-1 row-start-2 flex min-w-0 flex-wrap items-center gap-2 sm:col-span-2">
+          <PriorityControl
+            disabled={issue.status === "done"}
+            issueKey={issue.key}
+            priority={issue.priority}
+          />
+          <ClaimChip claim={issue.claim} />
+          <UnreachableRouteMarker issue={issue} />
+          {(issue.labels ?? []).map((label) => (
+            <LabelPill key={label}>{label}</LabelPill>
+          ))}
+          {issue.parent === null ? null : (
+            <Link
+              className={`${pillClassName("label")} border ${borderDefault} ${cardHoverBorder}`}
+              to={buildIssuePath({ key: issue.parent, kind: "issue" })}
+              {...referenceTriggerProps({ key: issue.parent, kind: "issue" })}
+            >
+              {issue.parent}
+            </Link>
+          )}
+        </div>
       </div>
     </li>
   );

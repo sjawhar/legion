@@ -154,7 +154,7 @@ exactly one owner to every owner-scoped tool: `issue` for an issue, or `project`
 that GitHub issue or pull request. Only `dispatch_issue` with `external` creates a native issue; if no issue is linked, call
 `dispatch_issue({ external: "owner/repo#n", project: "<project>", title: "<title>" })` before addressing it.
 
-Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys. They also include nullable coarse priority (`P0` highest through `P3` lowest) and `assignee`: the lowercase GitHub login of the human who answers the issue's asks, or `null` when nobody holds it. `dispatch_read` of an issue prints it as `Assignee: <login>` or `Assignee: unassigned`.
+Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with `{"rank": {"before": "<key>", "after": "<key>"}}`, either neighbor optional and both in the issue's project. A bearer caller also names its own session in that body, `"actor": {"kind": "session", "id": "<your session id>"}`, or the server refuses with `ACTOR_KIND`. They also include nullable coarse priority (`P0` highest through `P3` lowest) and `assignee`: the lowercase GitHub login of the human who answers the issue's asks, or `null` when nobody holds it. `dispatch_read` of an issue prints it as `Assignee: <login>` or `Assignee: unassigned`.
 
 ### Who answers an ask
 
@@ -171,6 +171,36 @@ dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: str
 `labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `priority` is yours on creation too — see [Priority is yours to set](#priority-is-yours-to-set). Set `assignee` (a GitHub login on the sign-in allowlist) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It returns
 `details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
+
+## Choosing what to work on
+
+When you finish an issue, or are told to work on the next thing, take the top ready issue of the
+whole backlog, across every project: status `todo`, highest priority first, then board rank. There
+are no areas: a standing role, a product owner and a lane each take the top issue like everyone
+else (Sami, 2026-09-27, dispatch://AGENTC-34/ask/01ed2956-73cc-48d2-8ed4-7a86c6d439b1). `todo`
+means ready: specced, unblocked, and waiting on neither a deploy nor a decision. An issue that
+waits on one belongs in `backlog`, with what it waits on said on the issue.
+
+Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), of any
+kind (Sami, 2026-09-27, answering dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca;
+the question proposed two, and his answer set three). The limit is per agent and has nothing to do
+with the week's priorities (Sami, 2026-09-28, reply a7647eb0 on
+dispatch://AGENTC-393/ask/b773d9f6): the priorities decide only what you pull next. Past three:
+push any unfinished work, say where in one comment on the issue, move it to `backlog` and clear
+its route. Each issue counts on its own; a child does not ride under its parent's slot.
+In-flight issues with no owner at all go
+back to `backlog` as well: no claim or route held by a live session, no Dispatch activity in the
+last day, and no pull request moving on GitHub (an owner working there leaves no Dispatch trace).
+The order keeper sweeps those. Never write the status of an issue that carries the `legion`
+label, or of any issue under one: the Legion daemon writes those statuses, and moving one of its
+admitted roots out of its flow parks the tree and stops its workers.
+
+One agent keeps the backlog's order against those priorities, with Sami
+(dispatch://AGENTC-34/ask/f6780f9e-8b96-49eb-9be7-7c7f2036d5cc). Setting an issue's priority
+stays yours ([Priority is yours to set](#priority-is-yours-to-set)); reordering the board does not.
+When the top of the backlog looks wrong, or a priority's next step is not yet a ready issue,
+publish it to `notifications.role.backlog-order`, which the order keeper holds, instead of
+reordering the board yourself.
 
 ## Claim the issue before you work it
 
@@ -286,20 +316,21 @@ distinction from the named issue, citing it (`dispatch://KEY`), for whoever read
 
 To see the shape of a project rather than find a phrase, list its issues:
 ```ts
-dispatch_issues({ project, status?, parent?, label?, priority?, updated_since?, limit? })
+dispatch_issues({ project, status?, parent?, label?, priority?, route_status?, updated_since?, limit? })
 ```
 Each row carries the issue key, title, status, priority, parent, labels, its open-ask count, and
 when it last changed — a roadmap or backlog pass without opening every issue. Filter with `status`
 (a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
-`null` for an issue with no priority: `[0, 1]` is every P0 and P1), or `updated_since` (an RFC3339
-timestamp, for "what moved this week"). `limit` caps the rows at 50 by default and 250 at most.
+`null` for an issue with no priority: `[0, 1]` is every P0 and P1), `route_status` (below), or
+`updated_since` (an RFC3339 timestamp, for "what moved this week"). `limit` caps the rows at 50 by
+default and 250 at most.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.
 
 ### The owner audit
 
-As the owner of a surface, list your area's P0 and P1 issues and staff or close each one nobody
+As the owner of a surface, list the project's P0 and P1 issues and staff or close each one nobody
 has started:
 ```ts
 dispatch_issues({ project, priority: [0, 1], limit: 250 })
@@ -311,7 +342,13 @@ and is not re-staffed. A todo with a finished spec reads as queued work that nob
 (LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
 with nobody building it).
 
-The audit finds three shapes:
+A close that says the defect cannot happen cites the code that makes it impossible. An issue
+closed because a rewrite forecloses it names the file and line in the rewrite that does so; a
+close that cannot name one is not foreclosed, it is unread. The cheapest way for a rewrite to reach
+parity is to port the code, defect included: LEGION-211's bare `git worktree prune`, filed against
+the TypeScript daemon, had been ported into the Go coordinator and was live in production.
+
+The audit finds four shapes:
 
 - **Unstaffed work.** A plan or measurement exists, and no one is building it.
 - **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
@@ -321,6 +358,25 @@ The audit finds three shapes:
   sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
   find; the tell is your own messages. Doing something by hand more than once means an issue is
   wearing the wrong status.
+- **Unreachable route.** An open issue whose route names a role nobody holds, or a session that is
+  not running, reaches nobody, whatever its priority, and the priority filter above never finds
+  it. List it on its own:
+  ```ts
+  dispatch_issues({ project, route_status: "no_holder", limit: 250 })
+  ```
+  Each row reads `route role:sre (nobody holds it right now)` or `route session:<id> (that session
+  is not running right now)`. That is one read of the listener, and one read is a restart gap as
+  often as a vacancy: an agent box that restarts or resumes keeps the session id, but the session
+  is absent from the listener for minutes, and its role with it. On 2026-09-27, 58 of 63 session
+  routes one read showed as unreachable pointed at a single session that was moving between boxes.
+  So a route is unowned only when it is `no_holder` on two reads at least ten minutes apart: list
+  again after ten minutes and act on the issues both lists name. Confirm with the second
+  `dispatch_issues` read, not `envoy_role_get`: a role lookup releases the claim of a holder whose
+  session is absent from the registry as it answers. Then staff the role, re-route the
+  issue to a live holder, or clear the route and assign it (AGENTC-1065, a P2 production listener
+  503, sat routed to an unheld `role:sre` with no assignee). `route_status: "unknown"` means the
+  listener did not answer, so a route could not be judged; a `no_holder` filter refuses rather
+  than answer an empty list then.
 
 Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
 are found by running the check, not by noticing them.

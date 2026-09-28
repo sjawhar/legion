@@ -11,6 +11,9 @@ phase gets its own long-lived process against the same jj workspace, run in turn
 the phase assigned to you, report its completion to the architect, and leave the durable
 copy the next phase can trust.
 
+Every path this skill cites (`packages/...`, `docs/...`, `AGENTS.md`) is in sjawhar/legion, the
+Legion repository, which need not be the repository you are working in.
+
 ## Identity, scope, and role
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
@@ -102,8 +105,9 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 5. `review.json`
 
 Read only files that precede the assigned phase. Every handoff is validated when it is read:
-`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the file, and the
-ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that fails validation as missing.
+`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the
+file, and the ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that
+fails validation as missing.
 Undeclared fields pass validation untouched and reach the next worker; a declared field of the
 wrong type fails the whole file, so the `legion` tool's `handoff_read` returns null for that phase.
 Write the phase-specific fields the next phase and the architect need, consistent with what
@@ -141,6 +145,22 @@ Anything else, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE"
 evidence; the architect decides, and an operator performs any operation-log restore with every
 other tree paused.
 
+**Filesystem and process safety:** Your pane runs as the operator's own user, so one mistaken
+path can destroy the machine every agent shares (on 2026-09-13 a probe script's leftover
+`rm -rf "$work" "$HOME"` deleted the operator's SSH and signing keys and stopped every worker).
+The extension refuses, before it runs, a `bash` command, `eval` code, or `hub` process start
+(yours or a `task` subagent's) that would delete, move, truncate, overwrite an existing file by
+redirection or `tee`, or `chmod -R`/`chown -R` anything outside `$LEGION_WORKSPACE` and any
+directory below `/tmp` except `/tmp` itself, a glob over it, and its tmux and ssh socket
+directories. It cannot tell which allowed `/tmp` directory belongs to your pane. It follows
+`$HOME`, `~`, variables, `cd`, and the scripts a command runs. A target with no proven path prefix
+is refused; an unknown trailing component under a prefix already proven inside your workspace or
+permitted `/tmp` remains allowed. `pkill` and `killall` are refused, and `kill` only reaches a
+process you started (a descendant of your Oh My Pi process): stop your own long-running processes
+through the hub tool. The refusal names the target and the rule; do not rewrite a script just to
+silence it. This is a mistake-guard rather than a sandbox. What it cannot read, a compiled program
+or code whose paths are only known at run time, is still yours to keep inside the workspace.
+
 ## Phase work
 
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
@@ -161,14 +181,19 @@ assignment, since `jj split`/`jj describe` keep its author). Never set or overri
 `user.name`/`user.email` in any jj or Git scope — not `jj config set`, not `--config`, not
 `git config`: `--config` outranks the pane environment and would put the wrong App back on your
 commits, and the repository-scoped jj config is one file shared by every issue workspace of the
-clone. Before a push, check
+clone. Legion has two GitHub Apps, not one per role: your role's App is the **implement** App
+if you are the implementer or the merger, and the **review** App if you are the planner, tester,
+reviewer, or an architect (in Legion's own deployment, `legion-implementer[bot]` and
+`legion-reviewer[bot]`). A planner's commits authored by the review App are right. Before a push,
+check
 `jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
 shows your role's App in both columns **on every commit you made** — not on the whole list:
 earlier phases' commits are legitimately authored by their own role's App, and a conflict-forced
 rebase legitimately sets the committer of every rebased commit, other roles' included, to the
-rebaser. A wrong identity on your own commit is a pane-environment problem to report to the
-architect, not something to pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
-Hazard 1). Your session receives the credential capability it needs; invoke GitHub through the
+rebaser. A wrong identity on your own commit, the other App or none, is a pane-environment
+problem to report to the architect, not something to pin
+(`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
+Your session receives the credential capability it needs; invoke GitHub through the
 credential helper:
 
 ```bash
@@ -225,8 +250,8 @@ legion gh -- pr comment <pr-number> \
 
 The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
-and spec content goes into the issue, never into a PR (the root `AGENTS.md`'s `docs/plans/` row
-is human-authored design history, not a Legion artifact). A skill step that says "save the plan
+and spec content goes into the issue, never into a PR (the root `AGENTS.md`
+calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
 to a file" is satisfied by the handoff write in the completion gate below; the planner's only
 commit is `plan: record handoff`.
 
@@ -280,7 +305,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
-**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, record the pushed tip, rebase onto the new base, and push with `legion-worker`'s procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
+**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, merge the bookmark onto the new base (`jj new legion/<KEY> <new base> -m "<message>"`) and push with `legion-worker`'s ordinary push procedure — a genuine fast-forward, never the procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
 ```
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
@@ -362,9 +387,30 @@ this proof.
   the fingerprint at the current tip; after pushing the rebased branch, record it at the new
   tip; post one PR comment (Legion footer):
   `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
-  Rebase the whole chain — `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin` —
-  so the tester's and reviewer's commits move with yours. Record the pushed tip before it and
-  push the rebased chain with the push procedure (*Rewriting pushed commits*, below).
+  Every issue workspace is a `jj workspace` of the same shared repository and operation log, and
+  jj always rebases every descendant of any commit it rewrites — a revset naming the root of your
+  own chain and rewriting it in place also rewrites whatever another tree has stacked on that root,
+  whichever selector chose it (`-s`, `-b`, and `-r` all rewrite descendants; `-r` only re-parents
+  them to fill the hole, which is worse). This is what happened in LEGION-118: one issue's own
+  conflict step moved a second issue's twelve commits and its bookmark onto a conflicted copy.
+  Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
+  bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
+  built on your prior commits, in this tree or another, ever moves:
+
+  ```bash
+  jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
+  ```
+
+  Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
+  commit above the described one the bookmark already names, and `jj git push` refuses to push
+  any commit without a description — merging from `@` drags that undescribed commit into the
+  ancestry and the push fails (`Won't push commit … since it has no description`); the bookmark
+  is always on a described, already-pushed commit. If the merge conflicts, resolve it in that
+  one commit — edit the markers directly; there is nothing to squash, since the merge is the
+  only new commit. Then `jj -R "$LEGION_WORKSPACE" new` to move off it, and push with the one
+  push procedure (*Every role pushes its own commits*, below): the merge descends from both the
+  bookmark's old position and the destination, so it is a genuine fast-forward and *Rewriting
+  pushed commits* never applies — nothing was rewritten, so there is no tip to record first.
 - **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
@@ -586,8 +632,8 @@ remote branch sideways onto your commit and drops theirs (jj 0.45.1:
 `bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
 push is refused by jj itself (`unexpectedly moved on the remote`).
 
-**Rewriting pushed commits** — the conflict-forced rebase, the rebase after a retarget, or a
-`jj squash --into` a commit already on GitHub — leaves the pushed tip outside `::@-`, so record
+**Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
+rewrite of a commit you already pushed — leaves the pushed tip outside `::@-`, so record
 that tip first, after a fetch and while your chain still descends from it:
 
 ```bash
@@ -631,9 +677,16 @@ This publishes your phase's completion to the architect's role and clears the da
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
 invent a different completion protocol — this is the whole contract.
 
-A reviewer's phase ends with its completion, not with its review: submit the review on GitHub
-first, then commit the handoff and complete. The daemon moves the issue once both are in — the
-decision GitHub reports and your completion, in either order — so a review posted without a
+A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
+takes this order: write, commit and push the handoff; submit the review of the head that push
+made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
+before you submit it, since an approval stands only on green checks and GitHub can dismiss one
+once the head moves, and a verdict that settles red there makes the round's decision a request for
+changes naming the failing checks; a request for changes does not wait, since it stands whatever CI says and the
+issue leaves reviewing with it. A review of a head the handoff push then replaces names a head
+the pull request no longer has. A round that writes none (the final approval of the `.legion/`
+deletion head) reviews the head as it is. The daemon moves the issue once both are in —
+the decision GitHub reports and your completion, in either order — so a review posted without a
 completion leaves the issue in reviewing until you finish.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to

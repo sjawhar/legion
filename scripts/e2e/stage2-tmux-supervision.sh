@@ -8,9 +8,10 @@
 #
 # Stage 1's discipline holds: the cleanup cannot fail, every wait is bounded, a process that
 # ignores its stop is SIGKILLed, and everything the run takes is its own — its mktemp work
-# directory, its containers, its OMP profile, its ports, its project keys, its tmux servers
-# (TMUX_TMPDIR under the work directory), and its legions registry (XDG_STATE_HOME). The work
-# directory survives a failure, because its logs are the evidence, and goes when the run passed.
+# directory, its containers, its OMP profile (under the HOME its Oh My Pi processes run under,
+# inside the work directory: make_omp_home, lib/omp-home.sh), its ports, its project keys, its tmux
+# servers (TMUX_TMPDIR under the work directory), and its legions registry (XDG_STATE_HOME). The
+# work directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
 # postgres:16 on tmpfs. LEGION_E2E_MODEL_GATEWAY_URL (required): the agents' model is Anthropic
@@ -40,9 +41,13 @@ deadline_ptoken=${deadline_project,,}
 nats_container=legion-e2e2-nats-$$
 pg_container=legion-e2e2-pg-$$
 state=$work/state
+omp_home=$work/omp-home
+profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$work/daemon.log
 check=setup
 timeout_hook=
+# shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
+. "$root/scripts/e2e/lib/omp-home.sh"
 
 # ---- reporting and waiting ------------------------------------------------------------------------
 
@@ -108,7 +113,7 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1 || true
-  rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
+  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -182,11 +187,12 @@ omp_of() {
   return 1
 }
 env_of() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
-# start_daemon: the main daemon, in the background, its log appended to daemon.log. OMP_PROFILE
-# selects the isolated profile for the plugin gate and — through the pane allow-list — every pane.
+# start_daemon: the main daemon, in the background, its log appended to daemon.log. HOME and
+# OMP_PROFILE select the run's isolated profile for the plugin gate and — through the pane allow-list
+# — every pane.
 start_daemon() {
   echo "=== boot at $(date -u +%FT%TZ)" >>"$daemon_log"
-  env -u LEGION_OMP_PATH OMP_PROFILE="$profile" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
+  env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
   daemon_pid=$!
   until_true 180 "the daemon to answer /healthz" curl -fs "http://127.0.0.1:$port/healthz"
 }
@@ -208,7 +214,7 @@ stop_daemon() {
 # expect_refusal NAME PATTERN: `legion start` must refuse, printing PATTERN.
 expect_refusal() {
   local out=$work/refusal-$1.log st=0
-  env -u LEGION_OMP_PATH OMP_PROFILE="$profile" timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$out" 2>&1 || st=$?
+  env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$out" 2>&1 || st=$?
   [ "$st" != 0 ] || fail "legion start was not refused (exit 0)"
   [ "$st" != 124 ] || fail "legion start neither refused nor served within 300s"
   grep -qF "$2" "$out" || fail "the refusal (exit $st) does not say \"$2\": $(grep -v '^{' "$out" | head -3)"
@@ -221,10 +227,11 @@ for tool in go docker jq curl ss tmux bun mise socat secrets hawk-token; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
 mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
-# The model route, installed while this shell still holds the operator's XDG directories, which
-# the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
-# run here, by name.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+make_omp_home "$omp_home"
+# The model route, installed while this shell still holds the operator's HOME and XDG directories,
+# which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring
+# stops the run here, by name.
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
@@ -237,6 +244,8 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 omp_bin=$(mise where "$pin")/bin
 [ -x "$omp_bin/omp" ] || fail "mise has no omp executable for $pin under $omp_bin"
 echo "configured OMP pin: $pin ($("$omp_bin/omp" --version 2>&1 | head -1)) at $omp_bin/omp; ordinary PATH omp: $(command -v omp)"
+# profile_omp ARGS…: the pinned Oh My Pi on the run's own profile, as the daemon runs it.
+profile_omp() { HOME="$omp_home" OMP_PROFILE="$profile" "$omp_bin/omp" "$@"; }
 
 # Below the kernel's ephemeral range and distinct from one another (scripts/e2e/lib/free-port.sh):
 # none is bound until its process starts, so no socket opened in between can take one.
@@ -282,7 +291,7 @@ envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_
 
 # The branch plugin, packed as the release packs it, into this run's own OMP profile.
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
 want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
 echo "plugin: $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (goDaemonApiVersion $want_contract)"
 
@@ -324,11 +333,11 @@ cmp -s "$work/manifest.orig" "$work/plugin/package.json" || fail "the installed 
 pass
 
 begin gate-refuses-a-disabled-plugin
-OMP_PROFILE=$profile omp plugin disable @sjawhar/pi-legion-envoy >/dev/null
-note "omp plugin disable: $(OMP_PROFILE=$profile omp plugin list --json | jq -c '[.npm[]? | select(.name == "@sjawhar/pi-legion-envoy") | {name, enabled}]')"
+profile_omp plugin disable @sjawhar/pi-legion-envoy >/dev/null
+note "omp plugin disable: $(profile_omp plugin list --json | jq -c '[.npm[]? | select(.name == "@sjawhar/pi-legion-envoy") | {name, enabled}]')"
 expect_refusal disabled "is installed but not loaded by omp (disabled or unregistered)"
-OMP_PROFILE=$profile omp plugin enable @sjawhar/pi-legion-envoy >/dev/null
-OMP_PROFILE=$profile omp plugin list --json |
+profile_omp plugin enable @sjawhar/pi-legion-envoy >/dev/null
+profile_omp plugin list --json |
   jq -e '[.npm[]? | select(.name == "@sjawhar/pi-legion-envoy" and .enabled == true)] | length == 1' >/dev/null ||
   fail "the plugin did not come back enabled"
 pass
@@ -358,7 +367,7 @@ begin gate-refuses-an-unconfigured-model-role
 # subagent's, in the pane's own Oh My Pi under this profile. The profile without modelRoles.oracle
 # is refused, naming the agent and the role no one configured: the task tool would otherwise run
 # every oracle consult on the session's own model without a word.
-roles=$HOME/.omp/profiles/$profile/agent/config.yml
+roles=$profile_agent/config.yml
 cp -p "$roles" "$work/roles.orig"
 grep -v '^  oracle: ' "$work/roles.orig" >"$roles"
 ! grep -q '^  oracle: ' "$roles" || fail "modelRoles.oracle is still in $roles"
@@ -429,8 +438,8 @@ begin model-turn-through-the-gateway
 # profile's pinned model on the anthropic provider, the one provider the profile routes (to
 # middleman) and leaves enabled, and none ended in an error; the key command minted for more than
 # the preflight.
-pinned=$(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml")
-[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $HOME/.omp/profiles/$profile/agent/config.yml"
+pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
+[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
 replies=$(jq -c 'select(.type == "message" and .message.role == "assistant")
   | {provider: .message.provider, model: .message.model, stopReason: .message.stopReason}' "$session_file2" | jq -sc .)
 jq -e --arg pinned "$pinned" 'length > 0 and all(.provider == "anthropic" and "anthropic/" + .model == $pinned and .stopReason != "error")' \
@@ -513,7 +522,10 @@ pass
 begin stale-generation-hello-refused
 refused_msg="worker-stream: rejected hello (stale worker generation)"
 before_count=$(log_count "$refused_msg")
-reply=$(printf '{"type":"hello","bootToken":"%s"}\n' "$(cat "$work/stale-boot-token")" |
+# The hello2 a pane's shim sends (shimwire.Hello2; a tmux pane's carries no agentSecrets). The
+# listener refuses a v1 hello before it reads the boot token, so one would never reach the
+# generation check.
+reply=$(printf '{"type":"hello2","bootToken":"%s"}\n' "$(cat "$work/stale-boot-token")" |
   socat -t 5 - "UNIX-CONNECT:$state/worker-stream.sock" 2>&1) || true
 [ -z "$reply" ] || fail "the daemon answered a stale hello: $reply"
 until_true 10 "the daemon to log the stale hello" sh -c "[ \"\$(jq -R --arg m '$refused_msg' 'fromjson? | select(.msg == \$m)' '$daemon_log' | jq -s length)\" -gt $before_count ]"
@@ -550,7 +562,7 @@ operator_token_file: $work/operator-token
 worker_boot_timeout_seconds: 5
 worker_boot_registration_deadline_intervals: 2
 EOF
-LEGION_OMP_PATH=$work/stub/omp OMP_PROFILE=$profile "$work/legion" start --config "$work/deadline.yaml" >"$work/deadline.log" 2>&1 &
+LEGION_OMP_PATH=$work/stub/omp HOME=$omp_home OMP_PROFILE=$profile "$work/legion" start --config "$work/deadline.yaml" >"$work/deadline.log" 2>&1 &
 deadline_pid=$!
 until_true 120 "the second daemon to answer /healthz" curl -fs "http://127.0.0.1:$deadline_port/healthz"
 dclaims() {
@@ -747,9 +759,19 @@ begin every-turn-through-the-gateway
 # Every agent turn the run recorded, in every session of the isolated profile, each subagent's
 # included, was served by the anthropic provider, the gateway's; and the same check refuses a copy
 # of one captured session with a turn rewritten as Bedrock's.
-route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
   --control "$work/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
 note "$route"
+pass
+
+begin profile-stays-in-the-run
+# Every session the run's agents wrote is under the run's own home, inside its work directory, and
+# the operator's profile root holds none of the run's profile (make_omp_home, lib/omp-home.sh).
+[ -d "$profile_agent/sessions" ] || fail "no agent session directory at $profile_agent/sessions"
+sessions=$(find "$profile_agent/sessions" -name '*.jsonl' -type f | wc -l)
+[ "$sessions" -gt 0 ] || fail "no agent session under $profile_agent/sessions"
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+note "$sessions agent session files under $profile_agent/sessions; $HOME/.omp/profiles/$profile does not exist"
 pass
 
 ok=1

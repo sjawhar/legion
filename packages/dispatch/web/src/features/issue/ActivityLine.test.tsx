@@ -21,6 +21,8 @@ const uploaded: Artifact = {
 };
 
 const issue: IssueDetails = {
+  route_status: null,
+  route_holder: null,
   artifacts: [
     {
       created_at: "2026-09-15T00:00:00Z",

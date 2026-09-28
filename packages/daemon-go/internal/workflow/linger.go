@@ -18,6 +18,7 @@ import (
 // the human's move; the tree's architect is told, and decides what the rest of its tree does, as
 // the shipped daemon routes a child's close to the architect. A later todo re-enters the child.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
+	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {
 		return e.beginLinger(ctx, tx, issue)
 	}
@@ -27,7 +28,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 			return err
 		}
 	}
-	if err := e.everyClaim(ctx, tx, issue, "suspend"); err != nil {
+	if err := e.everyClaim(ctx, tx, issue, "suspend", fmt.Sprintf("%s is %s", issue.Key, status)); err != nil {
 		return err
 	}
 	kind := record.NoticeKind("child-status")
@@ -54,7 +55,7 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		return err
 	}
 	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member, "suspend"); err != nil {
+		if err := e.everyClaim(ctx, tx, member, "suspend", fmt.Sprintf("the tree of %s lingers", root.Key)); err != nil {
 			return err
 		}
 	}
@@ -62,7 +63,11 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	if err != nil {
 		return err
 	}
-	return e.store.Enqueue(ctx, tx, row)
+	if err := e.store.Enqueue(ctx, tx, row); err != nil {
+		return err
+	}
+	e.logOnCommit(ctx, "workflow: tree lingers", "tree", root.Key, "generation", root.Generation, "until", until)
+	return nil
 }
 
 func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.LingerExpired) (intake.Result, error) {
@@ -87,5 +92,6 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 			return intake.Result{}, err
 		}
 	}
+	e.logOnCommit(ctx, "workflow: linger closed the tree", "tree", issue.Key, "generation", issue.Generation, "issues", len(members))
 	return intake.Result{}, nil
 }
