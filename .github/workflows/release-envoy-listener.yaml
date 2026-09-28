@@ -88,8 +88,13 @@ jobs:
       # took 256.60–289.47 s, of which the five assertions measured 0.00 s each, and run
       # 36443745717 (83fe7bd7, attempt 1) hit `panic: test timed out after 5m0s` at build step
       # 46/46, publishing no image until the job was re-run.
+      # Same Dockerfile, context, builder and LEGION_COMMIT as the publish step below, so this
+      # tag is the amd64 half of the image that gets published and the publish reuses its layers.
       - name: Build the listener image the smoke test runs against
-        run: docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" --file packages/envoy/docker/Dockerfile .
+        run: |
+          docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" \
+            --build-arg LEGION_COMMIT=${{ github.sha }} \
+            --file packages/envoy/docker/Dockerfile .
       # 5m now bounds only what the test does: pull NATS, start both containers behind the test's
       # own 60 s health wait, and assert. Measured at 5.3–6.2 s against a prebuilt image on a
       # devbox at load average 80, so the bound is deliberate headroom, not a build budget.

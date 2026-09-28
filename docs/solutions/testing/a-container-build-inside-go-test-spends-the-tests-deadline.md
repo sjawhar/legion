@@ -17,7 +17,7 @@ symptoms:
   - "A container test that passes most runs fails on a slow runner with no code change"
   - "The image build's last step is in the log and the assertions never ran"
 root_cause: design_error
-resolution_type: workflow_change
+resolution_type: workflow_improvement
 severity: medium
 ---
 

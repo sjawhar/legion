@@ -62,9 +62,11 @@ Fix the credential helper, not the test:
   registry credential on the machine being healthy.
 
 Do not weaken the smoke test (skip it, stub the Docker build, mock the container) to route
-around this — the test is exercising the exact thing it should: a real Docker build and a real
-NATS container. CI's clean environment is what proves the test itself is correct; a broken
-local credential helper is an environment problem, not a test design problem.
+around this — the test is exercising the exact thing it should: a real NATS container, and,
+on the local fallback this failure belongs to (`ENVOY_SMOKE_IMAGE` unset), a real Docker build
+too; in CI that build is the workflow step before it. CI's clean environment is what proves the
+test itself is correct; a broken local credential helper is an environment problem, not a test
+design problem.
 
 ## Why This Works
 
