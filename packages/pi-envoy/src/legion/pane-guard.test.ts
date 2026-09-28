@@ -212,7 +212,7 @@ describe("resolution", () => {
   test("tells an unresolvable in-workspace path how to become resolvable", () => {
     const reason = bash("rm -rf out/tmp/../old");
     expect(reason).toContain("cannot know where the `..` after it leads");
-    expect(reason).toContain("Create the missing path component in an earlier command");
+    expect(reason).toContain("Make the unresolved path component resolvable in an earlier command");
     expect(reason).not.toContain("Name a path under $LEGION_WORKSPACE");
   });
 
