@@ -101,3 +101,31 @@ every exit path, so a failed run leaves nothing behind either. Both smokes run
 their tmux on a private socket in their temp dir, so the kill can end only the
 session the smoke started; on the shared default server it could end anyone's,
 and the Legion pane guard refuses it there.
+
+## measure-pane-guard-model.ts
+
+Runs the LEGION-354 batch — the rows `pane-guard-bash.test.ts` runs, from
+`src/legion/pane-guard-model-rows.ts` — against a guard build, and prints
+what each row does: the verdict `guard.bash` returned, and whether real bash
+destroyed that row's canary `HOME`. A row is a leak when the guard allowed it
+and bash destroyed the canary.
+
+The test asserts each row against the guard beside it. This measures the same
+rows against any build, so a claim about what a change to the file model
+closed, or what it cost, is derived from the rows that ship rather than
+counted by hand.
+
+```bash
+jj file show -r main@origin packages/pi-envoy/src/legion/pane-guard.ts \
+  > packages/pi-envoy/src/legion/pane-guard.base.ts
+bun packages/pi-envoy/scripts/measure-pane-guard-model.ts \
+  packages/pi-envoy/src/legion/pane-guard.base.ts base
+bun packages/pi-envoy/scripts/measure-pane-guard-model.ts \
+  packages/pi-envoy/src/legion/pane-guard.ts head
+```
+
+The copy goes inside the package: a guard build imports the package's own
+modules, so one written to a temporary directory fails to resolve them. The
+unwaited shapes (a background command, a coprocess, an earlier part of the
+same pipeline, a process substitution) are races, so one trial per row settles
+nothing about them — their live rate comes from repeating the run.
