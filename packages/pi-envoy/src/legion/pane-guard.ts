@@ -88,8 +88,18 @@ interface Piece {
   readonly why?: string;
   readonly descendantPid?: true;
   readonly lenient?: true;
+  /** Only on `UNSET`'s piece. */
+  readonly unset?: true;
 }
 type Expansion = readonly Piece[];
+
+/** What `unset NAME` and `env -u NAME` leave for NAME: unset, which is neither empty (`${NAME-x}`
+ * takes `x`) nor absent (the pane's environment no longer supplies it). */
+const UNSET: Expansion = [{ kind: "literal", text: "", unset: true }];
+
+function isUnset(value: Expansion | undefined): boolean {
+  return value?.length === 1 && value[0]?.unset === true;
+}
 
 /** One argument of a command: the word as written (for the refusal) and one of its expansions
  * (brace expansion and `"$@"` give a word several). `fields` says when bash may not make it one
@@ -510,10 +520,11 @@ function unquotedLiteral(
   return pieces;
 }
 
-/** A variable's value: this command's assignments, then the pane's environment. */
+/** A variable's value: this command's assignments, then the pane's environment; undefined for one
+ * this command unset. */
 function lookup(name: string, st: State, ctx: Ctx): Expansion | undefined {
   const own = st.vars.get(name);
-  if (own !== undefined) return own;
+  if (own !== undefined) return isUnset(own) ? undefined : own;
   if (name === "PWD" && st.cwd !== undefined) return [literal(st.cwd)];
   const value = ctx.env[name];
   return value === undefined ? undefined : [literal(value)];
@@ -549,6 +560,8 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
   }
   if (name === "#" && st.positional !== undefined) return [[literal(String(st.positional.length))]];
   if (["?", "#", "-"].includes(name)) return [[unknown(`\`$${name}\``)]];
+  // Unset in this command, a name expands to nothing.
+  if (isUnset(st.vars.get(name))) return [[literal("")]];
   const value = lookup(name, st, ctx);
   if (value === undefined) {
     return [[unknown(`\`$${name}\`, which is not set in this command or the pane's environment`)]];
@@ -1991,7 +2004,7 @@ function unwrap(
       if (i !== -1) list = rest.slice(i);
       state = { ...clone(state), cwd, cwdWhy: "`env -C`" };
       for (const name of unset) {
-        state.vars.set(name, [literal("")]);
+        state.vars.set(name, UNSET);
         state.exported.delete(name);
       }
       for (const [name, value] of overlay) {
@@ -2142,7 +2155,8 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       for (const arg of operands(rest, "").operands) {
         const variable = literalText(arg.exp);
         if (variable !== undefined) {
-          outer.vars.set(variable, [literal("")]);
+          outer.vars.set(variable, UNSET);
+          outer.exported.delete(variable);
           outer.arrays.delete(variable);
         }
       }
@@ -2867,6 +2881,8 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     const value = st.vars.get(name);
     if (value !== undefined) vars.set(name, value);
   }
+  // A name unset here is not in the child's environment either, the pane's included.
+  for (const [name, value] of st.vars) if (isUnset(value)) vars.set(name, value);
   for (const [name, value] of overlay) vars.set(name, value);
   return {
     vars,
@@ -3207,7 +3223,8 @@ function checkCode(
   const env = { ...ctx.env };
   for (const [name, value] of st.vars) {
     const text = literalText(value);
-    if (text !== undefined) env[name] = text;
+    if (isUnset(value)) delete env[name];
+    else if (text !== undefined) env[name] = text;
   }
   scanCode(
     language,

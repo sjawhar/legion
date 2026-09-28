@@ -202,6 +202,25 @@ describe("resolution", () => {
     expect(bash(`rm -rf "\${HOME:-/nowhere}"`)).toContain(home);
   });
 
+  test("keeps a variable unset after unset, apart from empty and from the pane's environment", () => {
+    const ssh = path.join(home, ".ssh");
+    // `-` and `+` test whether a name is set, where `:-` and `:+` test whether it is non-empty.
+    for (const command of [
+      `unset D; rm -rf "\${D-$HOME/.ssh}"`,
+      `D=x; unset D; rm -rf "\${D-$HOME/.ssh}"`,
+      `env -u D rm -rf "\${D-$HOME/.ssh}"`,
+      `unset D; rm -rf "\${D:-$HOME/.ssh}"`,
+      // Unset hides the pane's environment value too, in this shell and in a child.
+      `unset LEGION_WORKSPACE; rm -rf "\${LEGION_WORKSPACE-$HOME/.ssh}"`,
+      `unset LEGION_WORKSPACE; bash -c 'rm -rf "\${LEGION_WORKSPACE-$HOME/.ssh}"'`,
+    ]) {
+      expect(bash(command), command).toContain(ssh);
+    }
+    expect(bash(`D=x; unset D; rm -rf "\${D+$LEGION_WORKSPACE}/.ssh"`)).toContain("(/.ssh)");
+    // An unset name expands to nothing.
+    expect(bash('D="$HOME"; unset D; rm -rf "$LEGION_WORKSPACE/$D"')).toBeUndefined();
+  });
+
   test("resolves the paths realpath, dirname, basename and readlink -f print", () => {
     expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/a/../b"); rm -rf "$d"')).toBeUndefined();
     expect(bash('d=$(realpath -m -- "$HOME/a/../.ssh"); rm -rf "$d"')).toContain(
