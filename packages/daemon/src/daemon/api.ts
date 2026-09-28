@@ -240,6 +240,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     auth,
     github,
     spawnRequests,
+    loginWarnings: { lastAt: Number.NEGATIVE_INFINITY },
     operatorTokenHash:
       config.operatorToken === undefined ? undefined : secretHash(config.operatorToken),
     mintControllerCapability,

@@ -8,7 +8,7 @@ import (
 
 func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *testing.T) {
 	prior := record.PullRequest{
-		HeadSHA: "old", Verdict: "red", FixAttempts: 2,
+		HeadSHA: "old", CheckedHead: "old", Verdict: "red", FixAttempts: 2,
 		Pushes: []record.ClassifiedPush{{SHA: "next", Before: "old", HandoffOnly: true}},
 	}
 	got := AdvancePullRequestHead(prior, "next")
@@ -16,8 +16,8 @@ func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *t
 		t.Fatalf("handoff-only head = %#v, want unchanged count", got)
 	}
 
-	got = AdvancePullRequestHead(record.PullRequest{HeadSHA: "old", Verdict: "red", FixAttempts: 2}, "next")
-	if got.FixAttempts != 3 || got.HeadCounted != "next" || got.Verdict != "" {
+	got = AdvancePullRequestHead(record.PullRequest{HeadSHA: "old", CheckedHead: "old", Verdict: "red", FixAttempts: 2}, "next")
+	if got.FixAttempts != 3 || got.HeadCounted != "next" || HeadVerdict(got) != "" {
 		t.Fatalf("real fix head = %#v, want counted next head", got)
 	}
 }
@@ -41,7 +41,7 @@ func TestApplySettlementUsesTheExportedSettlementClassifiers(t *testing.T) {
 }
 
 func TestBlockFixAttemptPublishesOnlyOncePerExhaustedCount(t *testing.T) {
-	prior := record.PullRequest{Verdict: "red", FixAttempts: 3}
+	prior := record.PullRequest{HeadSHA: "head", CheckedHead: "head", Verdict: "red", FixAttempts: 3}
 	got, blocked := BlockFixAttempt(prior, 3)
 	if !blocked || got.BlockedAttempts != 3 {
 		t.Fatalf("first exhausted count = %#v blocked %t, want publish", got, blocked)
@@ -53,9 +53,25 @@ func TestBlockFixAttemptPublishesOnlyOncePerExhaustedCount(t *testing.T) {
 }
 
 // A green settlement at an exhausted count is the fix that worked, not a blocked pull request: only
-// a red one reports the count.
+// a red one reports the count, and only a red that stands for the head (HeadVerdict): a red a code
+// push left behind reports nothing.
+// A red sends the tree back only while it stands for the head: a red a code push left behind, whose
+// head no longer carries it, sends nothing back.
+func TestRedSendsBackOnlyOnTheRedThatStandsForTheHead(t *testing.T) {
+	if !RedSendsBack(record.PullRequest{HeadSHA: "head", CheckedHead: "head", Verdict: "red"}) {
+		t.Fatal("the head's own red did not send the tree back")
+	}
+	if RedSendsBack(record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Verdict: "red"}) {
+		t.Fatal("a red that no longer stands for the head sent the tree back")
+	}
+}
+
 func TestBlockFixAttemptPublishesOnlyOnARedSettlement(t *testing.T) {
-	exhausted := record.PullRequest{Verdict: "green", FixAttempts: 3}
+	stale := record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Verdict: "red", FixAttempts: 3}
+	if got, blocked := BlockFixAttempt(stale, 3); blocked || got.BlockedAttempts != 0 {
+		t.Fatalf("a red that no longer stands for the head = %#v blocked %t, want no publish", got, blocked)
+	}
+	exhausted := record.PullRequest{HeadSHA: "head", CheckedHead: "head", Verdict: "green", FixAttempts: 3}
 	if got, blocked := BlockFixAttempt(exhausted, 3); blocked || got.BlockedAttempts != 0 {
 		t.Fatalf("green settlement at an exhausted count = %#v blocked %t, want no publish", got, blocked)
 	}
@@ -102,7 +118,7 @@ func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
 			name = "push first"
 		}
 		t.Run(name, func(t *testing.T) {
-			pr := record.PullRequest{HeadSHA: "impl", Verdict: "green"}
+			pr := record.PullRequest{HeadSHA: "impl", CheckedHead: "impl", Verdict: "green"}
 			check := func(step, head string, plannedRed bool, fixAttempts int, headCounted string) {
 				t.Helper()
 				if pr.HeadSHA != head || pr.PlannedRed != plannedRed || pr.FixAttempts != fixAttempts || pr.HeadCounted != headCounted {
@@ -113,15 +129,15 @@ func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
 
 			pr = arrive(pr, "red-tests", "src/widget_test.go", true, pushFirst)
 			check("the review App's red tests", "red-tests", true, 0, "")
-			pr.Verdict = "red"
+			pr.Verdict, pr.CheckedHead = "red", pr.HeadSHA
 
 			pr = arrive(pr, "tester-handoff", ".legion/test.json", true, pushFirst)
 			check("the tester's handoff-only head", "tester-handoff", true, 0, "")
-			pr.Verdict = "red"
+			pr.Verdict, pr.CheckedHead = "red", pr.HeadSHA
 
 			pr = arrive(pr, "fix", "src/widget.go", false, pushFirst)
 			check("the implementer's fix", "fix", false, 0, "")
-			pr.Verdict = "red"
+			pr.Verdict, pr.CheckedHead = "red", pr.HeadSHA
 
 			pr = AdvancePullRequestHead(pr, "fix-2")
 			check("a later fix whose push webhook is lost", "fix-2", false, 1, "fix-2")

@@ -71,24 +71,20 @@ instead.
 
 ```ts
 async function waitForFile(target: string): Promise<void> {
-  for (let attempt = 0; attempt < 1500; attempt += 1) {
-    if (existsSync(target)) return;
-    await Bun.sleep(20);
-  }
-  throw new Error(`argv record never appeared at ${target}`);
+  await waitFor(() => existsSync(target), 30_000, `the argv record at ${target}`);
 }
 ```
 
-This is `waitForSocket` in `real-shutdown-e2e.test.ts` and `waitFor` in `ci-fixtures.ts` with a
-different predicate: a 20 ms tick, a 30 s bound, and a failure that names the path. Polling has no
+This is `waitForSocket` in `real-tmux-fixture.ts` with a different predicate: both call `waitFor`
+in `ci-fixtures.ts`, which polls every 2 ms, fails at a real-time bound (30 s here, inside the
+test's 60 s), and names the path. Polling has no
 watcher to coalesce, so the temp file goes back beside the record (`argv.json.tmp` → `argv.json`,
 still an atomic rename). 50 of 50 loop iterations passed at a one-minute load average of 104–111
 on 32 cores, 1.9–3.4 s wall each.
 
-The `ts-no-test-timers` rule flags the `Bun.sleep`. This is the rule's stated exception: an
-integration test observing a real subprocess with no in-process signal to await. Say so in the
-helper's doc comment, keep the tick small, and never let the sleep stand in for the awaited
-condition — poll the observable itself.
+The poll's `Bun.sleep` lives inside `waitFor`. It is the `ts-no-test-timers` rule's stated
+exception: an integration test observing a real subprocess with no in-process signal to await. The
+sleep never stands in for the awaited condition — the observable itself is polled.
 
 ## Rules
 
@@ -96,7 +92,7 @@ condition — poll the observable itself.
   writer before trusting `existsSync` — a plain `Bun.write`/`writeFile` is never enough.
 - Do not wait on `fs.watch`/`fs.promises.watch` for a file's arrival in a test. It reports the
   source name on rename and coalesces near-simultaneous events; both defeat an existence check.
-- Poll with the directory's existing helper shape (20 ms tick, explicit bound, path in the error).
+- Poll with `waitFor`: an explicit bound below the test's own timeout, and the path in `what`.
   The bound belongs to the *failure*, not to the success path.
 - Measure a flake fix with the loop it was found by: the reviewer ran 300 iterations; run at
   least that many under the same test command before calling a race closed, and record the load

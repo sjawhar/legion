@@ -9,6 +9,16 @@
 - `POST /v1/roles/set` accepts `"soft": true`: the claim lands only if the role is unheld, held by a session that is no longer live, or held by the declared `previous_session_id`; any other live holder answers 409 with its id.
 - Dispatch redelivers the GitHub App webhook's failed deliveries, which GitHub never redelivers on its own. Every two minutes it lists the webhook's attempts whose status is not OK and asks GitHub to redeliver each one the listener answered 5xx or GitHub could not complete. A failed or refused redelivery is retried after a doubling backoff, at most five times, and a 4xx is never redelivered. Requests go a second apart, and a GitHub rate limit stops the sweep until the time GitHub gives. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep over a chosen window.
 
+### Changed
+
+- The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
+  whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
+  pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it
+  after it lands (LEGION-208). Consumers decide which commit a settlement stands for: the
+  TypeScript daemon still takes only its head's, and the Go daemon takes a code head's for the
+  handoff-only heads after it. The listener no longer records each pull request's head (the
+  `head.*` records in the CI bucket); a record an earlier listener wrote is skipped until its TTL.
+
 ### Fixed
 
 - A role claim that overtook another session no longer risks deleting a newer claim made in the same instant; old-holder cleanup now touches only the previous holder's topics, never the role row.

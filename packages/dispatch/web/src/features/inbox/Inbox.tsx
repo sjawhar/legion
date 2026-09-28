@@ -9,6 +9,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   dangerText,
@@ -199,7 +200,7 @@ function InboxItem({
                 {...referenceTriggerProps({ key: owner, kind: "issue" })}
               >
                 <span className="shrink-0 font-semibold">{owner}</span>
-                <span className="truncate">{title}</span>
+                <TruncatedText>{title}</TruncatedText>
               </Link>
             )
           ) : (
@@ -218,7 +219,9 @@ function InboxItem({
                 slug: ask.document.slug,
               })}
             >
-              {ask.document.project} · {ask.document.name}
+              <TruncatedText>
+                {ask.document.project} · {ask.document.name}
+              </TruncatedText>
             </Link>
           )}
           <span className="min-w-0 max-w-[40%] shrink truncate">

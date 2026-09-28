@@ -13,6 +13,7 @@ import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
+import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
   askUrgencyAccent,
@@ -435,7 +436,9 @@ export function AskCard({
               </span>
             )}
             {handleCount === 0 ? (
-              <span className="min-w-0 truncate">{authorLabel === "" ? "asked" : authorLabel}</span>
+              <TruncatedText className="min-w-0" title={authorLabel === "" ? "asked" : authorLabel}>
+                {authorLabel === "" ? "asked" : authorLabel}
+              </TruncatedText>
             ) : (
               <button
                 aria-expanded={handlesOpen}
@@ -443,9 +446,12 @@ export function AskCard({
                 onClick={() => setHandlesOpen((open) => !open)}
                 type="button"
               >
-                <span className="min-w-0 truncate">
+                <TruncatedText
+                  className="min-w-0"
+                  title={authorLabel === "" ? "asked" : authorLabel}
+                >
                   {authorLabel === "" ? "asked" : authorLabel}
-                </span>
+                </TruncatedText>
                 <ChevronIcon expanded={handlesOpen} />
               </button>
             )}

@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -51,16 +53,24 @@ func appliedEvents(t *testing.T, state record.PullRequestState, facts ...intake.
 	return pool
 }
 
-// pullRequestAt reads back the pull request and the reviewer round's decision.
+// pullRequestAt reads back the pull request, the verdict that stands for its head, and the reviewer
+// round's decision.
 func pullRequestAt(t *testing.T, pool *pgxpool.Pool) pullRequestView {
 	t.Helper()
 	var got pullRequestView
-	if err := pool.QueryRow(context.Background(), `select pr.head_sha, pr.verdict, coalesce(reviewer.decision ->> 'state', ''), pr.state
+	if err := pool.QueryRow(context.Background(), `select coalesce(reviewer.decision ->> 'state', '')
 		from pull_requests pr left join phases reviewer on reviewer.issue = pr.issue and reviewer.role = $1
-		where pr.issue = $2`, string(claim.RoleReviewer), "LEGION-208").
-		Scan(&got.head, &got.verdict, &got.decision, &got.state); err != nil {
-		t.Fatalf("read pull request: %v", err)
+		where pr.issue = $2`, string(claim.RoleReviewer), "LEGION-208").Scan(&got.decision); err != nil {
+		t.Fatalf("read the reviewer's decision: %v", err)
 	}
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		pr, err := record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
+		if err != nil || pr == nil {
+			return fmt.Errorf("read pull request: %v", err)
+		}
+		got.head, got.verdict, got.state = pr.HeadSHA, classify.HeadVerdict(*pr), pr.State
+		return nil
+	})
 	return got
 }
 

@@ -28,11 +28,16 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
+	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
+	// that stands for the head can be of the code head it replaced, arriving after it. A
+	// settlement is for the commit it names, never the head by default.
+	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Verdict: fact.Verdict, Failing: fact.Failing}
+	var stands bool
+	if *pr, stands = classify.SettlementFor(*pr, candidate); !stands {
 		return intake.Result{}, nil
 	}
 	var applied bool
-	*pr, applied = classify.ApplySettlement(*pr, classify.SettlementCandidate{CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Verdict: fact.Verdict, Failing: fact.Failing})
+	*pr, applied = classify.ApplySettlement(*pr, candidate)
 	if !applied {
 		return intake.Result{}, nil
 	}
@@ -159,7 +164,7 @@ func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issu
 		}
 		return true, e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Decision.Body)
 	case "approved":
-		if pr == nil || pr.Verdict != "green" || !classify.ApprovalStands(*pr, row.Decision.Head) {
+		if pr == nil || classify.HeadVerdict(*pr) != "green" || !classify.ApprovalStands(*pr, row.Decision.Head) {
 			return false, nil
 		}
 		return true, e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")

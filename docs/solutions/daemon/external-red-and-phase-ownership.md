@@ -100,7 +100,9 @@ round:
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and the **implementer**
   runs `legion threads resolve --pr <number> --repo <owner>/<repo>` (LEGION-34) before its next
   push: it resolves every unresolved thread whose newest comment is the opener's own submitted
-  `Accepted:` reply, one `resolveReviewThread` per thread, prints `resolved <url>` /
+  `Accepted:` reply (since LEGION-208, also a thread a bot outside Legion's role Apps opened once
+  the Legion reviewer's `Accepted:` is its newest comment), one `resolveReviewThread` per thread,
+  prints `resolved <url> — <whose acceptance>` /
   `left open <url> — newest reply by <login> is not an acceptance` (or `… is an unsubmitted draft
   in a pending review`, for a newest comment still in a pending review), and exits 1 naming the
   thread and GitHub's message when GitHub refuses one (report it to the architect; a human

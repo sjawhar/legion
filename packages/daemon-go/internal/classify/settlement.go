@@ -27,16 +27,25 @@ const (
 	GitHubFenceConflict GitHubFenceEffect = "conflict"
 )
 
-// SettlementCandidate is the listener's proposed CI outcome and its ordering identity. Envoy
-// listener settlements are the Go daemon's only CI input: it never reads GitHub's checks, and a new
-// head resets the fence and failures (AdvancePullRequestHead). A check_run delivery the listener
-// lost is recovered only by Dispatch's webhook redelivery sweep (packages/envoy/internal/dispatch/
+// SettlementCandidate is the listener's proposed CI outcome for one commit and its ordering
+// identity. Envoy listener settlements are the Go daemon's only CI input: it never reads GitHub's
+// checks. The listener publishes a settlement for every settled commit of a pull request, its
+// current head or not, and the daemon takes one for the head when it is the head's own or a head
+// the current one replaced through pushes that each changed only .legion/ (SettlementFor), since a
+// handoff push can carry GitHub's skip-checks trailer and run no CI; a settlement of another head
+// than the recorded one starts the fence afresh. A check_run delivery the listener lost is
+// recovered only by Dispatch's webhook redelivery sweep (packages/envoy/internal/dispatch/
 // redeliver: it runs only where Dispatch has the App key and NATS, every two minutes, and resends
-// only deliveries GitHub recorded as failed within the last hour) or by the check's next run.
-// Nothing on the Go path corrects the rest: a check_run with no pull_requests yields no
-// observation, a deleted check's failure stands for the life of the head, and a rerun whose
-// completion is never observed holds the last verdict until the check runs again.
+// deliveries GitHub recorded as failed since the sweep's window starts: the last hour while it
+// runs without a gap, back to its stored cursor after one, never past GitHub's three-day horizon,
+// and the last hour on a first sweep with no cursor) or by the check's next run. Nothing on the Go
+// path corrects the rest: a check_run with no pull_requests yields no observation, a deleted
+// check's failure stands for the life of the head and of the handoff heads after it, and a rerun
+// whose completion is never observed holds the last verdict until the check runs again.
 type SettlementCandidate struct {
+	// Head is the commit the settlement is for, which need not be the pull request's head
+	// (SettlementFor).
+	Head       string              `json:"head"`
 	CheckRuns  []record.AttemptRun `json:"checkRuns"`
 	Generation int64               `json:"generation"`
 	Snapshot   string              `json:"snapshot"`

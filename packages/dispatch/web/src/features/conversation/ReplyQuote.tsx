@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-
+import { TruncatedText } from "../../components/TruncatedText";
 import { linkHoverText, secondaryButtonBorder, textMutedOnCanvas } from "../../theme/classes";
 
 // The phone stylesheet makes every link an inline-flex 44 px tap target, which no longer
@@ -31,7 +31,7 @@ export function ReplyQuote({
   className?: string;
   to?: string;
 }): ReactNode {
-  const text = <span className="min-w-0 truncate">{children}</span>;
+  const text = <TruncatedText className="min-w-0">{children}</TruncatedText>;
   return to === undefined ? (
     <span className={`${quoteClasses} ${className}`}>{text}</span>
   ) : (

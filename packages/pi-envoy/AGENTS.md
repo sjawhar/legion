@@ -91,7 +91,7 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 10) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 11) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
@@ -257,6 +257,31 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
 (`LEGION_TEST_OMP`).
 
+## The pane guard: filesystem and signals (LEGION-121)
+
+`src/legion/pane-guard.ts` holds a phase worker's and a root architect's pane (and its `task`
+subagents: the check runs in the `tool_call` hook ahead of the subagent exemption, beside
+`PANE_RULES`) to the boundary `docs/deployment.md` "The pane guard" describes: no deletion, move,
+truncation, overwrite of an existing file, or recursive mode or owner change outside
+`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, and the
+tmux and ssh socket directories. The guard cannot tell which allowed `/tmp` directory belongs to
+the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and whose bash is one `legion`
+command, gets the `/tmp` root alone. No signal reaches a process that is not a descendant of the
+pane's Oh My Pi process (`/proc` read at check time). It reads the variables both daemons set on
+every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORKSPACE`, `HOME`), so
+it adds nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser,
+bundled into `dist/legion.js`) and walked as bash would run them: word expansion with quoting,
+tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path), `cd`, brace expansion,
+command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`, `timeout`, ...),
+and the scripts a command runs, whose refusal names the script and line. `src/legion/pane-guard-code.ts`
+tokenizes Python and JavaScript for known deletion, move, overwrite, signal, and shell-out calls
+whose arguments it can evaluate; an argument it cannot evaluate is let through, where a shell
+target it cannot resolve, and a command `unbash` reports as malformed, are refused. Command tables
+are `Set`/`Map`, never object literals, since their keys come from the command (`constructor` would
+otherwise match). `src/legion/pane-guard.test.ts` holds the family matrix, the incident's script,
+the signal cases, and the eval tool; `extensions/legion.test.ts` proves the hook refuses the
+incident's script through a booted worker.
+
 ## Native Dispatch tools
 
 The twenty-one native Dispatch tools — `dispatch_issue`, `dispatch_issue_update`, `dispatch_claim`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,
@@ -414,4 +439,4 @@ state never nudges.
 - `spawnWorker` in `src/legion/daemon-client.ts` carries the caller's `requestId` (minted once per `legion` `spawn_worker` call in `src/legion/tools.ts`) and retries only a `fetch` that rejected — never a `LegionDaemonApiError`, whatever its status, and never a response-shape error — up to `SPAWN_WORKER_ATTEMPTS` (3) with `SPAWN_WORKER_RETRY_DELAYS_MS` between attempts, the same id every time so the daemon's ledger dedupes it; the last rejected fetch is a `LegionDaemonTransportError` naming the cause, attempts, and id. A response whose headers arrived but body cannot be read is not retried because `fetch` fulfilled; it is a `LegionDaemonResponseReadError` with the same request id and `legion state` guidance. The 403 recovery above composes with both paths unchanged (LEGION-102).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
-- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider.
+- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. A Legion pane cannot run their default tmux cleanup under the pane guard; do not edit the smoke to bypass that refusal. LEGION-300 owns a pane-safe smoke path.

@@ -169,16 +169,10 @@ func (state *State) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-const headRecordKind = "head"
-
-var ErrInvalidHeadSHA = errors.New("cistore: invalid head SHA")
-
-type headRecord struct {
-	Kind       string `json:"kind"`
-	SHA        string `json:"sha"`
-	UpdatedAt  string `json:"updated_at"`
-	Generation uint64 `json:"generation"`
-}
+// retiredHeadKind marks the head record an earlier listener kept per pull request under its own
+// key, to settle only a pull request's head. Settlements no longer depend on the head, so nothing
+// writes or reads one; a record left in the bucket waits out its TTL uncached.
+const retiredHeadKind = "head"
 
 // keyCleaner writes one segment of a KV key: every key this store builds joins its segments with
 // '.', and a KV key's tokens must not be empty, so a '.' in a segment is written '='. A GitHub
@@ -196,20 +190,6 @@ func Key(owner, repo, number, sha string) string {
 		keyCleaner.Replace(repo) + ".pr" +
 		keyCleaner.Replace(number) + "." +
 		keyCleaner.Replace(sha)
-}
-
-// headKey derives the key of a pull request's head record, each segment through keyCleaner.
-func headKey(owner, repo, number string) string {
-	return "head." + keyCleaner.Replace(owner) + "." +
-		keyCleaner.Replace(repo) + "." + keyCleaner.Replace(number)
-}
-
-func validHeadSHA(sha string) bool {
-	if len(sha) != 40 {
-		return false
-	}
-	_, err := hex.DecodeString(sha)
-	return err == nil
 }
 
 // Hash is a stable, order-independent fingerprint of the CI state. It includes
@@ -241,7 +221,6 @@ func (s State) Hash() string {
 type Store struct {
 	mu             sync.RWMutex
 	cache          map[string]State
-	heads          map[string]string
 	cacheRevisions map[string]uint64
 	// watcher feeds the cache and holds the handle the store writes through. The summary loop
 	// reads only the cache (no KV fallback), so a dead watcher silently stops summaries; Ping
@@ -314,7 +293,6 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 	}
 	s := &Store{
 		cache:          map[string]State{},
-		heads:          map[string]string{},
 		cacheRevisions: map[string]uint64{},
 		combiners:      map[string]*keyCombiner{},
 		rewatched:      make(chan struct{}),
@@ -351,7 +329,6 @@ func (s *Store) Rewatch(conn *nats.Conn) error {
 func (s *Store) resetCache() {
 	s.mu.Lock()
 	s.cache = map[string]State{}
-	s.heads = map[string]string{}
 	s.cacheRevisions = map[string]uint64{}
 	s.mu.Unlock()
 }
@@ -368,17 +345,8 @@ func (s *Store) applyWatched(entry nats.KeyValueEntry) {
 		var marker struct {
 			Kind string `json:"kind"`
 		}
-		if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == headRecordKind {
-			var head headRecord
-			if err := json.Unmarshal(entry.Value(), &head); err != nil {
-				s.evictCachedLocked(key, entry.Revision())
-				malformed = err
-			} else if !validHeadSHA(head.SHA) {
-				s.evictCachedLocked(key, entry.Revision())
-				malformed = errors.New("invalid head SHA")
-			} else {
-				s.cacheHeadLocked(key, head.SHA, entry.Revision())
-			}
+		if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == retiredHeadKind {
+			s.evictCachedLocked(key, entry.Revision())
 		} else {
 			var st State
 			if err := json.Unmarshal(entry.Value(), &st); err != nil {
@@ -409,16 +377,6 @@ func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
 		return
 	}
 	s.cache[key] = state
-	delete(s.heads, key)
-	s.cacheRevisions[key] = revision
-}
-
-func (s *Store) cacheHeadLocked(key, sha string, revision uint64) {
-	if revision < s.cacheRevisions[key] {
-		return
-	}
-	delete(s.cache, key)
-	s.heads[key] = sha
 	s.cacheRevisions[key] = revision
 }
 
@@ -427,7 +385,6 @@ func (s *Store) evictCachedLocked(key string, revision uint64) {
 		return
 	}
 	delete(s.cache, key)
-	delete(s.heads, key)
 	s.cacheRevisions[key] = revision
 }
 
@@ -560,81 +517,6 @@ func checkRunIDIsOlder(incoming, stored uint64) bool {
 	return incoming < stored
 }
 
-// RecordHead persists the current PR head SHA. The WatchAll cache serves Head.
-func (s *Store) RecordHead(owner, repo, number, sha, updatedAt string) error {
-	if !validHeadSHA(sha) {
-		return ErrInvalidHeadSHA
-	}
-	kv := s.watcher.KV()
-	var incomingAt time.Time
-	if updatedAt != "" {
-		var err error
-		incomingAt, err = time.Parse(time.RFC3339, updatedAt)
-		if err != nil {
-			return fmt.Errorf("cistore: invalid head updated_at: %w", err)
-		}
-	}
-	key := headKey(owner, repo, number)
-	deadline := time.Now().Add(recordBudget)
-	for attempt := 0; ; attempt++ {
-		entry, getErr := kv.Get(key)
-		var current headRecord
-		var rev uint64
-		switch {
-		case getErr == nil:
-			if err := json.Unmarshal(entry.Value(), &current); err != nil {
-				return err
-			}
-			rev = entry.Revision()
-		case errors.Is(getErr, nats.ErrKeyNotFound):
-			current = headRecord{Kind: headRecordKind}
-		default:
-			return getErr
-		}
-		if current.UpdatedAt != "" && updatedAt != "" {
-			storedAt, err := time.Parse(time.RFC3339, current.UpdatedAt)
-			if err == nil {
-				if incomingAt.Before(storedAt) || (incomingAt.Equal(storedAt) && current.SHA == sha) {
-					return nil
-				}
-			}
-		}
-		generation := current.Generation
-		if current.SHA != "" && current.SHA != sha {
-			generation++
-		}
-		buf, err := json.Marshal(headRecord{Kind: headRecordKind, SHA: sha, UpdatedAt: updatedAt, Generation: generation})
-		if err != nil {
-			return err
-		}
-		if rev == 0 {
-			if _, err := kv.Create(key, buf); err == nil {
-				return nil
-			} else if !errors.Is(err, nats.ErrKeyExists) {
-				return err
-			}
-		} else {
-			if _, err := kv.Update(key, buf, rev); err == nil {
-				return nil
-			} else if !isCASConflict(err) {
-				return err
-			}
-		}
-		if time.Now().After(deadline) {
-			return errors.New("cistore: record head exceeded CAS budget")
-		}
-		time.Sleep(casBackoff(attempt))
-	}
-}
-
-// Head returns the current PR head SHA when one has been observed.
-func (s *Store) Head(owner, repo, number string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sha, ok := s.heads[headKey(owner, repo, number)]
-	return sha, ok
-}
-
 // casBackoff returns a full-jitter, capped-exponential backoff for CAS retries.
 func casBackoff(attempt int) time.Duration {
 	base := time.Millisecond << attempt
@@ -709,8 +591,8 @@ func (s *Store) List() []State {
 
 // ClaimSettlement atomically acquires the right to publish a ready state
 // generation without changing that generation, after re-reading the durable
-// state and head record. It applies the debounce window to the durable
-// LastEventAt value, not the cache snapshot.
+// state. It applies the debounce window to the durable LastEventAt value, not
+// the cache snapshot.
 func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uint64, now int64, debounce time.Duration) (State, bool, error) {
 	state, claimed, err := s.casState(key, func(state *State) (bool, error) {
 		if state.SettledEmitted ||
@@ -720,10 +602,6 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 			!settlementReady(*state) ||
 			state.LastEventAt+debounce.Milliseconds() > now {
 			return false, nil
-		}
-		headMatches, err := s.durableHeadMatches(*state)
-		if err != nil || !headMatches {
-			return headMatches, err
 		}
 		state.Claim = &SettlementClaim{
 			Hash:       expectedHash,
@@ -748,10 +626,6 @@ func (s *Store) ClaimStillHeld(key string, generation uint64, hash string) (bool
 	}
 	var state State
 	if err := json.Unmarshal(entry.Value(), &state); err != nil {
-		return false, err
-	}
-	headMatches, err := s.durableHeadMatches(state)
-	if err != nil || !headMatches {
 		return false, err
 	}
 	return !state.SettledEmitted &&
@@ -822,24 +696,9 @@ func (s *Store) markOverflowed(key string) error {
 	return err
 }
 
-func (s *Store) durableHeadMatches(state State) (bool, error) {
-	kv := s.watcher.KV()
-	entry, err := kv.Get(headKey(state.Owner, state.Repo, state.Number))
-	if errors.Is(err, nats.ErrKeyNotFound) {
-		return true, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	var head headRecord
-	if err := json.Unmarshal(entry.Value(), &head); err != nil || !validHeadSHA(head.SHA) {
-		return false, nil
-	}
-	return head.SHA == state.SHA, nil
-}
-
 // settlementReady reports whether st can settle: every check and suite it holds is terminal, one
-// check has a run id, and the record holds the whole head, which an overflowed one does not.
+// check has a run id, and the record holds every check of its commit, which an overflowed one does
+// not.
 func settlementReady(st State) bool {
 	if st.Overflowed || !terminal(st) {
 		return false

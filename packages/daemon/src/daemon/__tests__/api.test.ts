@@ -17,7 +17,7 @@ import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError, SAME_AGENT_REFUSAL } f
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { reduceGithubEvent, routeActive } from "../reducers";
-import { checkPr, fakeDispatchClient } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient, waitFor } from "./ci-fixtures";
 
 const root = "WIDGETS-1" as IssueKey;
 const child = "WIDGETS-2" as IssueKey;
@@ -2095,6 +2095,46 @@ describe("Legion HTTP API", () => {
     expect(mismatched.response.status).toBe(403);
   });
 
+  it("logs a Legion App login it cannot read at most once a minute, and names no logins then", async () => {
+    // The failure turns legion threads resolve's bot-thread rule off for that answer, so it is
+    // logged; every `legion gh` call asks for a token, so not once per call.
+    await start({
+      getToken: async (role, owner) => {
+        if (role === "implement") throw new Error("GitHub answered 502");
+        return {
+          token: `minted-${role}-${owner}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-review[bot]",
+            email: "42+legion-review[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const grant = await mintArchitectGrant(root);
+      for (let call = 0; call < 3; call++) {
+        const token = await json("/legion/v1/gh-token", { grantId: grant.grantId });
+        expect(token.response.status).toBe(200);
+        expect(token.body).toEqual({ token: "minted-review-acme", appLogin: "legion-review[bot]" });
+      }
+      const logged = warn.mock.calls.filter((call) =>
+        String(call[0]).includes("could not read a Legion App's login")
+      );
+      expect(logged.length).toBe(1);
+      now += 60_000;
+      await json("/legion/v1/gh-token", { grantId: (await mintArchitectGrant(root)).grantId });
+      expect(
+        warn.mock.calls.filter((call) =>
+          String(call[0]).includes("could not read a Legion App's login")
+        ).length
+      ).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("reissues a daemon-registered worker session capability and keeps grants short-lived", async () => {
     await start();
     const bootToken = await api?.mintBootToken(root, 3);
@@ -2201,11 +2241,14 @@ describe("Legion HTTP API", () => {
     const token = await json("/legion/v1/gh-token", {
       grantId: grant.body.grantId,
     });
+    // The answer also names both of Legion's role Apps, which `legion threads resolve` keeps out of
+    // its bot-thread rule; reading them leases each App once more.
     expect(token.body).toEqual({
       token: "minted-review-acme",
       appLogin: "legion-review[bot]",
+      legionAppLogins: { implement: "legion-implement[bot]", review: "legion-review[bot]" },
     });
-    expect(tokenRoles).toEqual(["review", "review"]);
+    expect(tokenRoles).toEqual(["review", "review", "implement", "review"]);
 
     const credential = await curl("/legion/v1/git-credential", {
       grantId: grant.body.grantId,
@@ -2352,7 +2395,7 @@ describe("Legion HTTP API", () => {
     // architect acts as the review App — `appRoleForLegionRole`, LEGION-42).
     const survivor = await json("/legion/v1/gh-token", { grantId: architectGrant.body.grantId });
     expect(survivor.response.status).toBe(200);
-    expect(tokenRoles).toEqual(["review"]);
+    expect(tokenRoles).toEqual(["review", "implement", "review"]);
   });
   it("rejects gh-token/git-credential with 403 when the minting session's capability is revoked while the GitHub lease is in flight", async () => {
     const reachedLease = Promise.withResolvers<void>();
@@ -3853,19 +3896,6 @@ describe("Legion HTTP API", () => {
     expect(spawnedWorkers).toEqual([]);
   });
 
-  /** Polls `condition` across real macrotask ticks (`setImmediate`, never a wall-clock wait)
-   * until it holds — the awaited chain is an HTTP request reaching a handler on the same event
-   * loop — bounded so a broken expectation fails the test instead of hanging it. */
-  async function waitUntil(condition: () => boolean, maxTicks = 20_000): Promise<void> {
-    for (let tick = 0; tick < maxTicks; tick += 1) {
-      if (condition()) return;
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-    throw new Error("condition did not hold within the wait bound");
-  }
-
   /** Fires two spawn requests with one body and holds the caller until both have reached the
    * daemon: the first is inside `spawnWorkerImpl` (`started()` true) and the second has been
    * answered from the ledger (its `repeated` log line). Without the second wait a request still
@@ -3875,7 +3905,7 @@ describe("Legion HTTP API", () => {
     try {
       const a = json<T>("/legion/v1/worker/spawn", body);
       const b = json<T>("/legion/v1/worker/spawn", body);
-      await waitUntil(
+      await waitFor(
         () =>
           started() &&
           infoSpy.mock.calls.some(
