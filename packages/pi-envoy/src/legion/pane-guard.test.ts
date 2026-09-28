@@ -496,20 +496,33 @@ describe("scripts a command runs", () => {
   test("keeps the arguments a sourced file changes", () => {
     const safe = '"$LEGION_WORKSPACE/a"';
     const sets = script("source-sets-args.sh", 'set -- "$HOME/y"\n');
+    const setsSafe = script("source-sets-safe-args.sh", 'set -- "$LEGION_WORKSPACE/in"\n');
     const shifts = script("source-shifts-args.sh", "shift\n");
     const reads = script("source-reads-args.sh", 'echo "$1"\n');
-    expect(bash(`set -- ${safe}; . ${sets}; rm -rf "$1"`)).toContain(home);
+    const noop = script("source-noop.sh", ":\n");
+    const removesAll = script("source-removes-args.sh", 'rm -rf "$@"\n');
+    // With no operands the file runs with this shell's arguments, and what it does to them stays.
+    expect(bash(`set -- "$HOME/y" ${safe}; . ${noop}; rm -rf "$1"`)).toContain(home);
     expect(bash(`set -- ${safe} "$HOME/y"; . ${shifts}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe}; . ${sets}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- "$HOME/y"; . ${setsSafe}; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`set -- "$HOME/y"; . ${removesAll}`)).toContain(home);
+    expect(bash(`set -- ${safe}; . ${removesAll}`)).toBeUndefined();
+    // With operands bash restores this shell's arguments afterwards, undoing a `shift`, and keeps
+    // a list the file set with `set --`.
+    expect(bash(`set -- "$HOME/y"; . ${noop} ${safe}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe}; . ${noop} "$HOME/y"; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`set -- ${safe}; . ${removesAll} "$HOME/y"`)).toContain(home);
     expect(bash(`set -- ${safe}; if true; then . ${sets}; fi; rm -rf "$1"`)).toContain(
       "(a positional parameter)"
     );
-    // With operands bash keeps a list the file set and restores one it shifted; the guard cannot
-    // tell which, so a changed list is unknown.
+    // The guard does not tell a `set --` from a `shift`, so a list the file changed is unknown.
     expect(bash(`set -- ${safe}; . ${sets} q; rm -rf "$1"`)).toContain("(a positional parameter)");
+    expect(bash(`set -- "$HOME/y"; . ${shifts} ${safe} ${safe}; rm -rf "$1"`)).toContain(
+      "(a positional parameter)"
+    );
     expect(bash(`set -- ${safe}; . ${reads} ${safe}; rm -rf "$1"`)).toBeUndefined();
-    // With none, the file reads this shell's own arguments.
     expect(bash(`set -- ${safe}; . ${reads}; rm -rf "$1"`)).toBeUndefined();
-    expect(bash(`set -- "$HOME/y"; . ${reads}; rm -rf "$LEGION_WORKSPACE/b"`)).toBeUndefined();
     // A function's arguments are its own, and the caller's come back when it returns.
     expect(bash(`set -- ${safe} "$HOME/y"; f() { shift; }; f; rm -rf "$1"`)).toBeUndefined();
   });
