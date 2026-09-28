@@ -37,9 +37,21 @@ read when a value it cannot know is written into it by `printf %s`, `printf %q` 
 parses the value as code, so a `;`, a quote or a newline in it escapes any position), when `echo`
 takes an option first, or when an unquoted here-document holds text bash expands; `printf %d`
 writes only digits and a sign, so it is read. A shell or interpreter reading such a here-document
-as its program is refused too. A target with no proven path prefix is refused, as is a command the
-parser reports as malformed. An unknown trailing component under a prefix already proven inside a
-permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For
+as its program is refused too. Every target is resolved the way `open(2)` resolves it, each
+component's symlink followed before the next is read, so a `..` after a symlink leaves the
+directory the link points into (`ln -s "$HOME/.ssh" e; rm -f e/../.bashrc` deletes the operator's
+profile and is refused); the same holds for a relative target after a `cd` into a symlink, where
+bash keeps a logical `PWD` while the kernel uses the physical path. A `..` after a component the
+guard cannot resolve — one that does not exist, a dangling link, a loop, a directory it may not
+search — is unknown and so refused, because whatever an earlier stage of the same command makes
+of that component decides where the `..` leads. What the guard resolves is the whole path every
+time: a `..` is the shape that makes the divergence visible, not the property, and a directory it
+may not search diverges with no `..` in the path at all. It does not cover a link the command
+retargets while it runs (`ln -sfn "$HOME" d && rm -f d/x`), where the value it read was right when
+it read it. A target with no proven path prefix is refused, as
+is a command the parser reports as malformed. An unknown trailing component under a prefix already
+proven inside a permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused
+outright. For
 `tmux kill-*`, the guard resolves the socket as tmux does
 (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then the default socket) and refuses
 a resolved path outside the pane roots. `kill` only reaches a pid that `/proc` shows descending

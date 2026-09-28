@@ -4,6 +4,12 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
+import {
+  DOTDOT_COMPONENT,
+  measureAllPathRows,
+  PATH_ROWS,
+  type PathRowResult,
+} from "./pane-guard-path-rows";
 
 // The guard evaluates `${v#…}`, `${v%…}` and `${v/…/…}` itself (pane-guard-bash.ts), decides
 // `${v-…}` and `${v+…}` by whether a parameter is set, and binds a function's arguments. Held to
@@ -314,3 +320,89 @@ test("every write to a variable is bash's own, and never leaves a stale value to
   );
   expect(outside.length).toBeGreaterThan(commands.length / 10);
 }, 60_000);
+
+// Where the guard's path and the kernel's part company is a component the guard cannot RESOLVE,
+// not a `..`: `path.resolve` — and `realpathSync` on this runtime — strip a `..` before the
+// symlink in front of it is read, which is the shape that makes the divergence visible, but a
+// directory the guard may not search diverges with no `..` anywhere. These rows are judged by
+// what real bash did to a canary HOME, never by their names (LEGION-355).
+//
+// Two residuals, both allowed here and both with their own controls in the batch:
+//
+// - `cp`, `dd`, `install` and `ln` are not path-matched at all, so their `..` rows are allowed —
+//   and so is their own no-`..` control, which is what says the `..` is not what lets them
+//   through. That is #1551's create-the-target residual (LEGION-357).
+// - The command changing, during its own run, the namespace the guard resolved against: it
+//   retargets a link the guard already followed, or it creates the component that decides where
+//   the path lands (`ln -s .. sub/made; echo <payload> >> sub/made/unread.sh`, which carries no
+//   `..` in the written path at all — the `..` is the link's target). Resolving harder cannot
+//   reach either: the first reading was right when it was taken, and in the second there was
+//   nothing on disk to read. The `prelink.*` rows are the discriminator — the same write through
+//   a link ALREADY on disk is refused here and allowed at base.
+const PATH_ROW_RESIDUAL = [
+  "cp.dotdot.symlink",
+  "cp.symlink.nodotdot",
+  "dd.dotdot.symlink",
+  "install.dotdot.symlink",
+  "ln.sf.dotdot.symlink",
+  "retarget.realdir.dotdot",
+  "retarget.script",
+  "madelink.append",
+  "madelink.group",
+  "madelink.tee",
+  "retarget.symlink.dotdot",
+  "retarget.symlink.nodotdot",
+  "retarget.truncate",
+];
+
+// The copy family is the one place a control does not fire, and that is the finding rather than a
+// gap: its no-`..` must-refuse leaks identically to its `..` rows.
+const PATH_ROW_CONTROL_EXEMPT = ["cp.symlink.nodotdot"];
+
+test("the path battery's rows measure the property they name", () => {
+  // `path.join` normalises a `..` away, so a row whose property is the `..` and whose fixture was
+  // built with it would pass while measuring nothing. This is the assertion that catches that.
+  expect(
+    PATH_ROWS.filter((row) => row.dotdot && !DOTDOT_COMPONENT.test(row.command)).map((r) => r.name)
+  ).toEqual([]);
+
+  // Every operation class carries a control in both directions, so no class rests on probes alone.
+  const families = [...new Set(PATH_ROWS.map((row) => row.family))].sort();
+  expect(
+    families.filter(
+      (family) =>
+        !PATH_ROWS.some((row) => row.family === family && row.role === "must-refuse") ||
+        !PATH_ROWS.some((row) => row.family === family && row.role === "must-allow")
+    )
+  ).toEqual([]);
+  expect(families.length).toBeGreaterThan(10);
+});
+
+test("a target is judged as the kernel resolves it, not as the text reads", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-paths-"));
+  try {
+    const results = measureAllPathRows(root);
+    const live = results.filter((result) => result.live);
+    const named = (subset: readonly PathRowResult[]): string[] =>
+      subset.map((result) => result.row.name).sort();
+
+    // Positive controls: a harness whose bash did nothing, or whose controls stopped
+    // discriminating, must fail rather than report a clean zero.
+    expect(live.length).toBeGreaterThan(20);
+    expect(
+      named(results.filter((r) => r.row.role === "must-refuse" && r.refusal === undefined))
+    ).toEqual([...PATH_ROW_CONTROL_EXEMPT].sort());
+
+    // The claim: every command real bash used to damage the canary is refused.
+    expect(named(live.filter((result) => result.refusal === undefined))).toEqual(
+      [...PATH_ROW_RESIDUAL].sort()
+    );
+
+    // The other direction, at equal standing: nothing ordinary is refused for it.
+    expect(
+      named(results.filter((r) => r.row.role === "must-allow" && r.refusal !== undefined))
+    ).toEqual([]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 180_000);

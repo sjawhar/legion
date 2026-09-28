@@ -310,6 +310,20 @@ stays one unknown word. `echo` with an option first, and a here-document whose u
 bash expands, are scripts it cannot read too; a shell or interpreter reading such a
 here-document as its program is refused.
 
+Every target, script and model key is then resolved as `open(2)` resolves it — each component's
+symlink followed before the next is read — so a `..` after a symlink names the directory the link
+points into, not the one the text reads as, and a relative target after a `cd` into a symlink
+follows the physical path while bash's `PWD` stays logical (`cd -P` and `env -C` chdir outright,
+so the guard resolves those physically too). Neither `path.resolve` nor `realpathSync` does this:
+both strip `..` lexically first. A `..` after a component the guard cannot resolve — absent, a
+dangling link, a loop, a directory it may not search — is **unknown**, never the path the text
+reads as, because an earlier stage of the same command is what decides what that component becomes
+(LEGION-355). The property is resolvability rather than the `..`: a `..` is the shape that makes
+the divergence visible, and a directory the guard may not search diverges with no `..` in the path
+at all, so there is one walk for every target and no shortcut for a path that looks simple. What
+the walk does not cover is a link the command retargets during its own run, where the guard
+resolves a value it read correctly and a later stage changes it.
+
 A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
 value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,
 `read`, `mapfile`, `getopts`, `declare` and its kin, `unset`, `wait -p`), arithmetic, `${v:=x}`,
@@ -333,7 +347,17 @@ set-ness operator over set, empty, unset and environment names, a function's arg
 that give one, none, several or an unknown number, and every writer above over variables, arrays,
 elements and attributed names, to one real bash, through the guard. Each differential also asserts
 that more than a tenth of its cases reach outside the roots, so a harness that stopped
-discriminating fails rather than passing on an empty comparison.
+discriminating fails rather than passing on an empty comparison. It also holds the path battery:
+`src/legion/pane-guard-path-rows.ts` names each command class the guard path-matches over a
+fixture whose symlink's parent is a canary HOME, runs every row through `guard.bash` and then
+through real bash, and the test requires that every row bash used to damage the canary was
+refused. Each of the fifteen classes carries a control in both directions — the test asserts the
+coverage structurally, so a new class cannot rest on probes alone — and every one fires except the
+copy family's must-refuse, whose leaking with no `..` in it is what says that family's residual is
+not this defect. The test also asserts that every row whose property is a `..` carries one as a
+literal path component, because `path.join` normalises a `..` away and such a row would otherwise
+pass while measuring nothing. `scripts/measure-pane-guard-paths.ts` prints the same measurement
+for any guard build.
 `src/legion/pane-guard-code.ts` tokenizes Python and JavaScript for known deletion, move,
 overwrite, signal, and shell-out calls whose arguments it can evaluate; an argument it cannot
 evaluate is let through, where a shell target it cannot resolve, and a command `unbash` reports as

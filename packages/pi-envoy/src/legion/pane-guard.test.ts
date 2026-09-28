@@ -289,13 +289,21 @@ describe("resolution", () => {
   });
 
   test("resolves the paths realpath, dirname, basename and readlink -f print", () => {
-    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/a/../b"); rm -rf "$d"')).toBeUndefined();
-    expect(bash('d=$(realpath -m -- "$HOME/a/../.ssh"); rm -rf "$d"')).toContain(
+    expect(
+      bash('d=$(realpath -m -- "$LEGION_WORKSPACE/../LEGION-1/b"); rm -rf "$d"')
+    ).toBeUndefined();
+    expect(bash('d=$(realpath -m -- "$HOME/.ssh/../.ssh"); rm -rf "$d"')).toContain(
       path.join(home, ".ssh")
     );
     expect(bash('d=$(dirname "$HOME/.ssh/id"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
     expect(bash('d="$LEGION_WORKSPACE/$(basename "$HOME/x")"; rm -rf "$d"')).toBeUndefined();
     expect(bash('d=$(readlink -f "$HOME/.ssh"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+    // A `..` after a component that is not there is never resolved to the path the text reads
+    // as: whatever creates that component decides where the `..` leads, so the guard models no
+    // path at all and the value stays a command's output (LEGION-355).
+    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/gone/../b"); rm -rf "$d"')).toContain(
+      "(a command's output)"
+    );
   });
 
   test("never resolves git rev-parse --show-toplevel, whose answer config it cannot read decides", () => {

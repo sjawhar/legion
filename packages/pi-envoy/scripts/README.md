@@ -101,3 +101,18 @@ every exit path, so a failed run leaves nothing behind either. Both smokes run
 their tmux on a private socket in their temp dir, so the kill can end only the
 session the smoke started; on the shared default server it could end anyone's,
 and the Legion pane guard refuses it there.
+
+## measure-pane-guard-paths.ts
+
+The pane guard's path battery, run against whatever guard the checkout holds. Each row of
+`src/legion/pane-guard-path-rows.ts` is measured twice — what `guard.bash` returns, and what real
+bash does to a canary HOME in the same fixture — so a row is a leak only when the guard allowed it
+and bash damaged the canary. Swap `src/legion/pane-guard.ts` for another revision's and diff the
+output to get that revision's column. `src/legion/pane-guard-bash.test.ts` asserts the same
+measurement through the same functions, so the numbers in a pull request body and the test cannot
+drift apart.
+
+```bash
+cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts
+cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts --summary
+```

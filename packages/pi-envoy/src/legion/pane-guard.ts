@@ -86,6 +86,7 @@
 import {
   closeSync,
   existsSync,
+  lstatSync,
   openSync,
   readFileSync,
   readSync,
@@ -205,6 +206,11 @@ interface Ctx {
   readonly ompPid: number;
   readonly parentOf: (pid: number) => number | undefined;
   readonly steps: { count: number };
+  /** Set once this command writes to a file the guard cannot name, which is every file at once as
+   * far as the model is concerned. A box rather than a field of `State`, because `files` and
+   * `pidFiles` are shared by every branch and `merge` deliberately does not reconcile them: a
+   * scalar set inside a branch would not survive the merge, and this must. */
+  readonly unnameableWrite: { why: string | undefined };
 }
 
 interface State {
@@ -441,12 +447,112 @@ function realExisting(abs: string): string {
   }
 }
 
-/** `abs` with symlinks resolved; the final component is followed only when `followFinal` (rm and
- * mv act on a symlink itself, chmod -R and a redirection on what it points to). */
+/** `abs` with symlinks resolved, for the guard's own configured roots (`LEGION_WORKSPACE`, `HOME`,
+ * `TMUX_TMPDIR`, the scratch root): absolute paths the daemon sets, which a pane cannot change.
+ * A command's target never comes here — it goes through `physical`, which resolves each component
+ * as the kernel does and says so when it cannot, where this reports a best effort. */
 function realish(abs: string, followFinal: boolean): string {
   const resolved = path.resolve(abs);
   if (resolved === "/" || followFinal) return realExisting(resolved);
   return path.join(realExisting(path.dirname(resolved)), path.basename(resolved));
+}
+
+/** A command's target as the kernel would open it, or why the guard cannot say. */
+type Resolved = { readonly real: string } | { readonly unknown: string };
+
+/** `text` against `cwd`, resolved the way `open(2)` resolves it: every component is read in turn
+ * and its symlink followed before the next one is looked at. Neither `path.resolve` nor
+ * `realpathSync` does that — both strip `..` lexically first, on this runtime `realpathSync`
+ * included — so a `..` after a symlink named a path the shell never opens (LEGION-355).
+ *
+ * `followFinal` follows the last component as well: a redirection and `chmod -R` act on what a
+ * symlink points to, `rm` and `mv` on the link itself.
+ *
+ * **The property is whether the guard can resolve the path, not whether a `..` is in it.** A
+ * component it cannot read — one that does not exist, a dangling link, a loop, a directory it may
+ * not search — is where its answer and the kernel's part company, and a `..` is only the shape
+ * that makes the divergence visible. So the walk is the one answer for every path: an earlier
+ * shortcut that resolved a `..`-free path in one call kept the weaker answer for the same input
+ * (`chmod 755 perm && rm -f perm/inner/id_rsa`, no `..` anywhere, deleted the operator's key
+ * while the guard allowed it), because the call it used swallows EACCES the way it swallows
+ * ENOENT. Only ENOENT is safe to walk past, and only until a `..` follows it: a name that is not
+ * there cannot be a symlink, but a name the guard may not read can be anything. Anything else is
+ * **unknown**, never the path the text reads as, because an earlier stage of this very command is
+ * what decides what that component becomes (`ln -s "$HOME" e; rm -f e/../.bashrc`) and the guard
+ * evaluates the whole command before bash runs any of it. That is LEGION-349's rule. */
+function physical(cwd: string, text: string, followFinal: boolean): Resolved {
+  const joined = text.startsWith("/") ? text : `${cwd}/${text}`;
+  const parts = joined.split("/");
+  const pending: string[] = [];
+  let real = "/";
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i] as string;
+    if (part === "" || part === ".") continue;
+    if (pending.length > 0) {
+      if (part === "..") {
+        return {
+          unknown:
+            `\`${path.join(real, ...pending)}\`, which does not exist yet, so the guard ` +
+            "cannot know where the `..` after it leads",
+        };
+      }
+      pending.push(part);
+      continue;
+    }
+    if (part === "..") {
+      real = path.dirname(real);
+      continue;
+    }
+    const candidate = real === "/" ? `/${part}` : `${real}/${part}`;
+    if (!followFinal && !parts.slice(i + 1).some((later) => later !== "" && later !== ".")) {
+      return { real: candidate };
+    }
+    let link: boolean;
+    try {
+      link = lstatSync(candidate).isSymbolicLink();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        return { unknown: `\`${candidate}\`, which the guard cannot read (${messageFor(error)})` };
+      }
+      pending.push(part);
+      continue;
+    }
+    if (!link) {
+      real = candidate;
+      continue;
+    }
+    try {
+      // `candidate` holds no `..`, so this resolution is the kernel's.
+      real = realpathSync(candidate);
+    } catch (error) {
+      return {
+        unknown: `\`${candidate}\`, a link the guard cannot follow (${messageFor(error)})`,
+      };
+    }
+  }
+  return { real: pending.length === 0 ? real : path.join(real, ...pending) };
+}
+
+/** The key a file the command writes, reads back, or runs is modelled under: the path the kernel
+ * opens, so a write and the read after it meet on the same entry. Undefined is "the guard cannot
+ * say which file that is" — the caller records nothing and keeps the file unknown, rather than
+ * modelling a file the command never touched. */
+/** A write landed on a file the guard cannot name. It cannot say which file, so it says nothing
+ * about any of them: every modelled file becomes unknown, every pid read from a file is forgotten,
+ * and no script this command runs can be read afterwards — the one on disk may be the one that was
+ * just written. Resolving to "the write went somewhere harmless" is the LEGION-349 mistake, and
+ * leaving the models standing is that mistake by omission: `ln -s sub late; echo <payload> >>
+ * late/../run.sh; bash run.sh` appended to the very script it then ran. */
+function forgetFileModels(st: State, ctx: Ctx, why: string): void {
+  for (const file of st.files.keys()) st.files.set(file, null);
+  st.pidFiles.clear();
+  ctx.unnameableWrite.why ??= why;
+}
+
+function modelKey(st: State, text: string): string | undefined {
+  if (!text.startsWith("/") && st.cwd === undefined) return undefined;
+  const resolved = physical(st.cwd ?? "/", text, true);
+  return "unknown" in resolved ? undefined : resolved.real;
 }
 
 /** Whether a first component under the scratch root is one other processes own, or one holding
@@ -510,10 +616,12 @@ function judgePath(
         resolution: `relative to a working directory unknown after ${st.cwdWhy}`,
       };
     }
-    const abs = path.resolve(st.cwd ?? "/", text);
-    const real = realish(abs, options.follow || text.endsWith("/"));
+    const resolved = physical(st.cwd ?? "/", text, options.follow || text.endsWith("/"));
+    if ("unknown" in resolved) return { ok: false, resolution: resolved.unknown };
+    const real = resolved.real;
     if (inWorkspace(real, roots) || inScratch(real, roots)) return { ok: true };
     if (options.overwrite && !existsSync(real)) return { ok: true };
+    const abs = path.resolve(st.cwd ?? "/", text);
     return { ok: false, resolution: real === abs ? real : `${abs}, which resolves to ${real}` };
   }
   const piece = exp[open] as Piece;
@@ -530,15 +638,13 @@ function judgePath(
     return { ok: false, resolution: `relative to a working directory unknown after ${st.cwdWhy}` };
   }
   const component = prefix.slice(slash + 1);
-  let stem = path.resolve(
-    st.cwd ?? "/",
-    slash === -1 ? "." : slash === 0 ? "/" : prefix.slice(0, slash)
-  );
-  // A glob component that starts with a dot can match `..`.
-  if (piece.kind === "glob" && (component === "" ? piece.text : component).startsWith(".")) {
-    stem = path.dirname(stem);
-  }
-  const real = realish(stem, true);
+  const stemText = slash === -1 ? "." : slash === 0 ? "/" : prefix.slice(0, slash);
+  const resolved = physical(st.cwd ?? "/", stemText, true);
+  if ("unknown" in resolved) return { ok: false, resolution: resolved.unknown };
+  // A glob component that starts with a dot can match `..`, which leaves the resolved directory.
+  const dotGlob =
+    piece.kind === "glob" && (component === "" ? piece.text : component).startsWith(".");
+  const real = dotGlob ? path.dirname(resolved.real) : resolved.real;
   const allowed =
     inWorkspace(real, roots) ||
     inScratch(real, roots) ||
@@ -952,14 +1058,17 @@ function substitution(
   st: State,
   ctx: Ctx
 ): Piece[][] {
-  const pidRead = /^\$\(<(.+)\)$/.exec(text);
-  const variableRead = /^\$\(<"?\$([A-Za-z_][A-Za-z0-9_]*)"?\)$/.exec(text);
+  // `$(< f)` reads `f`: the space between the operator and the word is the redirection's, not
+  // part of the name.
+  const pidRead = /^\$\(<\s*(.+?)\s*\)$/.exec(text);
+  const variableRead = /^\$\(<\s*"?\$([A-Za-z_][A-Za-z0-9_]*)"?\s*\)$/.exec(text);
   const directFile = pidRead?.[1]?.includes("$") === true ? undefined : pidRead?.[1];
   const file =
     directFile ??
     (variableRead === null ? undefined : literalText(lookup(variableRead[1] as string, st, ctx)));
-  if (file !== undefined && st.cwd !== undefined) {
-    const pid = st.pidFiles.get(path.resolve(st.cwd, file));
+  const pidFile = file === undefined ? undefined : modelKey(st, file);
+  if (pidFile !== undefined) {
+    const pid = st.pidFiles.get(pidFile);
     if (pid !== undefined) return [[...pid]];
   }
   const only = script?.commands.length === 1 ? script.commands[0]?.command : undefined;
@@ -1033,12 +1142,17 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
   // An empty operand names no path: dirname prints `.`, basename nothing, and realpath and
   // readlink fail and print nothing.
   if (target === "") return base === "dirname" ? "." : "";
-  const abs = path.resolve(st.cwd, target);
-  if (base === "dirname") return path.dirname(abs);
-  if (base === "basename") return path.basename(abs);
+  // `dirname` is textual: it strips the last component of the operand and prints what is left,
+  // so a relative operand prints a relative path and `dirname e/../x` prints `e/..`, which the
+  // site that uses it resolves against the working directory as bash would.
+  if (base === "dirname") return path.dirname(target);
+  // `basename` is textual too: it prints the operand's last component, so `basename e/..` prints
+  // `..`, where resolving the operand first printed the parent directory's name.
+  if (base === "basename") return path.basename(target);
   if (base === "readlink" && !list.some((arg) => literalText(arg.exp)?.includes("f")))
     return undefined;
-  return realExisting(abs);
+  const resolved = physical(st.cwd, target, true);
+  return "unknown" in resolved ? undefined : resolved.real;
 }
 
 function mktempPath(command: Command, st: State, ctx: Ctx): Piece[] {
@@ -1056,7 +1170,8 @@ function mktempPath(command: Command, st: State, ctx: Ctx): Piece[] {
     } else if (value.startsWith("--tmpdir=")) directory = [literal(value.slice(9))];
     else if (value.startsWith("-p") && value.length > 2) directory = [literal(value.slice(2))];
     else if (!value.startsWith("-") && value.includes("/")) {
-      directory = [literal(path.resolve(st.cwd ?? "/", path.dirname(value)))];
+      // As written, not lexically resolved: the site that judges the path follows its symlinks.
+      directory = [literal(path.dirname(value))];
     }
   }
   const base = directory ?? [literal(ctx.env.TMPDIR ?? "/tmp")];
@@ -1955,8 +2070,13 @@ function checkRedirects(
         }
       }
       const target = literalText(exp);
-      if (target === undefined || (st.cwd === undefined && !target.startsWith("/"))) continue;
-      const file = path.resolve(st.cwd ?? "/", target);
+      const file = target === undefined ? undefined : modelKey(st, target);
+      if (file === undefined) {
+        if (target !== undefined) {
+          forgetFileModels(st, ctx, `the redirection \`${operator} ${redirect.target.text}\``);
+        }
+        continue;
+      }
       let content: string | null = null;
       if (command?.name === "cat" && command.args.length === 0) {
         if (heredoc !== undefined) content = heredocText(heredoc);
@@ -2014,8 +2134,8 @@ function groupOutputFile(statement: Statement, st: State, ctx: Ctx): string | un
   }
   const targets = expandWord(redirect.target, st, ctx);
   const target = targets.length === 1 ? literalText(targets[0]) : undefined;
-  if (target === undefined || (st.cwd === undefined && !target.startsWith("/"))) return undefined;
-  return path.resolve(st.cwd ?? "/", target);
+  if (target === undefined) return undefined;
+  return modelKey(st, target);
 }
 
 /** Walks a brace group whose output goes to a file, and returns what it writes there: the
@@ -2365,12 +2485,12 @@ function unwrap(
           if (name !== undefined) unset.push(name);
           i += 1;
         } else if (text === "-C" || text === "--chdir") {
+          // `env -C` calls chdir(2): no logical path is kept, so the symlinks are followed.
           const dir = literalText(rest[i + 1]?.exp);
-          cwd =
-            dir === undefined || state.cwd === undefined ? undefined : path.resolve(state.cwd, dir);
+          cwd = dir === undefined ? undefined : movedDirectory(state.cwd, dir);
           i += 1;
         } else if (text?.startsWith("--chdir=")) {
-          cwd = state.cwd === undefined ? undefined : path.resolve(state.cwd, text.slice(8));
+          cwd = movedDirectory(state.cwd, text.slice(8));
         } else if (text === "-S" || text === "--split-string") {
           const split = literalText(rest[i + 1]?.exp);
           const tail = rest.slice(i + 2);
@@ -2577,8 +2697,13 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     case "cd":
     case "pushd": {
-      const target = operands(rest, "").operands[0];
-      changeDirectory(target, outer, ctx);
+      const found = operands(rest, "");
+      changeDirectory(
+        found.operands[0],
+        found.options.some((option) => /^-[a-zA-Z]*P/.test(option)),
+        outer,
+        ctx
+      );
       return;
     }
     case "popd":
@@ -2922,16 +3047,18 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           }
         }
         const target = literalText(arg.exp);
-        if (target !== undefined && st.cwd !== undefined) {
-          const file = path.resolve(st.cwd, target);
-          st.pidFiles.delete(file);
-          // `tee -a` leaves the file unknown whatever the model, which is stricter than the `>>`
-          // rule in `checkRedirects` and stays so on purpose: routing it through that rule would
-          // start reading a file `tee` appended to, and the guard does not render what `tee`
-          // writes. So `tee -a` onto a file this command wrote, then run, is refused.
-          const text = heredoc === undefined ? null : heredocText(heredoc);
-          st.files.set(file, append || text === null ? null : readable(text));
+        const file = target === undefined ? undefined : modelKey(st, target);
+        if (file === undefined) {
+          if (target !== undefined) forgetFileModels(st, ctx, `\`tee ${arg.text}\``);
+          continue;
         }
+        st.pidFiles.delete(file);
+        // `tee -a` leaves the file unknown whatever the model, which is stricter than the `>>`
+        // rule in `checkRedirects` and stays so on purpose: routing it through that rule would
+        // start reading a file `tee` appended to, and the guard does not render what `tee`
+        // writes. So `tee -a` onto a file this command wrote, then run, is refused.
+        const text = heredoc === undefined ? null : heredocText(heredoc);
+        st.files.set(file, append || text === null ? null : readable(text));
       }
       return;
     }
@@ -3042,7 +3169,24 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   }
 }
 
-function changeDirectory(target: Arg | undefined, st: State, ctx: Ctx): void {
+/** The working directory a real `chdir(2)` leaves behind — `env -C`, and `cd -P`. Undefined is a
+ * directory the guard cannot name, which makes every relative target after it unknown. */
+function movedDirectory(from: string | undefined, text: string): string | undefined {
+  if (from === undefined && !text.startsWith("/")) return undefined;
+  const resolved = physical(from ?? "/", text, true);
+  return "unknown" in resolved ? undefined : resolved.real;
+}
+
+/** `cd` keeps a logical working directory: bash canonicalises `..` in the path it was given and
+ * changes to that, so `cd link/..` lands where the text says. `cd -P` does not — it chdirs to the
+ * path the kernel resolves. Either way a later relative target is resolved from this directory
+ * through the filesystem, which is where a `cd` into a symlink and bash's logical `PWD` part. */
+function changeDirectory(
+  target: Arg | undefined,
+  physicalMode: boolean,
+  st: State,
+  ctx: Ctx
+): void {
   if (target === undefined) {
     const home = literalText(lookup("HOME", st, ctx));
     st.cwd = home;
@@ -3055,7 +3199,12 @@ function changeDirectory(target: Arg | undefined, st: State, ctx: Ctx): void {
     st.cwdWhy = `\`cd ${target.text}\``;
     return;
   }
-  st.cwd = path.resolve(st.cwd, text);
+  if (!physicalMode) {
+    st.cwd = path.resolve(st.cwd, text);
+    return;
+  }
+  st.cwd = movedDirectory(st.cwd, text);
+  if (st.cwd === undefined) st.cwdWhy = `\`cd -P ${target.text}\``;
 }
 
 /** `export`, `declare`, `typeset`, `local` and `readonly` over their arguments. A name is the
@@ -3255,9 +3404,9 @@ function checkTargets(
       );
     }
     const text = literalText(target.exp);
-    if (text !== undefined && (text.startsWith("/") || st.cwd !== undefined)) {
-      st.pidFiles.delete(path.resolve(st.cwd ?? "/", text));
-    }
+    // `judgePath` above refuses a target the guard cannot resolve, so `modelKey` answers here.
+    const file = text === undefined ? undefined : modelKey(st, text);
+    if (file !== undefined) st.pidFiles.delete(file);
   }
 }
 
@@ -3756,7 +3905,25 @@ function runFile(
       `the guard cannot resolve the script \`${file.text}\` (${file.exp.find((p) => p.kind !== "literal")?.why ?? `a working directory unknown after ${st.cwdWhy}`}), so it cannot read what it runs`
     );
   }
-  const abs = path.resolve(st.cwd ?? "/", text);
+  // The interpreter opens the path the kernel resolves, not the one `path.resolve` computes: a
+  // `..` after a symlink names another file entirely, and one the guard cannot resolve is a
+  // script it cannot read rather than one that is not there (LEGION-355).
+  if (ctx.unnameableWrite.why !== undefined) {
+    throw new Refusal(
+      site.snippet,
+      site.line,
+      `${ctx.unnameableWrite.why} writes a file the guard cannot name, so it cannot tell whether \`${file.text}\` is the file that was written`
+    );
+  }
+  const resolved = physical(st.cwd ?? "/", text, true);
+  if ("unknown" in resolved) {
+    throw new Refusal(
+      site.snippet,
+      site.line,
+      `the guard cannot resolve the script \`${file.text}\` (${resolved.unknown}), so it cannot read what it runs`
+    );
+  }
+  const abs = resolved.real;
   let content: string | undefined;
   if (st.files.has(abs)) {
     const written = st.files.get(abs);
@@ -4043,6 +4210,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     ompPid: options.ompPid,
     parentOf: options.parentOf ?? procParent,
     steps: { count: 0 },
+    unnameableWrite: { why: undefined },
   });
   const initial = (cwd: string, source: string): State => ({
     vars: new Map(),
