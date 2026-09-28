@@ -617,15 +617,18 @@ async function fillUntilStable(textarea: Locator): Promise<void> {
   throw new Error("the message box never stopped growing");
 }
 
-/** Whole `article` cards above the composer: top >= 0 and bottom <= the composer's top edge. */
+/** Whether a box sits wholly above the composer: top >= 0 and bottom <= the composer's top edge. */
+function wholeAbove(box: { y: number; height: number } | null, composerTop: number): boolean {
+  return box !== null && box.y >= 0 && box.y + box.height <= composerTop;
+}
+
+/** Whole `article` cards above the composer. */
 async function wholeCardsAbove(agents: Locator, composer: Locator): Promise<number> {
   const composerTop = (await composer.boundingBox())?.y ?? 0;
-  let count = 0;
-  for (const card of await agents.locator("article").all()) {
-    const box = await card.boundingBox();
-    if (box !== null && box.y >= 0 && box.y + box.height <= composerTop) count += 1;
-  }
-  return count;
+  const boxes = await Promise.all(
+    (await agents.locator("article").all()).map((card) => card.boundingBox())
+  );
+  return boxes.filter((box) => wholeAbove(box, composerTop)).length;
 }
 
 test("on a phone the open composer keeps its height budget at forty recipients, empty or filled, keeps its message box steady, and keeps every chip reachable", async ({
@@ -649,10 +652,8 @@ test("on a phone the open composer keeps its height budget at forty recipients, 
       });
     const composerHeight = async () => (await composer.boundingBox())?.height ?? Infinity;
     const composerTop = async () => (await composer.boundingBox())?.y ?? 0;
-    const checkboxAbove = async (index: number) => {
-      const box = await row(index).boundingBox();
-      return box !== null && box.y >= 0 && box.y + box.height <= (await composerTop());
-    };
+    const checkboxAbove = async (index: number) =>
+      wholeAbove(await row(index).boundingBox(), await composerTop());
     const scrollFirstCardToTop = () =>
       row(0).evaluate((element) => element.closest("article")?.scrollIntoView({ block: "start" }));
 
@@ -756,8 +757,8 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
     ).toBeVisible();
     const phoneMessage = (await message.boundingBox())?.height;
 
-    // 640 and 700 are the band below `md` that a width-only `sm` key left wide; 844x390 and
-    // 667x375 are phones in landscape, where height is the constraint.
+    // 640 and 700 are the band below `md`; 844x390 and 667x375 are phones in landscape, where
+    // height is the constraint.
     // Soft, so each viewport reports on its own.
     for (const size of [
       { height: 664, width: 640 },

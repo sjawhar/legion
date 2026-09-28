@@ -69,6 +69,10 @@ import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
+/** The broadcast composer's excluded-recipients and send-error lines: full width in the compact
+ *  grid, and below the controls on a short screen. */
+const composerNotice = `mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 short:order-3 short:col-span-4 ${dangerText}`;
+
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
@@ -934,10 +938,10 @@ function SelectionHeader({
   selected,
 }: {
   listed: readonly Agent[];
+  matching: readonly Agent[];
   onClear: () => void;
   onToggle: () => void;
   selected: ReadonlySet<string>;
-  matching: readonly Agent[];
 }): ReactNode {
   const selection = matchingSelection(listed, matching, selected);
   const { state } = selection;
@@ -960,7 +964,7 @@ function SelectionHeader({
         type="checkbox"
       />
       <span className={`min-w-0 flex-1 text-xs ${textMutedOnCanvas}`} id={countId}>
-        {selectionSummary(matching.length, selection)}
+        {selectionSummary(selection)}
       </span>
       {selected.size === 0 ? null : (
         <button
@@ -1085,9 +1089,7 @@ function BroadcastComposer({
         value={body}
       />
       {excluded.length === 0 ? null : (
-        <p
-          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 short:order-3 short:col-span-4 ${dangerText}`}
-        >
+        <p className={composerNotice}>
           Excluded:{" "}
           {excluded
             .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
@@ -1096,9 +1098,7 @@ function BroadcastComposer({
         </p>
       )}
       {send.isError ? (
-        <p
-          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 short:order-3 short:col-span-4 ${dangerText}`}
-        >
+        <p className={composerNotice}>
           Could not send: {send.error instanceof Error ? send.error.message : "network error"}
         </p>
       ) : null}
@@ -1191,10 +1191,10 @@ export function AgentsPage(): ReactNode {
           <AgentFilterBar agents={agents} filters={filters} onFilters={setFilters} />
           <SelectionHeader
             listed={agents}
+            matching={matching}
             onClear={() => setSelected(new Set())}
             onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}
-            matching={matching}
           />
           {matching.length === 0 ? (
             <EmptyState

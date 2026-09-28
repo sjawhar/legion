@@ -22,7 +22,7 @@ const matching = [agent("planner"), agent("reviewer")];
 const listed = [...matching, agent("tester")];
 
 function summary(selected: string[], rows: readonly Agent[] = listed): string {
-  return selectionSummary(matching.length, matchingSelection(rows, matching, new Set(selected)));
+  return selectionSummary(matchingSelection(rows, matching, new Set(selected)));
 }
 
 test("the header state reads none, some or all of the matching agents, never the rest of the selection", () => {

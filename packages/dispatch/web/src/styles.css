@@ -3,8 +3,8 @@
 
 /* A screen too narrow or too short for a wide sticky panel: a phone in either orientation, or a
    tablet-width window below `md`. The Agents broadcast composer compacts under it (and further
-   under `short`, where two stacked rows of controls would still take half the height). Width
-   alone missed the landscape phone, where height is the constraint. `short` is registered after
+   under `short`, where two stacked rows of controls would still take half the height). The
+   height clause is what catches a phone in landscape. `short` is registered after
    `narrow-or-short`, so its utilities win where both match. */
 @custom-variant narrow-or-short {
   @media (max-width: 767px), (max-height: 500px) {

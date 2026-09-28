@@ -3,6 +3,8 @@ import type { Agent } from "../../api/types";
 export type MatchingSelectionState = "none" | "some" | "all";
 
 export interface MatchingSelection {
+  /** Rows the filters match, folded sections included. */
+  readonly matchingCount: number;
   /** Selected sessions among the rows the filters match, folded sections included. */
   readonly selectedMatching: number;
   /** Selected sessions still listed that an active filter hides. */
@@ -32,6 +34,7 @@ export function matchingSelection(
   const state =
     selectedMatching === 0 ? "none" : selectedMatching === matching.length ? "all" : "some";
   return {
+    matchingCount: matching.length,
     selectedGone: selected.size - selectedListed,
     selectedHidden: selectedListed - selectedMatching,
     selectedMatching,
@@ -42,8 +45,8 @@ export function matchingSelection(
 /** The header's count: how many rows the filters match and how many of them are selected,
  *  then every other selected session, since the composer names and sends to those too - the
  *  ones an active filter hides apart from the ones gone from the list. */
-export function selectionSummary(matchingCount: number, selection: MatchingSelection): string {
-  const { selectedGone, selectedHidden, selectedMatching } = selection;
+export function selectionSummary(selection: MatchingSelection): string {
+  const { matchingCount, selectedGone, selectedHidden, selectedMatching } = selection;
   const more = selectedMatching === 0 ? "" : "more ";
   const parts = [
     selectedMatching === 0
