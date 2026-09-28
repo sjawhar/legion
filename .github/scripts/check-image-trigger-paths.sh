@@ -5,8 +5,10 @@
 # `RUN --mount=type=bind` names, the Dockerfile, the `.dockerignore` that shapes the context, and
 # the workflow file that runs the build.
 #
-# An image build is a `docker/build-push-action` step; its `file` and `context` name the
-# Dockerfile and the context. A trigger that builds it is, in its workflow and in every workflow
+# An image build is a `docker/build-push-action` step, whose `file` and `context` name the
+# Dockerfile and the context, or a `run:` step invoking `docker build` / `docker buildx build`,
+# whose `--file` and one positional argument name them, relative to the step's
+# `working-directory`. A trigger that builds it is, in its workflow and in every workflow
 # that calls that one through `workflow_call`, a `push`, `pull_request`, `pull_request_target` or
 # `merge_group` event. An event with no `paths` covers everything; `paths-ignore` covers whatever
 # it does not name. A calling job whose `if:` tests `needs.<job>.outputs.<name> == 'true'` for
@@ -19,6 +21,9 @@
 #   1. an input a trigger does not cover,
 #   2. a source this check cannot resolve — a variable, a heredoc, a path that matches nothing —
 #      since reading zero files from it would pass while checking nothing,
+#   2a. a `docker … build` in a run step it cannot read — a subshell, a wrapper, `docker compose
+#      build`, an unknown flag, a `working-directory` holding a variable — since skipping one
+#      leaves an image whose inputs no trigger owes, which is what this check exists to catch,
 #   3. a gate it cannot evaluate — a calling job's `if:` in any other shape, an output that is
 #      not a `dorny/paths-filter` filter, a `predicate-quantifier` other than `some`, a GitHub
 #      path pattern using `?`, `+` or `\` — since misreading one could pass wrongly,
@@ -242,18 +247,24 @@ BUILDX_BOOLEAN_FLAGS = {
 }
 SEPARATOR = re.compile(r"[;|&]+")
 EXPRESSION = re.compile(r"\$\{\{[^}]*\}\}")
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+SUDO_BOOLEAN_FLAGS = {"-E", "-H", "-n", "-S", "-b", "-i", "-s", "--preserve-env"}
+SUDO_VALUE_FLAGS = {"-u", "--user", "-g", "--group", "-p", "--prompt"}
+GROUPING = {"(", ")", "{", "}", "<", ">", ">>", "<<"}
 
 
 def buildx_builds(script: str) -> list[tuple[str, str]]:
     """(context, Dockerfile) of every `docker buildx build` / `docker build` in a run step.
 
-    Two normalisations before shlex, which knows nothing about shell grammar: a `${{ … }}`
+    Two normalisations before shlex, which knows nothing about shell grammar. A `${{ … }}`
     expression collapses to one word, or it would split into three and the tail would read as
-    context arguments; and `;`, `|`, `&` and the newline become standalone words, or a second
-    command on the same line would read as arguments to the first and a build on the next line
-    would be missed entirely."""
+    context arguments. And a `;` is inserted after each newline — after, not instead of, because
+    `shlex.split(comments=True)` ends a comment at a newline and nowhere else: replacing the
+    newline let the first `#` in a step swallow every command below it, including the build.
+    The whole script is split at once rather than line by line, since a quoted program (the awk
+    in envoy-and-contracts.yaml) spans lines."""
     joined = re.sub(r"\\\s*\n", " ", EXPRESSION.sub("EXPRESSION", script))
-    padded = SEPARATOR.sub(r" \g<0> ", joined).replace("\n", " ; ")
+    padded = SEPARATOR.sub(r" \g<0> ", joined).replace("\n", "\n ; ")
     try:
         words = shlex.split(padded, comments=True)
     except ValueError as error:
@@ -271,14 +282,61 @@ def buildx_builds(script: str) -> list[tuple[str, str]]:
 
 
 def build_arguments(command: list[str]) -> list[str] | None:
-    """The arguments after `docker build` / `docker buildx build`, or None for anything else."""
-    if not command or posixpath.basename(command[0]) != "docker":
-        return None
-    if command[1:3] == ["buildx", "build"]:
-        return command[3:]
-    if command[1:2] == ["build"]:
-        return command[2:]
+    """The arguments after `docker build` / `docker buildx build`, or None for anything else.
+
+    Leading `VAR=value` assignments and `sudo` are stripped, since both are ordinary ways to
+    write the same build. Anything else that reaches a `docker … build` — a subshell, a retry
+    wrapper, `docker compose build` — is Unreadable rather than None: a build this check skips
+    is a build whose inputs nothing owes, which is the failure the check exists to prevent."""
+    shaped = any(
+        posixpath.basename(word) == "docker" and "build" in command[index + 1 :]
+        for index, word in enumerate(command)
+    )
+    if shaped and any(word in GROUPING for word in command):
+        raise Unreadable("invokes a docker build this check cannot read")
+    words = list(command)
+    while words:
+        if ASSIGNMENT.fullmatch(words[0]):
+            words = words[1:]
+            continue
+        if posixpath.basename(words[0]) != "sudo":
+            break
+        words = words[1:]
+        while words and words[0].startswith("-"):
+            flag = words[0].partition("=")[0]
+            if flag in SUDO_BOOLEAN_FLAGS:
+                words = words[1:]
+            elif flag in SUDO_VALUE_FLAGS:
+                words = words[1 if "=" in words[0] else 2 :]
+            else:
+                break
+    if words and posixpath.basename(words[0]) == "docker":
+        if words[1:3] == ["buildx", "build"]:
+            return words[3:]
+        if words[1:2] == ["build"]:
+            return words[2:]
+    if shaped:
+        raise Unreadable("invokes a docker build this check cannot read")
     return None
+
+
+def working_directory(document: dict, job: dict, step: dict) -> str:
+    """A run step's working-directory: the step's own, else the job's `defaults.run`, else the
+    workflow's, else the repository root."""
+    for holder in (step, job.get("defaults") or {}, document.get("defaults") or {}):
+        if holder is step:
+            value = holder.get("working-directory")
+        else:
+            value = (holder.get("run") or {}).get("working-directory")
+        if value is None:
+            continue
+        directory = str(value)
+        if "$" in directory:
+            raise Unreadable(
+                f"runs in working-directory {directory}, which this check cannot resolve"
+            )
+        return posixpath.normpath(directory)
+    return "."
 
 
 def buildx_target(arguments: list[str]) -> tuple[str, str]:
@@ -561,8 +619,17 @@ for workflow, document in documents.items():
                 continue
             where = step.get("name") or "an unnamed run step"
             try:
+                # A run step's paths are relative to its working-directory, not the repository
+                # root: without this a nested build reads whatever sits at the root path instead.
+                directory = working_directory(document, job, step)
                 for context, dockerfile in buildx_builds(script):
-                    builds.append((workflow, context, dockerfile))
+                    builds.append(
+                        (
+                            workflow,
+                            posixpath.normpath(posixpath.join(directory, context)),
+                            posixpath.normpath(posixpath.join(directory, dockerfile)),
+                        )
+                    )
             except Unreadable as error:
                 problems.append(f"::error file={workflow}::{workflow}: {where} {error}")
 

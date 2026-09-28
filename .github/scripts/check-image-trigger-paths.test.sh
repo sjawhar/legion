@@ -321,16 +321,18 @@ callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.
 run_check "$root"
 check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
-# buildx_step <root> <run body>: replaces the build-push-action step with a run step.
+# buildx_step <root> <run body> [working-directory]: replaces the build-push-action step with a
+# run step.
 buildx_step() {
-  local root=$1 body=$2
-  python3 - "$root/.github/workflows/image.yaml" "$body" <<'PY'
+  local root=$1 body=$2 workdir=${3:-}
+  python3 - "$root/.github/workflows/image.yaml" "$body" "$workdir" <<'PY'
 import sys
-path, body = sys.argv[1], sys.argv[2]
+path, body, workdir = sys.argv[1], sys.argv[2], sys.argv[3]
 indented = "\n".join("          " + line for line in body.splitlines())
+where = f"        working-directory: {workdir}\n" if workdir else ""
 text = open(path).read()
 head, _, _ = text.partition("      - uses: docker/build-push-action@v6")
-open(path, "w").write(f"{head}      - name: Build\n        run: |\n{indented}\n")
+open(path, "w").write(f"{head}      - name: Build\n        run: |\n{indented}\n{where}")
 PY
 }
 
@@ -379,6 +381,98 @@ buildx_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"
 check "fails on zero builds rather than passing" "$(is "$status" 1)"
 check "says it proves nothing" "$(contains "$out" 'this check covered 0 image builds')"
+
+echo "case: a comment never swallows a build, in any of the four shapes it can take"
+root=$(fixture buildx-run-comment-first)
+buildx_step "$root" '# build the image the smoke runs against
+docker buildx build --load --file docker/Dockerfile .'
+run_check "$root"
+check "a leading comment leaves the build visible" "$(is "$status" 0)"
+check "and it is counted" "$(contains "$out" '(1 image build(s))')"
+
+root=$(fixture buildx-run-comment-between)
+buildx_step "$root" 'docker pull debian:trixie-slim
+# now build
+docker buildx build --load --file docker/Dockerfile .'
+run_check "$root"
+check "a comment between commands leaves the build visible" "$(is "$status" 0)"
+check "and it is counted" "$(contains "$out" '(1 image build(s))')"
+
+root=$(fixture buildx-run-comment-trailing)
+cp "$root/docker/Dockerfile" "$root/docker/Other.Dockerfile"
+buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile . # the smoke image
+docker buildx build --load --file docker/Other.Dockerfile .'
+run_check "$root"
+check "a trailing comment does not hide the next command's build" "$(is "$status" 0)"
+check "both builds are counted" "$(contains "$out" '(2 image build(s))')"
+
+root=$(fixture buildx-run-comment-heredoc)
+buildx_step "$root" "cat <<'EOF' > /tmp/note
+# a hash inside a heredoc
+EOF
+docker buildx build --load --file docker/Dockerfile ."
+run_check "$root"
+check "a hash inside a heredoc does not hide the build" "$(is "$status" 0)"
+check "and it is counted" "$(contains "$out" '(1 image build(s))')"
+
+echo "case: working-directory moves the context and the Dockerfile"
+root=$(fixture buildx-run-workdir)
+mkdir -p "$root/nested/docker"
+echo '{}' > "$root/nested/package.json"
+printf 'FROM debian:trixie-slim\nCOPY package.json ./\n' > "$root/nested/docker/Dockerfile"
+sed -i 's|      - "docker/\*\*"|&\n      - "nested/**"|' "$root/.github/workflows/image.yaml"
+buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile .' nested
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "reads the Dockerfile under working-directory, not the root decoy" "$(contains "$out" 'nested/docker/Dockerfile: checked')"
+check "and only that one" "$(contains "$out" '(1 image build(s))')"
+
+root=$(fixture buildx-run-workdir-uncovered)
+mkdir -p "$root/nested/docker"
+echo '{}' > "$root/nested/package.json"
+printf 'FROM debian:trixie-slim\nCOPY package.json ./\n' > "$root/nested/docker/Dockerfile"
+buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile .' nested
+run_check "$root"
+check "an uncovered input under working-directory fails" "$(is "$status" 1)"
+check "names the nested file" "$(contains "$out" 'nested/package.json')"
+
+root=$(fixture buildx-run-workdir-variable)
+buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile .' '${{ github.workspace }}/sub'
+run_check "$root"
+check "a working-directory this check cannot resolve fails" "$(is "$status" 1)"
+check "says so" "$(contains "$out" 'working-directory')"
+
+echo "case: a leading assignment or sudo is read, not skipped"
+root=$(fixture buildx-run-assignment)
+buildx_step "$root" 'DOCKER_BUILDKIT=1 IMAGE=app:ci docker buildx build --load --file docker/Dockerfile .'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "the build is counted" "$(contains "$out" '(1 image build(s))')"
+
+root=$(fixture buildx-run-sudo)
+buildx_step "$root" 'sudo -E docker buildx build --load --file docker/Dockerfile .'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "the build is counted" "$(contains "$out" '(1 image build(s))')"
+
+echo "case: a build in a form this check cannot read fails rather than passing unseen"
+root=$(fixture buildx-run-subshell)
+buildx_step "$root" '( cd . && docker buildx build --load --file docker/Dockerfile . )'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
+root=$(fixture buildx-run-wrapper)
+buildx_step "$root" 'retry docker buildx build --load --file docker/Dockerfile .'
+run_check "$root"
+check "a wrapped build fails" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
+root=$(fixture buildx-run-compose)
+buildx_step "$root" 'docker compose build listener'
+run_check "$root"
+check "docker compose build fails rather than being ignored" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
 
 
 summary "check-image-trigger-paths.sh"
