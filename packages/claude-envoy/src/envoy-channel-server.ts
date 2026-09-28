@@ -1,3 +1,4 @@
+import { unwatchFile, watchFile } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
 import {
   agentSubject,
@@ -66,6 +67,34 @@ const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
 const PersistedRole = z.object({ session_id: z.string().min(1), role: z.string().min(1) })
+/** How often the handoff file is checked for a `/clear`. */
+const HANDOFF_POLL_MS = 250
+/** How long a handoff waits for NATS to confirm the new direct subject before retrying. */
+const HANDOFF_FLUSH_TIMEOUT_MS = 10_000
+
+/** `promise`, or a rejection naming `what` once `ms` pass. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms)
+  })
+  try {
+    return await Promise.race([promise, expired])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * A rejection handler for a listener read whose subject legitimately may not
+ * exist yet: `undefined` on the listener's 404 — no such role, no such entry —
+ * and a rethrow for everything else, so a transport failure is never read as an
+ * absence.
+ */
+function undefinedOnNotFound(error: unknown): undefined {
+  if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
+  throw error
+}
 
 /** The MCP `serverInfo`; the version is the package's, so it is spelled once. */
 export const MCP_SERVER_INFO = { name: "envoy", version: packageVersion } as const
@@ -124,10 +153,12 @@ export interface ChannelSessionOptions {
     "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
   >
   readonly heartbeatMs: number
+  /** How long a handoff waits for NATS to confirm the new direct subject before it retries. */
+  readonly handoffFlushTimeoutMs?: number
   /** `${CLAUDE_PLUGIN_DATA}`: role state per session id and the per-process handoff files. */
   readonly stateDirectory: string
   /**
-   * The `claude` process this server belongs to. When set, each heartbeat reads that
+   * The `claude` process this server belongs to. When set, the server polls that
    * process's handoff file and rebinds to the id it names; unset under the QA override.
    */
   readonly handoffPid?: number
@@ -371,14 +402,40 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       ? undefined
       : sessionHandoffFile(options.stateDirectory, options.handoffPid)
 
+  /**
+   * Every registry write runs through this chain, one at a time. The listener
+   * merges each registration's topics into the entry and never removes one, so a
+   * registration sent after a topic's removal or after an id's deregistration
+   * writes it back for good. Queued writes run in order, and a registration reads
+   * the id and topics when it runs rather than when it was requested.
+   */
+  let registryWrites: Promise<unknown> = Promise.resolve()
+  const serialized = <T>(write: () => Promise<T>): Promise<T> => {
+    const result = registryWrites.then(() => write())
+    registryWrites = result.catch(() => undefined)
+    return result
+  }
+
   const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id)
-      if (removedTopics !== undefined) {
+      // An empty list would mean "every topic" to both unfollow and the listener.
+      if (removedTopics !== undefined && removedTopics.length > 0) {
         for (const topic of removedTopics) userTopics.delete(topic)
-        void forwarder.unfollow(removedTopics).catch((error: unknown) => {
+        const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removedTopics)
+        dropping.catch((error: unknown) => {
           process.stderr.write(
             `envoy-channel: could not drop a removed subscription — ${messageFor(error)}\n`,
+          )
+        })
+        // Dispatch has already removed them from the entry, but a registration in
+        // flight at that moment adds them back; removing them again behind it undoes
+        // that. A failure here is not retried by name: the heartbeat's own interest
+        // reconciliation (below) brings the entry back in line with what this session
+        // actually follows, whatever caused the drift.
+        unsubscribing.catch((error: unknown) => {
+          process.stderr.write(
+            `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}; the next heartbeat reconciles it\n`,
           )
         })
       }
@@ -386,6 +443,28 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     },
   })
 
+  /**
+   * Drops `topics` from the forwarder's subscriptions and the registry entry — the two
+   * steps every removal here takes once a caller has already taken them out of
+   * `userTopics`. `forwarder.unfollow` runs first and removes from `following`
+   * before its first await, so no registration queued behind either promise
+   * advertises a dropped topic again. Both callers here — `deliver`'s own
+   * best-effort removal and the public `unfollow` below — take these same two
+   * steps in this order; only whether they wait for them differs.
+   */
+  function dropFromForwarderAndRegistry(topics: readonly string[]): {
+    readonly dropping: Promise<void>
+    readonly unsubscribing: Promise<void>
+  } {
+    return {
+      dropping: forwarder.unfollow(topics),
+      unsubscribing: serialized(() =>
+        options.client.unsubscribe({ sessionID: identity.id, topics }),
+      ),
+    }
+  }
+
+  /** Advertise the current id and topics; runs only inside `serialized`. */
   const register = async (): Promise<void> => {
     await options.client.subscribe({
       sessionID: identity.id,
@@ -425,13 +504,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   const reassertRole = async (): Promise<void> => {
     if (heldRole === undefined) return
-    const holder = await options.client.getRole(heldRole).then(
-      (role) => role.holder,
-      (error: unknown) => {
-        if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
-        throw error
-      },
-    )
+    const holder = await options.client
+      .getRole(heldRole)
+      .then((role) => role.holder, undefinedOnNotFound)
     if (holder === identity.id) return
     const result = await options.client.setRole({
       sessionID: identity.id,
@@ -445,10 +520,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 
   /**
+   * The id a handoff moved away from, until its role has been taken back; a
+   * handoff whose registration failed leaves it for the next heartbeat.
+   */
+  let roleTransferFrom: string | undefined
+  const transferRole = async (): Promise<void> => {
+    if (roleTransferFrom === undefined) return
+    await restoreRole(roleTransferFrom)
+    roleTransferFrom = undefined
+  }
+
+  /**
    * Claude Code mints a new session id on `/clear` while this process keeps the
    * one it was spawned with; the SessionStart hook writes the current id for our
    * shared parent process, and we move every binding to it. The new direct
-   * subject is consumed before anything is advertised under the new id.
+   * subject is consumed before anything is advertised under the new id, and the
+   * old one leaves the topic list before the first registration under it. Runs
+   * only inside `serialized`.
    */
   const adoptHandoff = async (): Promise<void> => {
     if (handoffFile === undefined) return
@@ -458,72 +546,185 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const previousSubject = directSubject
     const nextSubject = agentSubject(next)
     forwarder.follow(nextSubject)
-    await options.connection.flush()
-    await options.client.unregisterSession(previous)
+    try {
+      // Bounded: this runs inside the registry chain, and a flush on a stalled NATS
+      // connection never settles, which would hold every later write and shutdown.
+      await withTimeout(
+        options.connection.flush(),
+        options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS,
+        "flushing NATS",
+      )
+      await options.client.unregisterSession(previous)
+    } catch (error) {
+      // The session stays on the old id until a later tick retries, so the new
+      // subject leaves the topic list; otherwise the next registration would
+      // advertise it under the old id.
+      void forwarder.unfollow([nextSubject])
+      throw error
+    }
     identity.set(next)
     directSubject = nextSubject
+    // `unfollow` removes the subject from the topic list before it first awaits.
+    // What it then awaits is the drain of deliveries already in flight, and the
+    // handoff does not wait for it: a stuck notification would otherwise hold
+    // every registry write queued behind this one. The drain never rejects.
+    void forwarder.unfollow([previousSubject])
+    roleTransferFrom ??= previous
     await register()
-    await forwarder.unfollow([previousSubject])
-    await restoreRole(previous)
+    await transferRole()
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered\n`)
   }
 
-  // One tick at a time: a tick that outlives the interval (a slow listener, a
-  // handoff mid-flight) would otherwise be overlapped by the next, interleaving
-  // its register/unregister/setRole calls with the ones still in progress.
+  /** Set by the first read `syncRegisteredInterests` completes, never cleared. */
+  let interestsRead = false
+
+  /**
+   * Brings the registry entry and this process's own NATS subscriptions into line
+   * with each other. The first successful read adopts every topic the entry lists;
+   * every later read subtracts every topic the entry lists that
+   * `forwarder.topics()` no longer names.
+   *
+   * Subtracting is safe only while `forwarder.topics()` is authoritative for this
+   * session, so both windows where it is not are checked after the read, together,
+   * because both open while the read is in flight. `interestsRead` is false until
+   * a read has succeeded, when the forwarder holds only the direct subject while
+   * the entry legitimately holds more. `shuttingDown` is set as teardown begins,
+   * and `forwarder.close()` empties the topic list in that same synchronous step,
+   * so a shutdown landing mid-read would leave an emptied list looking like total
+   * drift. Neither is read before the await: the early return at the top only
+   * saves a round trip, and guards nothing.
+   *
+   * The drift filter names the direct subject even though `followed` covers it in
+   * every state this can subtract in — it is followed before the first
+   * registration, and `adoptHandoff` follows the new subject before assigning it.
+   * That redundancy is deliberate, because it is not what the reasoning costs if
+   * it is ever wrong again: an empty topic set makes the listener delete the whole
+   * entry (`removeInterestTopics` calls `deleteInterest`), where a followed topic
+   * slipping through loses one topic.
+   *
+   * A 404 completes the read: it is the genuinely-new-session case, and the
+   * forwarder is already complete. Any other failure leaves `interestsRead` false
+   * and the next heartbeat adopts again, so a permanent outage means the entry is
+   * never reconciled. That is the correct direction, because nothing undoes a
+   * wrong subtraction: `unregisterSession` deletes only the sessions row, so a
+   * stripped entry stands until `Registry.Reap` and is what a `--resume` inside
+   * that window reads back. The listener refuses the same inference from the other
+   * side of the wire — `mergeForUpsert` (packages/envoy/internal/store/kv.go)
+   * merges and never removes because a transient read once truncated a live
+   * subscription out of durable state.
+   *
+   * Reading live state each heartbeat, rather than replaying a topic list a
+   * failure was recorded against, is what keeps a topic re-followed since a failed
+   * removal from being stripped again, and keeps one topic's registry outage from
+   * blocking any other: there is no per-topic queue, only this session's own entry.
+   *
+   * Runs inside `serialized` from the heartbeat, so it never races a concurrent
+   * registration; the startup call runs before the first one is queued.
+   * Quiet only at startup, where the caller swallows a failed read; from the
+   * heartbeat an outage is what the heartbeat's own report exists to surface.
+   */
+  const syncRegisteredInterests = async (): Promise<void> => {
+    if (shuttingDown) return
+    const registry = await options.client.getInterest(identity.id).catch(undefinedOnNotFound)
+    if (shuttingDown) return
+    if (!interestsRead) {
+      for (const topic of registry?.topics ?? []) {
+        if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX)) continue
+        userTopics.add(topic)
+        forwarder.follow(topic)
+      }
+      interestsRead = true
+      return
+    }
+    if (registry === undefined) return
+    const followed = new Set(forwarder.topics())
+    const drifted = registry.topics.filter(
+      (topic) =>
+        topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic),
+    )
+    if (drifted.length === 0) return
+    await options.client.unsubscribe({ sessionID: identity.id, topics: drifted })
+  }
+
+  // One tick at a time, and at most one pending behind it. `serialized` already
+  // orders the registry writes across ticks; what these two flags buy is
+  // coalescing — a tick requested while one runs (a handoff file written
+  // mid-tick) runs once, straight after — and the single immediate retry a
+  // failed tick asks for below.
   let heartbeatInFlight = false
+  let heartbeatRequested = false
   let outageReported = false
   const heartbeat = async (): Promise<void> => {
     if (shuttingDown || heartbeatInFlight) return
     heartbeatInFlight = true
     try {
-      await adoptHandoff()
-      await register()
+      await serialized(async () => {
+        await adoptHandoff()
+        await register()
+        await reassertRole()
+        await transferRole()
+        await syncRegisteredInterests()
+      })
       outageReported = false
-      await reassertRole()
     } catch (error) {
       if (outageReported) return
       outageReported = true
       process.stderr.write(
         `envoy-channel: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat\n`,
       )
+      // A handoff that unregistered the old id and then failed to register the new
+      // one leaves the session unreachable under both until the next attempt: one
+      // immediate retry, not the full heartbeat interval, closes that window. Bounded
+      // to once per outage: a further failure here hits the `outageReported` guard
+      // above before ever reaching this line.
+      requestHeartbeat()
     } finally {
       heartbeatInFlight = false
+      if (heartbeatRequested) {
+        heartbeatRequested = false
+        void heartbeat()
+      }
     }
   }
-
-  /**
-   * Registered interests deliver only through this process's own NATS
-   * subscriptions, so a resumed or restarted server must rebuild the topics its
-   * session id already registered or stay deaf to them. Quiet on failure: a
-   * brand-new id has no registry entry, and a listener outage must not fail startup.
-   */
-  const recoverRegisteredInterests = async (): Promise<void> => {
-    const registry = await options.client.getInterest(identity.id).catch(() => undefined)
-    if (registry === undefined) return
-    for (const topic of registry.topics) {
-      if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX)) continue
-      userTopics.add(topic)
-      forwarder.follow(topic)
-    }
+  const requestHeartbeat = (): void => {
+    if (heartbeatInFlight) heartbeatRequested = true
+    else void heartbeat()
   }
 
   // The NATS subscription precedes registration so the listener never routes
   // a direct delivery to an advertised but deaf channel process.
   forwarder.follow(directSubject)
-  await recoverRegisteredInterests()
+  // Best-effort: a listener outage must not fail startup. It leaves
+  // `interestsRead` false, so the heartbeat retries the adopt and never
+  // subtracts against a set this read could not populate.
+  await syncRegisteredInterests().catch((error: unknown) => {
+    process.stderr.write(
+      `envoy-channel: could not read the registered interests (${messageFor(error)}); the next heartbeat retries\n`,
+    )
+  })
   await options.connection.flush()
-  await register()
-  await restoreRole()
+  await serialized(async () => {
+    await register()
+    await restoreRole()
+  })
   await pruneStaleSessionHandoffs(options.stateDirectory)
   const heartbeatTimer = setInterval(() => {
     void heartbeat()
   }, options.heartbeatMs)
+  // A `/clear` is adopted when the SessionStart hook writes the handoff file, not
+  // at the next heartbeat minutes later. The hook replaces the file by rename,
+  // which a directory watch reports only as its temporary file, so the file is
+  // polled by path; the first tick picks up a file written before polling began.
+  if (handoffFile !== undefined) {
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat)
+    requestHeartbeat()
+  }
 
   return {
     delivery,
     topics: () => forwarder.topics(),
     async follow(topics) {
+      if (shuttingDown) return []
       const fresh: string[] = []
       for (const topic of expandSubscriptionTopics(topics)) {
         if (topic === directSubject || userTopics.has(topic)) continue
@@ -532,15 +733,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         fresh.push(topic)
       }
       await options.connection.flush()
-      await register()
+      await serialized(register)
       return fresh
     },
     async unfollow(topics) {
       const requested = topics.length === 0 ? [...userTopics] : expandSubscriptionTopics(topics)
       const removed = requested.filter((topic) => userTopics.delete(topic))
       if (removed.length === 0) return []
-      await options.client.unsubscribe({ sessionID: identity.id, topics: removed })
-      await forwarder.unfollow(removed)
+      const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removed)
+      await unsubscribing
+      await dropping
       return removed
     },
     async rememberRole(role) {
@@ -554,12 +756,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (shuttingDown) return
       shuttingDown = true
       clearInterval(heartbeatTimer)
+      if (handoffFile !== undefined) unwatchFile(handoffFile, requestHeartbeat)
       await forwarder.close()
-      await options.client.unregisterSession(identity.id).catch((error: unknown) => {
-        process.stderr.write(
-          `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
-        )
-      })
+      await serialized(() => options.client.unregisterSession(identity.id)).catch(
+        (error: unknown) => {
+          process.stderr.write(
+            `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
+          )
+        },
+      )
       // The handoff directory stays: Claude Code restarts this server inside the
       // same `claude` process (plugin reload, changed config), and the hook does
       // not rewrite the file until the next SessionStart. Startup pruning removes

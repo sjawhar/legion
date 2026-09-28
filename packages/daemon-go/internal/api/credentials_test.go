@@ -1,9 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,18 +22,27 @@ import (
 type tokenSource struct {
 	started chan struct{}
 	release chan struct{}
+	once    sync.Once
 	role    appauth.AppRole
 	owner   string
 }
 
+// Token leases the role's App: the implement App is legion-implementer[bot], the review App
+// legion-reviewer[bot]. A source with started blocks its first lease until release closes.
 func (s *tokenSource) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
 	s.role = role
 	s.owner = owner
 	if s.started != nil {
-		close(s.started)
-		<-s.release
+		s.once.Do(func() {
+			close(s.started)
+			<-s.release
+		})
 	}
-	return appauth.Lease{Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-implementer[bot]"}}, nil
+	name := "legion-implementer[bot]"
+	if role == appauth.Review {
+		name = "legion-reviewer[bot]"
+	}
+	return appauth.Lease{Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: name}}, nil
 }
 func newCredentialHarness(t *testing.T, tokens appauth.Tokens) *harness {
 	return newCredentialHarnessWithGrants(t, tokens, credential.New(nil))
@@ -221,6 +236,67 @@ func TestAClaimLeavingItsRunningStatesRevokesItsSecretAndGrants(t *testing.T) {
 				http.StatusForbidden, "GRANT_REVOKED")
 			if stored := h.stored(token); len(stored.CapabilityHash) != 0 {
 				t.Fatalf("stored claim after %s keeps capability hash %x", exit, stored.CapabilityHash)
+			}
+		})
+	}
+}
+
+// reviewUnavailable is a token source whose review App cannot be leased.
+type reviewUnavailable struct{ tokenSource }
+
+func (s *reviewUnavailable) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	if role == appauth.Review {
+		return appauth.Lease{}, errors.New("the review App is not installed for acme")
+	}
+	return s.tokenSource.Token(ctx, role, owner)
+}
+
+// gh-token names each of Legion's role Apps beside the caller's own, keyed by App role, so `legion
+// threads resolve` can tell a Legion App's review thread from any other bot's and knows which
+// login is the review App's. When any App's login cannot be read the logins are left out, and the
+// command then applies no bot-thread rule; the caller's token still comes back.
+// A Legion App whose login cannot be read turns the bot-thread rule off for that answer, so the
+// daemon says so in its log, once: every `legion gh` call asks for a token, and a minute of GitHub
+// failing must not write a line per call.
+func TestAnUnreadableLegionAppLoginIsLoggedAtMostOnceAMinute(t *testing.T) {
+	h := newHarness(t)
+	var logged bytes.Buffer
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Tokens: &reviewUnavailable{}, GitHubOwner: "acme",
+		Log: slog.New(slog.NewTextHandler(&logged, nil)),
+	}).Handler
+	grant := liveGrant(t, h, claim.RoleImplementer)
+	for range 3 {
+		if recorder := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gh-token = %d: %s", recorder.Code, recorder.Body)
+		}
+	}
+	if got := strings.Count(logged.String(), "could not read a Legion App's login"); got != 1 {
+		t.Fatalf("logged the unreadable login %d times over three calls, want once:\n%s", got, logged.String())
+	}
+}
+
+func TestGitHubTokenNamesEveryLegionAppLogin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source appauth.Tokens
+		want   map[appauth.AppRole]string
+	}{
+		{"both Apps leased", &tokenSource{}, map[appauth.AppRole]string{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}},
+		{"the review App unavailable", &reviewUnavailable{}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCredentialHarness(t, tc.source)
+			grant := liveGrant(t, h, claim.RoleImplementer)
+			recorder := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("gh-token = %d: %s", recorder.Code, recorder.Body)
+			}
+			var got GitHubTokenResponse
+			decodeInto(t, recorder, &got)
+			if got.Token != "installation-token" || got.AppLogin != "legion-implementer[bot]" || !maps.Equal(got.LegionAppLogins, tc.want) {
+				t.Fatalf("gh-token = %+v, want the implementer's token and Legion App logins %v", got, tc.want)
 			}
 		})
 	}

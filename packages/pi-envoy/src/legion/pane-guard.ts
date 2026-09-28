@@ -19,6 +19,26 @@
  * piped into a shell, a script executed by path, and python/node/bun scripts through
  * `pane-guard-code.ts`). A command the parser reports as malformed is refused, and so is a target
  * the guard cannot resolve (a variable read from input, a command's output): it never guesses.
+ * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread.
+ *
+ * A `trap` handler's body is judged once, against the state of the shell that set it after that
+ * shell's last statement, where bash runs an EXIT handler; a subshell's handlers (a substitution,
+ * `( … )`, a pipeline's part, a coprocess, a backgrounded command) are judged at the subshell's
+ * end. The text judged is the one bash stores: a double-quoted handler's variables were expanded
+ * when it was set, and a single-quoted one reads its own when it runs. So a handler set inside a
+ * branch or loop body is judged with the variables that body gave it, which the merged state after
+ * the construct may no longer know, except a name the shell assigns after the construct, whose new
+ * value is the one it reads. A later branch that blurs the name expires the capture too, so
+ * `…; fi; if [ -n "$x" ]; then t="$LEGION_WORKSPACE/b"; fi` is refused though both values are safe.
+ * A handler lifted from a branch has that body's variables but not its arguments, which merge
+ * as the branches leave them: `set -- a a; if true; then shift; trap 'rm -rf "$1"' EXIT; fi` is
+ * refused though `$1` is safe either way, and a walk that decides the branch would not lift that.
+ * A function a branch or loop body defines is every definition a path may have left: a call runs
+ * each, and the command of that name where a path defined none. A handler that would be dangerous
+ * only at an earlier exit (an `exit` before a later assignment makes its target safe) is not
+ * caught: the guard does not model where a shell exits. A handler whose text the guard cannot read
+ * is refused; one it can read that runs a command it cannot (`trap 'eval "$c"' EXIT`) is judged as
+ * any such command is, the residual above.
  */
 import {
   closeSync,
@@ -109,10 +129,11 @@ interface State {
   /** Per-element values of shell arrays. */
   readonly arrays: Map<string, Map<string, Expansion>>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
-  functions: Map<string, FunctionDefinition>;
-  /** EXIT handlers run when this shell finishes, after its last assignment. */
+  functions: Map<string, Callee>;
   /** Functions whose current body walk has not returned; recursive calls add no new code to check. */
   readonly runningFunctions: Set<string>;
+  /** The handlers this shell set with `trap`. Each body runs when this shell finishes, against its
+   * state after its last statement; a subshell starts with none (`subshell`). */
   traps: readonly Trap[];
 }
 
@@ -122,11 +143,46 @@ interface FunctionDefinition {
   readonly file: string | undefined;
 }
 
+/** What a name runs as: each function definition a path through the command may have left, and
+ * `undefined` for a path that left none, where the name runs as a command. A definition alone is
+ * the ordinary case; a name a branch or loop body defines has more than one. */
+type Callee = readonly (FunctionDefinition | undefined)[];
+
+/** One definition per `Function` node, so a definition walked again (a function called in two
+ * branches) is one candidate where they meet, not one per walk. */
+const definitions = new WeakMap<Node, Callee>();
+
 interface Trap {
   readonly text: string;
   readonly site: Site;
+  /** The conditions it handles (`EXIT`, `INT`, …), as `trapSignal` names them. Every handler's
+   * body is reachable, so each is walked; the set is what `trap - <signal>` removes. */
+  readonly signals: readonly string[];
   readonly file: string;
+  /** For a handler `merge` lifted out of a branch or loop body: that body's variables, and the
+   * values the merge left for them. A handler reads its variables when it runs, so a body's value
+   * stands only while the shell still holds the value that merge wrote (`handlerVars`). */
+  readonly vars?: ReadonlyMap<string, Expansion>;
+  readonly merged?: ReadonlyMap<string, Expansion>;
+  /** Names bound to the pids of this shell's children a double-quoted handler expanded when it was
+   * set (`trap "kill $pid" EXIT`), which its text reads back. */
+  readonly pids?: ReadonlyMap<string, Expansion>;
 }
+
+/** A `trap` operand as bash names the condition: case aside, `0` is `EXIT`, and a signal may carry
+ * its `SIG` prefix (`SIGINT` is `INT`). `SIGEXIT` is no condition bash knows, so it stays as
+ * written and matches nothing. Signal numbers other than `0` are not translated, so a removal
+ * naming one (`trap - 2`) removes nothing: the handler stays and is walked. */
+function trapSignal(operand: string): string {
+  const name = operand.toUpperCase();
+  if (name === "0") return "EXIT";
+  return name.startsWith("SIG") && name !== "SIGEXIT" ? name.slice(3) : name;
+}
+
+/** The condition a handler records for a `trap` operand the guard cannot read. `trapSignal`
+ * names every readable one in capitals, and a removal leaves out the operands it cannot read, so
+ * no removal names this: the handler stays and is walked. */
+const UNREADABLE_CONDITION = "an unreadable condition";
 
 /** What a refusal names: the simple command it came from, where that command sits, and the
  * rule. A refusal inside a script is rethrown by the command that ran it with the script's
@@ -164,7 +220,13 @@ interface Site {
 }
 
 const MAX_DEPTH = 8;
-const MAX_WALK_STEPS = 10_000;
+/** The syntax nodes one command's walk may visit before the guard refuses it as too large to judge.
+ * The repository's largest tracked script, `scripts/e2e/stage4b-sandbox-tree.sh`, reaches its
+ * first refusal after about 20,700, in about a third of a second through the guard on a loaded
+ * devbox. What a node costs depends on what it does: 100,000 `true;` walk in about 200 ms, while a
+ * budget's worth of `rm -rf a;`, each target resolved against the pane's roots, takes about
+ * 490 ms. So the budget bounds a walk's size, not its time. */
+const MAX_WALK_STEPS = 100_000;
 const MAX_ALTERNATIVES = 64;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const FRESH_TEMP_NAME = "tmp.XXXXXXXXXX";
@@ -553,11 +615,33 @@ function substitution(
   }
   const only = script?.commands.length === 1 ? script.commands[0]?.command : undefined;
   const invocation = substitutionInvocation(only, st, ctx);
-  const definition = invocation === undefined ? undefined : st.functions.get(invocation.base);
-  if (definition !== undefined && invocation !== undefined) {
-    const output = functionOutput(invocation.base, definition, invocation.rest, st, ctx);
-    if (output !== undefined) return output.map((value) => [...value]);
+  const callee = invocation === undefined ? undefined : st.functions.get(invocation.base);
+  if (callee !== undefined && invocation !== undefined) {
+    const alternatives: Piece[][] = [];
+    let external = false;
+    for (const definition of callee) {
+      const output =
+        definition === undefined
+          ? undefined
+          : functionOutput(invocation.base, definition, invocation.rest, st, ctx);
+      if (output !== undefined) alternatives.push(...output.map((value) => [...value]));
+      else external = true;
+    }
+    return external
+      ? [...alternatives, ...commandOutput(only, invocation, text, st, ctx)]
+      : alternatives;
   }
+  return commandOutput(only, invocation, text, st, ctx);
+}
+
+/** The value of a substitution that runs a command rather than one of this shell's functions. */
+function commandOutput(
+  only: Node | undefined,
+  invocation: ReturnType<typeof substitutionInvocation>,
+  text: string,
+  st: State,
+  ctx: Ctx
+): Piece[][] {
   if (invocation !== undefined) {
     if (invocation.base === "pwd" && invocation.rest.length === 0 && st.cwd !== undefined) {
       return [[literal(st.cwd)]];
@@ -838,7 +922,7 @@ function walkSubstitution(
     throw new Refusal(text, 1, `the guard could not read the command in \`${text}\``);
   }
   const source = parsed.source ?? (script === undefined ? (inner ?? "") : st.source);
-  walkScript(parsed, { ...clone(st), source }, ctx);
+  walkScript(parsed, subshell(st, { source }), ctx);
 }
 
 // --- Statements --------------------------------------------------------------------------------
@@ -856,8 +940,18 @@ function clone(st: State): State {
   };
 }
 
-/** After branches that may or may not run: a variable or working directory the branches leave
- * differently is unknown. */
+/** Anything a copy-back site does not carry out of a child is a candidate hole. Three sites carry
+ * a child's state back into this shell, `merge`, `runFunction` and `runFile`'s sourced branch, and
+ * each lists `State`'s fields by hand. A field added to `State` belongs in all three; or in the
+ * list of what each leaves out and why; or, like `nested`, `depth`, `source`, `script` and
+ * `argv0`, it says where the walk is rather than what the shell holds, and crosses no site at all.
+ *
+ * After branches that may or may not run: everything a branch leaves in this shell, since any of
+ * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
+ * working directory the branches leave differently is unknown, a function name holds every
+ * definition they leave (`Callee`), and a handler any of them sets stays. Not merged: `files` and
+ * `pidFiles`, which every branch shares; `output`, which each caller compares itself
+ * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -883,6 +977,10 @@ function merge(target: State, branches: readonly State[]): void {
       target.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, unknownElement]]));
     }
   }
+  const positionals = branches.map((branch) => JSON.stringify(branch.positional ?? null));
+  target.positional = positionals.every((value) => value === positionals[0])
+    ? branches[0]?.positional
+    : undefined;
   const cwds = new Set(branches.map((branch) => branch.cwd));
   if (cwds.size > 1) {
     target.cwd = undefined;
@@ -895,6 +993,55 @@ function merge(target: State, branches: readonly State[]): void {
     for (const name of branch.exported) target.exported.add(name);
     target.backgroundStarted ||= branch.backgroundStarted;
   }
+  const functionNames = new Set<string>();
+  for (const branch of branches)
+    for (const name of branch.functions.keys()) functionNames.add(name);
+  const functions = new Map<string, Callee>();
+  for (const name of functionNames) {
+    const callees = branches.map((branch) => branch.functions.get(name));
+    const first = callees[0];
+    if (first !== undefined && callees.every((callee) => callee === first)) {
+      functions.set(name, first);
+      continue;
+    }
+    const candidates = new Set<FunctionDefinition | undefined>();
+    for (const callee of callees)
+      for (const definition of callee ?? [undefined]) candidates.add(definition);
+    functions.set(name, [...candidates]);
+  }
+  target.functions = functions;
+  // A handler a branch or loop body sets stays set after it, as bash keeps it. It carries the
+  // variables that body left, since the merged state may already have blurred the ones it reads
+  // (`t=$(mktemp); trap 'rm -f "$t"' EXIT` in an `if`), beside the values this merge wrote for
+  // them. A removal inside a branch that may not run resets nothing here.
+  const lifted: Trap[] = [];
+  let merged: ReadonlyMap<string, Expansion> | undefined;
+  for (const branch of branches) {
+    for (const trap of branch.traps) {
+      if (target.traps.includes(trap)) continue;
+      merged ??= new Map(target.vars);
+      lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged });
+    }
+  }
+  target.traps = [...target.traps, ...lifted];
+}
+
+/** The variables a handler runs with in a shell whose variables are `vars`. For a handler lifted
+ * out of a branch, a name the shell still holds as the merge that lifted it wrote it takes the
+ * value that branch left, since the handler runs only on a path where that branch ran; a name
+ * assigned since holds its new value, which is the one the handler reads when it runs. This capture
+ * exists because a variable keeps one value after a merge, a blur where the branches differ. Giving
+ * variables every candidate a path may have left, as a function name has (`Callee`), would replace
+ * it, and is the direction a further change to the merge model takes. */
+function handlerVars(
+  trap: Trap,
+  vars: ReadonlyMap<string, Expansion>
+): ReadonlyMap<string, Expansion> {
+  const { vars: branch, merged } = trap;
+  if (branch === undefined || merged === undefined) return vars;
+  const out = new Map(vars);
+  for (const [name, value] of branch) if (vars.get(name) === merged.get(name)) out.set(name, value);
+  return out;
 }
 
 function lineOf(source: string, pos: number): number {
@@ -927,13 +1074,27 @@ function walkScript(script: ParsedScript, st: State, ctx: Ctx, runTraps = true):
     );
   }
   for (const statement of script.commands) walkNode(statement, st, ctx, false);
-  if (!runTraps) return;
+  if (runTraps) runSetTraps(st, ctx);
+}
+
+/** A subshell of this shell: `( … )`, each part of a pipeline, a coprocess, a command or process
+ * substitution. Bash resets the parent's traps in one, so a subshell runs only the handlers it sets
+ * itself, at its own end (`runSetTraps`), and the parent's run once, at the parent's end. */
+function subshell(st: State, patch?: Partial<State>): State {
+  return { ...clone(st), traps: [], ...patch };
+}
+
+/** Runs the body of every handler this shell set, at its end: each against the state after the
+ * shell's last statement, with the variables of the branch that set it where the shell still holds
+ * what the merge wrote for them (`handlerVars`), and the pids it expanded (`Trap.pids`) over it. */
+function runSetTraps(st: State, ctx: Ctx): void {
   for (const trap of st.traps) {
+    const vars = new Map([...handlerVars(trap, st.vars), ...(trap.pids ?? [])]);
     try {
       runText(
         trap.text,
         "the EXIT trap",
-        { ...clone(st), source: trap.file, traps: [] },
+        subshell(st, { source: trap.file, vars }),
         ctx,
         trap.site
       );
@@ -969,20 +1130,36 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
   switch (node.type) {
     case "Statement": {
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
+      if (node.background) {
+        // `command &` runs in a subshell: nothing it changes (a handler, a variable, the working
+        // directory, the arguments) reaches this shell, and the handlers it sets run at its end.
+        const before = st.output;
+        const child = subshell(st);
+        walkNode(node.command, child, ctx, pipeIn);
+        runSetTraps(child, ctx);
+        if (outputChanged(before, child.output)) st.output = undefined;
+        st.backgroundStarted = true;
+        return;
+      }
       walkNode(node.command, st, ctx, pipeIn);
-      if (node.background) st.backgroundStarted = true;
       return;
     }
     case "Command":
       handleCommand(node, st, ctx, pipeIn);
       return;
     case "Pipeline": {
-      // Every part of a pipeline runs in a subshell of its own.
+      // `! command`, a pipeline of one, runs in this shell; bash runs every part of a longer
+      // pipeline in a subshell of its own.
+      if (node.commands.length === 1) {
+        for (const command of node.commands) walkNode(command, st, ctx, pipeIn);
+        return;
+      }
       const before = st.output;
       const parts: State[] = [];
       for (const [index, command] of node.commands.entries()) {
-        const part = clone(st);
+        const part = subshell(st);
         walkNode(command, part, ctx, index > 0);
+        runSetTraps(part, ctx);
         parts.push(part);
       }
       if (parts.some((part) => outputChanged(before, part.output))) st.output = undefined;
@@ -999,8 +1176,9 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     case "Subshell": {
       const before = st.output;
-      const child = clone(st);
+      const child = subshell(st);
       walkList(node.body.commands, child, ctx);
+      runSetTraps(child, ctx);
       if (outputChanged(before, child.output)) st.output = undefined;
       return;
     }
@@ -1092,14 +1270,21 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
     }
-    case "Function":
-      st.functions.set(node.name.value, { body: node.body, source: st.source, file: st.script });
+    case "Function": {
+      let callee = definitions.get(node);
+      if (callee === undefined) {
+        callee = [{ body: node.body, source: st.source, file: st.script }];
+        definitions.set(node, callee);
+      }
+      st.functions.set(node.name.value, callee);
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
+    }
     case "Coproc": {
       const before = st.output;
-      const child = clone(st);
+      const child = subshell(st);
       walkNode(node.body, child, ctx, false);
+      runSetTraps(child, ctx);
       if (outputChanged(before, child.output)) st.output = undefined;
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
@@ -1456,6 +1641,9 @@ function runFunction(
   } catch (error) {
     locateRefusal(error, definition.file);
   }
+  // A call runs in this shell, so everything the body leaves stays: the copy-back rule on `merge`
+  // holds here too. Not carried: the positional parameters, which bash restores to the caller's
+  // when a function returns; `files` and `pidFiles` (shared); and `runningFunctions`.
   outer.vars = child.vars;
   outer.exported = child.exported;
   outer.arrays.clear();
@@ -1503,9 +1691,25 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   const base = path.basename(name);
   const rest = argv.slice(1);
   const site = invocation.site;
-  const functionDefinition = outer.functions.get(base);
-  if (functionDefinition !== undefined) {
-    runFunction(base, functionDefinition, rest, outer, ctx);
+  const callee = outer.functions.get(base);
+  if (callee !== undefined) {
+    const [only] = callee;
+    if (callee.length === 1 && only !== undefined) {
+      runFunction(base, only, rest, outer, ctx);
+      return;
+    }
+    // Each definition a branch may have left, and the command where a path left none, runs as a
+    // branch of its own.
+    const runs = callee.map((definition) => {
+      const run = clone(outer);
+      if (definition !== undefined) runFunction(base, definition, rest, run, ctx);
+      else {
+        run.functions.delete(base);
+        dispatch(invocation, run, ctx);
+      }
+      return run;
+    });
+    merge(outer, runs);
     return;
   }
   const stdoutRedirected = invocation.redirects.some(
@@ -1617,11 +1821,52 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "trap": {
-      const text = literalText(operands(rest, "").operands[0]?.exp);
+      const [handler, ...conditions] = operands(rest, "").operands;
+      if (handler === undefined) return;
+      const text = literalText(handler.exp);
+      // A condition the guard cannot read could be any condition. A removal resets only the
+      // conditions it can read, so `trap - "$x"` resets nothing; a handler set for one records
+      // UNREADABLE_CONDITION, which no removal names, so it stays and is walked.
+      const readable = conditions.map((arg) => literalText(arg.exp));
+      const signals = readable.map((condition) =>
+        condition === undefined ? UNREADABLE_CONDITION : trapSignal(condition)
+      );
+      const handled = signals.length === 0 ? ["EXIT"] : signals;
+      const file = outer.script ?? outer.source;
       if (text === "-") {
-        outer.traps = [];
-      } else if (text !== undefined && !text.startsWith("-")) {
-        outer.traps = [...outer.traps, { text, site, file: outer.script ?? outer.source }];
+        // `trap - INT` resets INT and leaves every other handler, the EXIT one included; `trap -`
+        // naming nothing is a usage error that resets nothing.
+        const named = readable.flatMap((condition) =>
+          condition === undefined ? [] : [trapSignal(condition)]
+        );
+        outer.traps = outer.traps.flatMap((trap) => {
+          const signals = trap.signals.filter((signal) => !named.includes(signal));
+          return signals.length === 0 ? [] : [{ ...trap, signals }];
+        });
+      } else if (
+        text === undefined &&
+        handler.exp.every((piece) => piece.kind === "literal" || piece.descendantPid)
+      ) {
+        // A double-quoted handler that expanded only this shell's children's pids when it was set
+        // (`trap "kill $pid" EXIT`): its text reads each pid back from a name bound to it.
+        const pids = new Map<string, Expansion>();
+        const handlerText = handler.exp
+          .map((piece) => {
+            if (piece.kind === "literal") return piece.text;
+            const name = `__legion_guard_trap_pid_${pids.size}`;
+            pids.set(name, [piece]);
+            return `\${${name}}`;
+          })
+          .join("");
+        outer.traps = [...outer.traps, { text: handlerText, site, signals: handled, file, pids }];
+      } else if (text === undefined) {
+        throw new Refusal(
+          site.snippet,
+          site.line,
+          `the guard cannot read the handler this \`trap\` sets, \`${handler.text}\` (${handler.exp.find((piece) => piece.kind !== "literal")?.why ?? "a value the guard cannot know"}), so it cannot check what runs when this shell exits; write the handler out, or put it in a function`
+        );
+      } else if (!text.startsWith("-")) {
+        outer.traps = [...outer.traps, { text, site, signals: handled, file }];
       }
       return;
     }
@@ -2479,9 +2724,25 @@ function runFile(
         );
       }
       const child: State = { ...clone(st), source: content, script: abs, depth: st.depth + 1 };
-      child.positional = positional.map((arg) => arg.exp);
+      const operands = positional.map((arg) => arg.exp);
+      // `. file` with no operands runs the file with this shell's own arguments.
+      child.positional = source && operands.length === 0 ? st.positional : operands;
       walkScript(parse(content), child, ctx, !source);
       if (source) {
+        // A sourced file runs in this shell, so everything it leaves stays: the copy-back rule on
+        // `merge` holds here too. Not carried here: `files` and `pidFiles` (shared), and
+        // `runningFunctions`. The arguments: with no operands the file changed this shell's own,
+        // which stay changed; with operands bash restores this shell's afterwards unless the file
+        // set new ones with `set`, which the guard does not tell apart from a `shift` bash undoes,
+        // so a list the file touched is unknown. Touched, not changed: `shift` and `set --` each
+        // leave a new list, so identity tells a file that never touched them from one that ran
+        // `set -- "$@"`, which bash keeps.
+        st.positional =
+          operands.length === 0
+            ? child.positional
+            : child.positional === operands
+              ? st.positional
+              : undefined;
         st.vars = child.vars;
         st.exported = child.exported;
         st.arrays.clear();

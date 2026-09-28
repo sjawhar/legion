@@ -27,6 +27,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   card,
@@ -663,7 +664,7 @@ function AgentRow({
               title={label}
               type="button"
             >
-              <span className="min-w-0 truncate">{label}</span>
+              <TruncatedText className="min-w-0">{label}</TruncatedText>
               <span className={disclosureButtonText}>
                 <ChevronIcon expanded={expanded} />
               </span>

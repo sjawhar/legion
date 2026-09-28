@@ -24,6 +24,7 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../theme/classes";
+import { TruncatedText } from "./TruncatedText";
 
 /** The popover's `w-64` plus the 8 px margin the anchor keeps from each viewport edge. */
 const popoverWidth = 272;
@@ -263,6 +264,7 @@ export function MultiSelect({
               >
                 {visibleOptions.map((option) => {
                   const isSelected = selected.includes(option);
+                  const label = optionLabel(option);
                   return (
                     <button
                       aria-selected={isSelected}
@@ -281,7 +283,9 @@ export function MultiSelect({
                       >
                         {isSelected ? "✓" : ""}
                       </span>
-                      <span className="min-w-0 flex-1 truncate">{optionLabel(option)}</span>
+                      <TruncatedText className="min-w-0 flex-1" title={label}>
+                        {label}
+                      </TruncatedText>
                     </button>
                   );
                 })}

@@ -45,6 +45,7 @@ import {
   type Fetch,
   ghGraphql,
   githubGraphql,
+  type LegionAppLogins,
   parsePullNumber,
   parseRepo,
   type RunGh,
@@ -245,7 +246,10 @@ function isGitHubIssueWriteInvocation(args: string[]): boolean {
   );
 }
 
-async function redeemGitHubToken(deps: GrantRedemptionDeps, withoutGrant = ""): Promise<string> {
+async function redeemGitHubToken(
+  deps: GrantRedemptionDeps,
+  withoutGrant = ""
+): Promise<{ token: string; legionAppLogins: LegionAppLogins | null }> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -271,7 +275,7 @@ async function redeemGitHubToken(deps: GrantRedemptionDeps, withoutGrant = ""): 
   if (!payload.success) {
     throw new CliError("Daemon returned an invalid GitHub credential response");
   }
-  return payload.data.token;
+  return { token: payload.data.token, legionAppLogins: payload.data.legionAppLogins ?? null };
 }
 
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
@@ -285,7 +289,7 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
       `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on ${deps.env.LEGION_ISSUE || "the Dispatch issue"}`
     );
   }
-  const token = await redeemGitHubToken(deps);
+  const { token } = await redeemGitHubToken(deps);
   const childEnv = buildGitHubTokenEnv(token, deps.env);
   // Never the pane's own `gh` shim (first on its PATH for life) — see `pathWithoutWorkerBin`.
   if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH);
@@ -295,8 +299,9 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
 
 /** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it
  * (with `gh`, as whoever the caller's own `gh` authenticates as), resolves every unresolved review
- * thread whose newest comment is its opener's own submitted `Accepted:` reply and names every
- * other unresolved thread as left open (`resolveAcceptedThreads`). GitHub grants resolving to the
+ * thread whose newest comment is its opener's own submitted `Accepted:` reply, or, on a bot's
+ * thread, the Legion review App's, and names every other unresolved thread as left open
+ * (`resolveAcceptedThreads`). GitHub grants resolving to the
  * pull request's author's App, and the implementer opens every Legion pull request
  * (`daemon/AGENTS.md`, GitHub Apps), so the threads the reviewer opens are resolved here by the
  * implementer — before every push that answers a review — and by the merger once more before
@@ -319,16 +324,24 @@ export async function cmdThreadsResolve(
       "--gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh"
     );
   }
-  const graphql = options.gh
-    ? ghGraphql(deps.runGh, deps.env, repo, deps.stderr)
-    : githubGraphql(
-        deps.fetch,
-        await redeemGitHubToken(
-          deps,
-          "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
-        )
+  // Which accounts are Legion's own role Apps, and which is the review App, is the daemon's to say
+  // on the grant's gh-token answer. `--gh` has no grant, so it knows none, and no thread then
+  // counts as a bot's.
+  const credential = options.gh
+    ? null
+    : await redeemGitHubToken(
+        deps,
+        "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
       );
-  await resolveAcceptedThreads(graphql, repo, number, deps.log);
+  await resolveAcceptedThreads(
+    credential
+      ? githubGraphql(deps.fetch, credential.token)
+      : ghGraphql(deps.runGh, deps.env, repo, deps.stderr),
+    repo,
+    number,
+    credential?.legionAppLogins ?? null,
+    deps.log
+  );
 }
 
 export async function cmdCredential(deps: CredentialCommandDeps): Promise<void> {

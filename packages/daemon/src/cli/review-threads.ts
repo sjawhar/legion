@@ -16,20 +16,35 @@ export interface GitHubRepo {
   name: string;
 }
 
-/** An unresolved review thread reduced to what the acceptance rule reads. A thread has no URL of
- * its own on GitHub; `url` is its opening comment's, the anchor the PR page scrolls to.
- * `newestPending` marks a newest comment that is a draft in a pending, unsubmitted review. */
+/** An unresolved review thread reduced to the facts the rule reads. A thread has no URL of its own
+ * on GitHub; `url` is its opening comment's, the anchor the PR page scrolls to. `newestPending`
+ * marks a newest comment that is a draft in a pending, unsubmitted review. */
 interface UnresolvedThread {
   id: string;
   url: string;
   openerLogin: string | null;
+  openerTypename: string | null;
   newestLogin: string | null;
+  newestTypename: string | null;
   newestBody: string;
   newestPending: boolean;
 }
 
+/** Each Legion role App's login, keyed by its App role, as the daemon's gh-token answer names them
+ * (`<slug>[bot]`); absent when it could not read every one. */
+export interface LegionAppLogins {
+  implement: string;
+  review: string;
+}
+
+/** Legion's role Apps as the rule reads them: every App's login through `botSlug`, and the review
+ * App's. Null is a session that cannot know them (`--gh`, or a daemon that named none), and then
+ * no thread counts as a bot's. */
+type LegionApps = { logins: ReadonlySet<string>; review: string } | null;
+
 interface Actor {
   login: string;
+  __typename?: string;
 }
 
 interface ThreadsPage {
@@ -40,7 +55,12 @@ interface ThreadsPage {
         nodes: Array<{
           id: string;
           isResolved: boolean;
-          opener: { nodes: Array<{ url: string; author: Actor | null }> };
+          opener: {
+            nodes: Array<{
+              url: string;
+              author: Actor | null;
+            }>;
+          };
           newest: {
             // `state` is absent only when the query stops selecting it; listUnresolvedThreads refuses that.
             nodes: Array<{ author: Actor | null; body: string; state?: "PENDING" | "SUBMITTED" }>;
@@ -59,8 +79,8 @@ const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $af
         nodes {
           id
           isResolved
-          opener: comments(first: 1) { nodes { url author { login } } }
-          newest: comments(last: 1) { nodes { author { login } body state } }
+          opener: comments(first: 1) { nodes { url author { __typename login } } }
+          newest: comments(last: 1) { nodes { author { __typename login } body state } }
         }
       }
     }
@@ -133,29 +153,82 @@ function graphqlData<T>(response: unknown): T {
   return payload.data;
 }
 
-/** The reviewer's acceptance reply form: the comment begins `Accepted:` after any leading space,
- * tab, CR or LF (`Accepted: fixed in <commit> — <one line>` or `Accepted: not a defect —
- * <reason>`). Anything else — `Still open: …`, `Accepted (round 2): …`, a bare "fixed", or
- * `Accepted:` after other whitespace such as a no-break space — is not an acceptance. The Go CLI
- * trims the same four characters (`threads.go`), so both CLIs apply one rule. */
-function isAcceptance(body: string): boolean {
-  return body.replace(/^[ \t\r\n]+/, "").startsWith("Accepted:");
+/** How both ends of every login comparison read an account: GitHub GraphQL names a Bot by its bare
+ * slug and the daemon by its git identity, `<slug>[bot]`, and a login's case never distinguishes
+ * two accounts. */
+function botSlug(login: string): string {
+  return login.replace(/\[bot\]$/, "").toLowerCase();
 }
 
-/** True when the thread's newest comment is its opener's own submitted `Accepted:` reply: the
- * account that raised the point is the one closing it, and nobody has replied since. A draft in a
- * pending review never counts. GitHub shows a draft only to its author, so without this check an
- * outside-a-pane caller posting as the opener's account would resolve on an acceptance the
- * reviewer has not submitted. For every caller, then, a thread is resolved only when its newest
- * submitted comment is the opener's `Accepted:`. A caller still sees its own drafts, and one newer
- * than a submitted acceptance can only make that caller leave the thread open. */
-function acceptedByOpener(thread: UnresolvedThread): boolean {
-  return (
-    !thread.newestPending &&
+function legionApps(logins: LegionAppLogins | null): LegionApps {
+  if (logins === null) return null;
+  return { logins: new Set(Object.values(logins).map(botSlug)), review: botSlug(logins.review) };
+}
+
+/** A reply's first line, after any leading space, tab, CR or LF. */
+function firstLine(body: string): string {
+  return (body.replace(/^[ \t\r\n]+/, "").split("\n")[0] ?? "").replace(/\r$/, "");
+}
+
+/** The reviewer's acceptance reply form: its first line begins `Accepted:` (`Accepted: fixed in
+ * <commit> — <one line>` or `Accepted: not a defect — <reason>`). Only space, tab, CR and LF may
+ * precede it; `Still open: …`, `Accepted (round 2): …`, a bare "fixed", or `Accepted:` after other
+ * whitespace such as a no-break space is not an acceptance. The Go CLI trims the same four
+ * characters (`threads.go`). */
+function isAcceptance(body: string): boolean {
+  return firstLine(body).startsWith("Accepted:");
+}
+
+type Resolution = { how: string } | { reason: string };
+
+/** Whether a thread is resolved and on whose acceptance, or, when it is left open, why. Every
+ * account it compares is identified by what GitHub asserts about it, its type and its login
+ * together, never a login alone: a login is a string anyone may register (the review App's bare
+ * slug is a free username on a public repository), and every weaker proxy for "who wrote this" was
+ * forgeable by someone who read the rule. The subject of a finding never closes it: a thread
+ * closes only on its newest submitted comment being an `Accepted:` from its opener, or, on a
+ * thread a Bot that is none of Legion's role Apps opened, from Legion's review App. GitHub cannot
+ * tell a CI bot from a person whose `gh` is routed to an App, and such a bot may never accept, so
+ * the Legion reviewer is the independent party who adjudicates its finding; the reviewer may
+ * accept a finding an App-routed person raised, which the resolved line then says. The pull
+ * request's author (the implementer, whose App the merger shares) closes nothing: its reply is an
+ * answer, not an acceptance. The reviewer's acceptance need not follow an answer from the author:
+ * accepting is the reviewer's judgement of the finding, and a required prior reply would be a
+ * ceremony the implementer could satisfy with an empty one. A draft in a pending review never
+ * counts, since GitHub shows it only to its author. The Go CLI applies the same rule (`threads.go`
+ * resolution), and the two share their vectors.
+ */
+function resolution(thread: UnresolvedThread, apps: LegionApps): Resolution {
+  if (thread.newestPending) return { reason: "an unsubmitted draft in a pending review" };
+  const acceptance = isAcceptance(thread.newestBody);
+  if (
+    acceptance &&
     thread.openerLogin !== null &&
-    thread.openerLogin === thread.newestLogin &&
-    isAcceptance(thread.newestBody)
-  );
+    thread.newestLogin !== null &&
+    thread.openerTypename === thread.newestTypename &&
+    botSlug(thread.openerLogin) === botSlug(thread.newestLogin)
+  ) {
+    return { how: "its opener's acceptance" };
+  }
+  if (thread.openerTypename !== "Bot") return { reason: "not an acceptance" };
+  if (apps === null) {
+    return {
+      reason:
+        "not its opener's acceptance, and this session cannot identify Legion's review App, so a bot's thread closes only on its opener's Accepted:",
+    };
+  }
+  if (thread.openerLogin !== null && apps.logins.has(botSlug(thread.openerLogin))) {
+    return { reason: "not an acceptance" };
+  }
+  if (
+    acceptance &&
+    thread.newestTypename === "Bot" &&
+    thread.newestLogin !== null &&
+    botSlug(thread.newestLogin) === apps.review
+  ) {
+    return { how: "the Legion reviewer's acceptance of a bot's thread" };
+  }
+  return { reason: "not its opener's or the Legion reviewer's acceptance" };
 }
 
 /** Every unresolved review thread on the pull request, across every page of `reviewThreads`. */
@@ -193,7 +266,9 @@ async function listUnresolvedThreads(
         id: node.id,
         url: opener.url,
         openerLogin: opener.author?.login ?? null,
+        openerTypename: opener.author?.__typename ?? null,
         newestLogin: newest.author?.login ?? null,
+        newestTypename: newest.author?.__typename ?? null,
         newestBody: newest.body,
         newestPending: newest.state === "PENDING",
       });
@@ -225,29 +300,31 @@ export function parsePullNumber(value: string): number {
 }
 
 /** The policy `legion threads resolve` applies, as whichever identity `graphql` carries: every
- * unresolved review thread whose newest comment is its opener's own submitted `Accepted:` reply is
- * resolved (one `resolveReviewThread` per thread, in GitHub's order) and every other unresolved
- * thread is named as left open; no unresolved thread at all prints exactly `no unresolved
- * threads`. A thread GitHub refuses rejects with a CliError naming the thread's URL and GitHub's
- * message, and nothing after it is attempted. */
+ * unresolved review thread `resolution` finds accepted is resolved (one `resolveReviewThread` per
+ * thread, in GitHub's order) and printed as `resolved <url> — <whose acceptance>`, and every other
+ * unresolved thread is named as left open with the reason; no unresolved thread at all prints
+ * exactly `no unresolved threads`. `legionAppLogins` is the daemon's gh-token answer, null when it
+ * named none. A thread GitHub refuses rejects with a CliError naming the thread's URL and
+ * GitHub's message, and nothing after it is attempted. */
 export async function resolveAcceptedThreads(
   graphql: GraphqlCall,
   repo: GitHubRepo,
   number: number,
+  legionAppLogins: LegionAppLogins | null,
   log: (line: string) => void
 ): Promise<void> {
+  const apps = legionApps(legionAppLogins);
   const threads = await listUnresolvedThreads(graphql, repo, number);
   if (threads.length === 0) {
     log("no unresolved threads");
     return;
   }
   for (const thread of threads) {
-    if (!acceptedByOpener(thread)) {
-      const by = thread.newestLogin ?? "an unknown account";
-      const reason = thread.newestPending
-        ? "an unsubmitted draft in a pending review"
-        : "not an acceptance";
-      log(`left open ${thread.url} — newest reply by ${by} is ${reason}`);
+    const outcome = resolution(thread, apps);
+    if ("reason" in outcome) {
+      log(
+        `left open ${thread.url} — newest reply by ${thread.newestLogin ?? "an unknown account"} is ${outcome.reason}`
+      );
       continue;
     }
     try {
@@ -256,6 +333,6 @@ export async function resolveAcceptedThreads(
       const message = error instanceof Error ? error.message : String(error);
       throw new CliError(`resolveReviewThread failed for ${thread.url}: ${message}`);
     }
-    log(`resolved ${thread.url}`);
+    log(`resolved ${thread.url} — ${outcome.how}`);
   }
 }

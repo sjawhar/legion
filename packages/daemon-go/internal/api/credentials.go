@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -39,6 +41,10 @@ type GrantCredentialRequest struct {
 type GitHubTokenResponse struct {
 	Token    string `json:"token"`
 	AppLogin string `json:"appLogin"`
+	// LegionAppLogins, on gh-token alone, is the login of each role App this daemon leases for the
+	// repository owner, keyed by its App role: the accounts Legion's own roles post as
+	// (legionAppLogins).
+	LegionAppLogins map[appauth.AppRole]string `json:"legionAppLogins,omitempty"`
 }
 
 // GitCredentialResponse is the logical credential a git helper writes in the credential protocol.
@@ -132,7 +138,39 @@ func (s *server) githubToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, GitHubTokenResponse{Token: lease.Token, AppLogin: lease.Identity.Name})
+	logins := s.legionAppLogins(r.Context())
+	// The logins are read after the grant's claim was checked, so the claim is checked again before
+	// the token leaves, as leaseForGrant checks it after its own await.
+	if !s.claimHolds(grant) {
+		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
+		return
+	}
+	writeJSON(w, http.StatusOK, GitHubTokenResponse{Token: lease.Token, AppLogin: lease.Identity.Name, LegionAppLogins: logins})
+}
+
+// legionAppLogins is the login of each role App the daemon leases for the repository owner, keyed
+// by its App role: the accounts Legion's own roles post as. `legion threads resolve` keeps their
+// threads out of its bot-thread rule and takes the review App's Accepted: on a thread a bot outside
+// them opened. It is nil when any App's identity cannot be read: the command then cannot tell a
+// Legion App from any other bot, and a bot's thread closes only on its opener's Accepted:. The
+// failure turns that rule off for the answer, so it is logged, at most once a minute, since every
+// `legion gh` call in every pane asks for a token.
+func (s *server) legionAppLogins(ctx context.Context) map[appauth.AppRole]string {
+	logins := map[appauth.AppRole]string{}
+	for _, role := range appauth.Roles {
+		lease, err := s.tokens.Token(ctx, role, s.githubOwner)
+		if err != nil || lease.Identity.Name == "" {
+			s.loginsWarnedMu.Lock()
+			if time.Since(s.loginsWarned) >= time.Minute {
+				s.loginsWarned = time.Now()
+				s.log.Warn("api: could not read a Legion App's login, so legion threads resolve applies no bot-thread rule for this answer (logged at most once a minute)", "role", role, "error", err)
+			}
+			s.loginsWarnedMu.Unlock()
+			return nil
+		}
+		logins[role] = lease.Identity.Name
+	}
+	return logins
 }
 
 func (s *server) gitCredential(w http.ResponseWriter, r *http.Request) {
