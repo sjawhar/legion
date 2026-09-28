@@ -78,7 +78,7 @@ func TestAKubernetesDaemonRefusesAClusterWithoutAgentSandboxBeforeItsBoot(t *tes
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, cfg, quietLogger(), overrides{clock: stillClock{}})
+	err := run(ctx, cfg, quietLogger(), overrides{clock: stillClock{}, listen: heldListen})
 	if err == nil {
 		t.Fatal("the daemon booted on a cluster without Agent Sandbox")
 	}
@@ -128,10 +128,10 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 	}
 }
 
-// Under kubernetes the worker stream is TCP on the daemon's bind and worker_stream_port, the one
-// address the runtime hands every pod's shim, and the runtime is given the workflow's App tokens.
-// The host's own agent machinery never runs: no pane launcher is installed, no Dispatch token file
-// is written, and the workflow's boot has no worker-bin stage.
+// Under kubernetes the worker stream is TCP on the daemon's bind, at a port the listener resolves
+// itself, the one address the runtime hands every pod's shim, and the runtime is given the
+// workflow's App tokens. The host's own agent machinery never runs: no pane launcher is
+// installed, no Dispatch token file is written, and the workflow's boot has no worker-bin stage.
 func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
@@ -155,14 +155,22 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	record.mu.Lock()
 	address, apps := record.address, record.apps
 	record.mu.Unlock()
-	stream := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	if address != "tcp://"+stream {
-		t.Errorf("the runtime was told to have shims dial %q, want tcp://%s", address, stream)
+	prefix := "tcp://" + cfg.Bind + ":"
+	if !strings.HasPrefix(address, prefix) || strings.HasSuffix(address, ":0") {
+		t.Fatalf("the runtime was told to have shims dial %q, want %s<bound port>", address, prefix)
 	}
-	if conn, err := net.DialTimeout("tcp", stream, time.Second); err != nil {
-		t.Errorf("the worker stream does not accept on %s: %v", stream, err)
+	if conn, err := net.DialTimeout("tcp", strings.TrimPrefix(address, "tcp://"), time.Second); err != nil {
+		t.Errorf("the worker stream does not accept on %s: %v", address, err)
 	} else {
 		conn.Close()
+	}
+	// Both sides here are the listener's own Addr(), so this pins what p.newRuntime was told, not
+	// the address itself: that the returned address names a real worker-stream socket is proved
+	// by internal/stream's dial-and-hello tests, not by the dial above (a bare TCP connect, which
+	// proves only that something is listening). A requested-rather-than-bound address fails the
+	// :0 check above.
+	if bound := bootField(t, logged.String(), "workerStream"); address != bound {
+		t.Errorf("the runtime was told to have shims dial %q, want %q, the address the stream listener bound", address, bound)
 	}
 	if apps != tokens {
 		t.Errorf("the runtime was handed App tokens %v, want the workflow's", apps)
@@ -174,6 +182,49 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	}
 	if strings.Contains(logged.String(), `"stage":"worker-bin"`) {
 		t.Errorf("the boot installed the pane launcher:\n%s", logged.String())
+	}
+}
+
+// bootField is one field of the "legion daemon started" line in a daemon's JSON log.
+func bootField(t *testing.T, logged, field string) string {
+	t.Helper()
+	for _, line := range strings.Split(logged, "\n") {
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil || entry["msg"] != "legion daemon started" {
+			continue
+		}
+		value, ok := entry[field].(string)
+		if !ok {
+			t.Fatalf("the boot line has no string %s: %s", field, line)
+		}
+		return value
+	}
+	t.Fatalf("no \"legion daemon started\" line in:\n%s", logged)
+	return ""
+}
+
+// The address every pod's shim dials derives from runtime.kubernetes's own worker_stream_port
+// (readSandbox, kubernetes.go), not a value prepare hardcodes or leaves at the zero a test's own
+// config happens to carry: a daemon configured with a distinctive port builds its plan's stream
+// address from exactly that port, before anything binds. The test above proves the bound address
+// is real and dialable; it cannot catch worker_stream_port being ignored, since testConfig's own
+// port is always 0 — this does, by configuring a nonzero one and checking prepare()'s plan
+// directly, with no listener bound.
+func TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
+	if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+	cfg.WorkerStreamPort = 47381
+
+	p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if want := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)); p.stream != want {
+		t.Errorf("prepare's worker stream address = %q, want %q (derived from worker_stream_port)", p.stream, want)
 	}
 }
 
@@ -360,7 +411,7 @@ func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
+		response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
