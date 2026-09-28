@@ -543,7 +543,8 @@ func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageR
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
 		return
 	}
 	sessionID := strings.TrimSpace(r.PathValue("session_id"))
@@ -551,33 +552,47 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "session id is required")
 		return
 	}
-	target := "session:" + sessionID
 	// Newest activity first: a conversation moves up when anyone replies anywhere in it, so the
-	// 50 read here, and the newest one the Agents page opens on, are the ones that last moved,
-	// not the ones last started. A follow-up to an old direct message is never outside the window
-	// while a newer, quiet one is inside it.
+	// newest one the Agents page opens on is the one that last moved, not the one last started.
+	// The window is the 50 that moved last, plus every conversation holding a reply this viewer
+	// has not read, in one activity order. The unread term has no ceiling: it is exactly what
+	// `unread_replies` counts (both read the shared unreadDirectRepliesCTE), so the count and the
+	// window can never disagree. Bounding it would reopen LEGION-301's defect at a higher
+	// threshold - a reply counted, never shown, and then marked read by a watermark that only
+	// moves forward.
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select m.id::text, m.issue_key, m.author, m.body, m.target, m.in_reply_to::text, m.created_at
-		from messages m
-		cross join lateral (
-			with recursive chain as (
-				select c.id, c.created_at from messages c where c.in_reply_to = m.id
-				union all
-				select c.id, c.created_at from messages c join chain on c.in_reply_to = chain.id
-			)
-			select max(created_at) as latest from chain
-		) activity
-		where m.in_reply_to is null
-		  and (
-			m.target = $1
-			or exists (
-				select 1 from message_deliveries d
-				where d.message_id = m.id and d.session_id = $2
-			)
-		  )
-		order by greatest(m.created_at, activity.latest) desc, m.id desc
-		limit 50
-	`, target, sessionID)
+		with recursive`+unreadDirectRepliesCTE+`,
+		roots as (
+			select m.id::text as id, m.issue_key, m.author, m.body, m.target,
+			       m.in_reply_to::text as in_reply_to, m.created_at,
+			       greatest(m.created_at, activity.latest) as moved,
+			       exists (select 1 from unread_direct_replies u where u.root_id = m.id) as unread
+			from messages m
+			cross join lateral (
+				with recursive chain as (
+					select c.id, c.created_at from messages c where c.in_reply_to = m.id
+					union all
+					select c.id, c.created_at from messages c join chain on c.in_reply_to = chain.id
+				)
+				select max(created_at) as latest from chain
+			) activity
+			where m.in_reply_to is null
+			  and (
+				m.target = 'session:' || $3::text
+				or exists (
+					select 1 from message_deliveries d
+					where d.message_id = m.id and d.session_id = $3::text
+				)
+			  )
+		),
+		ranked as (
+			select *, row_number() over (order by moved desc, id desc) as rank from roots
+		)
+		select id, issue_key, author, body, target, in_reply_to, created_at
+		from ranked
+		where rank <= 50 or unread
+		order by moved desc, id desc
+	`, canonicalLogin(actor.ID), actor.ID, sessionID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

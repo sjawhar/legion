@@ -191,6 +191,49 @@ test("a session's replies to a direct message are unread until the live view sho
   }
 });
 
+// The unread count is over every direct message the human sent, while the conversation list is a
+// window of the fifty that moved last. A reply outside that window used to be counted, never
+// rendered, and then marked read by the mark this view writes - so the live view has to show it.
+test("the live view shows an unread reply from outside the fifty most active conversations", async ({
+  browser,
+}) => {
+  const session = { id: planner.session_id, kind: "session" as const };
+  const asked = await createAgentMessage(planner.session_id, {
+    body: "Did the migration land?",
+    delivery: "aside",
+  });
+  await replyToMessageDelivery(
+    asked.id,
+    { attempt: 1, body: "No - it rolled back, here is why." },
+    session
+  );
+  // Fifty conversations that moved after it, each answered, so the one above is the fifty-first.
+  for (let index = 0; index < 50; index += 1) {
+    const busier = await createAgentMessage(planner.session_id, {
+      body: `Busier question ${index}`,
+      delivery: "aside",
+    });
+    await replyToMessageDelivery(
+      busier.id,
+      { attempt: 1, body: `Busier answer ${index}` },
+      session
+    );
+  }
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto("/agents");
+    await expect(page.getByText("New replies 51").first()).toBeVisible();
+
+    await page.goto(`/agents/${planner.session_id}/live`);
+    await expect(page.getByTestId("agent-thread")).toContainText("Did the migration land?");
+    await expect(page.getByText("No - it rolled back, here is why.")).toBeVisible();
+    await expect(page.getByText(/^New repl/)).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
 test("a session that has published nothing renders as empty, not as a conversation", async ({
   browser,
 }) => {

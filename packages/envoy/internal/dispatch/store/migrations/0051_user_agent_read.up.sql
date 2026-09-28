@@ -17,6 +17,21 @@ create table user_agent_read (
   primary key (login, session_id)
 );
 
+-- One index for both readers of the shared unread definition (api/unread_replies.go's
+-- unreadDirectRepliesCTE): its predicate is that fragment's own root filter, and its key the
+-- login the fragment matches roots on. GET /api/v1/me/agents/state reads it on every page load
+-- and GET /agents/{id}/messages on every conversation list; nothing else on `messages` serves
+-- that predicate, so without it each is a sequential scan of every message ever stored.
+create index messages_direct_roots on messages (lower(author->>'id'))
+  where issue_key is null and in_reply_to is null and target like 'session:%'
+    and author->>'kind' = 'user';
+
+-- The conversation window's own candidates are every root targeted at one session, which had no
+-- index either: the root scan walked every message whose in_reply_to is null. Measured on 1.8M
+-- messages with 2,251 conversations for one session, the window query runs in 1.0 s with this
+-- index and 1.9 s without it.
+create index messages_session_roots on messages (target) where in_reply_to is null;
+
 -- Every direct conversation that already exists is read as of this migration. Before it there
 -- was no read mark to count against, so without this every reply ever stored would turn unread
 -- at the deploy, for sessions long gone as well as live ones. The keys match the unread count's

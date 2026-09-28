@@ -171,46 +171,25 @@ type userAgentState struct {
 // refused.
 const agentStateCutoffSkew = time.Minute
 
-// userAgentStatesQuery reads a viewer's per-session state ($1 is the login as the actor id spells
-// it, which keys the Clear; $3 is its canonical form, which keys the read mark and matches the
-// viewer's own direct messages), narrowed to one session when $2 is not null: every session with
-// a Clear (user_agent_state) or a read mark (user_agent_read), and every session with a reply the
-// viewer has not read. A reply is unread
-// when a session wrote it anywhere under a direct message this viewer sent that session (an
-// issue-less message targeted at it, a broadcast's copy included) and it is newer than the
-// viewer's read mark and Clear, whichever is later.
+// userAgentStatesQuery reads a viewer's per-session state: every session with a Clear
+// (user_agent_state) or a read mark (user_agent_read), and every session holding a reply the
+// viewer has not read, whose count is the rows of the shared unreadDirectRepliesCTE. Parameters
+// are that fragment's own ($1 canonical login, $2 raw actor id, $3 one session or null).
 const userAgentStatesQuery = `
-	with recursive roots as (
-		select id, substr(target, length('session:') + 1) as session_id
-		from messages
-		where issue_key is null and in_reply_to is null and target like 'session:%'
-		  and author->>'kind' = 'user' and lower(author->>'id') = $3
-		  and ($2::text is null or target = 'session:' || $2::text)
-	),
-	replies as (
-		select m.id, m.author, m.created_at, roots.session_id
-		from messages m join roots on m.in_reply_to = roots.id
-		union all
-		select m.id, m.author, m.created_at, replies.session_id
-		from messages m join replies on m.in_reply_to = replies.id
-	),
+	with recursive` + unreadDirectRepliesCTE + `,
 	state as (
 		select coalesce(cleared.session_id, marked.session_id) as session_id, cleared.cleared_before, marked.read_through
 		from (
 			select session_id, cleared_before from user_agent_state
-			where login = $1 and ($2::text is null or session_id = $2::text)
+			where login = $2 and ($3::text is null or session_id = $3::text)
 		) cleared
 		full join (
 			select session_id, read_through from user_agent_read
-			where login = $3 and ($2::text is null or session_id = $2::text)
+			where login = $1 and ($3::text is null or session_id = $3::text)
 		) marked on marked.session_id = cleared.session_id
 	),
 	unread as (
-		select replies.session_id, count(*)::int as unread
-		from replies left join state on state.session_id = replies.session_id
-		where replies.author->>'kind' = 'session'
-		  and replies.created_at > coalesce(greatest(state.read_through, state.cleared_before), '-infinity')
-		group by replies.session_id
+		select session_id, count(*)::int as unread from unread_direct_replies group by session_id
 	)
 	select coalesce(state.session_id, unread.session_id), state.cleared_before, state.read_through,
 	       coalesce(unread.unread, 0)
@@ -223,7 +202,7 @@ const userAgentStatesQuery = `
 // login, so one person is one viewer however their identity source spells them; the Clear
 // (user_agent_state, migration 0033) is keyed on the raw actor id.
 func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, login, sessionID, canonicalLogin(login))
+	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, canonicalLogin(login), login, sessionID)
 	if err != nil {
 		return nil, err
 	}

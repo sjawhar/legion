@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // directConversation is a human's direct message to s1 on a fresh handler whose fake listener
@@ -16,18 +18,19 @@ import (
 // dispatch_message does, asking to follow up once it has answered.
 func directConversation(t *testing.T) (http.Handler, model.Message, func(body string) *httptest.ResponseRecorder, *[]map[string]any) {
 	t.Helper()
-	return directConversationFrom(t, "alice")
+	handler, _, root, reply, sent := directConversationFrom(t, "alice")
+	return handler, root, reply, sent
 }
 
 // directConversationFrom is directConversation with the message sent by login, spelled as the
 // identity source spells it.
-func directConversationFrom(t *testing.T, login string) (http.Handler, model.Message, func(body string) *httptest.ResponseRecorder, *[]map[string]any) {
+func directConversationFrom(t *testing.T, login string) (http.Handler, *store.Store, model.Message, func(body string) *httptest.ResponseRecorder, *[]map[string]any) {
 	t.Helper()
 	live := true
 	sent := []map[string]any{}
 	listener := sessionListener(t, &live, &sent)
 	t.Cleanup(listener.Close)
-	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
 		"body": "Where is the dashboard?", "delivery": "aside",
 	}, login)
@@ -40,7 +43,7 @@ func directConversationFrom(t *testing.T, login string) (http.Handler, model.Mes
 			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
 		})
 	}
-	return handler, root, reply, &sent
+	return handler, database, root, reply, &sent
 }
 
 // A session that answers a human's direct message and then has more to say posts that follow-up
@@ -335,7 +338,7 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 // direct messages they sent count unread under any casing of it, and a read mark written under
 // one casing clears them under another.
 func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T) {
-	handler, _, reply, _ := directConversationFrom(t, "Alice")
+	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
 	first := decodeBody[model.Message](t, reply("On it."))
 	for _, login := range []string{"Alice", "alice", "ALICE"} {
 		if got := unreadReplies(t, handler, login, "s1"); got.UnreadReplies != 1 {
@@ -431,4 +434,258 @@ func TestAgentConversationsListByLatestActivity(t *testing.T) {
 		}
 		t.Fatalf("conversations = %v, want [%s (answered last) %s]", ids, root.ID, newer.ID)
 	}
+}
+
+// backdate moves a conversation and everything in it into the past, so newer traffic outranks it
+// by activity.
+func backdate(t *testing.T, database *store.Store, rootID string, by time.Duration) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		with recursive thread as (
+			select id from messages where id = $1::uuid
+			union all
+			select m.id from messages m join thread on m.in_reply_to = thread.id
+		)
+		update messages set created_at = created_at - $2::interval where id in (select id from thread)
+	`, rootID, by.String()); err != nil {
+		t.Fatalf("backdate %s: %v", rootID, err)
+	}
+}
+
+// seedAnsweredConversations writes count conversations targeted at s1 and answered by it, as the
+// traffic of a session that has been busy: issue-anchored when issueKey is not nil, direct
+// otherwise.
+func seedAnsweredConversations(t *testing.T, database *store.Store, count int, issueKey *string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		select $2, '{"kind":"user","id":"alice"}'::jsonb, 'Busier question ' || n, 'session:s1', null
+		from generate_series(1, $1) as n
+	`, count, issueKey); err != nil {
+		t.Fatalf("seed roots: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		select issue_key, '{"kind":"session","id":"s1"}'::jsonb, 'Busier answer', target, id
+		from messages
+		where in_reply_to is null and body like 'Busier question %'
+	`); err != nil {
+		t.Fatalf("seed replies: %v", err)
+	}
+}
+
+// windowHolds reports whether the conversation list a viewer reads holds rootID.
+func windowHolds(t *testing.T, handler http.Handler, rootID string) (bool, int) {
+	t.Helper()
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	for _, read := range window {
+		if read.Message.ID == rootID {
+			return true, len(window)
+		}
+	}
+	return false, len(window)
+}
+
+// The unread count is over every direct message the viewer sent the session, while the
+// conversation list is a window: a reply the count counts has to be in the list, or opening the
+// view marks it read through a watermark that only moves forward and nothing ever shows it.
+func TestUnreadReplyOutsideTheActivityWindowIsStillListed(t *testing.T) {
+	handler, database, root, reply, _ := directConversationFrom(t, "alice")
+	answer := decodeBody[model.Message](t, reply("Here is the answer you needed."))
+	backdate(t, database, root.ID, 24*time.Hour)
+	seedAnsweredConversations(t, database, 50, nil)
+
+	// Every seeded conversation is a direct message this viewer sent, so all 51 replies count,
+	// one more than the activity window holds.
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 51 {
+		t.Fatalf("before opening the view: %#v, want all 51 replies counted unread", got)
+	}
+	held, size := windowHolds(t, handler, root.ID)
+	if !held {
+		t.Fatalf("window of %d conversations does not hold %s, whose reply %s is counted unread: opening the view would mark it read unseen", size, root.ID, answer.ID)
+	}
+}
+
+// The count covers direct messages alone, while the window covers every conversation targeted at
+// the session, so ordinary issue traffic is enough to push a direct conversation out of it.
+func TestIssueTrafficDoesNotPushAnUnreadDirectReplyOutOfTheWindow(t *testing.T) {
+	handler, database, root, reply, _ := directConversationFrom(t, "alice")
+	answer := decodeBody[model.Message](t, reply("No - it rolled back, here is why."))
+	backdate(t, database, root.ID, 24*time.Hour)
+	issue := createInteractionIssue(t, handler, "WINDOW", "Issue traffic", "seed")
+	seedAnsweredConversations(t, database, 50, &issue.Key)
+
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 1 {
+		t.Fatalf("before opening the view: %#v, want the direct reply counted unread", got)
+	}
+	held, size := windowHolds(t, handler, root.ID)
+	if !held {
+		t.Fatalf("window of %d conversations, all issue traffic, does not hold the direct conversation %s, whose reply %s is counted unread", size, root.ID, answer.ID)
+	}
+	read := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": answer.CreatedAt,
+	}, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+		t.Fatalf("after reading the reply the view showed: %#v, want nothing unread", got)
+	}
+}
+
+// seedConversations writes count conversations targeted at s1, each answered by it, authored by
+// login: issue-anchored when issueKey is not nil, direct otherwise. The bodies are tagged so a
+// test can tell one batch from another.
+func seedConversations(t *testing.T, database *store.Store, count int, issueKey *string, login, tag string) {
+	t.Helper()
+	author := fmt.Sprintf(`{"kind":"user","id":%q}`, login)
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		select $2, $3::jsonb, $4 || ' question ' || n, 'session:s1', null
+		from generate_series(1, $1) as n
+	`, count, issueKey, author, tag); err != nil {
+		t.Fatalf("seed %s roots: %v", tag, err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		select issue_key, '{"kind":"session","id":"s1"}'::jsonb, $1 || ' answer', target, id
+		from messages where in_reply_to is null and body like $1 || ' question %'
+	`, tag); err != nil {
+		t.Fatalf("seed %s replies: %v", tag, err)
+	}
+}
+
+// The unread term of the window has no ceiling, because it is exactly what the count counts: 60
+// unread conversations come back beside the 50 that moved last, and one read mark over the window
+// clears the badge with every reply already shown.
+func TestTheWindowReturnsEveryUnreadConversationBesideTheFiftyMostActive(t *testing.T) {
+	handler, database, _, _, _ := directConversationFrom(t, "alice")
+	seedConversations(t, database, 60, nil, "alice", "unread")
+	issue := createInteractionIssue(t, handler, "WINDOW", "Issue traffic", "seed")
+	seedConversations(t, database, 50, &issue.Key, "alice", "busier")
+
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 60 {
+		t.Fatalf("before opening the view: %#v, want 60 unread replies", got)
+	}
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	seen := map[string]bool{}
+	unread, busier := 0, 0
+	var newestReply string
+	for _, read := range window {
+		if seen[read.Message.ID] {
+			t.Fatalf("conversation %s is in the window twice", read.Message.ID)
+		}
+		seen[read.Message.ID] = true
+		switch {
+		case strings.HasPrefix(read.Message.Body, "unread question"):
+			unread++
+		case strings.HasPrefix(read.Message.Body, "busier question"):
+			busier++
+		}
+		for _, reply := range read.Replies {
+			if reply.Author.Kind == "session" && (newestReply == "" || reply.CreatedAt.Format(time.RFC3339Nano) > newestReply) {
+				newestReply = reply.CreatedAt.Format(time.RFC3339Nano)
+			}
+		}
+	}
+	// 110: every unread conversation, and the 50 that moved last. The fixture's own unanswered
+	// question is neither - nothing in it is unread, and 110 conversations moved after it.
+	if unread != 60 || busier != 50 || len(window) != 110 {
+		t.Fatalf("window = %d conversations (%d unread, %d busier), want 110 (60 unread and the 50 most active)", len(window), unread, busier)
+	}
+
+	read := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": newestReply,
+	}, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+		t.Fatalf("after one read mark over the window: %#v, want nothing unread", got)
+	}
+}
+
+// The count and the window read one definition of an unread reply (unreadDirectRepliesCTE), so
+// for every session the count equals the number of unread replies the window shows. The login is
+// mixed-case on purpose: with a login whose raw and canonical forms are the same, a call site
+// passing the raw one would pass this test while the window read zero roots.
+func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
+	handler, database, root, reply, _ := directConversationFrom(t, "Alice")
+	first := decodeBody[model.Message](t, reply("The first answer."))
+	seedConversations(t, database, 2, nil, "Alice", "direct")
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		select null, '{"kind":"user","id":"Alice"}'::jsonb, 'To another session', 'session:s2', null
+	`); err != nil {
+		t.Fatalf("seed s2: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		select null, '{"kind":"session","id":"s2"}'::jsonb, 'An answer from s2', target, id
+		from messages where body = 'To another session'
+	`); err != nil {
+		t.Fatalf("seed s2 reply: %v", err)
+	}
+	// Fifty busier conversations after the direct ones, so every unread direct conversation is
+	// outside the fifty most active and comes back only through the window's unread term - the
+	// term whose login the call site supplies.
+	issue := createInteractionIssue(t, handler, "SHARED", "Issue traffic", "seed")
+	seedConversations(t, database, 50, &issue.Key, "Alice", "busier")
+	// One conversation read, so a session's counted replies are the ones after its mark.
+	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s2/state", map[string]any{
+		"read_through": time.Now().UTC().Format(time.RFC3339Nano),
+	}, "alice")
+	if marked.Code != http.StatusOK {
+		t.Fatalf("mark s2 read: status=%d body=%s", marked.Code, marked.Body.String())
+	}
+
+	states := decodeBody[map[string]userAgentState](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/agents/state", nil, "ALICE"))
+	if len(states) == 0 {
+		t.Fatalf("no per-session state for ALICE, want s1 and s2")
+	}
+	for _, session := range []string{"s1", "s2"} {
+		counted := states[session].UnreadReplies
+		shown := unreadRepliesShownInWindow(t, handler, session, states[session])
+		if counted != shown {
+			t.Fatalf("session %s: unread_replies=%d, window shows %d unread replies; the count and the window disagree", session, counted, shown)
+		}
+	}
+	if states["s1"].UnreadReplies == 0 {
+		t.Fatalf("session s1 counts nothing unread, so the equality above proves nothing; first reply %s", first.ID)
+	}
+	if root.Target == nil {
+		t.Fatalf("the fixture's root has no target")
+	}
+}
+
+// unreadRepliesShownInWindow counts, in the conversation list a viewer reads, the session's
+// replies to that viewer's own direct messages that are newer than their read mark and Clear -
+// what the Agents page and the live view show them as unread.
+func unreadRepliesShownInWindow(t *testing.T, handler http.Handler, sessionID string, state userAgentState) int {
+	t.Helper()
+	watermark := time.Time{}
+	for _, at := range []*string{state.ReadThrough, state.ClearedBefore} {
+		if at == nil {
+			continue
+		}
+		if parsed := parseTimestamp(t, *at); parsed.After(watermark) {
+			watermark = parsed
+		}
+	}
+	// Read as the identity source spells the login, as the state above is: a call site that
+	// passed the raw form to the shared fragment would read a window over no roots at all.
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+sessionID+"/messages", nil, "ALICE"))
+	shown := 0
+	for _, read := range window {
+		if read.Message.IssueKey != nil || read.Message.Author.Kind != "user" ||
+			!strings.EqualFold(read.Message.Author.ID, "alice") {
+			continue
+		}
+		for _, reply := range read.Replies {
+			if reply.Author.Kind == "session" && reply.Author.ID == sessionID && reply.CreatedAt.After(watermark) {
+				shown++
+			}
+		}
+	}
+	return shown
 }
