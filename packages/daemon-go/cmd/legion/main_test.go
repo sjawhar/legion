@@ -387,6 +387,33 @@ func TestStartCheckConfigValidatesAndStartsNothing(t *testing.T) {
 	}
 }
 
+// A file given as an argument is refused rather than ignored: before, `legion start --check-config
+// broken.yaml` checked ./legion.yaml instead and answered Config OK for the file it never read.
+func TestStartRefusesAConfigurationGivenAsAnArgument(t *testing.T) {
+	legionState(t)
+	config, _ := workflowConfig(t, 13370, "")
+	dir := filepath.Dir(config)
+	if err := os.Rename(config, filepath.Join(dir, "legion.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "broken.yaml"), []byte("worker_cap: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--check-config", "broken.yaml"}, &out, &errb)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stdout %q stderr %q", code, out.String(), errb.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing: the file checked was not the one named", out.String())
+	}
+	if !strings.Contains(errb.String(), `unexpected argument "broken.yaml"`) || !strings.Contains(errb.String(), "--config") {
+		t.Fatalf("stderr = %q, want it to name the argument and --config", errb.String())
+	}
+}
+
 // Every broken variant is refused naming its key, and the command exits non-zero — including a
 // key only boot read before (the Dispatch bearer's file, internal/daemon/workflow.go bind).
 func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {

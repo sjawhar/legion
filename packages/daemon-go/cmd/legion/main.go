@@ -94,6 +94,12 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	// The configuration is named only by --config: a file given as an argument would otherwise be
+	// ignored while ./legion.yaml is read, and --check-config would vouch for the wrong file.
+	if flags.NArg() > 0 {
+		fmt.Fprintf(stderr, "legion start: unexpected argument %q; name the configuration with --config <file>\n", flags.Arg(0))
+		return 2
+	}
 	if *checkConfig {
 		return checkStartConfig(*configPath, stdout, stderr)
 	}

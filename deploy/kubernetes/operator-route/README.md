@@ -32,7 +32,7 @@ deploy/kubernetes/operator-route/apply.sh --context <kubectl context> --base-url
 
 `--context` is required, and the output names the cluster it wrote to. Then put `pod.yml` under
 `runtime.kubernetes.pod` in the deployment's `legion.yaml` and run
-`legion start --check-config <file>`, which applies the daemon's own collision checks.
+`legion start --config <file> --check-config`, which applies the daemon's own collision checks.
 
 `pod.yml` mounts both files by `subPath`, and the kubelet never refreshes a `subPath` mount. A
 changed ConfigMap therefore reaches only pods created after the change; a running pod keeps the
