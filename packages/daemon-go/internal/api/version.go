@@ -1,7 +1,7 @@
 package api
 
-// GoDaemonAPIVersion is the contract this daemon speaks with the Oh My Pi plugin: the
-// `/legion/v1/claims/*` and `/legion/v1/state` shapes the plugin's Go client parses strictly
+// GoDaemonAPIVersion is the contract this daemon speaks with the Oh My Pi plugin: the claim,
+// credential, workflow, controller and state shapes the plugin's Go client parses strictly
 // (`packages/pi-envoy/src/legion/go-daemon-client.ts`, through
 // `packages/contracts/src/legion-go-api.ts`), and the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
@@ -24,4 +24,7 @@ package api
 // (agentSecretsLogin) on GET /legion/v1/state.
 //
 // 10: LEGION-208 -- POST /legion/v1/roots/close, the Go legion tool's close_root.
-const GoDaemonAPIVersion = 10
+//
+// 11: LEGION-208 -- legionAppLogins on POST /legion/v1/gh-token, each Legion role App's login keyed by
+// its App role.
+const GoDaemonAPIVersion = 11

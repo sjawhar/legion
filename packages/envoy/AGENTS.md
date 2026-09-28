@@ -929,8 +929,16 @@ then marked read by a watermark that only moves forward (LEGION-301). The unread
 ceiling, deliberately: a cap would reopen that defect at a higher threshold. It grows only while
 the badge is ignored, since opening the view clears it - a practical bound, not a structural one,
 and the same bound the root scan's cost has, both indexed by `messages_direct_roots` (`0051`).
-Each root comes back with its deliveries and reply chains (a reply in the chain carries its own
-deliveries). Dispatch resolves a role holder
+Each root comes back with its deliveries, its reply chains (a reply in the chain carries its own
+deliveries), and `unread`, that conversation's own verdict from the same fragment - the server's
+answer to "does this hold a reply the caller has not read", so no client derives it from
+timestamps. The scope is a root this viewer targeted at this session: a root the session only
+received a delivery of (targeted at a role, or at another session) is listed by activity like any
+other conversation and is never unread. The candidate roots are read as two indexed branches
+unioned (`messages_session_roots`, `message_deliveries_session`), and their activity as one
+recursive walk over every candidate's replies: an OR across `messages` and `message_deliveries`
+can use no index, and a lateral walk per candidate estimates high enough to put the plan past
+`jit_above_cost`, which cost 780 ms of compilation per read on production's own data. Dispatch resolves a role holder
 and checks the selected session's capabilities for every attempt, then makes the synchronous
 listener send; `POST /api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same
 callers, same `actor` rule for bearers) in the `delivery` mode it names - the attempt's own mode

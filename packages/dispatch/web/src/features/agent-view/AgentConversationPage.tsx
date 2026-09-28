@@ -99,8 +99,11 @@ export function AgentConversationPage(): ReactNode {
   );
   const presence = STATUS[status];
 
+  // The shell hands this route the viewport below its header as a flex column; the page takes
+  // all of it and the thread is its only scroller, so the header and composer never leave the
+  // screen and the document never scrolls.
   return (
-    <div className="flex h-[calc(100vh-6rem)] flex-col" data-testid="agent-conversation">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-conversation">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Link className={`text-sm ${linkText} ${linkHoverText}`} to="/agents">
           ← Agents

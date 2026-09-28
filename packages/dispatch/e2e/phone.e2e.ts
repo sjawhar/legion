@@ -1,17 +1,22 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { setLiveSessions } from "./agents";
 
 import {
+  createArtifactAsk,
   createAsk,
+  createBroadcast,
   createComment,
   createIssue,
+  createIssueArtifact,
   createMessage,
   createProject,
   createProjectDocument,
+  editArtifact,
   getAsk,
+  patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, selectEditorText } from "./editor";
-import { resetDatabase } from "./seed";
+import { insertExternalLink, resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -410,5 +415,209 @@ test("an inline link keeps its line and grows its hit box without covering its n
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
   } finally {
     await context.close();
+  }
+});
+
+/** The name is cut, and whatever cuts it draws an ellipsis. `text-overflow` applies to a block
+ *  container's own text, never to a flex container's, and below 1280 px every link is an
+ *  inline-flex box: a `truncate` link there clipped its name mid-word with nothing to say so. */
+async function expectEllipsis(link: Locator): Promise<void> {
+  const state = await link.evaluate((node) => {
+    const clippers = [node, ...node.querySelectorAll("*")].filter(
+      (element) =>
+        element.scrollWidth > element.clientWidth &&
+        getComputedStyle(element).overflowX === "hidden"
+    );
+    const container = node.parentElement?.getBoundingClientRect();
+    return {
+      clipperStyles: clippers.map((element) => {
+        const style = getComputedStyle(element);
+        return `${style.display}/${style.textOverflow}`;
+      }),
+      overflowsContainer:
+        container === undefined || node.getBoundingClientRect().right > container.right + 0.5,
+    };
+  });
+  expect.soft(state.overflowsContainer).toBe(false);
+  expect.soft(state.clipperStyles.length).toBeGreaterThan(0);
+  for (const style of state.clipperStyles) {
+    expect.soft(style).toMatch(/^(block|inline-block)\/ellipsis$/);
+  }
+}
+
+/** A control whose lines are meant to stack: each child starts at the same left edge, below the
+ *  one before it. Below 1280 px `styles.css` makes every link and button an inline-flex row,
+ *  which puts a `block` control's lines side by side. */
+async function expectStacked(control: Locator): Promise<void> {
+  const rows = await control.evaluate((node) =>
+    [...node.children].map((child) => {
+      const box = child.getBoundingClientRect();
+      return { bottom: box.bottom, left: box.left, top: box.top };
+    })
+  );
+  expect.soft(rows.length).toBeGreaterThan(1);
+  for (const [index, row] of rows.entries()) {
+    if (index === 0) continue;
+    expect.soft(Math.abs(row.left - rows[0].left)).toBeLessThanOrEqual(1);
+    expect.soft(row.top).toBeGreaterThanOrEqual(rows[index - 1].bottom - 1);
+  }
+}
+
+test("a long name ends in an ellipsis wherever a link or control truncates it", async ({
+  browser,
+}, testInfo) => {
+  test.setTimeout(90_000);
+  const longName =
+    "legion-go-coordinator-stage-4b-sandbox-tree-runbook-with-every-checkpoint-and-the-evidence-each-one-left-on-the-production-cluster.md";
+  const longQuestion =
+    "Which checkpoint gates the sandbox tree before the daemon restarts mid-tree: the fence, the node release, or the linger close that follows both of them?";
+  const longUrl = `https://docs.example.com/runbooks/legion/go-coordinator/stage-4b/${"sandbox-tree-".repeat(4)}checkpoints`;
+  const longRoute = "role:merge-queue-controller-for-legion";
+  // A label's 40-character cap is still wider than the label picker's 256 px popover.
+  const longLabel = "sandbox-tree-checkpoint-evidence-runbook";
+  const longBroadcast =
+    "Please rebase every open pull request onto main before the stage 4b sandbox tree run, and post the new head in this thread once its checks have gone green again";
+  const longTitle =
+    "LEGION-67 implementer: long names end in an ellipsis wherever a link or a control truncates them, on a 390 px phone and in a 280 px margin as much as on a 1280 px desktop";
+  const longTitledSession = {
+    actor: {
+      kind: "session" as const,
+      id: "e2e-long-title",
+      origin: { session_title: longTitle, tmux: "legion:1.2" },
+    },
+    as: "agent" as const,
+  };
+  await setLiveSessions([
+    {
+      capabilities: ["aside", "btw"],
+      dir: "/w/legion",
+      last_seen: Date.now(),
+      roles: ["legion-implementer"],
+      session_id: "e2e-long-title",
+      title: longTitle,
+    },
+  ]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Stage 4b runbook" });
+  await patchIssue(issue.key, { route: longRoute });
+  const labelled = await createIssue({ project: "CORE", title: "Labelled" });
+  await patchIssue(labelled.key, { labels: [longLabel] });
+  await createIssueArtifact(issue.key, { content: "# Runbook\n", name: longName });
+  const document = await createProjectDocument("CORE", { content: "# Runbook\n", name: longName });
+  await createArtifactAsk(
+    document.artifact.id,
+    { question: "Does this runbook cover it?" },
+    longTitledSession
+  );
+  await insertExternalLink(issue.key, longUrl);
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown: `:::ask{#gate urgency="high" multiple="false" state="open"}\n${longQuestion}\n\n- Fence\n- Release\n:::\n`,
+          op: "insert",
+        },
+      ],
+    },
+    session
+  );
+  await createBroadcast({ body: longBroadcast, delivery: "btw", session_ids: ["e2e-long-title"] });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width: 1280 });
+  }
+  try {
+    // The project's Documents list: the name ends in an ellipsis, and its kind and time share
+    // one line rather than stacking in a second column.
+    await page.goto("/projects/CORE/documents");
+    const row = page.getByRole("listitem", { name: longName });
+    await expectEllipsis(row.getByRole("link", { name: longName }));
+    const details = await row.evaluate((node) => {
+      const time = node.querySelector("time");
+      const kind = [...node.querySelectorAll("span")].find((span) => span.textContent === "doc");
+      if (time === null || kind === undefined) {
+        throw new Error("the row has no kind or time");
+      }
+      return { kind: kind.getBoundingClientRect().top, time: time.getBoundingClientRect().top };
+    });
+    expect.soft(Math.abs(details.kind - details.time)).toBeLessThanOrEqual(4);
+    // The cut name is still readable: the full name is the truncated text's title.
+    await expect
+      .soft(row.getByRole("link", { name: longName }).locator("[title]"))
+      .toHaveAttribute("title", longName);
+
+    await page.goto(`/issues/${issue.key}/artifacts`);
+    const artifactLink = page.getByRole("link", { exact: true, name: longName });
+    await expectEllipsis(artifactLink);
+    await expect.soft(artifactLink.locator("[title]")).toHaveAttribute("title", longName);
+
+    await page.goto("/?view=everyone");
+    const inboxOwner = page.locator("[data-inbox-owner]", { hasText: longName });
+    await expectEllipsis(inboxOwner);
+    // The row already opens a RefPreview hover card (referenceTriggerProps); a native title
+    // would draw its own tooltip over that card, so this row carries none.
+    await expect.soft(inboxOwner.locator("[title]")).toHaveCount(0);
+    // The ask's author chip is a flex button that opens the session's handles.
+    const authorChip = page.getByRole("button", { exact: true, name: longTitle });
+    await expectEllipsis(authorChip);
+    await expect
+      .soft(authorChip.getByText(longTitle, { exact: true }))
+      .toHaveAttribute("title", longTitle);
+
+    await page.goto(`/issues/${issue.key}`);
+    await expectEllipsis(page.getByRole("link", { name: longUrl }));
+    await expectEllipsis(
+      page
+        .getByRole("navigation", { name: "Open decisions" })
+        .getByRole("link", { name: longQuestion })
+    );
+    // A button that is inline-flex by its own classes is the same case as a link below 1280 px.
+    await expectEllipsis(page.locator(`button[title="${longRoute}"]`));
+
+    // The @ picker's detail line: a role's detail names the live session that holds it.
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const composer = page.getByRole("form", { name: "Comment composer" });
+    await composer.getByLabel("Comment").fill("@");
+    const roleOption = composer
+      .getByRole("listbox", { name: "Mention suggestions" })
+      .getByRole("option", { exact: true, name: "legion-implementer" });
+    await expectEllipsis(roleOption);
+    await expectStacked(roleOption);
+    const detail = roleOption.getByText(new RegExp(`^${longTitle} · /w/legion · `));
+    await expect.soft(detail).toHaveAttribute("title", (await detail.textContent()) ?? "");
+
+    // A label picker row.
+    await page.goto(`/issues/${labelled.key}`);
+    await page.getByRole("button", { name: "Edit labels" }).click();
+    const labelOption = page.getByRole("option", { exact: true, name: longLabel });
+    await expectEllipsis(labelOption);
+    await expect
+      .soft(labelOption.getByText(longLabel, { exact: true }))
+      .toHaveAttribute("title", longLabel);
+
+    // An agent row's name, which opens the row. The button carries the full name itself.
+    await page.goto("/agents");
+    const agentName = page.getByRole("heading", { name: longTitle }).getByRole("button");
+    await expectEllipsis(agentName);
+    await expect.soft(agentName).toHaveAttribute("title", longTitle);
+
+    // A sent broadcast's row: the metadata line, then the message's first line under it.
+    await page.goto("/agents/broadcasts");
+    const broadcastRow = page
+      .getByRole("region", { name: "Broadcasts" })
+      .getByRole("listitem")
+      .getByRole("link");
+    await expectEllipsis(broadcastRow);
+    await expectStacked(broadcastRow);
+    await expect
+      .soft(broadcastRow.getByText(longBroadcast, { exact: true }))
+      .toHaveAttribute("title", longBroadcast);
+  } finally {
+    await context.close();
+    await setLiveSessions([]);
   }
 });

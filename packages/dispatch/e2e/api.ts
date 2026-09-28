@@ -12,6 +12,7 @@ import type {
   Ask,
   AskFollower,
   AskRead,
+  BroadcastCreated,
   BroadcastRead,
   BroadcastSummary,
   Comment,
@@ -19,6 +20,7 @@ import type {
   CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
+  CreateBroadcastInput,
   CreateCommentInput,
   CreateMessageInput,
   CreateProjectInput,
@@ -432,6 +434,13 @@ export function createAgentMessage(
     input,
     options
   );
+}
+
+export function createBroadcast(
+  input: CreateBroadcastInput,
+  options: ApiOptions = {}
+): Promise<BroadcastCreated> {
+  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {

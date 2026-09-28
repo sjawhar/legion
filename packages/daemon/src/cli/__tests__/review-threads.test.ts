@@ -5,19 +5,38 @@ const PR = "https://github.com/sjawhar/legion/pull/993#discussion_r";
 
 interface Comment {
   login: string;
+  /** The author's account type (GitHub GraphQL's actor `__typename`); a person's unless named. */
+  type?: OpenerType;
   body: string;
   /** GitHub's `PullRequestReviewCommentState`; a PENDING comment is visible only to its author. */
   state?: "PENDING" | "SUBMITTED";
 }
 
-function thread(id: string, n: number, opener: string, newest: Comment, isResolved = false) {
+/** Whether a thread's opener is a person or a bot account (GitHub GraphQL's actor `__typename`). */
+type OpenerType = "User" | "Bot";
+
+/** One review thread as GitHub's GraphQL serves it; `by` is its opener's type (a Bot's login is its
+ * bare slug). */
+function thread(
+  id: string,
+  n: number,
+  opener: string,
+  newest: Comment,
+  { isResolved = false, by = "User" }: { isResolved?: boolean; by?: OpenerType } = {}
+) {
   return {
     id,
     isResolved,
-    opener: { nodes: [{ url: `${PR}${n}`, author: { login: opener } }] },
+    opener: {
+      nodes: [{ url: `${PR}${n}`, author: { __typename: by, login: opener } }],
+    },
     newest: {
       nodes: [
-        { author: { login: newest.login }, body: newest.body, state: newest.state ?? "SUBMITTED" },
+        {
+          author: { __typename: newest.type ?? "User", login: newest.login },
+          body: newest.body,
+          state: newest.state ?? "SUBMITTED",
+        },
       ],
     },
   };
@@ -47,13 +66,17 @@ function served(query: string, page: unknown): unknown {
   return JSON.parse(JSON.stringify(page), (key, value) => (key === "state" ? undefined : value));
 }
 
-/** A fake daemon + GitHub: `/legion/v1/gh-token` redeems the grant; `api.github.com/graphql`
- * serves `reviewThreads` pages keyed by the `after` cursor ("null" for the first page) and
- * records every `resolveReviewThread` mutation. */
+/** The daemon's gh-token answer naming both of Legion's role Apps by App role. */
+const LEGION_APP_LOGINS = { implement: "legion-implementer[bot]", review: "legion-reviewer[bot]" };
+
+/** A fake daemon + GitHub: `/legion/v1/gh-token` redeems the grant, naming `legionAppLogins` (none
+ * when null); `api.github.com/graphql` serves `reviewThreads` pages keyed by the `after`
+ * cursor ("null" for the first page) and records every `resolveReviewThread` mutation. */
 function fakeGitHub(
   pages: Record<string, unknown>,
   mutation: (threadId: string) => unknown,
-  tokenStatus = 200
+  tokenStatus = 200,
+  legionAppLogins: Record<string, string> | null = LEGION_APP_LOGINS
 ) {
   const requests: Request[] = [];
   const graphqlBodies: Array<{ query: string; variables: Record<string, unknown> }> = [];
@@ -63,7 +86,11 @@ function fakeGitHub(
     requests.push(request);
     if (new URL(request.url).pathname === "/legion/v1/gh-token") {
       if (tokenStatus !== 200) return new Response("nope", { status: tokenStatus });
-      return Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" });
+      return Response.json({
+        token: "scoped-token",
+        appLogin: "legion-implementer[bot]",
+        ...(legionAppLogins === null ? {} : { legionAppLogins }),
+      });
     }
     const body = (await request.json()) as { query: string; variables: Record<string, unknown> };
     graphqlBodies.push(body);
@@ -145,7 +172,7 @@ describe("legion threads resolve", () => {
               4,
               reviewer,
               { login: reviewer, body: "Accepted: not a defect — by design." },
-              true
+              { isResolved: true }
             ),
             thread("T5", 5, reviewer, {
               login: reviewer,
@@ -175,10 +202,10 @@ describe("legion threads resolve", () => {
 
     expect(github.resolved).toEqual(["T1", "T5"]);
     expect(lines).toEqual([
-      `resolved ${PR}1`,
+      `resolved ${PR}1 — its opener's acceptance`,
       `left open ${PR}2 — newest reply by legion-reviewer is not an acceptance`,
       `left open ${PR}3 — newest reply by legion-implementer is not an acceptance`,
-      `resolved ${PR}5`,
+      `resolved ${PR}5 — its opener's acceptance`,
       `left open ${PR}6 — newest reply by legion-reviewer is not an acceptance`,
     ]);
     const grant = github.requests[0] as Request;
@@ -262,7 +289,7 @@ describe("legion threads resolve", () => {
               1,
               reviewer,
               { login: reviewer, body: "Accepted: fixed in abc1234" },
-              true
+              { isResolved: true }
             ),
           ],
           null
@@ -338,7 +365,7 @@ describe("legion threads resolve", () => {
 
     expect(gh.resolved).toEqual(["T1"]);
     expect(lines).toEqual([
-      `resolved ${PR}1`,
+      `resolved ${PR}1 — its opener's acceptance`,
       `left open ${PR}2 — newest reply by sjawhar-agent is not an acceptance`,
       `left open ${PR}3 — newest reply by legion-reviewer is not an acceptance`,
     ]);
@@ -382,7 +409,7 @@ describe("legion threads resolve", () => {
       }
     );
 
-    expect(lines).toEqual([`resolved ${PR}1`]);
+    expect(lines).toEqual([`resolved ${PR}1 — its opener's acceptance`]);
     // The query's and the mutation's, verbatim: the mutation acts as that token's owner.
     expect(written).toEqual([warning, warning]);
   });
@@ -430,7 +457,7 @@ describe("legion threads resolve", () => {
       expect(run.resolved).toEqual(["T2"]);
       expect(lines).toEqual([
         `left open ${PR}1 — newest reply by sjawhar-agent is an unsubmitted draft in a pending review`,
-        `resolved ${PR}2`,
+        `resolved ${PR}2 — its opener's acceptance`,
       ]);
     }
   });
@@ -464,9 +491,235 @@ describe("legion threads resolve", () => {
 
     expect(github.resolved).toEqual(["T1"]);
     expect(lines).toEqual([
-      `resolved ${PR}1`,
+      `resolved ${PR}1 — its opener's acceptance`,
       `left open ${PR}2 — newest reply by legion-reviewer is not an acceptance`,
     ]);
+  });
+
+  it("closes a bot's thread on the Legion reviewer's acceptance, never the author's reply, as the Go CLI does", async () => {
+    // The shared vector with threads_test.go. The subject of a finding never closes it. A thread a
+    // Bot opened that is none of Legion's role Apps (a CI bot, or a person whose gh is routed to an
+    // App: GitHub cannot tell them apart) closes on its opener's Accepted:, or on Legion's review
+    // App's, the independent party, and the resolved line says which. The pull request author's
+    // reply (Fixed in, Declined) closes nothing. The review App's Accepted: counts only as the first
+    // line of a submitted comment, after space, tab, CR or LF alone, whatever the login's case. A
+    // thread either Legion App opened closes only on its opener's Accepted:, and a person's thread
+    // is unchanged. An account is its type and its login together: a User who registered the review
+    // App's bare slug is not the review App, nor the Bot opener of that name.
+    const reviewer = "legion-reviewer";
+    const author = "legion-implementer";
+    const vectors: Array<[string, string, OpenerType, Comment]> = [
+      [
+        "reviewer-accepts",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "Bot", body: "Accepted: fixed in 1a2b3c4 — moved the guard" },
+      ],
+      [
+        "reviewer-accepts-any-case",
+        "claude",
+        "Bot",
+        {
+          login: "Legion-Reviewer",
+          type: "Bot",
+          body: " \t\r\nAccepted: not a defect — the loop is bounded",
+        },
+      ],
+      [
+        "author-declined",
+        "claude",
+        "Bot",
+        { login: author, type: "Bot", body: "Declined: the loop is bounded" },
+      ],
+      [
+        "author-fixed",
+        "claude",
+        "Bot",
+        { login: author, type: "Bot", body: "Fixed in 1a2b3c4: moved the guard" },
+      ],
+      [
+        "author-accepts",
+        "claude",
+        "Bot",
+        { login: author, type: "Bot", body: "Accepted: my own fix" },
+      ],
+      [
+        "reviewer-still-open",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "Bot", body: "Still open: the loop is not bounded" },
+      ],
+      [
+        "reviewer-nbsp",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "Bot", body: "\u00a0Accepted: fixed" },
+      ],
+      [
+        "reviewer-second-line",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "Bot", body: "Thanks.\nAccepted: fixed" },
+      ],
+      [
+        "reviewer-draft",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "Bot", body: "Accepted: drafted", state: "PENDING" },
+      ],
+      [
+        "routed-person",
+        "sjawhar-agent",
+        "Bot",
+        { login: reviewer, type: "Bot", body: "Accepted: fixed in 1a2b3c4 — moved the guard" },
+      ],
+      [
+        "routed-person-own",
+        "sjawhar-agent",
+        "Bot",
+        { login: "sjawhar-agent", type: "Bot", body: "Accepted: fixed" },
+      ],
+      [
+        "reviewer-thread",
+        reviewer,
+        "Bot",
+        { login: author, type: "Bot", body: "Fixed in 1a2b3c4: moved the guard" },
+      ],
+      [
+        "implementer-app-thread",
+        author,
+        "Bot",
+        { login: reviewer, type: "Bot", body: "Accepted: fine" },
+      ],
+      ["human", "octocat", "User", { login: reviewer, type: "Bot", body: "Accepted: fixed" }],
+      [
+        "impostor-reviewer",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "User", body: "Accepted: fixed" },
+      ],
+      [
+        "impostor-opener",
+        reviewer,
+        "Bot",
+        { login: reviewer, type: "User", body: "Accepted: fixed" },
+      ],
+    ];
+    const github = fakeGitHub(
+      {
+        null: page(
+          vectors.map(([id, opener, by, newest], n) => thread(id, n + 1, opener, newest, { by })),
+          null
+        ),
+      },
+      resolvedOk
+    );
+    const lines: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993" },
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
+        log: (line) => lines.push(line),
+      }
+    );
+
+    const byReviewer = "the Legion reviewer's acceptance of a bot's thread";
+    const notEither = "not its opener's or the Legion reviewer's acceptance";
+    expect(github.resolved).toEqual([
+      "reviewer-accepts",
+      "reviewer-accepts-any-case",
+      "routed-person",
+      "routed-person-own",
+    ]);
+    expect(lines).toEqual([
+      `resolved ${PR}1 — ${byReviewer}`,
+      `resolved ${PR}2 — ${byReviewer}`,
+      `left open ${PR}3 — newest reply by ${author} is ${notEither}`,
+      `left open ${PR}4 — newest reply by ${author} is ${notEither}`,
+      `left open ${PR}5 — newest reply by ${author} is ${notEither}`,
+      `left open ${PR}6 — newest reply by ${reviewer} is ${notEither}`,
+      `left open ${PR}7 — newest reply by ${reviewer} is ${notEither}`,
+      `left open ${PR}8 — newest reply by ${reviewer} is ${notEither}`,
+      `left open ${PR}9 — newest reply by ${reviewer} is an unsubmitted draft in a pending review`,
+      `resolved ${PR}10 — ${byReviewer}`,
+      `resolved ${PR}11 — its opener's acceptance`,
+      `left open ${PR}12 — newest reply by ${author} is not an acceptance`,
+      `left open ${PR}13 — newest reply by ${reviewer} is not an acceptance`,
+      `left open ${PR}14 — newest reply by ${reviewer} is not an acceptance`,
+      `left open ${PR}15 — newest reply by ${reviewer} is ${notEither}`,
+      `left open ${PR}16 — newest reply by ${reviewer} is not an acceptance`,
+    ]);
+  });
+
+  it("applies no bot-thread rule when Legion's App logins are unknown: a daemon that names none, and --gh", async () => {
+    // Which accounts are Legion's own, and which is its review App, is the daemon's to say, on the
+    // grant's gh-token answer. A daemon that names none, and `--gh`,
+    // which has no grant, leave every bot's thread to its opener's Accepted:, and the left-open line
+    // says the session cannot tell rather than that the reply was not an acceptance.
+    const pages = {
+      null: page(
+        [
+          thread(
+            "ci-bot",
+            1,
+            "claude",
+            { login: "legion-reviewer", body: "Accepted: fixed" },
+            { by: "Bot" }
+          ),
+          thread("human", 2, "octocat", {
+            login: "legion-implementer",
+            body: "Fixed in 1a2b3c4: moved the guard",
+          }),
+        ],
+        null
+      ),
+    };
+    const expected = [
+      `left open ${PR}1 — newest reply by legion-reviewer is not its opener's acceptance, and this session cannot identify Legion's review App, so a bot's thread closes only on its opener's Accepted:`,
+      `left open ${PR}2 — newest reply by legion-implementer is not an acceptance`,
+    ];
+    const github = fakeGitHub(pages, resolvedOk, 200, null);
+    const daemonLines: string[] = [];
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993" },
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
+        log: (line) => daemonLines.push(line),
+      }
+    );
+    expect(github.resolved).toEqual([]);
+    expect(daemonLines).toEqual(expected);
+
+    // A daemon names every App or none; an answer naming some is refused as invalid, as the Go CLI
+    // refuses it.
+    const partial = fakeGitHub(pages, resolvedOk, 200, { implement: "legion-implementer[bot]" });
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993" },
+        { env: { LEGION_GRANT: "grant-123" }, fetch: partial.fetch, ...noGh, log: () => undefined }
+      )
+    ).rejects.toThrow("Daemon returned an invalid GitHub credential response");
+    expect(partial.resolved).toEqual([]);
+
+    const gh = fakeGh(pages, resolvedOk);
+    const ghLines: string[] = [];
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993", gh: true },
+      {
+        env: {},
+        fetch: noFetch,
+        runGh: gh.runGh,
+        stderr: () => undefined,
+        log: (line) => ghLines.push(line),
+      }
+    );
+    expect(gh.resolved).toEqual([]);
+    expect(ghLines).toEqual(expected);
   });
 
   it("refuses a newest comment that carries no state, resolving nothing", async () => {

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -326,6 +327,7 @@ func TestTask310RouteGoldens(t *testing.T) {
 	})
 	golden(t, "github-token.json", GitHubTokenResponse{
 		Token: "installation-token", AppLogin: "legion-implementer[bot]",
+		LegionAppLogins: map[appauth.AppRole]string{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"},
 	})
 	golden(t, "git-credential.json", GitCredentialResponse{
 		Username: "x-access-token", Password: "installation-token",
