@@ -445,7 +445,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
-| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; refused when unset or when it holds a character outside letters, digits and `. _ : / -` |
+| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
@@ -576,7 +576,9 @@ ServiceAccount token. The run puts it in place of the placeholder in its copy of
 `LEGION_E2E_DISPATCH_TOKEN_SECRET_ID` and `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` are the Secrets Manager
 ids of the production Dispatch agents' bearer and the production Envoy listener's API token, which
 `prerequisites` reads with the devbox admin role into 0600 files. `prerequisites` refuses each of the
-three when it is unset or malformed, again naming the variable and never its value.
+three when it is unset or malformed (the audience through
+[`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), again naming the variable and never
+its value.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,
@@ -958,6 +960,22 @@ when the variable is unset, holds a character other than letters, digits and `:/
 colon (which YAML reads as a mapping key), or is not an `https://` URL. Its refusal names the
 variable on stderr and never prints the value, which names production infrastructure; the scripts
 that use it print that the route comes from the variable, not the URL.
+
+## lib/model-gateway-audience.sh
+
+Prints `LEGION_E2E_MODEL_GATEWAY_AUDIENCE`, the audience the model gateway accepts on a worker's
+projected ServiceAccount token, once it is one a stage proof can use. Stage 4a and Stage 4b read the
+variable through it and put it in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's
+copy of the operator route's `pod.yml`. The repository carries no default: the operator sets it to the
+audience their own gateway verifies.
+
+```sh
+gateway_audience=$(bash scripts/e2e/lib/model-gateway-audience.sh)
+```
+
+The audience is written inside a double-quoted YAML string, so the helper exits 1 when the variable
+is unset or holds a character other than letters, digits and `._:/-` (a quote or a backslash would
+break the pod the daemon loads). Its refusal names the variable on stderr and never prints the value.
 
 ## lib/install-model-gateway.sh
 

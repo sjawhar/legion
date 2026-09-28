@@ -68,7 +68,6 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
-gateway_audience=${LEGION_E2E_MODEL_GATEWAY_AUDIENCE:-}
 dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
 envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
@@ -1232,9 +1231,8 @@ fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
 nats_host=${nats_url#nats://} && nats_port=${nats_host##*:} && nats_host=${nats_host%:*}
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
-# The gateway's audience lands inside a quoted YAML string in the pod the daemon loads.
-[[ $gateway_audience =~ ^[A-Za-z0-9._:/-]+$ ]] ||
-  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is unset or not a token audience: letters, digits and . _ : / - only"
+gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
 [[ $dispatch_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
   fail "LEGION_E2E_DISPATCH_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
 [[ $envoy_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
@@ -1281,7 +1279,8 @@ read_bearers
 pass
 
 begin preflight
-# The runtime identity is the restricted role, and nothing more.
+# The runtime identity is the restricted role, and nothing more: the assumed-role pattern Stage 4a's
+# identity check uses (packages/daemon-go/internal/runtime/sandbox/live_install_test.go:52).
 who=$(rk auth whoami -o json) || blocked "kubectl auth whoami under $runtime_context failed"
 jq -e '.status.userInfo.username | test(":assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/")' <<<"$who" >/dev/null ||
   fail "the runtime identity $(jq -r .status.userInfo.username <<<"$who") is not the assumed Legion daemon role"

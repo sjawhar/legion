@@ -49,7 +49,6 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
-gateway_audience=${LEGION_E2E_MODEL_GATEWAY_AUDIENCE:-}
 agent_secrets_url=${LEGION_E2E_AGENT_SECRETS_URL:-}
 agent_secrets_operator=${LEGION_E2E_AGENT_SECRETS_OPERATOR:-}
 agent_secrets_auto_sha=${LEGION_E2E_AGENT_SECRETS_AUTO_SHA256:-}
@@ -116,9 +115,8 @@ for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/nul
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
-# The gateway's audience lands inside a quoted YAML string in the pod the runtime loads.
-[[ $gateway_audience =~ ^[A-Za-z0-9._:/-]+$ ]] ||
-  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is unset or not a token audience: letters, digits and . _ : / - only"
+gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
