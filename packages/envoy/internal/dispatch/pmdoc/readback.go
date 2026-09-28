@@ -23,9 +23,9 @@ var shapeOnly = skip{all: true, text: true}
 func (s skip) has(name string) bool { return s.all || s.names[name] }
 
 // A document's markdown reads back as written when Parse gives back its blocks, their attributes and
-// their text. Block ids, a typed block's server-owned attributes and anchor marks are not written,
-// so they are not compared, and neither is an empty paragraph the renderer does not write
-// (writtenChildren).
+// their text, as the markdown writes them (asWritten). Block ids, a typed block's server-owned
+// attributes and anchor marks are not written, so they are not compared, and neither is an empty
+// paragraph the renderer does not write (writtenChildren).
 
 // ReadBack is what doc's markdown reads back as.
 func ReadBack(doc *Node) (*Node, error) {
@@ -53,7 +53,7 @@ func NewMisread(before, after *Node) (string, error) {
 	if err != nil && !errors.Is(err, ErrSchema) {
 		return "", err
 	}
-	written := StripAnchorMarks(after)
+	written := asWritten(after)
 	if err == nil && readDifference(written, backAfter, skip{}) == "" {
 		return "", nil
 	}
@@ -67,7 +67,7 @@ func NewMisread(before, after *Node) (string, error) {
 	if err != nil {
 		return err.Error(), nil
 	}
-	previous := StripAnchorMarks(before)
+	previous := asWritten(before)
 	drift := skip{names: attributeDrift(previous, backBefore)}
 	type sameMisread struct{ id, differs string }
 	known := map[sameMisread]bool{}
@@ -94,7 +94,7 @@ func documentMisread(doc *Node) (string, error) {
 		}
 		return "", err
 	}
-	written := StripAnchorMarks(doc)
+	written := asWritten(doc)
 	difference := readDifference(written, back, skip{})
 	if difference == "" {
 		return "", nil

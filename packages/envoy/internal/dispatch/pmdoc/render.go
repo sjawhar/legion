@@ -82,8 +82,9 @@ func render(doc *Node) (r *renderer, err error) {
 	}
 	// Anchor marks render nothing, but one that starts or ends inside a word splits its text into
 	// runs, and an escape is decided within one run: rendering the document without them merges
-	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`).
-	doc = StripAnchorMarks(doc)
+	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`). The line
+	// breaks the browser editor holds that markdown has no form for are written as it draws them.
+	doc = asWritten(doc)
 	if holdsOnlyAnEmptyParagraph(doc) {
 		return &renderer{}, nil
 	}
@@ -495,17 +496,18 @@ func opensWithUnwrittenParagraph(item *Node) bool {
 // itemBlocks writes blocks the browser editor's parser reads as a list item's lines - the item's
 // own, or those of a footnote definition the item holds - at indent, their lines' prefix, where
 // prefix is the list's. A tight item writes its blocks on consecutive lines, where a paragraph
-// would run on into a paragraph after it and underline itself with a rule's `---`. The browser
+// would run on into a paragraph after it and underline itself with a rule's `---`, and a block
+// whose first line would be a row of a table before it (continuesTable) would be one. The browser
 // editor's writer puts a blank line between two paragraphs (the item then reads back spread) and
-// writes a rule `***`, and so does this renderer; firstRule reports whether a rule opening the
-// blocks is written `***` too.
+// writes a rule `***`, and so does this renderer, which writes a blank line after such a table too;
+// firstRule reports whether a rule opening the blocks is written `***` too.
 func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string, firstRule bool) {
 	otherMarkers := otherListMarkers(blocks)
 	for index, child := range blocks {
 		afterParagraph := index > 0 && blocks[index-1].Type == "paragraph"
 		if index > 0 {
 			blanks := 0
-			if spread || afterParagraph && child.Type == "paragraph" {
+			if spread || afterParagraph && child.Type == "paragraph" || blocks[index-1].Type == "table" && continuesTable(child) {
 				blanks = 1
 			}
 			if previous := blocks[index-1]; isList(previous) {
@@ -555,28 +557,31 @@ func (r *renderer) table(table *Node, prefix string) {
 		r.err = fmt.Errorf("%w: table requires a header row", ErrSchema)
 		return
 	}
-	header := table.Children[0]
-	r.tableRow(header, true, prefix)
+	grid := tableGrid(table)
+	r.tableRow(table.Children[0], grid[0], true, prefix)
 	r.writeSyntax("\n" + prefix + "| ")
-	for i, cell := range header.Children {
+	for i, cell := range grid[0] {
 		if i > 0 {
 			r.writeSyntax(" | ")
 		}
 		r.writeSyntax(tableAlignment(cell.Attrs["alignment"]))
 	}
 	r.writeSyntax(" |")
-	for _, row := range table.Children[1:] {
+	for index, row := range table.Children[1:] {
 		// A row with no cells is written as nothing: a table with only such rows reads back
 		// holding one, as the browser editor's parser reads a table with no body row.
 		if len(row.Children) == 0 {
 			continue
 		}
 		r.writeSyntax("\n" + prefix)
-		r.tableRow(row, false, prefix)
+		r.tableRow(row, grid[index+1], false, prefix)
 	}
 }
 
-func (r *renderer) tableRow(row *Node, header bool, prefix string) {
+// tableRow writes row as cells, its cells in the columns tableGrid places them in. A cell is one
+// line, so a hard break in it is written as a space, as the browser editor writes it: written as a
+// break, it would end the row, and `<br>` reads back as inline HTML the editor shows as that text.
+func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string) {
 	want := "table_cell"
 	rowType := "table_row"
 	if header {
@@ -588,7 +593,7 @@ func (r *renderer) tableRow(row *Node, header bool, prefix string) {
 		return
 	}
 	r.writeSyntax("| ")
-	for i, cell := range row.Children {
+	for i, cell := range cells {
 		if cell.Type != want {
 			r.err = fmt.Errorf("%w: table row contains %q", ErrSchema, cell.Type)
 			return
@@ -600,9 +605,92 @@ func (r *renderer) tableRow(row *Node, header bool, prefix string) {
 			r.err = fmt.Errorf("%w: table cell requires one paragraph", ErrSchema)
 			return
 		}
-		r.tableCellInline(cell.Children[0].Children, prefix)
+		r.tableCellInline(hardBreaksAsSpaces(cell.Children[0].Children), prefix)
 	}
 	r.writeSyntax(" |")
+}
+
+// tableGrid is each of table's rows as its markdown writes them, cell by cell. GFM carries no span,
+// so a cell spanning columns or rows (colspan, rowspan: a pasted HTML table can hold them) is
+// written in the first position it covers and each other one it covers as an empty cell of its
+// alignment, as the browser editor writes a spanning cell. The header row, whose width is the
+// table's to Go's parser, is as wide as the widest row, its added cells taking the alignment of the
+// first cell under them, so that no cell past it is lost. A body row keeps its own width, since
+// Parse pads a short row. A table with no span and no row wider than its header is its own rows.
+func tableGrid(table *Node) [][]*Node {
+	covered := map[[2]int]*Node{}
+	grid := make([][]*Node, len(table.Children))
+	width := 0
+	for rowIndex, row := range table.Children {
+		kind := "table_cell"
+		if row.Type == "table_header_row" {
+			kind = "table_header"
+		}
+		var cells []*Node
+		// fill adds the empty cells a span from a row above covers at the next position, and past
+		// it every position up to until.
+		fill := func(until int) {
+			for {
+				spanning, spanned := covered[[2]int{rowIndex, len(cells)}]
+				if !spanned && len(cells) >= until {
+					return
+				}
+				cells = append(cells, emptyTableCell(kind, spanning))
+			}
+		}
+		for _, cell := range row.Children {
+			fill(0)
+			column := len(cells)
+			columns, rows := tableSpan(cell.Attrs["colspan"]), tableSpan(cell.Attrs["rowspan"])
+			cells = append(cells, cell)
+			for range columns - 1 {
+				cells = append(cells, emptyTableCell(kind, cell))
+			}
+			for below := 1; below < rows; below++ {
+				for offset := range columns {
+					covered[[2]int{rowIndex + below, column + offset}] = cell
+				}
+			}
+		}
+		last := -1
+		for position := range covered {
+			if position[0] == rowIndex {
+				last = max(last, position[1])
+			}
+		}
+		fill(last + 1)
+		grid[rowIndex] = cells
+		width = max(width, len(cells))
+	}
+	for column := len(grid[0]); column < width; column++ {
+		var under *Node
+		for _, row := range grid[1:] {
+			if column < len(row) {
+				under = row[column]
+				break
+			}
+		}
+		grid[0] = append(grid[0], emptyTableCell("table_header", under))
+	}
+	return grid
+}
+
+// tableSpan is how many columns or rows a cell's colspan or rowspan covers: at least one.
+func tableSpan(value any) int {
+	return max(1, int(num(value, 1)))
+}
+
+// emptyTableCell is an empty cell of kind with like's alignment, or none when like is nil.
+func emptyTableCell(kind string, like *Node) *Node {
+	var alignment any
+	if like != nil {
+		alignment = like.Attrs["alignment"]
+	}
+	return &Node{
+		Type:     kind,
+		Attrs:    Attrs{"alignment": alignment, "colspan": 1, "colwidth": nil, "rowspan": 1},
+		Children: []*Node{{Type: "paragraph"}},
+	}
 }
 
 func (r *renderer) writeCodeText(node *Node, prefix string) {
@@ -697,14 +785,37 @@ func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
+// isBareAutolink reports whether a link whose text is its href can be written as that bare text for
+// linkify to link again. A backtick in it would be written escaped, which linkify stops at, so such
+// a link is written as an autolink (isAngleURLLink).
 func isBareAutolink(value string) bool {
 	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
 	}
-	if strings.ContainsAny(value, " \t\n()<>") {
+	if strings.ContainsAny(value, " \t\n()<>`") {
 		return false
 	}
 	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
+}
+
+// isAngleURLLink reports whether node is a link whose text is its href, holding a backtick, which
+// is written `<href>`, as the browser editor writes it: both parsers read an autolink's text as
+// written, escapes and references included, where bare text would be escaped and linkify would stop
+// at the escape. One an autolink cannot hold (whitespace, `<`, `>`, a pipe in a table cell) is
+// written as an explicit link.
+func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
+	for _, mark := range marks {
+		if mark.Type != "link" {
+			continue
+		}
+		href, _ := mark.Attrs["href"].(string)
+		title, _ := mark.Attrs["title"].(string)
+		value := node.Text
+		return href == value && title == "" && strings.Contains(value, "`") &&
+			(strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")) &&
+			!strings.ContainsAny(value, " \t\n\r<>") && !(escapePipes && strings.Contains(value, "|"))
+	}
+	return false
 }
 
 func escapeLinkDestination(href string, escapePipes bool) string {
@@ -807,6 +918,87 @@ func hardBreaksAsSpaces(nodes []*Node) []*Node {
 		out[index] = n
 	}
 	return out
+}
+
+// asWritten is doc as its markdown writes it: without the marks the rendering does not write
+// (StripAnchorMarks), and with each line break its textblocks hold in the one form markdown
+// carries. The browser editor holds two more. A soft line break it keeps from a paste (a hard break
+// with isInline) it draws as a space, and one is written: both parsers read a soft break as one too.
+// A line feed in text outside code it draws as a line break (white-space: break-spaces), and a
+// hard break is written, which both parsers read back as the editor draws it, except where nothing
+// but whitespace follows it in its textblock: a hard break there reads back as a backslash, and a
+// line feed as nothing, as trailing whitespace does.
+func asWritten(doc *Node) *Node {
+	out := StripAnchorMarks(doc)
+	writeLineBreaksIn(out)
+	return out
+}
+
+// writeLineBreaksIn gives every textblock under node its line breaks as asWritten writes them.
+func writeLineBreaksIn(node *Node) {
+	switch node.Type {
+	case "paragraph", "heading":
+		node.Children = writtenLineBreaks(node.Children)
+	case "code_block":
+	default:
+		for _, child := range node.Children {
+			writeLineBreaksIn(child)
+		}
+	}
+}
+
+// writtenLineBreaks is a textblock's inline nodes with each soft break a space and each line feed
+// in text outside code followed by more than whitespace a hard break (asWritten), adjacent text
+// with the same marks merged, as the parser reads it.
+func writtenLineBreaks(nodes []*Node) []*Node {
+	out := make([]*Node, 0, len(nodes))
+	appendText := func(text string, marks []Mark) {
+		if text == "" {
+			return
+		}
+		if last := len(out) - 1; last >= 0 && out[last].Type == "text" && marksEqual(out[last].Marks, marks) {
+			out[last] = &Node{Type: "text", Text: out[last].Text + text, Marks: marks}
+			return
+		}
+		out = append(out, &Node{Type: "text", Text: text, Marks: marks})
+	}
+	for index, node := range nodes {
+		switch {
+		case node.Type == "hardbreak" && node.Attrs["isInline"] == true:
+			appendText(" ", nil)
+		case node.Type == "text" && !nodeHasMark(node, "inlineCode") && strings.Contains(node.Text, "\n"):
+			lines := strings.Split(node.Text, "\n")
+			for line, text := range lines {
+				if line > 0 {
+					if onlyWhitespaceFollows(strings.Join(lines[line:], "\n"), nodes[index+1:]) {
+						appendText("\n", node.Marks)
+					} else {
+						out = append(out, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
+					}
+				}
+				appendText(text, node.Marks)
+			}
+		case node.Type == "text":
+			appendText(node.Text, node.Marks)
+		default:
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
+// onlyWhitespaceFollows reports whether text, and after it every one of rest, holds nothing but
+// whitespace.
+func onlyWhitespaceFollows(text string, rest []*Node) bool {
+	if strings.TrimSpace(text) != "" {
+		return false
+	}
+	for _, node := range rest {
+		if node.Type != "text" || strings.TrimSpace(node.Text) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // tableAlignment is the delimiter row's cell for a column's alignment. A column with none - null,

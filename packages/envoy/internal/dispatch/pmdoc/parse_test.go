@@ -93,6 +93,23 @@ func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T)
 	}
 }
 
+// The browser editor's reader keeps a link on an image, and a document here holds marks on text
+// alone, so a linked image read without its link would be stored as an image that is no link.
+func TestParseRefusesALinkedImage(t *testing.T) {
+	for _, markdown := range []string{
+		"[![x](i.png)](https://u.com)\n",
+		"see [a ![x](i.png) b](https://u.com \"t\") now\n",
+		"- **[![x](i.png)](https://u.com)**\n",
+	} {
+		if _, err := Parse(markdown); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "an image inside a link") {
+			t.Errorf("Parse(%q) error = %v, want a schema refusal naming an image inside a link", markdown, err)
+		}
+	}
+	if _, err := Parse("*![x](i.png)* [a](https://u.com) ![y](j.png)\n"); err != nil {
+		t.Errorf("Parse(an image beside a link) = %v, want it read", err)
+	}
+}
+
 // The browser editor's parser matches a reference to its definition by the labels as written,
 // before their character references are decoded, and a label is stored and written decoded, so a
 // reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
