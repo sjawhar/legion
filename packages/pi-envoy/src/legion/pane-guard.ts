@@ -1862,16 +1862,14 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       const name = node.name.value;
       const known = words.map((word) => literalText(word.exp));
       const branches: State[] = [clone(st)];
-      uncertainly(ctx, () => {
-        if (node.type === "For" && known.every((w) => w !== undefined) && known.length <= 16) {
-          for (const value of known) {
-            const body = clone(st);
-            assignScalar(body, name, [literal(value as string)]);
-            walkList(node.body.commands, body, ctx);
-            branches.push(body);
-          }
-          return;
+      if (node.type === "For" && known.every((w) => w !== undefined) && known.length <= 16) {
+        for (const value of known) {
+          const body = clone(st);
+          assignScalar(body, name, [literal(value as string)]);
+          uncertainly(ctx, () => walkList(node.body.commands, body, ctx));
+          branches.push(body);
         }
+      } else {
         const body = clone(st);
         const signalSafe = words.every((word) => {
           const text = literalText(word.exp);
@@ -1888,9 +1886,9 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         );
         if (node.type === "Select")
           assignScalar(body, "REPLY", [unknown("`$REPLY`, read from input")]);
-        walkList(node.body.commands, body, ctx);
+        uncertainly(ctx, () => walkList(node.body.commands, body, ctx));
         branches.push(body);
-      });
+      }
       merge(st, branches);
       if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
