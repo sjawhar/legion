@@ -24,7 +24,22 @@
  * no value the guard builds is longer than `MAX_VALUE_LENGTH`: past it (a replacement of a
  * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane. A script
  * a command writes is read whole up to `MAX_SCRIPT_BYTES`, as one on disk is, and past it is one
- * the guard cannot read (`readable`).
+ * the guard cannot read (`readable`). A `>>` append adds to the model the guard holds of that
+ * file: with no model the file is one it cannot read, never an empty one, or a no-op append would
+ * leave it reading the file as holding only what was appended (LEGION-349). The model's own
+ * property is narrower than "a file this command wrote": an entry is whatever the redirection
+ * path and `tee` record into this command's state, so it takes a write whose content the guard
+ * renders (`echo >`, `printf >`, `cat > <<EOF`, `tee f <<EOF`) and it takes one from anywhere the
+ * walk carried that state — a region the shell may never enter included, since `if`, `else`, `&&`,
+ * `||`, `case`, `while`, `until` and a `for` whose word list the guard cannot decide are all
+ * walked. Such a write seeds a model for code that never runs, the residual LEGION-354 closes.
+ * A write the walk never reaches records nothing, and neither does one it judges elsewhere: a
+ * `trap` handler's body is read and refused on its own line, but its writes never reach this
+ * model, not even on `EXIT`. `tee -a` is stricter
+ * and deliberately so: it leaves the file unknown whatever the model, since the guard does not
+ * render what `tee` writes, so appending with `tee -a` to a file this command wrote and then
+ * running it is refused where `>>` is allowed. Neither rule asks the filesystem what a file
+ * holds: at check time that is a state an earlier stage of the same command can choose.
  *
  * Every value the guard produces is known, unset, or unknown, and never one standing in for
  * another: a value it cannot know taken as some harmless concrete one (the empty string, the text
@@ -196,13 +211,23 @@ interface Ctx {
   readonly uncertain: { depth: number };
 }
 
-/** What a command wrote to a file before it ran it: path to content, or null when the guard
- * cannot know what was written. Shared by every subshell of one command, and exposing no `set`,
- * so `modelWrite` is the only way a write is recorded and no later site can record one without
- * the rule that governs it. */
+/** Why the guard cannot read what a command wrote to a file. A refusal names it, so an agent
+ * rewrites for the reason that actually fired: one text serving every cause sent it looking for
+ * output it could not render when the write was in a branch, or an append to a file nothing in
+ * the command had written. */
+interface UnknownContents {
+  readonly why: string;
+}
+
+/** What a command wrote to a file: the text, or why the guard cannot know it. */
+type FileContents = string | UnknownContents;
+
+/** What a command wrote to a file before it ran it: its text, or why the guard cannot know it.
+ * Shared by every subshell of one command, and exposing no `set`, so `modelWrite` is the only way
+ * a write is recorded and no later site can record one without the rule that governs it. */
 interface FileModel {
   has(file: string): boolean;
-  get(file: string): string | null | undefined;
+  get(file: string): FileContents | undefined;
 }
 
 /** Files this shell wrote with a pid it started, indexed by resolved path. `delete` stays, since
@@ -1579,9 +1604,29 @@ function uncertainly(ctx: Ctx, walk: () => void): void {
  * instead: `files` is one map the whole walk shares, and a stale model is worse than none, since
  * `runFile` prefers the model to what is on disk. A file that is unknown is refused, which is why
  * a conditional write followed by running the file is refused whether or not the branch runs. */
-function modelWrite(st: State, ctx: Ctx, file: string, content: string | null): void {
-  (st.files as Map<string, string | null>).set(file, ctx.uncertain.depth > 0 ? null : content);
+function modelWrite(st: State, ctx: Ctx, file: string, content: FileContents): void {
+  (st.files as Map<string, FileContents>).set(
+    file,
+    ctx.uncertain.depth > 0 ? UNCERTAIN_WRITE : content
+  );
 }
+
+/** The reason a write inside a body the shell may not have performed leaves behind, and the two
+ * a rendered write leaves when the guard cannot read what it produced. */
+const UNCERTAIN_WRITE: UnknownContents = {
+  why:
+    "the write is inside a branch, a loop body, a handler, or a command this shell does not wait " +
+    "for, so the guard cannot know the shell performed it",
+};
+const UNRENDERED_WRITE: UnknownContents = {
+  why: "the command writes output the guard cannot render",
+};
+const OVERLONG_WRITE: UnknownContents = {
+  why: `the command writes more than the ${MAX_SCRIPT_BYTES} bytes the guard reads of a script`,
+};
+const UNREAD_FILE: UnknownContents = {
+  why: "the command appends to a file it has not written, whose contents on disk the guard never reads",
+};
 
 /** What `file` holds as a pid after a command wrote it. The command's write always forgets what
  * the file held, since it is no longer there.
@@ -1848,7 +1893,12 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (node.command.type === "BraceGroup") {
         const written = groupOutputFile(node, st, ctx);
         if (written !== undefined) {
-          modelWrite(st, ctx, written, walkRenderingGroup(node.command, st, ctx));
+          modelWrite(
+            st,
+            ctx,
+            written,
+            walkRenderingGroup(node.command, st, ctx) ?? UNRENDERED_WRITE
+          );
           return;
         }
       }
@@ -2095,12 +2145,27 @@ function checkRedirects(
       } else if (command?.name === "printf") {
         content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
-      const before = appends ? st.files.get(file) : "";
+      // An append adds to the model of that file, and to nothing else: with no model the file is
+      // whatever is on disk, which the guard has not read, so it is unknown and never empty.
+      // Taking it as empty left one no-op append (`echo '' >> f`) making the guard read the file
+      // as holding only what was appended, a destructive line already there running unseen
+      // (LEGION-349). A model means "a path a rendered write in this command named, on a path the
+      // shell certainly takes": `files` is shared across regions, so `false && echo ok > f`, and
+      // the same inside `if`, `case`, `while`, `until` or a `for` whose list the guard cannot
+      // decide, seeded one for code the shell never runs — those writes now record only that the
+      // file is unknown (`modelWrite`), which an append onto it keeps unknown. Nothing here asks
+      // the filesystem either: a path absent at check time is one an earlier stage of the same
+      // command can fill (`cp evil.sh t; echo hi >> t; bash t`).
+      const before = appends ? (st.files.get(file) ?? UNREAD_FILE) : "";
       modelWrite(
         st,
         ctx,
         file,
-        content === null || before === null ? null : readable(`${before ?? ""}${content}`)
+        content === null
+          ? UNRENDERED_WRITE
+          : typeof before !== "string"
+            ? before
+            : (readable(`${before}${content}`) ?? OVERLONG_WRITE)
       );
       const pidWritten =
         writes &&
@@ -3058,8 +3123,21 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (target !== undefined && st.cwd !== undefined) {
           const file = path.resolve(st.cwd, target);
           st.pidFiles.delete(file);
+          // `tee -a` leaves the file unknown whatever the model, which is stricter than the `>>`
+          // rule in `checkRedirects` and stays so on purpose: routing it through that rule would
+          // start reading a file `tee` appended to, and the guard does not render what `tee`
+          // writes. So `tee -a` onto a file this command wrote, then run, is refused.
           const text = heredoc === undefined ? null : heredocText(heredoc);
-          modelWrite(st, ctx, file, append || text === null ? null : readable(text));
+          modelWrite(
+            st,
+            ctx,
+            file,
+            append
+              ? UNREAD_FILE
+              : text === null
+                ? UNRENDERED_WRITE
+                : (readable(text) ?? OVERLONG_WRITE)
+          );
         }
       }
       return;
@@ -3889,11 +3967,11 @@ function runFile(
   let content: string | undefined;
   if (st.files.has(abs)) {
     const written = st.files.get(abs);
-    if (written === null || written === undefined) {
+    if (written === undefined || typeof written !== "string") {
       throw new Refusal(
         site.snippet,
         site.line,
-        `this command writes ${abs} in a way the guard cannot read before running it (output it cannot render, or more than the ${MAX_SCRIPT_BYTES} bytes it reads of a script); write the script with the write tool first`
+        `this command may write ${abs} in a way the guard cannot read before running it (${written?.why ?? "the guard cannot say what it holds"}); write the script with the write tool first`
       );
     }
     content = written;
