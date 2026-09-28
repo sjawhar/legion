@@ -2229,3 +2229,79 @@ func drain(t *testing.T, sub *natsgo.Subscription) int {
 		count++
 	}
 }
+
+// truncatedWatchKV hands out a watcher over the real bucket whose updates channel closes after
+// one entry, without the nil marker nats.go sends once it has delivered every existing key.
+// nats.go closes that channel whenever the watcher's subscription ends — an ordered consumer it
+// could not recreate, or a closed connection — so this is what a scan cut short looks like to its
+// caller.
+type truncatedWatchKV struct {
+	natsgo.KeyValue
+
+	after int
+}
+
+func (k truncatedWatchKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+	watcher, err := k.KeyValue.Watch(keys, opts...)
+	if err != nil {
+		return nil, err
+	}
+	truncated := make(chan natsgo.KeyValueEntry)
+	go func() {
+		defer close(truncated)
+		for delivered := 0; delivered < k.after; delivered++ {
+			entry, ok := <-watcher.Updates()
+			if !ok || entry == nil {
+				return
+			}
+			truncated <- entry
+		}
+	}()
+	return &truncatedWatcher{KeyWatcher: watcher, updates: truncated}, nil
+}
+
+type truncatedWatcher struct {
+	natsgo.KeyWatcher
+
+	updates chan natsgo.KeyValueEntry
+}
+
+func (w *truncatedWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+
+// A revision snapshot that ends before the bucket's keys are all delivered is not a snapshot: the
+// claims it missed are still in the bucket, and each one is a restored holder that would lose the
+// grace a restart owes it and be released a session TTL early. So roleRevisions reports the short
+// scan instead of returning what it managed to read, and Open returns that error unchanged
+// (kv.go, Open), failing the start as a dead connection did before this read became a watch.
+func TestATruncatedRoleRevisionScanIsAnErrorNotAShortSnapshot(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	for i := range 4 {
+		value, err := json.Marshal(RoleClaim{HolderSessionID: fmt.Sprintf("ses_%d", i), ClaimedAt: time.Now().UnixMilli()})
+		if err != nil {
+			t.Fatalf("encode claim: %v", err)
+		}
+		if _, err := rawRoles.Put(fmt.Sprintf("role-%d", i), value); err != nil {
+			t.Fatalf("store role-%d: %v", i, err)
+		}
+	}
+
+	revisions, err := roleRevisions(bus.KeyValue{KeyValue: truncatedWatchKV{KeyValue: rawRoles, after: 1}})
+	if err == nil {
+		t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
+	}
+	if revisions != nil {
+		t.Fatalf("a failed scan returned %d revisions; a partial snapshot must not reach the registry", len(revisions))
+	}
+	if !strings.Contains(err.Error(), "after 1 keys") {
+		t.Fatalf("error = %q, want it to name how many keys the watch delivered", err)
+	}
+}

@@ -180,12 +180,22 @@ func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
 		}
 	}()
 	revisions := map[string]uint64{}
-	// A nil entry marks the end of the keys the bucket already held.
+	// nats.go sends a nil entry once it has delivered every key the bucket already held, and
+	// closes the channel instead when the watcher's subscription ends first — an ordered consumer
+	// it could not recreate, or a closed connection. A snapshot short of the marker is missing
+	// claims that are in the bucket, and each one it misses is a restored holder that loses its
+	// grace and is released a session TTL early, so a start that cannot read the whole bucket
+	// fails here rather than opening on a partial snapshot.
+	scanned := false
 	for entry := range watcher.Updates() {
 		if entry == nil {
+			scanned = true
 			break
 		}
 		revisions[entry.Key()] = entry.Revision()
+	}
+	if !scanned {
+		return nil, fmt.Errorf("role revisions: the bucket's watch ended after %d keys, before it had delivered them all", len(revisions))
 	}
 	return revisions, nil
 }
