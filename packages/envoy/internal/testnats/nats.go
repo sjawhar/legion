@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // Image is the NATS server image every Envoy test container runs. The envoy-go CI job reads this
@@ -263,10 +265,13 @@ func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
 
 // Grant replaces the user's publish grant with allow and has the server reload its configuration,
 // as an operator changing a grant does: the server keeps its connections and applies the new grant
-// to them. It returns once the server reports the reload.
+// to them. It returns once the server reports the outcome of this reload, not an earlier one - it
+// waits for one more outcome line than the server's log held before the signal - and fails the
+// test, with the server's reason, when the server refused the new configuration.
 func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
 	t.Helper()
 	ctx := context.Background()
+	earlier := len(g.reloadOutcomes(t))
 	if err := g.ctr.CopyToContainer(ctx, []byte(publishGrantConfig(g.user, allow)), "/etc/nats.conf", 0o644); err != nil {
 		t.Fatalf("write the new grant: %v", err)
 	}
@@ -278,19 +283,33 @@ func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
 	if err := docker.ContainerKill(ctx, g.ctr.GetContainerID(), "HUP"); err != nil {
 		t.Fatalf("signal NATS to reload: %v", err)
 	}
-	deadline := time.Now().Add(connectTimeout)
-	for time.Now().Before(deadline) {
-		logs, err := g.ctr.Logs(ctx)
-		if err == nil {
-			text, _ := io.ReadAll(logs)
-			logs.Close()
-			if strings.Contains(string(text), "Reloaded server configuration") {
-				return
-			}
-		}
-		time.Sleep(retryInterval)
+	reloaded := wait.ForLog(reloadOutcome.String()).AsRegexp().WithOccurrence(earlier + 1).WithStartupTimeout(connectTimeout)
+	if err := reloaded.WaitUntilReady(ctx, g.ctr); err != nil {
+		t.Fatalf("NATS did not report reloading its configuration: %v", err)
 	}
-	t.Fatalf("NATS did not report reloading its configuration within %s", connectTimeout)
+	// This reload's outcome is the one after the earlier ones, whatever may have followed it.
+	if outcome := g.reloadOutcomes(t)[earlier]; outcome != "Reloaded server configuration" {
+		t.Fatalf("NATS refused the new grant %q: %s", allow, outcome)
+	}
+}
+
+// reloadOutcome matches each line nats-server logs when a reload ends: done, or refused with its
+// reason.
+var reloadOutcome = regexp.MustCompile(`Reloaded server configuration|Failed to reload server configuration: [^\r\n]*`)
+
+// reloadOutcomes lists the reload outcomes the server's log reports so far, oldest first.
+func (g *NkeyGrant) reloadOutcomes(t testing.TB) []string {
+	t.Helper()
+	logs, err := g.ctr.Logs(context.Background())
+	if err != nil {
+		t.Fatalf("read NATS's log: %v", err)
+	}
+	defer logs.Close()
+	text, err := io.ReadAll(logs)
+	if err != nil {
+		t.Fatalf("read NATS's log: %v", err)
+	}
+	return reloadOutcome.FindAllString(string(text), -1)
 }
 
 func publishGrantConfig(user string, allow []string) string {

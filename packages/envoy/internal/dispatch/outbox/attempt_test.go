@@ -151,25 +151,51 @@ func TestAnAttemptEndedAfterADenialReturnsBoth(t *testing.T) {
 
 // Each denial names the destination it was for - the route, an author, a follower, the previous
 // claimant - since the subject alone does not say which, and it is still a bus.ErrPublishDenied.
+// One event cannot have all four: a reply to a session's comment reaches its author, a reply in an
+// ask's thread reaches the ask's followers, and a claim reaches the previous claimant, each besides
+// the issue's route.
 func TestEveryDenialNamesItsDestination(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	event := seedThreeDestinationEvent(t, database, broker)
-	publisher := &countingPublisher{failTopics: map[string]error{
-		roleTopic:                    denial(roleTopic),
-		"notifications.agent.writer": denial("notifications.agent.writer"),
-	}}
-
-	err := publishOnce(t, database, publisher, event)
-	if !errors.Is(err, bus.ErrPublishDenied) {
-		t.Fatalf("publish returned %v, want a bus.ErrPublishDenied", err)
+	reply := seedThreeDestinationEvent(t, database, broker)
+	askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "asker"}, "Ship it?")
+	seedFollower(t, database, askID, "follower")
+	askReply := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID: "answer", IssueKey: new("T-1"), Body: "Yes", AskID: &askID,
+		}},
+	})
+	claim := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "issue.claimed", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: map[string]any{
+			"key":            "T-1",
+			"previous_claim": map[string]any{"actor": map[string]any{"kind": "session", "id": "claimant"}},
+		},
+	})
+	failTopics := map[string]error{roleTopic: denial(roleTopic)}
+	for _, session := range []string{"writer", "asker", "follower", "claimant"} {
+		failTopics[contracts.AgentSubject(session)] = denial(contracts.AgentSubject(session))
 	}
-	for _, want := range []string{
-		`publish route "role:reviewer": bus: NATS denied the publish`,
-		`publish author route to "writer": bus: NATS denied the publish`,
+	publisher := &countingPublisher{failTopics: failTopics}
+
+	for _, tc := range []struct {
+		name   string
+		event  model.Event
+		labels []string
+	}{
+		{"reply to a session's comment", reply, []string{`publish route "role:reviewer"`, `publish author route to "writer"`}},
+		{"reply in an ask's thread", askReply, []string{`publish route "role:reviewer"`, `publish follower route to "asker"`, `publish follower route to "follower"`}},
+		{"claim", claim, []string{`publish route "role:reviewer"`, `publish claim change to "claimant"`}},
 	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("publish returned %q, which does not name the denied destination as %q", err, want)
+		err := publishOnce(t, database, publisher, tc.event)
+		if !errors.Is(err, bus.ErrPublishDenied) {
+			t.Fatalf("%s: publish returned %v, want a bus.ErrPublishDenied", tc.name, err)
+		}
+		for _, label := range tc.labels {
+			if !strings.Contains(err.Error(), label+": bus: NATS denied the publish") {
+				t.Fatalf("%s: publish returned %q, which does not name the denied destination as %s", tc.name, err, label)
+			}
 		}
 	}
 }

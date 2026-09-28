@@ -139,15 +139,7 @@ func TestRunDeliversTheGrantedRoutesOfAnEventWhoseRoleRouteNATSDenies(t *testing
 	roleReceived := subscribe(t, subscriber, roleTopic)
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	route := "role:reviewer"
-	seedIssue(t, database, "T-1", &route)
-	root := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "writer"}, "Draft", nil)
-	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.CommentEventPayload{Comment: model.Comment{
-			ID: "reply", IssueKey: new("T-1"), Body: "Reviewed", ReplyTo: &root,
-		}},
-	})
+	event := seedThreeDestinationEvent(t, database, broker)
 	stop := run(t, database, client, broker)
 	defer stop()
 
@@ -186,15 +178,7 @@ func TestTheRetryAfterAGrantDeliversOnlyTheDeniedRoute(t *testing.T) {
 	roleReceived := subscribe(t, subscriber, roleTopic)
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	route := "role:reviewer"
-	seedIssue(t, database, "T-1", &route)
-	root := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "writer"}, "Draft", nil)
-	event := appendEvent(t, database, broker, model.Event{
-		IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
-		Payload: model.CommentEventPayload{Comment: model.Comment{
-			ID: "reply", IssueKey: new("T-1"), Body: "Reviewed", ReplyTo: &root,
-		}},
-	})
+	event := seedThreeDestinationEvent(t, database, broker)
 	stop := run(t, database, client, broker)
 	defer stop()
 
