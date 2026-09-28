@@ -4,14 +4,13 @@ import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery } from "../../api/queries";
+import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
 import type {
   Agent,
   Message,
   MessageDelivery,
   MessageDeliveryMode,
   MessageRead,
-  UserAgentStates,
 } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
@@ -58,6 +57,8 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
+import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
+import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -217,7 +218,9 @@ function AgentExchangeReply({
   const retry = useMutation({
     mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
     onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
+      void queryClient.invalidateQueries({
+        queryKey: agentMessagesQuery(agent.session_id).queryKey,
+      }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
   const author = resolveAuthor(reply.author, titles);
@@ -293,7 +296,9 @@ function AgentTargetedMessage({
     mutationFn: (delivery: MessageDeliveryMode) =>
       api.createMessageDelivery(read.message.id, delivery),
     onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
+      void queryClient.invalidateQueries({
+        queryKey: agentMessagesQuery(agent.session_id).queryKey,
+      }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
   const titles = useMemo(
@@ -377,28 +382,36 @@ function AgentMessageList({
   onReply: (reply: AgentReply) => void;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const messages = useQuery({
-    queryFn: () => api.listAgentMessages(agent.session_id),
-    queryKey: ["agents", agent.session_id, "messages"],
-  });
-  const agentState = useQuery({
-    queryFn: () => api.getMyAgentState(),
-    queryKey: ["user-agent-state"],
-  });
+  const messages = useQuery(agentMessagesQuery(agent.session_id));
+  const agentState = useQuery(userAgentStateQuery());
   const [showOlder, setShowOlder] = useState(false);
   const [showCleared, setShowCleared] = useState(false);
+  const clearedBefore = agentState.data?.[agent.session_id]?.cleared_before;
+  const all = messages.data ?? [];
+  const unread = exchangesAfter(all, clearedBefore);
+  const visible = showCleared ? all : unread;
+  const [newest, ...older] = visible;
+  // Each of the viewer's own exchanges with a reply newer than how far they had read when the row
+  // opened is shown, not left behind "Show N older". The watermark stays where it was while the
+  // row is open, so marking those replies read does not fold them away from the viewer reading
+  // them.
+  const unreadAtOpen = useUnreadAtOpen(messages.data);
+  const olderShown = older.filter((read) => unreadAtOpen?.has(read.message.id) === true);
+  const olderFolded = older.filter((read) => !olderShown.includes(read));
+  const rendered =
+    newest === undefined ? [] : [newest, ...olderShown, ...(showOlder ? olderFolded : [])];
+  useMarkRepliesRead(
+    agent.session_id,
+    messages.isPending || agentState.isPending ? undefined : rendered
+  );
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
   // make Clear a silent no-op. This hides exactly what the viewer saw.
   const clear = useMutation({
-    mutationFn: (clearedBefore: string) =>
-      api.putAgentState(agent.session_id, { cleared_before: clearedBefore }),
+    mutationFn: (cutoff: string) => api.putAgentState(agent.session_id, { cleared_before: cutoff }),
     onSuccess: (next) => {
       setShowCleared(false);
-      queryClient.setQueryData<UserAgentStates>(["user-agent-state"], (current) => ({
-        ...current,
-        [agent.session_id]: next,
-      }));
+      storeAgentState(queryClient, agent.session_id, next);
     },
   });
   const label = sessionLabel(agent.session_id, agent.title);
@@ -406,46 +419,36 @@ function AgentMessageList({
   if (messages.isError || agentState.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
   }
-  if (messages.data.length === 0) return null;
-  const clearedBefore = agentState.data[agent.session_id]?.cleared_before;
-  const unread = exchangesAfter(messages.data, clearedBefore);
-  const visible = showCleared ? messages.data : unread;
-  const [newest, ...older] = visible;
+  if (all.length === 0) return null;
+  const row = (read: MessageRead) => (
+    <AgentTargetedMessage
+      agent={agent}
+      key={read.message.id}
+      liveAgents={liveAgents}
+      onReply={onReply}
+      read={read}
+    />
+  );
   return (
     <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
       {newest === undefined ? null : (
         <ol aria-label={`Conversation with ${label}`} className="space-y-2">
-          <AgentTargetedMessage
-            agent={agent}
-            key={newest.message.id}
-            liveAgents={liveAgents}
-            onReply={onReply}
-            read={newest}
-          />
-          {older.length === 0 ? null : (
+          {row(newest)}
+          {olderShown.map(row)}
+          {olderFolded.length === 0 ? null : (
             <li>
               <DisclosureToggle
                 expanded={showOlder}
-                label={`Show ${older.length} older`}
+                label={`Show ${olderFolded.length} older`}
                 onToggle={() => setShowOlder((open) => !open)}
               />
             </li>
           )}
-          {showOlder
-            ? older.map((read) => (
-                <AgentTargetedMessage
-                  agent={agent}
-                  key={read.message.id}
-                  liveAgents={liveAgents}
-                  onReply={onReply}
-                  read={read}
-                />
-              ))
-            : null}
+          {showOlder ? olderFolded.map(row) : null}
         </ol>
       )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        {clearedBefore === undefined || unread.length === messages.data.length ? null : (
+        {clearedBefore === undefined || unread.length === all.length ? null : (
           <p className={`flex flex-wrap items-center gap-x-1 text-sm ${textMutedOnCanvas}`}>
             <span>
               Cleared <Timestamp at={clearedBefore} />
@@ -564,7 +567,7 @@ function AgentMessageComposer({
         onSent={() => {
           onCancelReply();
           void queryClient.invalidateQueries({
-            queryKey: ["agents", agent.session_id, "messages"],
+            queryKey: agentMessagesQuery(agent.session_id).queryKey,
           });
         }}
         owner={composerOwner}
@@ -625,6 +628,8 @@ function AgentRow({
   // The inbox query and the agent list are polled separately, so the two counts can briefly
   // disagree in either direction; a negative remainder renders nothing.
   const waitingOnAgent = agent.open_asks - needsYou;
+  const unreadReplies =
+    useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
   const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
   const detailsId = useId();
@@ -689,6 +694,18 @@ function AgentRow({
               <Timestamp at={agent.last_activity} />
             )}
           </span>
+          {unreadReplies === 0 ? null : (
+            // Opening the conversation is what reads it, so the badge opens it.
+            <button
+              aria-label={`${label} replied: ${unreadReplies} unread`}
+              className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
+              onClick={() => setExpanded(true)}
+              title={`Replies from ${label} you have not read`}
+              type="button"
+            >
+              <LabelPill selected>{unreadRepliesLabel(unreadReplies)}</LabelPill>
+            </button>
+          )}
           {needsYou === 0 ? null : (
             <AskCountPill
               agent={agent}
@@ -971,7 +988,7 @@ function BroadcastComposer({
       onSent();
       for (const recipient of created.recipients) {
         void queryClient.invalidateQueries({
-          queryKey: ["agents", recipient.session_id, "messages"],
+          queryKey: agentMessagesQuery(recipient.session_id).queryKey,
         });
       }
       void queryClient.invalidateQueries({ queryKey: ["broadcast"] });
@@ -1193,6 +1210,7 @@ export function AgentsPage(): ReactNode {
           )}
         </>
       )}
+      <EndedAgentsWithReplies live={agents} />
     </section>
   );
 }

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-
+import type { Message } from "../web/src/api/types";
 import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
 import {
   createAgentMessage,
@@ -262,8 +262,15 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
     body: "First question",
     delivery: "btw",
   });
-  await replyToMessageDelivery(first.id, { attempt: 1, body: "First answer" }, plannerActor);
+  const firstAnswer = (await replyToMessageDelivery(
+    first.id,
+    { attempt: 1, body: "First answer" },
+    plannerActor
+  )) as Message;
   await createAgentMessage(planner.session_id, { body: "Second question", delivery: "btw" });
+  // Alice has read the first answer (on another device, say): an exchange holding an unread
+  // reply opens unfolded, so the fold is shown over one already read.
+  await putAgentState(planner.session_id, { read_through: firstAnswer.created_at });
 
   const alice = await asUser(browser, "alice");
   try {

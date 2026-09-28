@@ -17,6 +17,8 @@ export function eventDescription(event: Event): string {
       return `Architecture sync failed: ${event.payload.error}`;
     case "user_state.updated":
       return "User state updated";
+    case "user_agent_state.updated":
+      return "Agent conversation state updated";
     case "ask.resolved":
       return describeAskResolution(event.payload.resolution);
     case "ask.answered":

@@ -10,7 +10,14 @@ import {
   type StreamEvent,
   setConnectionState,
 } from "./live";
-import { architectureSourcesQuery, inboxQuery, projectsQuery, userStateQuery } from "./queries";
+import {
+  agentMessagesQuery,
+  architectureSourcesQuery,
+  inboxQuery,
+  projectsQuery,
+  userAgentStateQuery,
+  userStateQuery,
+} from "./queries";
 import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
 import type { ChangedReference, Event, EventType } from "./types";
 
@@ -22,6 +29,7 @@ const knownEventTypes: Record<EventType, true> = {
   "architecture.synced": true,
   "architecture.sync_failed": true,
   "user_state.updated": true,
+  "user_agent_state.updated": true,
   "issue.created": true,
   "issue.updated": true,
   "issue.closed": true,
@@ -172,7 +180,7 @@ function isCommentLikeEvent(event: Event): boolean {
 // resolved) belongs to no conversation on that page.
 function agentConversationKey(target: string | undefined): readonly unknown[] | undefined {
   if (target?.startsWith("session:") && target.length > "session:".length) {
-    return ["agents", target.slice("session:".length), "messages"];
+    return agentMessagesQuery(target.slice("session:".length)).queryKey;
   }
   return undefined;
 }
@@ -377,6 +385,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       ? [userStateQuery().queryKey, inboxQuery().queryKey]
       : [];
   }
+  if (event.type === "user_agent_state.updated") {
+    // Another tab or device of this viewer read or cleared a conversation: refresh the badge.
+    return payloadString(event, "login") === signedInLogin ? [userAgentStateQuery().queryKey] : [];
+  }
   if (event.type === "subscription.remove_requested") {
     return [];
   }
@@ -389,8 +401,12 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // that moves a broadcast's recipient table arrives here. The open broadcast views are
     // refreshed by key prefix rather than by threading a broadcast id through the message,
     // delivery and reply payloads; nothing else is keyed under ["broadcast"], and the
-    // queries only exist while a broadcast page is mounted.
-    return [key, ["broadcast"]];
+    // queries only exist while a broadcast page is mounted. A reply in a direct conversation can
+    // be unread for its asker, and the count lives in the viewer's per-agent state; every reply
+    // row is written with a message.answered event, so only that event can move the count.
+    return event.type === "message.answered"
+      ? [key, ["broadcast"], userAgentStateQuery().queryKey]
+      : [key, ["broadcast"]];
   }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {

@@ -19,8 +19,8 @@ func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
 	if saved.Code != http.StatusOK {
 		t.Fatalf("save Alice agent state: status=%d body=%s", saved.Code, saved.Body.String())
 	}
-	if got := decodeBody[userAgentState](t, saved); !parseTimestamp(t, got.ClearedBefore).Equal(cutoff) {
-		t.Fatalf("saved cleared_before = %q, want %s", got.ClearedBefore, cutoff.Format(time.RFC3339Nano))
+	if got := decodeBody[userAgentState](t, saved); !parseTimestamp(t, *got.ClearedBefore).Equal(cutoff) {
+		t.Fatalf("saved cleared_before = %v, want %s", got.ClearedBefore, cutoff.Format(time.RFC3339Nano))
 	}
 
 	alice := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/agents/state", nil, "alice")
@@ -28,7 +28,7 @@ func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
 		t.Fatalf("Alice agent state: status=%d body=%s", alice.Code, alice.Body.String())
 	}
 	state := decodeBody[map[string]userAgentState](t, alice)
-	if entry, ok := state["planner-session"]; !ok || !parseTimestamp(t, entry.ClearedBefore).Equal(cutoff) {
+	if entry, ok := state["planner-session"]; !ok || !parseTimestamp(t, *entry.ClearedBefore).Equal(cutoff) {
 		t.Fatalf("Alice agent state = %#v, want planner-session cleared before %s", state, cutoff.Format(time.RFC3339Nano))
 	}
 
@@ -41,7 +41,7 @@ func TestPerUserAgentStateRoundTripsAndIsIsolated(t *testing.T) {
 		t.Fatalf("move Alice cutoff: status=%d body=%s", moved.Code, moved.Body.String())
 	}
 	state = decodeBody[map[string]userAgentState](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/agents/state", nil, "alice"))
-	if len(state) != 1 || !parseTimestamp(t, state["planner-session"].ClearedBefore).Equal(later) {
+	if len(state) != 1 || !parseTimestamp(t, *state["planner-session"].ClearedBefore).Equal(later) {
 		t.Fatalf("Alice agent state after second clear = %#v, want one entry at %s", state, later.Format(time.RFC3339Nano))
 	}
 
