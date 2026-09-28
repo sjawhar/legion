@@ -11,15 +11,17 @@
  *       > packages/pi-envoy/src/legion/pane-guard.base.ts
  *     bun packages/pi-envoy/scripts/measure-pane-guard-model.ts \
  *       packages/pi-envoy/src/legion/pane-guard.base.ts base
- *
- * The copy goes inside the package: a guard build imports the package's own modules, so one
- * written to a temporary directory fails to resolve them.
  *     bun packages/pi-envoy/scripts/measure-pane-guard-model.ts \
  *       packages/pi-envoy/src/legion/pane-guard.ts head
  *
- * A row is a leak when the guard ALLOWED it and real bash destroyed the canary HOME. The three
- * unwaited shapes are races: one trial per row settles nothing about them, and their live rate is
- * measured by repeating the run, not by this script.
+ * The copy goes inside the package: a guard build imports the package's own modules, so one
+ * written to a temporary directory fails to resolve them.
+ *
+ * A row is a leak when the guard ALLOWED it and real bash destroyed the canary HOME — for a row
+ * the shell performs in order. The rows marked `racy` are the ones the shell does not wait for,
+ * where the write happens beside the read: one trial decides nothing about those, so they are
+ * counted apart and their live rate comes from repeating the run, not from here. Folding them
+ * into one leak total would make it swing by however many races a run happened to catch.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -46,8 +48,14 @@ const { createPaneGuard } = (await import(path.resolve(modulePath))) as GuardMod
 
 const base = mkdtempSync(path.join(os.tmpdir(), "pane-guard-model-"));
 try {
-  const results: { name: string; allowed: boolean; destroyed: boolean }[] = [];
-  const run = (name: string, payload: string, script: string | undefined, pid: boolean): void => {
+  const results: { name: string; allowed: boolean; destroyed: boolean; racy: boolean }[] = [];
+  const run = (
+    name: string,
+    payload: string,
+    script: string | undefined,
+    pid: boolean,
+    racy = false
+  ): void => {
     const dir = path.join(base, String(results.length));
     const ws = path.join(dir, "ws");
     const home = path.join(dir, "home");
@@ -76,23 +84,31 @@ try {
       timeout: 20_000,
     });
     if (pid) spawnSync("bash", ["-c", "pkill -P $$ sleep 2>/dev/null; true"], { cwd: ws, env });
-    results.push({ name, allowed, destroyed: !existsSync(path.join(home, "victim")) });
+    results.push({ name, allowed, destroyed: !existsSync(path.join(home, "victim")), racy });
   };
 
-  for (const row of MODEL_ROWS) run(row.name, row.payload, row.script, false);
+  for (const row of MODEL_ROWS) run(row.name, row.payload, row.script, false, row.live === "racy");
   for (const row of PID_ROWS) run(row.name, row.payload, undefined, true);
 
-  const leaks = results.filter((row) => row.allowed && row.destroyed);
+  const ordered = results.filter((row) => !row.racy);
+  const unwaited = results.filter((row) => row.racy);
+  const leaks = ordered.filter((row) => row.allowed && row.destroyed);
   for (const row of results) {
-    console.log(
-      `${(row.allowed ? "ALLOW" : "REFUSE").padEnd(7)}${(row.destroyed ? "DESTROYED" : "intact").padEnd(10)}${row.name}`
-    );
+    const live = row.racy ? "(race)" : row.destroyed ? "DESTROYED" : "intact";
+    console.log(`${(row.allowed ? "ALLOW" : "REFUSE").padEnd(7)}${live.padEnd(10)}${row.name}`);
   }
   console.log(
-    `\n${label}: ${results.length} rows (${MODEL_ROWS.length} + ${PID_ROWS.length}), ` +
-      `${leaks.length} leak, ${results.filter((row) => row.allowed && !row.destroyed).length} allowed and safe`
+    `\n${label}: ${results.length} rows (${MODEL_ROWS.length} + ${PID_ROWS.length}), of which ` +
+      `${unwaited.length} the shell does not wait for and are counted apart.\n` +
+      `  in order: ${leaks.length} leak, ` +
+      `${ordered.filter((row) => row.allowed && !row.destroyed).length} allowed and safe\n` +
+      `  unwaited: ${unwaited.filter((row) => row.allowed).length} of ${unwaited.length} allowed ` +
+      `(each a live leak when allowed; one trial cannot show it, so this run does not try)`
   );
   for (const row of leaks) console.log(`  leak: ${row.name}`);
+  for (const row of unwaited) {
+    console.log(`  unwaited, ${row.allowed ? "ALLOWED" : "refused"}: ${row.name}`);
+  }
 } finally {
   rmSync(base, { recursive: true, force: true });
 }
