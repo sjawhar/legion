@@ -9,11 +9,12 @@
  * canonical either: `08777` and the `8777` it parses to are one port written two ways, and the
  * point of validating here is that only one representation leaves this module.
  *
- * Values only, deliberately. The Playwright config's port probe and its reuse decision stay in
- * `e2e/playwright.config.ts`: `e2e/fake-envoy.ts` and `e2e/fake-github.ts` import this module as
- * plain `bun` processes with no `process.send` and no `PLAYWRIGHT_BASE_URL`, so a probe reached
- * through an import would fire inside them and refuse the second fake as soon as the first is
- * listening.
+ * This module refuses a bad or duplicated value and otherwise only computes: it opens no socket
+ * and reads nothing but the environment, so importing it is safe from any process. The port
+ * probe and the reuse decision stay in `e2e/playwright.config.ts` for that reason —
+ * `e2e/fake-envoy.ts` and `e2e/fake-github.ts` import this module as plain `bun` processes with
+ * no `process.send` and no `PLAYWRIGHT_BASE_URL`, so a probe reached through an import would fire
+ * inside them and refuse the second fake as soon as the first is listening.
  */
 function harnessPort(variable: string, fallback: string): number {
   const resolved = process.env[variable] || fallback;
