@@ -334,13 +334,16 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 // spent in document order as the document's render spent it, which writes each ask as the stored
 // markdown holds it while the budget lasts. A budget for each ask would write every ask past the
 // first budget's end with cells the document never wrote, and spend a budget for every ask the
-// document holds. Past the point the budget runs out, a span table's rows are written short: the
-// stored markdown's are padded when the parser reads the upload, and the fingerprint's are written
-// with whatever budget it has left. So an ask whose table holds a span and is written past that
-// point reads as changed, refusing an upload of the document's own markdown: the ask the budget
-// runs out in and every one after it, and, where a table before the asks ran it out, each whose
-// padded rows differ from its spans. An ask over a span-free table with a short row reads as
-// changed the same way.
+// document holds. Past the point the budget runs out, a table is written with fewer span cells
+// than its spans cover. Where it runs out in the asks, the fingerprint and the stored markdown
+// write each table alike, and an ask reads as changed, refusing an upload of the document's own
+// markdown, when its table as written holds a body row shorter than its widest, which the parser
+// pads when it reads the upload: a body cell spanning columns under a wider header, a rowspan, or
+// the rows the budget ran out partway through. The header is written as wide as the widest row,
+// so it never counts, and a table whose rows each hold as many cells written without their spans
+// is kept. Where a table before the asks ran the budget out, the fingerprint writes span cells the
+// document did not, and an ask reads as changed unless padding its stored rows gives those cells.
+// An ask over a span-free table with a short body row reads as changed the same way.
 func newAskMarkdown() func(ask *pmdoc.Node) (string, error) {
 	budget := pmdoc.NewSpanBudget()
 	return func(ask *pmdoc.Node) (string, error) {

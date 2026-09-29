@@ -1005,11 +1005,13 @@ that is only an image is left to settlement's `invalid` flag. A document edit is
 it writes or changes that breaks the rule or that settlement cannot read (`validateEditedAskBlocks`).
 Neither refuses an ask a browser edit left unreadable that it carries through unchanged, so such an
 ask does not refuse edits or versions elsewhere in the document, except that a new version is
-refused for an unreadable ask over a table whose rows its markdown writes short, which the parser
-pads when it reads the upload: a span-free table with a short row, or a span table written past the
-point the document's render ran out of its budget of span cells (100,000) - the ask it runs out in
-and every span-bearing ask after it, and, where a table before the asks ran it out, each whose
-padded rows differ from its spans.
+refused for an unreadable ask over a table whose markdown holds a body row shorter than its widest,
+which the parser pads when it reads the upload (the header is always written as wide as the widest
+row): a span-free table with a short body row, or a span table written after the document's render
+ran out of its budget of span cells (100,000) with a body row left short, such as a body cell
+spanning columns under a wider header or a rowspan. Where a table before the asks ran the budget
+out, the check writes span cells the document did not, and an ask is refused unless padding its
+stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown.
 
