@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
 const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
+const e2ePortNumber = Number(e2ePort);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${e2ePort}`;
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 const fakeEnvoyPort = Number(process.env.FAKE_ENVOY_PORT ?? "9021");
@@ -15,7 +16,7 @@ const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 // port already taken, because reusing a server this run did not start points `e2e/seed.ts`'s
 // truncation at whatever database that server holds — another lane's. Any other value is refused
 // rather than quietly read as "no".
-const reuseServers = ((): boolean => {
+function resolveReuseServers(): boolean {
   const requested = process.env.DISPATCH_E2E_REUSE_SERVERS;
   if (requested === undefined || requested === "") return false;
   if (requested === "1") return true;
@@ -24,10 +25,12 @@ const reuseServers = ((): boolean => {
       "Set it to 1 to run against a harness you started yourself, or leave it unset to have " +
       "this run start the harness."
   );
-})();
+}
+
+const reuseServers = resolveReuseServers();
 
 const harnessPorts = [
-  { variable: "DISPATCH_E2E_PORT", port: Number(e2ePort) },
+  { variable: "DISPATCH_E2E_PORT", port: e2ePortNumber },
   { variable: "FAKE_ENVOY_PORT", port: fakeEnvoyPort },
   { variable: "FAKE_GITHUB_PORT", port: fakeGithubPort },
 ];
@@ -116,7 +119,7 @@ export default defineConfig({
           },
           {
             command: `bash ${runServer}`,
-            port: Number(e2ePort),
+            port: e2ePortNumber,
             reuseExistingServer: reuseServers,
           },
         ],
