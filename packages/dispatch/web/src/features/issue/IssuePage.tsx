@@ -98,8 +98,9 @@ const STATUS_SELECT = 'select[aria-label="Status"]';
 const TITLE_HEADING = 'h1[tabindex="0"]';
 
 /** The header control `selector` names, or `null` when it is absent or refuses input (a closed
- *  issue, a save in flight), so `?` offers a shortcut exactly while its control takes a click. */
-function headerControl(selector: string): HTMLElement | null {
+ *  issue, a save in flight): the one fact both the key's `run` and the `when` that offers it read,
+ *  so a shortcut is listed exactly while its control would take a click. */
+function usableControl(selector: string): HTMLElement | null {
   const node = document
     .querySelector("[data-testid=issue-header]")
     ?.querySelector<HTMLElement>(selector);
@@ -158,36 +159,36 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   // its label names - the same handler a click reaches, offered while that control is. The
   // digits go through `useIssuePriority` on the route's key, the query key this page reads, so
   // a keyed priority lands in the same cache the picker writes.
-  const priority = useIssuePriority(route.key);
+  const priorityWrite = useIssuePriority(route.key);
   useKeymapScope("issue");
   useKeymap("issue", [
     {
       id: "status",
       keys: "s",
       label: "Focus the status",
-      run: () => headerControl(STATUS_SELECT)?.focus(),
-      when: () => headerControl(STATUS_SELECT) !== null,
+      run: () => usableControl(STATUS_SELECT)?.focus(),
+      when: () => usableControl(STATUS_SELECT) !== null,
     },
     {
       id: "priority",
       keys: "p",
       label: "Focus the priority",
-      run: () => headerControl(PRIORITY_SELECT)?.focus(),
-      when: () => headerControl(PRIORITY_SELECT) !== null,
+      run: () => usableControl(PRIORITY_SELECT)?.focus(),
+      when: () => usableControl(PRIORITY_SELECT) !== null,
     },
     {
       id: "set-priority",
       keys: ["0", "1", "2", "3"],
       label: "Set priority P0–P3",
-      run: (event) => priority.submit(Number(event.key) as IssuePriority),
-      when: () => headerControl(PRIORITY_SELECT) !== null,
+      run: (event) => priorityWrite.submit(Number(event.key) as IssuePriority),
+      when: () => usableControl(PRIORITY_SELECT) !== null,
     },
     {
       id: "labels",
       keys: "l",
       label: "Edit labels",
-      run: () => headerControl(LABELS_TRIGGER)?.click(),
-      when: () => headerControl(LABELS_TRIGGER) !== null,
+      run: () => usableControl(LABELS_TRIGGER)?.click(),
+      when: () => usableControl(LABELS_TRIGGER) !== null,
     },
     {
       // The heading takes focus only while the issue is open: closed, its `tabIndex` is -1 and
@@ -195,15 +196,15 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       id: "title",
       keys: "e",
       label: "Edit the title",
-      run: () => headerControl(TITLE_HEADING)?.focus(),
-      when: () => headerControl(TITLE_HEADING) !== null,
+      run: () => usableControl(TITLE_HEADING)?.focus(),
+      when: () => usableControl(TITLE_HEADING) !== null,
     },
     {
       id: "pin",
       keys: "Shift+P",
       label: "Pin or unpin the issue",
-      run: () => headerControl(PIN_TOGGLE)?.click(),
-      when: () => headerControl(PIN_TOGGLE) !== null,
+      run: () => usableControl(PIN_TOGGLE)?.click(),
+      when: () => usableControl(PIN_TOGGLE) !== null,
     },
     ...tabChords.map(({ id, keys, label, tab }) => ({
       id,
@@ -306,7 +307,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         documentArtifact={primaryArtifact}
         isClosed={isClosed}
         issue={issue.data}
-        priorityWrite={priority}
+        priorityWrite={priorityWrite}
         state={issueState}
       />
       <IssueTabs

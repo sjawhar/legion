@@ -19,7 +19,7 @@ const priorityOptions: readonly { label: string; value: IssuePriority | null }[]
  * an Inbox row - where this control is the only thing that writes that issue's priority.
  */
 export function PriorityControl({
-  disabled = false,
+  disabled,
   issueKey,
   priority,
 }: {
