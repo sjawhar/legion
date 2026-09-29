@@ -56,10 +56,14 @@ workspace package's manifest — none of which is under `packages/envoy/`:
     file: packages/envoy/docker/Dockerfile  # also relative to the repo root
 ```
 
-The same holds for the `docker buildx build --load --file packages/envoy/docker/Dockerfile .`
-steps that build the smoke image in `envoy-and-contracts.yaml` and `release-envoy-listener.yaml`,
-and for a local build by hand. Narrowing the context to `packages/envoy` fails the build at the
-first workspace `COPY`.
+The same holds for the steps that build the smoke image in `envoy-and-contracts.yaml` and
+`release-envoy-listener.yaml`, and for a local build by hand. Narrowing the context to
+`packages/envoy` fails the build at the first workspace `COPY`.
+
+Those two smoke steps are `docker/build-push-action@v6` with `load: true`, not a `run:` step:
+`.github/scripts/check-image-trigger-paths.sh` reads the action's `context` and `file` to check
+that the workflow's path triggers cover every file the build reads, and refuses a build written
+as a shell command, which it cannot read reliably.
 
 ### 3. Multi-Arch Requires QEMU + Buildx
 
