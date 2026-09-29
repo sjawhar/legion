@@ -47,6 +47,7 @@ type Registry struct {
 	// handle is the watcher's (kvwatch.Watcher.KV).
 	kvMu                  sync.RWMutex
 	roleKV                bus.KeyValue
+	log                   *slog.Logger
 	now                   func() time.Time
 	openedAt              time.Time
 	restoredRoleRevisions map[string]uint64
@@ -70,6 +71,20 @@ type openOpts struct {
 	interestBucket string
 	roleBucket     string
 	now            func() time.Time
+	log            *slog.Logger
+}
+
+// WithLogger sets the logger the registry and its cache watcher write through. The listener passes
+// its own, so the registry's lines and the watcher's (internal/kvwatch) are the JSON records with
+// machine_id that the rest of its output is; the default is slog.Default(), which is what every
+// other caller and the tests use. The listener must not set that default instead: it also routes
+// the stdlib log package's output into the same handler, and the deployed CloudWatch metric filters
+// for publish failures, webhook refusals and dropped stream subjects are space-delimited text
+// patterns anchored on that package's date and time prefix
+// (agent-c meta/infra/pulumi/components/envoy/listener.py), so JSON there silently stops three
+// alarms. No deployed pattern matches a line from this package or from internal/kvwatch.
+func WithLogger(log *slog.Logger) OpenOption {
+	return func(o *openOpts) { o.log = log }
 }
 
 // WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
@@ -85,7 +100,7 @@ func WithClock(now func() time.Time) OpenOption {
 }
 
 func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
-	opts := openOpts{replicas: 1, interestBucket: Bucket, roleBucket: RoleBucket, now: time.Now}
+	opts := openOpts{replicas: 1, interestBucket: Bucket, roleBucket: RoleBucket, now: time.Now, log: slog.Default()}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -101,19 +116,20 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	restoredRoleRevisions, err := roleRevisions(roleKV)
+	restoredRoleRevisions, err := roleRevisions(roleKV, opts.log)
 	if err != nil {
 		return nil, err
 	}
 	r := &Registry{
 		roleKV:                roleKV,
+		log:                   opts.log,
 		cache:                 map[string]Interest{},
 		cacheRevisions:        map[string]uint64{},
 		now:                   opts.now,
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
 	}
-	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
 	// No eager load: the watcher populates the cache asynchronously. A synchronous load of N
 	// individual kv.Get() calls blocks indefinitely when the KV stream leader is on a remote node.
 	r.watcher.Start()
@@ -150,6 +166,16 @@ func (r *Registry) interests() bus.KeyValue {
 	return r.watcher.KV()
 }
 
+// logger is the logger Open was given, or the default one. A Registry the package's own unit tests
+// build as a literal has no logger, and its zero value logging where slog.Default() points is the
+// same thing every caller but the listener gets.
+func (r *Registry) logger() *slog.Logger {
+	if r.log == nil {
+		return slog.Default()
+	}
+	return r.log
+}
+
 func (r *Registry) roles() bus.KeyValue {
 	r.kvMu.RLock()
 	defer r.kvMu.RUnlock()
@@ -157,32 +183,24 @@ func (r *Registry) roles() bus.KeyValue {
 }
 
 // roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
-// holder gets to register again. A claim whose key this build cannot read (bus.ErrRefused: an
-// earlier build stored it past what a read of it may send) gets none, since nothing can resolve
-// it; the role reaper deletes it.
-func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
+// holder gets to register again. It takes them from one scan over the bucket's existing keys
+// (kvwatch.ScanExistingKeys), the way the interest, session and CI caches read theirs, so readiness
+// costs one pass over the bucket rather than a round trip per stored claim. A claim whose key this
+// build cannot read gets a revision here; it still gets no grace, because ReleaseExpiredRoleClaim,
+// the only reader of these revisions, reads the claim itself first and cannot.
+//
+// A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
+// restored holder that loses its grace and is released a session TTL early, so an incomplete scan
+// fails the caller, and only a complete one logs.
+func roleRevisions(kv bus.KeyValue, log *slog.Logger) (map[string]uint64, error) {
 	revisions := map[string]uint64{}
-	keys, err := kv.Keys()
-	if errors.Is(err, nats.ErrNoKeysFound) {
-		return revisions, nil
-	}
+	scan, err := kvwatch.ScanExistingKeys(kv, "role revisions", log, func(entry nats.KeyValueEntry) {
+		revisions[entry.Key()] = entry.Revision()
+	})
 	if err != nil {
 		return nil, err
 	}
-	for _, role := range keys {
-		entry, err := kv.Get(role)
-		if errors.Is(err, nats.ErrKeyNotFound) {
-			continue
-		}
-		if errors.Is(err, bus.ErrRefused) {
-			slog.Warn("role registry skipped a stored claim it cannot read", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		revisions[role] = entry.Revision()
-	}
+	log.Info("restored role claims", slog.Int("restored", len(revisions)), slog.Int("delete_markers", scan.Markers))
 	return revisions, nil
 }
 
@@ -241,7 +259,7 @@ func (r *Registry) deleteInterest(sessionID string) error {
 			r.mu.Lock()
 			r.evictCachedInterestLocked(sessionID, latest.Revision())
 			r.mu.Unlock()
-			slog.Warn("registry cache evicted malformed value",
+			r.logger().Warn("registry cache evicted malformed value",
 				slog.String("key", latest.Key()),
 				slog.Uint64("revision", latest.Revision()),
 				slog.String("error", err.Error()),
@@ -313,7 +331,7 @@ func (r *Registry) applyWatched(entry nats.KeyValueEntry) {
 		r.mu.Lock()
 		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
 		r.mu.Unlock()
-		slog.Warn("registry watcher evicted malformed value",
+		r.logger().Warn("registry watcher evicted malformed value",
 			slog.String("key", entry.Key()),
 			slog.Uint64("revision", entry.Revision()),
 			slog.String("error", err.Error()),
@@ -440,7 +458,7 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 	claim, entry, err := r.roleClaim(role)
 	if errors.Is(err, bus.ErrRefused) {
-		slog.Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
+		r.logger().Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 		return nil
 	}
 	if err != nil {
@@ -642,13 +660,13 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 			// The old holder is a session an earlier build registered under an id this one cannot
 			// write. The claim is written and the caller named nothing too long, so it succeeds; the
 			// interest reaper removes the old holder's interest once its session is gone.
-			slog.Warn("registry role claim left an old holder's interest it cannot write to the reaper",
+			r.logger().Warn("registry role claim left an old holder's interest it cannot write to the reaper",
 				slog.String("role", role),
 				slog.Int("key_bytes", len(oldSessionID)),
 				slog.String("error", err.Error()),
 			)
 		} else if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-			slog.Warn("registry role claim old holder cleanup failed",
+			r.logger().Warn("registry role claim old holder cleanup failed",
 				slog.String("role", role),
 				slog.String("old_session_id", oldSessionID),
 				slog.String("new_session_id", sessionID),
@@ -770,7 +788,7 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 	for _, sid := range stale {
 		err := r.deleteInterest(sid)
 		if errors.Is(err, bus.ErrRefused) {
-			slog.Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
+			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
 			continue
 		}
 		if err != nil {
@@ -801,10 +819,10 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 		if errors.Is(err, bus.ErrRefused) {
 			switch err := r.roles().Delete(role); {
 			case err == nil:
-				slog.Warn("role reaper deleted a claim it cannot read", slog.Int("key_bytes", len(role)))
+				r.logger().Warn("role reaper deleted a claim it cannot read", slog.Int("key_bytes", len(role)))
 				reaped++
 			case errors.Is(err, bus.ErrRefused):
-				slog.Warn("role reaper skipped a claim it cannot delete", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
+				r.logger().Warn("role reaper skipped a claim it cannot delete", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 			default:
 				return 0, err
 			}
@@ -835,10 +853,10 @@ func (r *Registry) StartReaper(isAlive func(string) bool, interval, graceWindow 
 		for range ticker.C {
 			count, err := r.Reap(isAlive, graceWindow)
 			if err != nil {
-				slog.Error("reaper cycle failed", slog.String("error", err.Error()))
+				r.logger().Error("reaper cycle failed", slog.String("error", err.Error()))
 				continue
 			}
-			slog.Info("reaper cycle", slog.Int("reaped", count))
+			r.logger().Info("reaper cycle", slog.Int("reaped", count))
 		}
 	}()
 }
@@ -853,10 +871,10 @@ func (r *Registry) StartRoleClaimReaper(isAlive func(string) bool, interval, ses
 		for range ticker.C {
 			count, err := r.ReapRoleClaims(isAlive, sessionTTL)
 			if err != nil {
-				slog.Error("role claim reaper cycle failed", slog.String("error", err.Error()))
+				r.logger().Error("role claim reaper cycle failed", slog.String("error", err.Error()))
 				continue
 			}
-			slog.Info("role claim reaper cycle", slog.Int("reaped", count))
+			r.logger().Info("role claim reaper cycle", slog.Int("reaped", count))
 		}
 	}()
 }

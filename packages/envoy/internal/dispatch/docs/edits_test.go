@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -440,6 +441,50 @@ func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing
 	if markdown != want {
 		t.Fatalf("paragraph after cell anchor = %q, want %q", markdown, want)
 	}
+}
+
+// An insert reads the document back before and after it (pmdoc.RefuseMisreadWrite) once for each
+// insert of a batch, so it reads the tables' spans unwritten: with a budget of span cells for each
+// read-back, four inserts beside a table whose spans take the whole budget allocated some 1,580 MiB.
+func TestApplyOperationsInsertsBesideASpannedTableSpendNoSpanBudgetEach(t *testing.T) {
+	tree := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{
+		{Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "Before."}}},
+		wholeBudgetTable(),
+	}}
+	pmdoc.EnsureBlockIDs(tree)
+	ops := make([]model.EditOp, 4)
+	for index := range ops {
+		ops[index] = model.EditOp{Op: "insert", After: "end", Markdown: "New."}
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := applyOperations(tree, ops)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 64<<20 {
+		t.Fatalf("%d inserts allocated %d MiB, want at most 64", len(ops), allocated>>20)
+	}
+}
+
+// wholeBudgetTable is a table of 125 rows, each one cell holding `x` and spanning 801 columns, so
+// its spans add all the empty cells one render writes for spans (100,000) and every row is as wide
+// as the next.
+func wholeBudgetTable() *pmdoc.Node {
+	table := &pmdoc.Node{Type: "table"}
+	for index := range 125 {
+		kind, row := "table_cell", "table_row"
+		if index == 0 {
+			kind, row = "table_header", "table_header_row"
+		}
+		table.Children = append(table.Children, &pmdoc.Node{Type: row, Children: []*pmdoc.Node{{
+			Type:     kind,
+			Attrs:    pmdoc.Attrs{"alignment": nil, "colspan": 801, "colwidth": nil, "rowspan": 1},
+			Children: []*pmdoc.Node{{Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "x"}}}},
+		}}})
+	}
+	return table
 }
 
 func TestApplyOperationInsertsParagraphAfterParagraphContainingAnchor(t *testing.T) {

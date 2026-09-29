@@ -1,0 +1,4 @@
+# pane-guard-bash.test.ts's own must-refuse-at-the-base-guard check writes the merge base's
+# pane-guard.ts and its siblings here for the length of one test, under a fresh mkdtempSync name;
+# a concurrent jj/git status must never see it as a file to track.
+/.base-guard-check-*/

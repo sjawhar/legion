@@ -41,7 +41,7 @@ if [ -n "$WINIT_HOLD" ] && [ "$1 $2 $3" = "git clone https://github.com/acme/wid
 	printf held > "$WINIT_HOLD/held"
 	read _ < "$WINIT_HOLD/release"
 fi
-exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
+PATH="${PATH#*:}" exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
 
 // treeVolume is one tree volume and what a pod's two init containers run against it: a PATH whose

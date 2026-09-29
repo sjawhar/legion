@@ -45,19 +45,36 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   // Deletes the backups `find` lists: a path read from a command's output.
   "packages/envoy/deploy/scripts/autodeploy_test.sh":
     "packages/envoy/deploy/scripts/autodeploy.sh:80",
-  // Kills the processes a query selects (`$(run_processes)`, `first_child`), not pids it started.
-  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/controller-start-tmux.sh:67",
+  // A cp source read from a command's output can instead carry an option; no -- or -T makes
+  // its last operand certainly the destination. These drivers run the same library first.
+  "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
+  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
+  // `sed "${args[@]}"` over an array a loop appends `-e` and its script to: quoted, but the
+  // guard's branch merge forgets the elements, so it cannot pair each `-e` with the element
+  // it consumes, and reads them as words that may stand alone. `-e` always takes the next
+  // element, so no element of THIS construction turns on `-i`; the elements are sed scripts
+  // the guard does not read, whose own writes are LEGION-377. A listed cost rather than a
+  // leak (LEGION-357).
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:385",
+  // Creates and sets the mode of a directory outside the roots (`install -d /etc/apt/keyrings`):
+  // a script that provisions a host, never one a pane runs (LEGION-357).
+  "packages/envoy/deploy/scripts/install-docker-debian.sh":
+    "packages/envoy/deploy/scripts/install-docker-debian.sh:7",
   // A library run bare, without the arguments every caller passes: bash stops at its argument
   // check, and the guard, which walks a command whatever a test before it decides, reaches the
-  // paths an empty argument makes (`--control`, `--dest`).
+  // paths an empty argument makes. The negative control's copy is written under `--control`,
+  // empty here, so the copy lands at the filesystem root.
   "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
+  // An unnameable write can replace the script it runs next; these two driver scripts do that.
+  ".github/scripts/check-bun-version.test.sh": ".github/scripts/check-bun-version.test.sh:74",
+  ".github/scripts/check-image-trigger-paths.test.sh":
+    ".github/scripts/check-image-trigger-paths.test.sh:75",
   // Runs the gateway key command it writes, whose `command=(%s)` line takes a value built from
   // `$(command -v hawk-token)`: a script the guard cannot read. The drivers run it before any pane.
   "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
   "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
   "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
   "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
 };
 
 beforeAll(() => {
@@ -110,6 +127,16 @@ const FAMILIES: Record<string, (target: string) => string> = {
   truncate: (target) => `truncate -s 0 ${target}`,
   "> redirection": (target) => `echo overwritten > ${target}`,
   tee: (target) => `echo overwritten | tee ${target}`,
+  // The verbs that write the path they name, each through the operand its own grammar makes the
+  // destination: the last one, or the one an option carries. `dd` is not here because its
+  // destination is carried inside an operand word (`of=<path>`), which the refusal names whole,
+  // as `tar -C`'s does; its rows are in `pane-guard-write-rows.ts` and the test below.
+  cp: (target) => `cp "$LEGION_WORKSPACE/notes.txt" ${target}`,
+  "cp -t": (target) => `cp -t ${target} "$LEGION_WORKSPACE/notes.txt"`,
+  install: (target) => `install -m 644 "$LEGION_WORKSPACE/notes.txt" ${target}`,
+  "ln -sf": (target) => `ln -sf "$LEGION_WORKSPACE/notes.txt" ${target}`,
+  "ln (hard)": (target) => `ln "$LEGION_WORKSPACE/notes.txt" ${target}`,
+  "sed -i": (target) => `sed -i 's/notes/other/' ${target}`,
 };
 
 describe("the pane guard's command families", () => {
@@ -204,6 +231,13 @@ describe("resolution", () => {
     expect(bash(`rm -rf "\${HOME:-/nowhere}"`)).toContain(home);
   });
 
+  test("tells an unresolvable in-workspace path how to become resolvable", () => {
+    const reason = bash("rm -rf out/tmp/../old");
+    expect(reason).toContain("cannot know where the `..` after it leads");
+    expect(reason).toContain("Make the unresolved path component resolvable in an earlier command");
+    expect(reason).not.toContain("Name a path under $LEGION_WORKSPACE");
+  });
+
   test("keeps a variable unset after unset, apart from empty and from the pane's environment", () => {
     const ssh = path.join(home, ".ssh");
     // `-` and `+` test whether a name is set, where `:-` and `:+` test whether it is non-empty.
@@ -289,13 +323,38 @@ describe("resolution", () => {
   });
 
   test("resolves the paths realpath, dirname, basename and readlink -f print", () => {
-    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/a/../b"); rm -rf "$d"')).toBeUndefined();
-    expect(bash('d=$(realpath -m -- "$HOME/a/../.ssh"); rm -rf "$d"')).toContain(
+    expect(
+      bash('d=$(realpath -m -- "$LEGION_WORKSPACE/../LEGION-1/b"); rm -rf "$d"')
+    ).toBeUndefined();
+    expect(bash('d=$(realpath -m -- "$HOME/.ssh/../.ssh"); rm -rf "$d"')).toContain(
       path.join(home, ".ssh")
     );
     expect(bash('d=$(dirname "$HOME/.ssh/id"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
     expect(bash('d="$LEGION_WORKSPACE/$(basename "$HOME/x")"; rm -rf "$d"')).toBeUndefined();
     expect(bash('d=$(readlink -f "$HOME/.ssh"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+    // More than one operand prints one line each, which an unquoted substitution splits into
+    // several targets: the guard cannot say which it judged, so the value stays unknown.
+    expect(bash('rm -rf $(dirname "$LEGION_WORKSPACE/x" "$HOME/.ssh/id")')).toBeDefined();
+    expect(bash('rm -rf $(realpath -m -- "$LEGION_WORKSPACE/x" "$HOME/.ssh")')).toBeDefined();
+    // GNU `basename /` prints `/`, so this is `$HOME` itself, not a path under the workspace.
+    expect(bash(`chmod -R 000 "$(basename /)\${HOME#/}"`)).toBeDefined();
+    // GNU `dirname ///` prints `/` (a path of separators alone), not `.` (a word with none).
+    expect(bash(`chmod -R 000 "$(dirname ///)\${HOME#/}"`)).toBeDefined();
+    // `cd -@` is an invalid option on Linux: bash stays where it was.
+    expect(bash('cd "$HOME"; cd -@ "$LEGION_WORKSPACE"; rm -f .bashrc')).toBeDefined();
+    // `--relative-to`/`--relative-base` override any `-s`/`-L`/`-P` reading: read `-s` first and
+    // the substitution gets a lexical path as if `--relative-to` were not there at all.
+    expect(bash('rm -rf $(realpath -s --relative-to=d "$LEGION_WORKSPACE/keep")')).toBeDefined();
+    // `path.dirname` leaves a doubled separator GNU's own dirname strips: it would print
+    // `$LEGION_WORKSPACE/` (trailing slash) for a `//` input, and the `0` suffix below then
+    // names the sibling workspace `…10` rather than a path inside this one.
+    expect(bash('rm -rf "$(dirname "$LEGION_WORKSPACE//x")0"')).toBeDefined();
+    // A `..` after a component that is not there is never resolved to the path the text reads
+    // as: whatever creates that component decides where the `..` leads, so the guard models no
+    // path at all and the value stays a command's output (LEGION-355).
+    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/gone/../b"); rm -rf "$d"')).toContain(
+      "(a command's output)"
+    );
   });
 
   test("never resolves git rev-parse --show-toplevel, whose answer config it cannot read decides", () => {
@@ -1078,6 +1137,19 @@ describe("scripts a command runs", () => {
       expect(bash(command), command).toContain(path.join(home, ".ssh"));
     }
     expect(bash(`S="a b"; Y=($S "$HOME/.ssh"); rm -rf "\${Y[2]}"`)).toContain("rm would delete");
+  });
+
+  test("an array this command never assigned may hold any number of arguments", () => {
+    // The pane's shell persists between tool calls, so a name this command never assigned may be an
+    // array an earlier call filled, and `[@]` over it gives an unknown number of arguments — any of
+    // which may be the `-i` that makes sed write, or the file it writes. The write battery cannot
+    // express this: each row and each plant runs in a fresh bash, which has no earlier call.
+    expect(bash(`sed -i "\${args[@]}"`)).toBeDefined();
+    expect(bash(`sed -n "\${args[@]}"`)).toBeDefined();
+    // Quoted, `[*]` joins every element into one argument, so it is one operand however many
+    // elements that shell holds; and after `--` the words can only be files.
+    expect(bash(`sed -n "\${args[*]}" notes.txt`)).toBeUndefined();
+    expect(bash(`sed -n 1p -- "\${args[@]}"`)).toBeUndefined();
   });
 
   test("tests a positional parameter's operator expansion against the argument it holds", () => {
@@ -1884,6 +1956,21 @@ describe("a word the guard cannot read", () => {
     // Quoted, the same word is one word, and the harmless reading holds.
     expect(bash('a=$(cat f); fuser "$a"')).toBeUndefined();
     expect(bash('a=$(cat f); chmod "$a" notes.txt')).toBeUndefined();
+  });
+
+  test("reads the words after a `--` that an unread word may take as its value both ways", () => {
+    // Read as `-f`, the unread word takes `--` as its script file, so `--` ends no options; read as
+    // the script, it leaves `--` ending them, and every word after it an operand: `-run`, which
+    // reads as a harmless option cluster, and a second `--`, each then a file in the home.
+    writeFileSync(path.join(home, "-run"), "profile");
+    writeFileSync(path.join(home, "--"), "profile");
+    try {
+      expect(bash('cd ~ && s=$(cat f); sed -i "$s" -- -run')).toContain(path.join(home, "-run"));
+      expect(bash('cd ~ && s=$(cat f); sed -i "$s" -- -- x')).toContain(path.join(home, "--"));
+    } finally {
+      rmSync(path.join(home, "-run"));
+      rmSync(path.join(home, "--"));
+    }
   });
 
   test("judges the directory an extract option carries inside its own word", () => {

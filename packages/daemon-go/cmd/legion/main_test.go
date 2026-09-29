@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,6 +33,15 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func testRolePromptsDir(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate command test source")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(source), "../../../pi-envoy/roles"))
+}
+
 // legionState points the registry at a directory of this test's own, so nothing here reads or
 // writes the box's real record of running legions.
 func legionState(t *testing.T) string {
@@ -45,6 +55,7 @@ func legionState(t *testing.T) string {
 // here is about the claim on the team, which `start` settles before it opens a store.
 func legionConfig(t *testing.T, project string, port int) string {
 	t.Helper()
+	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legion.yaml")
 	body := fmt.Sprintf("project: %s\nport: %d\npostgres_dsn: postgres://legion:legion@127.0.0.1:1/legion\nstate_dir: %s\n",
@@ -333,6 +344,7 @@ func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) 
 // LEGION_OMP_PATH names an executable, so the OMP invocation resolves without mise.
 func workflowConfig(t *testing.T, port int, extra string) (path, marker string) {
 	t.Helper()
+	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	omp, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -708,6 +720,7 @@ func TestStartCheckConfigRefusesWhatTheSandboxRuntimeRefuses(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 			dir := t.TempDir()
 			marker := filepath.Join(dir, "private-key-command-ran")
 			command := "touch " + marker + "; exit 1"

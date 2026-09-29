@@ -279,13 +279,13 @@ func (s *server) writeBroadcast(
 	}
 	events := make([]model.Event, 0, len(recipients))
 	sent.Recipients = make([]broadcastRecipient, 0, len(recipients))
-	for _, recipient := range recipients {
+	for position, recipient := range recipients {
 		target := "session:" + recipient.sessionID
 		message, err := scanMessage(tx.QueryRow(ctx, `
-			insert into messages (issue_key, author, body, target, broadcast_id)
-			values (null, $1, $2, $3, $4)
+			insert into messages (issue_key, author, body, target, broadcast_id, broadcast_position)
+			values (null, $1, $2, $3, $4, $5)
 			returning `+messageColumns+`
-		`, author, body, target, sent.ID))
+		`, author, body, target, sent.ID, position))
 		if err != nil {
 			return broadcastRead{}, nil, err
 		}
@@ -455,15 +455,17 @@ func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, read)
 }
 
-// loadBroadcastRecipients reads every message the broadcast sent, oldest first, each with its
-// delivery attempts and the replies threaded under it - the same shape one agent card's
-// conversation is read in, so a recipient's state reads the same on both pages.
+// loadBroadcastRecipients reads every message the broadcast sent in the sender's requested
+// order. Messages created before positions existed, or by an old server during a rolling deploy,
+// have no position; their request order was never stored, so they retain the created_at and id
+// fallback order. created_at cannot order one current broadcast because all of its rows share
+// the one transaction's now().
 func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string) ([]broadcastRecipient, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, `
 		select `+messageColumns+`
 		from messages
 		where broadcast_id = $1
-		order by created_at, id
+		order by broadcast_position nulls last, created_at, id
 	`, broadcastID)
 	if err != nil {
 		return nil, err

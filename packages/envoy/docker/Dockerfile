@@ -48,9 +48,10 @@ COPY packages/envoy/internal ./internal
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go
 
 # The legion commit this image is built from, which envoy-dispatch's /healthz reports as
-# `commit`. The release workflow passes its own github.sha. Left empty (a local compose or
-# testcontainers build) the binary reports null; anything else must be a full commit sha, so
-# no placeholder is ever reported as a commit.
+# `commit`. The release workflow passes its own github.sha, for the image it publishes and for
+# the smoke image it tests first. Left empty — a local compose or hand build, and the
+# pull-request lane's smoke image, which publishes nothing to match — the binary reports null;
+# anything else must be a full commit sha, so no placeholder is ever reported as a commit.
 ARG LEGION_COMMIT=
 RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0-9a-f]{40}'; then \
       echo "LEGION_COMMIT must be a full 40-character commit sha or empty, got '$LEGION_COMMIT'" >&2; exit 1; \

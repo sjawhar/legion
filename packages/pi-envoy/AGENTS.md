@@ -272,6 +272,32 @@ not a descendant of the pane's Oh My Pi process (`/proc` read at check time). It
 both daemons set on every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify,
 `LEGION_WORKSPACE`, `HOME`), so it adds nothing to either daemon contract.
 
+A verb that writes a path it names is judged on the operand its own grammar makes the destination,
+which is the whole of what LEGION-357 fixed: `cp` and `install` on their last operand, or on the
+directory `-t` names, where every other operand is a source they read — except `install -d`,
+which creates directories, so there every operand is judged; `dd` on the path inside its
+`of=` word, wherever that word stands; `ln` on its last operand, or on the working directory when
+it is given one operand the guard reads whole, plus its source when it makes a hard link, which is
+a second name for a file outside the roots that no later command can resolve; `sed` on the files
+it names with `-i`, in a cluster (`-ni`) or with a suffix joined to it (`-i.bak`) as well as
+alone — never on
+the files its script names through `w`, `W`, `s///w`, `e` or `s///e`, which it does not read
+(LEGION-377). Which of the
+link and its target is judged follows what each verb does to a symlink — `sed -i` replaces the
+link, `cp` and `dd` write through it, and `install` and `ln` do one or the other depending on
+whether it leads to a directory, so both are judged (`Reach`). Each of these, like a redirection,
+judges a destination only where a file is already there: a path that does not exist yet
+overwrites nothing. Separately, `cp`, `mv`, `install` and `ln` refuse outright, whatever is on
+disk, when a word before `--` the guard cannot read whole may be an option that hides the
+destination, or when no destination is left; `docs/deployment.md` lists the four accepted costs.
+One residual of this family is a symlink the same command both creates and writes through: it is
+not on disk when the guard reads the command. Others are tracked rather than covered: a value
+re-parsed by `eval` or `bash -c` (LEGION-375), an expansion slice (LEGION-376), and a `sed`
+script's own writes (LEGION-377). Before it reads a simple command positionally, the guard drops
+words bash passes no argument for while preserving ordinary empty arguments.
+`src/legion/pane-guard-write-rows.ts` holds the rows this is measured on, and
+`scripts/measure-pane-guard-writes.ts` runs them against any guard build.
+
 Commands are parsed with `unbash` (a bash parser, bundled into `dist/legion.js`) and walked as bash
 would run them: word expansion with quoting, tilde, variables assigned earlier (`$(mktemp -d)` is a
 fresh `/tmp` path, and `printf -v` assigns), `cd`, brace expansion, the paths `realpath`,
@@ -309,6 +335,20 @@ double-quoted position). `printf %d` writes digits and a sign, so there a value 
 stays one unknown word. `echo` with an option first, and a here-document whose unquoted text
 bash expands, are scripts it cannot read too; a shell or interpreter reading such a
 here-document as its program is refused.
+
+Every target, script and model key is then resolved as `open(2)` resolves it — each component's
+symlink followed before the next is read — so a `..` after a symlink names the directory the link
+points into, not the one the text reads as, and a relative target after a `cd` into a symlink
+follows the physical path while bash's `PWD` stays logical (`cd -P` and `env -C` chdir outright,
+so the guard resolves those physically too). Neither `path.resolve` nor `realpathSync` does this:
+both strip `..` lexically first. A `..` after a component the guard cannot resolve — absent, a
+dangling link, a loop, a directory it may not search — is **unknown**, never the path the text
+reads as, because an earlier stage of the same command is what decides what that component becomes
+(LEGION-355). The property is resolvability rather than the `..`: a `..` is the shape that makes
+the divergence visible, and a directory the guard may not search diverges with no `..` in the path
+at all, so there is one walk for every target and no shortcut for a path that looks simple. What
+the walk does not cover is a link the command retargets during its own run, where the guard
+resolves a value it read correctly and a later stage changes it.
 
 A word the guard cannot read whole is never read as harmless. Where a word selects a dangerous
 option or subcommand — `tar`'s extract mode and `-C`, `unzip`'s `-d`, `fuser -k`, `tmux`'s kill
@@ -385,7 +425,15 @@ set-ness operator over set, empty, unset and environment names, a function's arg
 that give one, none, several or an unknown number, and every writer above over variables, arrays,
 elements and attributed names, to one real bash, through the guard. Each differential also asserts
 that more than a tenth of its cases reach outside the roots, so a harness that stopped
-discriminating fails rather than passing on an empty comparison.
+discriminating fails rather than passing on an empty comparison. It also holds the path battery:
+`src/legion/pane-guard-path-rows.ts` names each command class the guard path-matches over a
+fixture whose symlink's parent is a canary HOME, runs every row through `guard.bash` and then
+through real bash, and the test requires that every row bash used to damage the canary was
+refused. Each of the seventeen classes carries a control in both directions, and every control
+fires against the current guard, so a new class cannot rest on probes alone. The test also asserts
+that every row whose property is a `..` carries one as a literal path component, because
+`path.join` normalises a `..` away and such a row would otherwise pass while measuring nothing.
+`scripts/measure-pane-guard-paths.ts` prints the same measurement for any guard build.
 `src/legion/pane-guard-code.ts` tokenizes Python and JavaScript for known deletion, move,
 overwrite, signal, and shell-out calls whose arguments it can evaluate; an argument it cannot
 evaluate is let through, where a shell target it cannot resolve, and a command `unbash` reports as
@@ -393,7 +441,10 @@ malformed, are refused. Command tables are `Set`/`Map`, never object literals, s
 from the command (`constructor` would otherwise match). `src/legion/pane-guard.test.ts` holds the
 family matrix, the incident's script, the signal cases, the eval tool, and the sweep of every
 tracked shell script against `EXPECTED_SCRIPT_REFUSALS` (each refused script with its first
-refusal's site, filed under why it is refused); `src/legion/pane-guard-walk.ts` prints every
+refusal's site, filed under why it is refused); `src/legion/pane-guard-bash.test.ts` also runs
+`WRITE_ROWS`, where a row's expectation for the dangerous direction is what real bash did to a
+canary `HOME` rather than a verdict written beside it, and the rows the documented boundary leaves
+open are listed by name; `src/legion/pane-guard-walk.ts` prints every
 refusal a script meets, not only the first, and never writes that set, so a change to it is a
 person's decision to fix the guard, the script, or the set. `extensions/legion.test.ts` proves the
 hook refuses the incident's script through a booted worker.

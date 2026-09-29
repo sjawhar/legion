@@ -60,6 +60,9 @@ type escapeContext struct {
 	// opener and closer are the delimiter character (`*` or `~`) of the mark written right
 	// before the text and of the one written right after it, or 0 when that is no delimiter.
 	opener, closer byte
+	// flankFirst and flankLast report whether the text's first and last character are written as
+	// character references, for the delimiter run beside each to open or close (runSpelling).
+	flankFirst, flankLast bool
 }
 
 // endsBareURL reports whether the character is ASCII punctuation opening text written right after
