@@ -514,13 +514,13 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
 
 
 def gating_filters(document: dict, job_name: str, job: dict) -> list[tuple[str, Filter]]:
-    """The dorny/paths-filter filters a job's `if:` is gated on. A gate this check cannot
-    evaluate is reported, never ignored, since ignoring it would treat a gated call as one that
-    runs on every change."""
+    """The dorny/paths-filter filters a job's `if:` is gated on — a job that builds an image, or
+    one that calls a workflow which does. A gate this check cannot evaluate is reported, never
+    ignored, since ignoring it would treat a gated job as one that runs on every change."""
     try:
         outputs = gate_outputs(str(job.get("if", "")))
     except Unreadable as error:
-        problems.append(f"::error::jobs.{job_name} calls an image workflow, and its if: {error}")
+        problems.append(f"::error::jobs.{job_name} builds or calls an image, and its if: {error}")
         return []
     jobs = document.get("jobs") or {}
     found = []
@@ -541,8 +541,9 @@ def gating_filters(document: dict, job_name: str, job: dict) -> list[tuple[str, 
             )
         if step is None:
             problems.append(
-                f"::error::a job calling an image workflow is gated on needs.{needed}.outputs."
-                f"{output}, which is not a dorny/paths-filter filter this check can read"
+                f"::error::jobs.{job_name} builds or calls an image and is gated on "
+                f"needs.{needed}.outputs.{output}, which is not a dorny/paths-filter filter "
+                f"this check can read"
             )
             continue
         options = step.get("with") or {}
@@ -602,7 +603,7 @@ def triggers_for(workflow: Path) -> list[tuple[str, list]]:
 
 builds = []
 for workflow, document in documents.items():
-    for job in (document.get("jobs") or {}).values():
+    for job_name, job in (document.get("jobs") or {}).items():
         if not isinstance(job, dict):
             continue
         for step in job.get("steps") or []:
@@ -612,7 +613,7 @@ for workflow, document in documents.items():
                 options = step.get("with") or {}
                 context = posixpath.normpath(str(options.get("context", ".")))
                 dockerfile = str(options.get("file", posixpath.join(context, "Dockerfile")))
-                builds.append((workflow, context, posixpath.normpath(dockerfile)))
+                builds.append((workflow, job_name, context, posixpath.normpath(dockerfile)))
                 continue
             script = step.get("run")
             if not isinstance(script, str) or "docker" not in script:
@@ -626,6 +627,7 @@ for workflow, document in documents.items():
                     builds.append(
                         (
                             workflow,
+                            job_name,
                             posixpath.normpath(posixpath.join(directory, context)),
                             posixpath.normpath(posixpath.join(directory, dockerfile)),
                         )
@@ -639,7 +641,7 @@ if not builds:
         "build`: this check covered 0 image builds, so it proves nothing"
     )
 
-for workflow, context, dockerfile in builds:
+for workflow, job_name, context, dockerfile in builds:
     if not Path(dockerfile).is_file():
         problems.append(f"::error file={workflow}::{workflow} builds {dockerfile}, which is missing")
         continue
@@ -671,7 +673,19 @@ for workflow, context, dockerfile in builds:
         except Unreadable as error:
             problems.append(f"::error file={dockerfile},line={line}::{dockerfile}:{line}: {error}")
 
+    # A trigger that starts the workflow is not enough: the building job's own `if:` can skip it
+    # on a change the trigger let through, and the image is then not built for that change
+    # either. AND the job's gate into every trigger.
+    document = documents[workflow]
+    own = gating_filters(document, job_name, document["jobs"][job_name])
     triggers = triggers_for(workflow)
+    if own:
+        names = " or ".join(name for name, _ in own)
+        gate = AnyOf([f for _, f in own])
+        triggers = [
+            (f"{label} + jobs.{job_name}.if ({names})", filters + [gate])
+            for label, filters in triggers
+        ]
     for label, filters in triggers:
         for name, files in inputs:
             uncovered = [path for path in files if not all(f.covers(path) for f in filters)]

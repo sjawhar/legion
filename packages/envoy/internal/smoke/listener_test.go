@@ -31,13 +31,15 @@ func TestSmoke(t *testing.T) {
 	image := os.Getenv("ENVOY_SMOKE_IMAGE")
 	if image == "" {
 		t.Fatal("ENVOY_SMOKE_IMAGE is unset, and this test never builds the image itself.\n" +
-			"Build it first, from the repository root:\n" +
-			"  docker buildx build --load --tag legion-envoy-smoke:local " +
-			"--file packages/envoy/docker/Dockerfile .\n" +
+			"From the repository root:\n" +
+			"  img=$(docker buildx build --load -q " +
+			"-f packages/envoy/docker/Dockerfile .)\n" +
 			"then, in packages/envoy:\n" +
-			"  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local go test -tags smoke -v ./internal/smoke/\n" +
-			"Rebuild after changing anything the image contains. In CI the build is a step of " +
-			"its own; see .github/workflows/envoy-and-contracts.yaml.")
+			"  ENVOY_SMOKE_IMAGE=$img go test -tags smoke -v ./internal/smoke/\n" +
+			"`-q` prints the image id, and go's test cache keys on the value of this variable, " +
+			"so rebuilding re-runs the test. A fixed tag would replay a cached PASS against an " +
+			"image that had since changed. In CI the build is a step of its own; see " +
+			".github/workflows/envoy-and-contracts.yaml.")
 	}
 
 	ctx := context.Background()

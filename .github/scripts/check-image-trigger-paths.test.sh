@@ -298,7 +298,7 @@ sed -i "s#    if: .*#    if: (needs.changes.outputs.image == 'true') \&\& (needs
   "$root/.github/workflows/release.yaml"
 run_check "$root"
 check "outputs in two &&-joined clauses fail" "$(is "$status" 1)"
-check "says why" "$(contains "$out" 'jobs.image calls an image workflow, and its if: tests needs.\*.outputs in more than one &&-joined clause')"
+check "says why" "$(contains "$out" 'jobs.image builds or calls an image, and its if: tests needs.\*.outputs in more than one &&-joined clause')"
 
 root=$(fixture called-not-true)
 callers "$root" "$all_inputs"
@@ -473,6 +473,66 @@ buildx_step "$root" 'docker compose build listener'
 run_check "$root"
 check "docker compose build fails rather than being ignored" "$(is "$status" 1)"
 check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
+echo "case: the building job's own if: gate narrows what the trigger covers"
+# gate_build_job <root> <filter patterns>: adds a changes job to image.yaml and gates the
+# building job on one of its filters, the shape envoy-and-contracts.yaml uses.
+gate_build_job() {
+  local root=$1 patterns=$2
+  python3 - "$root/.github/workflows/image.yaml" "$patterns" <<'PY'
+import sys
+path, patterns = sys.argv[1], sys.argv[2]
+text = open(path).read()
+head, marker, tail = text.partition("jobs:\n")
+changes = (
+    "  changes:\n"
+    "    runs-on: ubuntu-24.04\n"
+    "    outputs:\n"
+    "      gated: ${{ steps.filter.outputs.gated }}\n"
+    "    steps:\n"
+    "      - uses: dorny/paths-filter@v3\n"
+    "        id: filter\n"
+    "        with:\n"
+    "          filters: |\n"
+    "            gated:\n"
+    f"{patterns}\n"
+)
+tail = tail.replace(
+    "  docker:\n    runs-on: ubuntu-24.04\n",
+    "  docker:\n    needs: changes\n    if: needs.changes.outputs.gated == 'true'\n"
+    "    runs-on: ubuntu-24.04\n",
+)
+open(path, "w").write(head + marker + changes + tail)
+PY
+}
+
+# The negative control: the build job runs only when an unrelated filter matched, so a commit
+# touching the image's own inputs builds nothing. The check must say so.
+root=$(fixture gated-build-unrelated)
+gate_build_job "$root" "              - 'packages/other/**'"
+run_check "$root"
+check "a build gated on an unrelated filter fails" "$(is "$status" 1)"
+check "names the building job's gate" "$(contains "$out" 'jobs.docker.if (jobs.changes filter gated)')"
+check "names an input the gate drops" "$(contains "$out" 'does not cover docker/Dockerfile')"
+
+root=$(fixture gated-build-complete)
+gate_build_job "$root" "              - 'package.json'
+              - 'packages/app/**'
+              - 'docker/**'
+              - '.dockerignore'
+              - '.github/workflows/image.yaml'"
+run_check "$root"
+check "a gate listing every input passes" "$(is "$status" 0)"
+check "names the gate it read" "$(contains "$out" 'jobs.docker.if (jobs.changes filter gated)')"
+
+root=$(fixture gated-build-partial)
+gate_build_job "$root" "              - 'package.json'
+              - 'packages/app/**'
+              - 'docker/**'
+              - '.github/workflows/image.yaml'"
+run_check "$root"
+check "a gate missing one input fails, though the trigger covers it" "$(is "$status" 1)"
+check "names that input" "$(contains "$out" 'does not cover .dockerignore')"
 
 
 summary "check-image-trigger-paths.sh"

@@ -70,6 +70,15 @@ on a runner where `docker/setup-buildx-action` has made a `docker-container` bui
 (Release Envoy Listener) and on one still using the `docker` driver (Legion Envoy and Contracts),
 where the build also reads base images the job pre-pulled.
 
+**Name the image by content, not by a fixed tag.** The message the refusal prints is
+`img=$(docker buildx build --load -q -f packages/envoy/docker/Dockerfile .)` and then
+`ENVOY_SMOKE_IMAGE=$img go test …`. Go's test cache keys on the value of every environment
+variable the test reads, so a rebuilt image changes `$img` and the test runs again; under a
+fixed tag it does not. Measured: with `ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local`, re-tagging
+that name to `nats:2.10` and re-running printed `ok … (cached)` — a pass reported for an image
+that could not possibly pass. With the id, the same substitution re-ran the test and failed.
+A tag is also per-checkout state: two working copies building different code collide on it.
+
 ## Why This Works
 
 A step has the job's budget; a test has its own. Moving the build moves it from a five-minute

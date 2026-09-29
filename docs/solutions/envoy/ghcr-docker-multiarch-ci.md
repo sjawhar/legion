@@ -57,9 +57,9 @@ workspace package's manifest — none of which is under `packages/envoy/`:
 ```
 
 The same holds for the `docker buildx build --load --file packages/envoy/docker/Dockerfile .`
-steps that build the smoke image, and for `testcontainers.FromDockerfile` in
-`packages/envoy/internal/smoke/listener_test.go`, whose `Context` is the repo root. Narrowing
-the context to `packages/envoy` fails the build at the first workspace `COPY`.
+steps that build the smoke image in `envoy-and-contracts.yaml` and `release-envoy-listener.yaml`,
+and for a local build by hand. Narrowing the context to `packages/envoy` fails the build at the
+first workspace `COPY`.
 
 ### 3. Multi-Arch Requires QEMU + Buildx
 

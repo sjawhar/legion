@@ -25,10 +25,12 @@ severity: low
 
 ## Problem
 
-The smoke test pulls `nats:2.10` from Docker Hub and runs the listener image
-`ENVOY_SMOKE_IMAGE` names (`packages/envoy/internal/smoke/listener_test.go:31-61`); the
-`docker buildx build` that produces that image reads only the local Dockerfile. Nothing in
-either targets a private registry. Both still fail locally on a machine whose
+What fails is the **pull**, not the build. The smoke test pulls `nats:2.10` from Docker Hub
+through testcontainers (`packages/envoy/internal/smoke/listener_test.go:46`), and testcontainers
+resolves credentials for that pull against every helper in the config. The
+`docker buildx build` that produces the listener image does not: it reads the local Dockerfile
+through the Docker CLI's own resolution and exits 0 on a machine whose helper is broken.
+Nothing in either targets a private registry. The test still fails locally on a machine whose
 `~/.docker/config.json` has a `credHelpers` entry mapping an unrelated registry (here,
 `us-east1-docker.pkg.dev` → `gcloud`) to a helper that is currently unable to authenticate
 non-interactively:
@@ -68,11 +70,11 @@ credential helper is an environment problem, not a test design problem.
 
 ## Why This Works
 
-Docker's credential resolution is global-config, not per-pull-scoped: the client loads the
-entire `credHelpers` map and is willing to shell out to any of its entries as part of building
-auth context for a build/pull, regardless of which registry the specific image comes from.
-Fixing or removing the one broken entry, or isolating Testcontainers to a config without it,
-sidesteps the global resolution without changing what the test verifies.
+testcontainers' credential resolution is global-config, not per-pull-scoped: it loads the entire
+`credHelpers` map and is willing to shell out to any of its entries while building the auth
+context for a pull, regardless of which registry the image comes from. Fixing or removing the
+one broken entry, or isolating testcontainers to a config without it, sidesteps that without
+changing what the test verifies.
 
 ## Prevention
 
