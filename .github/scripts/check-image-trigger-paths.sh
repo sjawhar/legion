@@ -35,7 +35,7 @@
 #     the detector misses it (a builder it does not name, a variable-named engine, a script
 #     file, a non-shell `shell:`), or when the step carries the marker and the anchored layer
 #     misses it. Every excusal is printed, with its workflow, job, step and matched text.
-#     Measured over 95 build shapes and 27 non-builds: 95/95 detected, 91 of them anchored
+#     Measured over 98 build shapes and 27 non-builds: 98/98 detected, 94 of them anchored
 #     beyond the marker's reach, every non-build either unseen or reachable by the marker, and
 #     0 of this repository's 122 run steps matched - nothing is excused today.
 #
@@ -326,7 +326,7 @@ def mount_sources(instruction: str) -> list[str]:
 # command EXCEPT inside the quoted argument of `echo` or `printf`, whose text is not a command;
 # an `echo` whose unquoted words read as a build is refused, and rewording is the remedy.
 #
-# Measured over 95 build shapes and 27 non-builds: 95 detected, 91 of those anchored, every
+# Measured over 98 build shapes and 27 non-builds: 98 detected, 94 of those anchored, every
 # non-build either unseen by the detector or reachable by the marker, and 0 of this repository's
 # 122 real run steps matched. The four builds the anchored layer leaves excusable are the
 # genuinely ambiguous ones: `earthly +target`, `docker commit`, `docker import` and `buildah
@@ -348,15 +348,21 @@ def mount_sources(instruction: str) -> list[str]:
 # never re-read as the subcommand (`docker --context build pull`). A flag that takes no value
 # must not swallow the subcommand either, so a bare value is never one of the subcommand words
 # (`pack --quiet build`).
-VERB = r"(build|bake|bud|b|publish|resolve|apply)\b"
-VALUE = r"""("[^"\n]*"|'[^'\n]*'|\$\{\{[^}\n]*\}\}|%s[^\s-]\S*)"""
-# The container CLIs take real values that read like subcommands - `docker --context build` is
-# a context named build - so a value is taken whatever it says, and `docker --debug build .`
-# stays a detector hit rather than an anchored one. Telling those apart needs a per-flag arity
-# table, which is the parser this replaced. The standalone builders below are flagged the other
-# way: their options are boolean in practice, so a value is never one of their subcommands.
-OPT = r"(?>([ \t]+-{1,2}[\w-]+(=\S+|[ \t]+%s)?)*)" % (VALUE % "")
-OPTV = r"(?>([ \t]+-{1,2}[\w-]+(=\S+|[ \t]+%s)?)*)" % (VALUE % ("(?!" + VERB + ")"))
+# Before the subcommand, an option may take a value. Only a flag whose value can itself read
+# as a subcommand has to be named: `docker --context build pull` is a context called build, and
+# VALUED is that list - a container CLI's own documented globals, few and stable. Any other
+# flag may take a value too, but never one of the subcommand words, so `docker --debug build .`
+# and `pack --quiet build` are seen as the builds they are while `buildctl --addr tcp://h build`
+# still reads its address. Options are atomic and never cross a line; a flag written
+# `--flag=value` is unambiguous, and that reword is what a wrong reading's refusal offers.
+VERB = r"(build|bake|bud|b|commit|import|publish|resolve|apply|up|run|create|watch)\b"
+VALUED = r"(--config|--context|-c|--host|-H|--log-level|-l|--tlscacert|--tlscert|--tlskey|--builder)"
+QUOTED_VALUE = r"""("[^"\n]*"|'[^'\n]*'|\$\{\{[^}\n]*\}\})"""
+OPT = (
+    r"(?>([ \t]+(%s([ \t]+(%s|\S+)|=\S+)?"
+    r"|-{1,2}[\w-]+(=\S+)?([ \t]+(%s|(?!%s)[^\s-]\S*))?))*)"
+) % (VALUED, QUOTED_VALUE, QUOTED_VALUE, VERB)
+
 NAME = r"(docker(-buildx)?|podman|nerdctl|depot|finch)"
 CLI = (
     r"""["']?(\b""" + NAME + r"\b"
@@ -378,8 +384,8 @@ ANCHORED_BUILD = re.compile(
     rf"|(\b(docker|podman|nerdctl)[ \t]+compose|\b(docker|podman|nerdctl)-compose){OPT}"
     rf"[ \t]+build{SUB}"
     rf"|{COMPOSE}"
-    rf"|\b(buildah|buildctl[\w.-]*|pack|skaffold|img){OPTV}[ \t]+(build|bud){SUB}"
-    rf"|\bko{OPTV}[ \t]+(build|publish|resolve|apply)\b|\bskaffold{OPTV}[ \t]+run\b"
+    rf"|\b(buildah|buildctl[\w.-]*|pack|skaffold|img){OPT}[ \t]+(build|bud){SUB}"
+    rf"|\bko{OPT}[ \t]+(build|publish|resolve|apply)\b|\bskaffold{OPT}[ \t]+run\b"
     rf"|\bcrane[ \t]+append\b|\bjib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
 # Inspecting or explaining, on THIS command: `buildx bake --print`, `buildx build --call=check`,

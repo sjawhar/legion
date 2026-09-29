@@ -774,6 +774,7 @@ echo "case: every build shape is detected, and the marker excuses only the ambig
 # the zero-build guard; then re-runs the same command carrying the marker, where an anchored
 # shape must still be refused. `\n` in a body is a newline: a build under a wrapper, or after
 # an inspecting command, is the shape that hid an escape hatch in the layer before this one.
+detector_only=""
 while IFS='|' read -r label anchored body; do
   [ -n "$label" ] || continue
   root=$(fixture "build-$label")
@@ -791,6 +792,7 @@ while IFS='|' read -r label anchored body; do
   else
     check "  and the marker excuses $label" "$(is "$status" 0)"
     check "  and the excusal is printed" "$(contains "$out" "declared not an image build")"
+    detector_only="$detector_only $label"
   fi
 done <<'BUILDS'
 docker-build-f-docker|yes|docker build -f docker/Dockerfile .
@@ -888,7 +890,17 @@ docker-compose-f-x|yes|docker compose -f x.yml run --rm --build app
 docker-then-buildx-build|yes|docker \\\n  buildx build --load -f docker/Dockerfile .
 docker-buildx-build-load-3|yes|docker buildx build --load -f docker/Dockerfile . # --help
 podman-compose-up|yes|podman-compose up
+docker-debug-build-f|yes|docker --debug build -f docker/Dockerfile .
+docker-d-buildx-build|yes|docker -D buildx build --load -f docker/Dockerfile .
+buildctl-addr-tcp-h|yes|buildctl --addr tcp://h:1234 --debug build --frontend dockerfile.v0
 BUILDS
+
+# Every build shape the detector knows must also be ANCHORED, or the marker is a way to admit
+# a real build. The only rows allowed to be detector-only are the genuinely ambiguous ones,
+# where a step refused outright would have no remedy it could take, and this names them: a new
+# build row cannot quietly join that set.
+check "only the ambiguous build shapes are detector-only" \
+  "$(is "$detector_only" " earthly-docker buildah-from-scratch-buildah docker-commit-working-app docker-import-rootfs-tar")"
 
 echo "case: a step that runs a build word without building goes green, marked when detected"
 # The detector is broad on purpose, so a step that runs a build word without building an image
