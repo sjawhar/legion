@@ -274,25 +274,33 @@ def copy_sources(instruction: str) -> list[str]:
         try:
             entries = json.loads(arguments)
         except json.JSONDecodeError as error:
-            raise Unreadable(f"malformed JSON-array form: {error.msg}") from error
+            raise Unreadable(
+                f"malformed JSON-array form: {error.msg}; write it as valid JSON, or as a "
+                f"plain argument list"
+            ) from error
         flags = []
     else:
         try:
             words = shlex.split(arguments)
         except ValueError as error:
-            raise Unreadable(f"unparseable: {error}") from error
+            raise Unreadable(
+                f"unparseable: {error}; balance its quotes so a shell could read it"
+            ) from error
         flags = [word for word in words if word.startswith("--")]
         entries = [word for word in words if not word.startswith("--")]
     if any(flag.startswith("--from=") for flag in flags):
         return []
     if not isinstance(entries, list) or len(entries) < 2:
-        raise Unreadable("no source and destination")
+        raise Unreadable("no source and destination; give it both")
     sources = []
     for source in entries[:-1]:
         if "://" in source or source.startswith("git@"):
             continue
         if source.startswith("<<"):
-            raise Unreadable("a heredoc source, which this check cannot read")
+            raise Unreadable(
+                "a heredoc source, which this check cannot read; write the content into a "
+                "file the context carries, and COPY that"
+            )
         sources.append(source)
     return sources
 
@@ -407,18 +415,23 @@ Q = r"""["']?"""  # a subcommand may be quoted: `docker "build" .`
 # The verb is matched at compose's own subcommand position, so `docker compose exec app go run`
 # is not read as `compose run`, which would refuse it with a `--no-build` it cannot use.
 COMPOSE_CLI = r"(\b(docker|podman|nerdctl)\b%s[ \t]+compose|\b(docker|podman|nerdctl)-compose)" % OPT
-# `up|run|create|watch` without `--no-build`: a service carrying `build:` builds implicitly, so
-# the remedy named for these is `--no-build`, which reads no compose file.
-COMPOSE = COMPOSE_CLI + OPT + r"[ \t]+(up|run|create|watch)(?![\w-])(?![^\n]*--no-build)"
+# A service carrying `build:` builds implicitly under `up`, `run`, `create` and `watch`.
+# `--no-build` says otherwise, but Compose takes it on `up` and `create` ONLY, so it can excuse
+# just those two - and only as a flag of the command, not as a word inside a value such as
+# `-e X=--no-build`.
+NO_BUILD = r"(?![^\n]*(^|[ \t])--no-build(?![\w-]))"
+COMPOSE = (
+    COMPOSE_CLI + OPT + r"[ \t]+((up|create)(?![\w-])" + NO_BUILD + r"|(run|watch)(?![\w-]))"
+)
 ANCHORED_BUILD = re.compile(
-    rf"{CLI}{OPT}[ \t]+((image|builder)[ \t]+)?{Q}(build|bake|commit|import){Q}{SUB}"
+    rf"{CLI}{OPT}[ \t]+((image|builder|container)[ \t]+)?{Q}(build|bake|commit|import){Q}{SUB}"
     rf"|({CLI}{OPT}[ \t]+)?buildx{OPT}[ \t]+b[a-z]*{SUB}"
     rf"|{COMPOSE_CLI}{OPT}[ \t]+build{SUB}"
     rf"|{COMPOSE}"
     rf"|\b(buildah|buildctl[\w.-]*|pack|skaffold|img){OPT}[ \t]+(build|bud){SUB}"
     rf"|\bbuildah{OPT}[ \t]+commit{SUB}"
     rf"|\bko{OPT}[ \t]+(build|publish|resolve|apply)\b|\bskaffold{OPT}[ \t]+run\b"
-    rf"|\bearthly\b[^\n]*[ \t]\+\w"
+    rf"|\bearthly\b[^\n]*[ \t]\S*\+\w"
     rf"|\bcrane[ \t]+append\b|\bjib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
 # A command whose own text says it only inspects: `buildx bake --print`, `buildx build
@@ -428,10 +441,10 @@ ANCHORED_BUILD = re.compile(
 # for `--load` changes the pinned command and re-opens the review. It does not reach a compose
 # verb or `earthly`, whose build lives in a file the step only names.
 INSPECTING = re.compile(
-    r"(^|\s)(--print|--list|--dry-run|--check|--help)(=|\s|$)"
+    r"(^|\s)(--print|--list|--dry-run|--check|--help)(?!=(false|0)(\s|$))(=|\s|$)"
     r"|(^|\s)--call(=|[ \t]+)(check|outline|targets)(\s|$)"
 )
-EARTHLY = re.compile(r"\bearthly\b[^\n]*[ \t]\+\w")
+EARTHLY = re.compile(r"\bearthly\b[^\n]*[ \t]\S*\+\w")
 RUN_STEP_BUILD = re.compile(
     r"\b(docker|podman|nerdctl|depot|finch)\b[^\n]*[\s-](?<!no-)[\"']?(build|bake|b)(?![\w-])"
     r"|\b(docker|podman|nerdctl|depot|finch)\b[^\n]*\s(commit|import)\b"
@@ -443,12 +456,12 @@ RUN_STEP_BUILD = re.compile(
     r"|\bko\b[^\n]*\s(build|publish|resolve|apply)\b"
     r"|\bpack\b[^\n]*\sbuild\b|\bskaffold\b[^\n]*\s(build|run)\b"
     r"|\bimg\b[^\n]*\sbuild\b"
-    r"|\bearthly\b[^\n]*\s\+\w"
+    r"|\bearthly\b[^\n]*\s\S*\+\w"
     r"|\bcrane\s+append\b|\b[\w./]*jib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
-# A compose hit has a remedy of its own: `--no-build` says the step starts services only.
 COMPOSE_VERB = re.compile(COMPOSE)
-COMPOSE_REMEDY = COMPOSE_VERB
+# Which compose verb a refusal is about, since only `up` and `create` accept `--no-build`.
+COMPOSE_TAKES_NO_BUILD = re.compile(COMPOSE_CLI + OPT + r"[ \t]+(up|create)(?![\w-])")
 excused: list[str] = []
 matches: dict[tuple, list[str]] = {}
 
@@ -584,7 +597,7 @@ PLAIN_CONTEXT = re.compile(r"[\w.][\w./-]*\Z")
 def context_files(context: str, source: str, ignored) -> list[str]:
     """Repository paths of the files a context source brings in, after the .dockerignore."""
     if "$" in source:
-        raise Unreadable(f"{source} names a variable, which this check cannot resolve")
+        raise Unreadable(f"{source} names a variable, which this check cannot resolve; write the path literally")
     relative = posixpath.normpath(source.lstrip("/"))
     root = "" if context == "." else context.rstrip("/") + "/"
 
@@ -602,7 +615,7 @@ def context_files(context: str, source: str, ignored) -> list[str]:
             and (regex.fullmatch(path) or any(regex.fullmatch(p) for p in parents(path)))
         ]
     if not found:
-        raise Unreadable(f"{source} matches no file in the context")
+        raise Unreadable(f"{source} matches no file in the context; correct the path, or remove the instruction")
     return found
 
 
@@ -615,7 +628,8 @@ def load(path: Path):
     try:
         return yaml.safe_load(path.read_text())
     except yaml.YAMLError as error:
-        problems.append(f"::error file={path}::{path} is not valid YAML: {' '.join(str(error).split())}")
+        problems.append(f"::error file={path}::{path} is not valid YAML: {' '.join(str(error).split())}; fix the "
+        f"syntax so this check can read the workflow")
         return None
 
 
@@ -647,7 +661,8 @@ def event_filters(workflow: Path, document: dict) -> list[tuple[str, Filter]]:
         if unread:
             problems.append(
                 f"::error file={workflow}::{workflow} on.{name}.{key} has {', '.join(unread)}: "
-                f"this check does not read GitHub's ?, + or \\ in a path filter"
+                f"this check does not read GitHub's ?, + or \\ in a path filter; write the "
+            f"filter with `*`, `**` and literal characters"
             )
             continue
         found.append((f"on.{name}.{key}", Filter(spec[key], ignore=key == "paths-ignore")))
@@ -717,15 +732,19 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
         if all(NEUTRAL.fullmatch(unwrap(term).strip()) for term in split_top(part, "||")):
             continue
         raise Unreadable(
-            f"is narrowed by `{' '.join(part.split())}`, which this check cannot "
-            f"evaluate against a path filter"
+            f"is narrowed by `{' '.join(part.split())}`, which this check cannot evaluate "
+            f"against a path filter; express which CHANGES reach the job as a "
+            f"dorny/paths-filter output tested `== 'true'`, and leave anything else "
+            f"(`always()`, `success()`, `!cancelled()`, a `needs.<job>.result` comparison that "
+            f"still admits `skipped`) beside it"
         )
     if not clauses:
         return []
     if len(clauses) > 1:
         raise Unreadable(
             "tests needs.*.outputs in more than one &&-joined clause, so no single filter's "
-            "match is enough for the job to run"
+            "match is enough for the job to run; join the filters this job needs with || in "
+            "one clause"
         )
     outputs = []
     for term in split_top(clauses[0], "||"):
@@ -736,7 +755,7 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
         elif NEEDS_OUTPUT.search(term):
             raise Unreadable(
                 f"tests an output as `{' '.join(term.split())}`, not as "
-                f"`needs.<job>.outputs.<name> == 'true'` joined by ||"
+                f"`needs.<job>.outputs.<name> == 'true'` joined by ||; write it that way"
             )
     return outputs
 
@@ -772,7 +791,7 @@ def gating_filters(document: dict, describe: str, holder: dict) -> list[tuple[st
             problems.append(
                 f"::error::{describe} builds or calls an image and is gated on "
                 f"needs.{needed}.outputs.{output}, which is not a dorny/paths-filter filter "
-                f"this check can read"
+                f"this check can read; make that output a paths-filter filter, or drop the gate"
             )
             continue
         options = step.get("with") or {}
@@ -783,7 +802,8 @@ def gating_filters(document: dict, describe: str, holder: dict) -> list[tuple[st
         if quantifier != "some":
             problems.append(
                 f"::error::jobs.{needed} runs dorny/paths-filter with predicate-quantifier: "
-                f"{quantifier}, which this check cannot evaluate; it reads only the default, some"
+                f"{quantifier}, which this check cannot evaluate; drop it and let the filter "
+                f"use the default, some"
             )
             continue
         name = reference.group(2)
@@ -792,7 +812,7 @@ def gating_filters(document: dict, describe: str, holder: dict) -> list[tuple[st
         if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
             problems.append(
                 f"::error::jobs.{needed} filter {name} is not a list of globs, which this "
-                f"check cannot read"
+                f"check cannot read; write it as a list of path globs"
             )
             continue
         found.append((f"jobs.{needed} filter {name}", Filter(patterns)))
@@ -949,27 +969,37 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
     )
     if entry is not None:
         matches.setdefault(entry, []).append(place)
-    compose = any(COMPOSE_REMEDY.search(text) for text in texts)
     if certain:
-        # No pinned text can vouch for these. A compose verb builds from a file the step only
-        # names, which can grow a `build:` without the step changing at all, and the rest are
-        # unmistakable builds. The list is not offered, and an entry for one is refused.
-        remedy = (
-            "add --no-build if the step should not build"
-            if compose
-            else "reword the command so it does not read as a build (`--flag=value`)"
-        )
+        # No pinned text can vouch for these. The remedy is whatever this check would then
+        # accept, and nothing else: a reword cannot turn a real build into a non-build, and
+        # `--no-build` is a flag of `compose up` and `compose create` only.
+        if any(COMPOSE_TAKES_NO_BUILD.search(text) for text in texts):
+            remedy = (
+                "add --no-build, or build the image with docker/build-push-action and give the "
+                "service an `image:` to run"
+            )
+        elif any(COMPOSE_VERB.search(text) for text in texts):
+            remedy = (
+                "build the image with docker/build-push-action and give the service an `image:` "
+                "to run; `--no-build` is not a flag of `compose run` or `compose watch`"
+            )
+        elif any(EARTHLY.search(text) for text in texts):
+            remedy = (
+                "there is none this check accepts: it cannot read an Earthfile, so a step that "
+                "runs earthly has to move to docker/build-push-action or out of this repository"
+            )
+        else:
+            remedy = "build it with docker/build-push-action so this check can read it"
         if entry is not None:
             problems.append(
                 f"::error file={workflow}::{place} is listed in NOT_A_BUILD_STEPS, but it "
                 f"cannot be: {shown} is certainly a build, or a compose verb that builds from "
-                f"a file this step only names. Remove the entry and {remedy}"
+                f"a file this step only names. Remove the entry; {remedy}"
             )
             return
         problems.append(
-            f"::error file={workflow}::{place} builds an image in a run step ({shown}); build "
-            f"it with docker/build-push-action so this check can read it, or {remedy}. This "
-            f"shape cannot be listed in NOT_A_BUILD_STEPS"
+            f"::error file={workflow}::{place} builds an image in a run step ({shown}); "
+            f"{remedy}. This shape cannot be listed in NOT_A_BUILD_STEPS"
         )
         return
     if entry is not None:
@@ -1006,7 +1036,8 @@ def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: s
     action` is itself JavaScript — so a local `using: node*`, an unknown `using`, and a missing
     `runs.using` are all refused unless NON_BUILDING_ACTIONS names the action."""
     if depth > 5:
-        problems.append(f"::error file={workflow}::{place} nests local actions too deeply to read")
+        problems.append(f"::error file={workflow}::{place} nests local actions too deeply to read; flatten the "
+        f"chain to five levels or fewer")
         return
     definition = next(
         (p for p in (Path(action[2:]) / "action.yml", Path(action[2:]) / "action.yaml") if p.is_file()),
@@ -1015,7 +1046,7 @@ def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: s
     if definition is None:
         problems.append(
             f"::error file={workflow}::{place} uses {action}, which has no action.yml this "
-            f"check can read"
+            f"check can read; give the action an action.yml, or correct the path"
         )
         return
     document = load(definition) or {}
@@ -1052,13 +1083,15 @@ for workflow, document in documents.items():
 
 if not builds:
     problems.append(
-        "::error::no workflow builds an image with docker/build-push-action: this check covered "
-        "0 image builds, so it proves nothing"
+        "::error::no workflow builds an image with docker/build-push-action: this check "
+        "covered 0 image builds, so it proves nothing; build the image with that action, or "
+        "delete this check"
     )
 
 for workflow, job_name, step, context, dockerfile in builds:
     if not Path(dockerfile).is_file():
-        problems.append(f"::error file={workflow}::{workflow} builds {dockerfile}, which is missing")
+        problems.append(f"::error file={workflow}::{workflow} builds {dockerfile}, which is missing; add the "
+        f"Dockerfile, or correct the step's file:")
         continue
     specific = f"{dockerfile}.dockerignore"
     general = posixpath.normpath(posixpath.join(context, ".dockerignore"))
@@ -1109,7 +1142,7 @@ for workflow, job_name, step, context, dockerfile in builds:
                 problems.append(
                     f"::error file={label.split()[0]}::{label} does not cover {name}: "
                     f"{uncovered[0]}{more} built into the image, so a commit touching only "
-                    f"that builds no image"
+                    f"that builds no image; add a path covering it to that trigger"
                 )
         print(
             f"{dockerfile}: checked {len(inputs)} inputs "

@@ -940,6 +940,15 @@ docker-compose-profile-up|yes|docker compose --profile up-stack up -d
 docker-compose-project-directory|yes|docker compose --project-directory=${{ env.COMPOSE_DIR }} -f x.yml up -d
 docker-build-f-docker-7|yes|docker build -f docker/Dockerfile .\ndocker buildx bake --load listener
 docker-compose-up-dry|yes|docker compose up --dry-run
+docker-container-commit-c|yes|docker container commit c probe
+podman-container-commit-c|yes|podman container commit c probe
+earthly-docker-2|yes|earthly ./+docker
+earthly-push-docker|yes|earthly --push ./+docker
+earthly-github-com-o|yes|earthly github.com/o/r+test
+docker-buildx-build-check|yes|docker buildx build --check=false --load -f docker/Dockerfile .
+docker-compose-f-x-2|yes|docker compose -f x.yml run app true
+docker-compose-f-x-3|yes|docker compose -f x.yml watch
+docker-compose-f-x-4|yes|docker compose -f x.yml up -d -e X=--no-build
 BUILDS
 
 # The continuation form cannot go in the table: its body spans two lines.
@@ -972,7 +981,7 @@ done <<'FALSEPOSITIVES'
 docker-h-build-example|'docker -H build.example.com:2375 pull alpine'|docker -H build.example.com:2375 pull alpine
 docker-config-build-docker|'docker --config build/.docker pull alpine'|docker --config build/.docker pull alpine
 docker-buildx-bake-print-2|'docker buildx bake --print'|docker buildx bake --print
-docker-buildx-build-check|'docker buildx build --check .'|docker buildx build --check .
+docker-buildx-build-check-2|'docker buildx build --check .'|docker buildx build --check .
 docker-buildx-build-help|'docker buildx build --help'|docker buildx build --help
 docker-buildx-build-call-2|'docker buildx build --call=check .'|docker buildx build --call=check .
 docker-buildx-bake-list|'docker buildx bake --list=targets'|docker buildx bake --list=targets
@@ -983,9 +992,8 @@ docker-run-rm-golang|'docker run --rm golang go build ./...'|docker run --rm gol
 docker-exec-app-make|'docker exec app make build'|docker exec app make build
 docker-run-alpine-echo|'docker run alpine echo a b'|docker run alpine echo a b
 docker-run-v-pwd|'docker run -v $PWD:/w -w /w golang go build ./...'|docker run -v "$PWD":/w -w /w golang go build ./...
-docker-compose-run-no|'docker compose run --no-build app ./test.sh --build'|docker compose run --no-build app ./test.sh --build
 docker-build-help|'docker build --help'|docker build --help
-docker-buildx-build-check-2|'docker buildx build --check -f docker/Dockerfile .'|docker buildx build --check -f docker/Dockerfile .
+docker-buildx-build-check-3|'docker buildx build --check -f docker/Dockerfile .'|docker buildx build --check -f docker/Dockerfile .
 FALSEPOSITIVES
 
 echo "case: a false positive the anchored layer calls certain cannot be listed at all"
@@ -1008,6 +1016,7 @@ while IFS='|' read -r label hits body; do
   check "  and an entry for it is refused" "$(is "$status" 1)"
   check "  saying it cannot be listed" "$(contains "$out" "cannot be:")"
 done <<'UNLISTABLE'
+docker-compose-run-no|'docker compose run --no-build app ./test.sh --build'|docker compose run --no-build app ./test.sh --build
 earthly-test|'earthly +test'|earthly +test
 UNLISTABLE
 
@@ -1211,7 +1220,7 @@ step_id "$root" "Extra" "starts-services"
 allowlist "$root" "starts-services" "'docker compose -f x.yml up -d'" "x.yml has no build: today"
 run_check "$root"
 check "the compose entry is refused" "$(is "$status" 1)"
-check "  and --no-build is the remedy" "$(contains "$out" "Remove the entry and add --no-build if the step should not build")"
+check "  and --no-build is the remedy" "$(contains "$out" "Remove the entry; add --no-build")"
 
 echo "case: P2 - an earthly entry is refused: its image comes from the Earthfile"
 root=$(fixture unlistable-earthly)
@@ -1369,11 +1378,32 @@ check "the same command in an unlisted step is still refused" "$(is "$status" 1)
 check "  and it is the unlisted step that is named" "$(contains "$out" "Another builds an image in a run step")"
 check "  and the listed step is excused" "$(contains "$out" "job docker: step listed:")"
 
-echo "case: an implicit compose build names --no-build as its remedy"
-root=$(fixture compose-remedy)
+echo "case: a compose refusal names the remedy that verb actually takes"
+# Compose accepts --no-build on `up` and `create` only, so offering it for `run` or `watch`
+# would be a remedy the tool rejects with "unknown flag".
+root=$(fixture compose-remedy-up)
 extra_step "$root" "docker compose -f compose/listener.compose.yml up -d"
 run_check "$root"
-check "the compose refusal names --no-build" "$(contains "$out" "add --no-build if the step should not build")"
+check "compose up is offered --no-build" "$(contains "$out" "add --no-build")"
+
+root=$(fixture compose-remedy-create)
+extra_step "$root" "docker compose -f compose/listener.compose.yml create"
+run_check "$root"
+check "compose create is offered --no-build" "$(contains "$out" "add --no-build")"
+
+for verb in run watch; do
+  root=$(fixture "compose-remedy-$verb")
+  extra_step "$root" "docker compose -f compose/listener.compose.yml $verb"
+  run_check "$root"
+  check "compose $verb is not offered --no-build"     "$(contains "$out" "\`--no-build\` is not a flag of \`compose run\` or \`compose watch\`")"
+  check "  and is offered one that works" "$(contains "$out" "give the service an \`image:\` to run")"
+done
+
+echo "case: --no-build must be a flag of the compose command, not a word in a value"
+root=$(fixture compose-no-build-in-value)
+extra_step "$root" "docker compose -f x.yml up -d -e X=--no-build"
+run_check "$root"
+check "a --no-build inside a value does not excuse the build" "$(is "$status" 1)"
 
 echo "case: a compose subcommand that is not a build keeps its own remedy out of the way"
 root=$(fixture compose-exec-run)
