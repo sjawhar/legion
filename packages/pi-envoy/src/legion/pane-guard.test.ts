@@ -56,10 +56,9 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
     "packages/envoy/deploy/scripts/install-docker-debian.sh:7",
   // A library run bare, without the arguments every caller passes: bash stops at its argument
   // check, and the guard, which walks a command whatever a test before it decides, reaches the
-  // paths an empty argument makes. Its first is a `sed` whose operand word it cannot read, which
-  // may be the `-i` that would rewrite the file the next word names (LEGION-357); two lines
-  // later the same walk reaches `--control` and `--dest`.
-  "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:97",
+  // paths an empty argument makes. The negative control's copy is written under `--control`,
+  // empty here, so the copy lands at the filesystem root.
+  "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
   // Runs the gateway key command it writes, whose `command=(%s)` line takes a value built from
   // `$(command -v hawk-token)`: a script the guard cannot read. The drivers run it before any pane.
   "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
@@ -1902,6 +1901,21 @@ describe("a word the guard cannot read", () => {
     // Quoted, the same word is one word, and the harmless reading holds.
     expect(bash('a=$(cat f); fuser "$a"')).toBeUndefined();
     expect(bash('a=$(cat f); chmod "$a" notes.txt')).toBeUndefined();
+  });
+
+  test("reads the words after a `--` that an unread word may take as its value both ways", () => {
+    // Read as `-f`, the unread word takes `--` as its script file, so `--` ends no options; read as
+    // the script, it leaves `--` ending them, and every word after it an operand: `-run`, which
+    // reads as a harmless option cluster, and a second `--`, each then a file in the home.
+    writeFileSync(path.join(home, "-run"), "profile");
+    writeFileSync(path.join(home, "--"), "profile");
+    try {
+      expect(bash('cd ~ && s=$(cat f); sed -i "$s" -- -run')).toContain(path.join(home, "-run"));
+      expect(bash('cd ~ && s=$(cat f); sed -i "$s" -- -- x')).toContain(path.join(home, "--"));
+    } finally {
+      rmSync(path.join(home, "-run"));
+      rmSync(path.join(home, "--"));
+    }
   });
 
   test("judges the directory an extract option carries inside its own word", () => {

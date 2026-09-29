@@ -335,6 +335,18 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     role: "must-allow",
     command: "install -D payload deep/a/tool",
   },
+  {
+    name: "install --strip before -t, where the full name --strip wins over --strip-program",
+    family: "install",
+    role: "probe",
+    command: 'cp payload .bashrc; install --strip -t "$HOME" .bashrc',
+  },
+  {
+    name: "install --strip inside the workspace, a flag that takes no value",
+    family: "install",
+    role: "must-allow",
+    command: "install --strip payload copy",
+  },
 
   // --- ln ----------------------------------------------------------------------------------------
   {
@@ -478,6 +490,76 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     family: "sed",
     role: "must-allow",
     command: `sed -i -e 's|/etc/passwd|x|' notes.txt`,
+  },
+  {
+    name: "sed -n over two words the guard cannot read, which no reading of them makes write",
+    family: "sed",
+    role: "must-allow",
+    command: `sed -n "${HIDDEN("1p")}" "${HIDDEN("notes.txt")}"`,
+  },
+  {
+    name: "sed without -i whose script the guard reads only in part, over a workspace file and the profile",
+    family: "sed",
+    role: "must-allow",
+    command: `sed "s/${HIDDEN("CANARY")}/x/" notes.txt "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed without -i whose joined --expression value the guard cannot read, over a file outside",
+    family: "sed",
+    role: "must-allow",
+    command: `sed --expr"${HIDDEN("=p")}" "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed with one word bash splits into -i, the script and a file outside the roots",
+    family: "sed",
+    role: "probe",
+    command: `sed ${HIDDEN('"-i s/CANARY/PWNED/ $HOME/.bashrc"')}`,
+  },
+  {
+    name: "sed -i with a long option whose joined value the guard cannot read, before the file",
+    family: "sed",
+    role: "probe",
+    command: `sed -i --exp"${HIDDEN("=s/CANARY/PWNED/")}" "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -i with a word the guard cannot read that may be --follow-symlinks",
+    family: "sed",
+    role: "probe",
+    command: `sed -i "${HIDDEN("--follow-symlinks")}" 's/CANARY/PWNED/' f`,
+  },
+  {
+    name: "sed -f in a word the guard cannot read takes -- as its script file, and -i follows",
+    family: "sed",
+    role: "probe",
+    plant: `echo 's/CANARY/PWNED/' > ./--`,
+    command: `sed "${HIDDEN("-f")}" -- "$HOME/.bashrc" -i`,
+  },
+  {
+    name: "sed with a long option word the guard reads only as --, which may be --in-place",
+    family: "sed",
+    role: "probe",
+    command: `sed --"${HIDDEN("in-place")}" 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed with an option cluster the guard reads only as -, which may be -i",
+    family: "sed",
+    role: "probe",
+    command: `sed -"${HIDDEN("i")}" 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -i -e with its script joined in a word the guard cannot read, before the file",
+    family: "sed",
+    role: "probe",
+    command: `sed -i -e"${HIDDEN("s/CANARY/PWNED/")}" "$HOME/.bashrc"`,
+  },
+
+  // --- shred -------------------------------------------------------------------------------------
+  // Judged before LEGION-357, but on the link alone: it overwrites what a link points at.
+  {
+    name: "shred through a workspace link that points at the profile",
+    family: "shred",
+    role: "probe",
+    command: "shred -n 1 f",
   },
 
   // Round-two review pairs. Each control/probe differs by one token; both must protect HOME.

@@ -107,8 +107,9 @@ try {
       elapsed.push(performance.now() - started);
       if (refusal !== undefined) throw new Error(`fresh copy refused: ${refusal}`);
     }
-    // Leave a small, measured amount of the shared syntax budget for an existing destination.
-    // The source-scanning implementation does not charge these entries and incorrectly allows it.
+    // Leave a small, measured amount of the walk budget, then copy into an existing destination
+    // subtree larger than it: each entry the copy inspects is charged to the same budget, so the
+    // copy is refused at the walk limit (`destination_walk_budget_refused=true`).
     const env = {
       HOME: fixture.home,
       LEGION_WORKSPACE: fixture.workspace,

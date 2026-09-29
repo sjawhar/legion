@@ -10,7 +10,8 @@
  * it copies the checkout's tracked files into a scratch tree, asks the guard about
  * `bash <script>` the way the sweep does, replaces the one command the refusal names with `:` in
  * the copy, and asks again, until the guard allows the script or the refusal names no command it
- * can replace. Nothing is ever run.
+ * can replace. Nothing is ever run. The last line counts the scripts refused and every refusal the
+ * walk met, so a change's effect on the tracked scripts is one number to compare.
  *
  *   bun packages/pi-envoy/src/legion/pane-guard-walk.ts [script ...]
  */
@@ -84,6 +85,7 @@ function main(): void {
   }
   const ask = sweepGuard(copy);
   let refusedScripts = 0;
+  let refusals = 0;
   try {
     for (const script of wanted.length > 0 ? wanted : scripts) {
       const touched = new Set<string>();
@@ -107,6 +109,7 @@ function main(): void {
       for (const file of touched) cpSync(path.join(checkout, path.relative(copy, file)), file);
       if (walked.length === 0) continue;
       refusedScripts += 1;
+      refusals += walked.length;
       console.log(`## ${script}: ${walked.length} refusal(s), ${end}`);
       // A multi-line command shows as its first line, so each refusal reads on one line.
       for (const reason of walked) console.log(`- ${reason.replace(/\n[^`]*`/g, " …`")}`);
@@ -115,7 +118,7 @@ function main(): void {
     rmSync(copy, { recursive: true, force: true });
   }
   console.log(
-    `${refusedScripts} of ${wanted.length > 0 ? wanted.length : scripts.length} scripts refused`
+    `${refusedScripts} of ${wanted.length > 0 ? wanted.length : scripts.length} scripts refused, ${refusals} refusals in all`
   );
 }
 
