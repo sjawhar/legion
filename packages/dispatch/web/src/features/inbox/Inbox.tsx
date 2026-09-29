@@ -80,6 +80,8 @@ const ROW_ATTRIBUTE = "data-inbox-row";
 const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
+/** The bar itself: Escape from the picker lands here when no row is rendered to return to. */
+const BULK_BAR_SELECTOR = "[data-inbox-bulk-bar]";
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
@@ -406,10 +408,14 @@ function heldRow(
  */
 function BulkSnoozeBar({
   onClear,
+  onPickerFocus,
   onSnoozed,
   selected,
 }: {
   onClear: () => void;
+  /** Where focus came from as the picker took it - `h` from a row, Tab, or a pointer with nothing
+   *  behind it - so Escape knows which row is one level out. */
+  onPickerFocus: (from: Element | null) => void;
   /** The ids the server took, once a pick has settled. */
   onSnoozed: (snoozed: readonly string[]) => void;
   selected: readonly string[];
@@ -428,7 +434,9 @@ function BulkSnoozeBar({
     // A fieldset, like the view switch: the group's name comes from its legend, and `min-w-0`
     // holds back the UA's `min-inline-size: min-content` so a long refusal wraps inside it.
     <fieldset
-      className={`flex min-w-0 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 ${borderDefault}`}
+      className={`flex min-w-0 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 ${focusVisibleRing} outline-none focus-visible:ring-2 ${borderDefault}`}
+      data-inbox-bulk-bar=""
+      tabIndex={-1}
     >
       <legend className="sr-only">Selected asks</legend>
       <span className={`text-sm ${textSecondaryOnCanvas}`}>{selected.length} selected</span>
@@ -440,6 +448,7 @@ function BulkSnoozeBar({
           aria-label="Snooze selected asks"
           className={badgeSelectOverlay}
           data-inbox-bulk-snooze=""
+          onFocus={(event) => onPickerFocus(event.relatedTarget)}
           onChange={(event) => {
             const preset = SNOOZE_PRESETS.find((option) => option.id === event.target.value);
             if (preset !== undefined) snooze(preset.until(new Date()));
@@ -519,8 +528,9 @@ export function Inbox(): ReactNode {
     });
   }, []);
   // The rows the reader has marked, by ask id: `x` and the row's own checkbox are the two ways
-  // in, and the bulk bar acts on exactly these. An id the inbox no longer lists drops out, so a
-  // row that is listed again comes back unmarked.
+  // in. An id the server no longer lists drops out here, so a row that is listed again comes back
+  // unmarked; a mark whose row this view does not list drops out of `selected` below, so the bar
+  // never counts - and `h` never writes - a row that is not on the page.
   const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
   const onMark = useCallback((askId: string) => {
     setMarked((current) => {
@@ -539,7 +549,21 @@ export function Inbox(): ReactNode {
         : new Set([...current].filter((id) => listed.has(id)))
     );
   }, [listedIds]);
-  const selected = (inbox.data ?? []).filter((row) => marked.has(row.id)).map((row) => row.id);
+  // What this view lists, narrowed the same way the bands are, and computed here rather than
+  // after the early returns so the bindings below speak for exactly the rows on the page.
+  const agent = filter.agent;
+  const fromAgent =
+    agent === undefined
+      ? (inbox.data ?? [])
+      : (inbox.data ?? []).filter(
+          (ask) => ask.author.kind === "session" && ask.author.id === agent
+        );
+  const inView = (rows: readonly InboxRow[]) =>
+    view === "everyone" || viewer === undefined
+      ? rows
+      : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
+  const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
+  const selected = shown.filter((row) => marked.has(row.id)).map((row) => row.id);
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
   const [laterOpen, setLaterOpen] = useState(false);
   const listRef = useRef<HTMLElement>(null);
@@ -654,7 +678,6 @@ export function Inbox(): ReactNode {
           inFocusedRow("[data-inbox-snooze]")?.focus();
           return;
         }
-        pickerOrigin.current = focusedRow()?.dataset.inboxRow ?? null;
         bulkPicker()?.focus();
       },
       when: () => selected.length > 0 || inFocusedRow("[data-inbox-snooze]") != null,
@@ -670,7 +693,13 @@ export function Inbox(): ReactNode {
           origin === null
             ? null
             : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
-        (row ?? rows()[0])?.focus();
+        // With every marked row folded away there is no row to return to, so the bar itself is
+        // the level out: it holds the count and the way to clear it.
+        (
+          row ??
+          rows()[0] ??
+          listRef.current?.querySelector<HTMLElement>(BULK_BAR_SELECTOR)
+        )?.focus();
       },
       when: () => document.activeElement?.matches(BULK_PICKER_SELECTOR) === true,
     },
@@ -692,17 +721,6 @@ export function Inbox(): ReactNode {
     return <p className={dangerText}>Could not load your inbox.</p>;
   }
 
-  const agent = filter.agent;
-  const fromAgent =
-    agent === undefined
-      ? inbox.data
-      : inbox.data.filter((ask) => ask.author.kind === "session" && ask.author.id === agent);
-  const inView = (rows: readonly InboxRow[]) =>
-    view === "everyone" ? rows : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
-  const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
-  // Names are read off the list the reader sees, so an issue that contributes one row to this
-  // view keeps the short name even when it has other asks elsewhere.
-  const ordinals = askOrdinals(shown);
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn
   // band on the first render after its moment passes.
   const place = { now: Date.now(), view, viewer };
@@ -794,6 +812,10 @@ export function Inbox(): ReactNode {
   presented.current = sections.flatMap(({ section, shownRows }) =>
     shownRows.map((ask) => ({ ask, section }))
   );
+  // Names are read off the rows as they render - band by band, top to bottom - so "ask 2 of 2"
+  // never sits above "ask 1 of 2", and a twin folded away in `Later` leaves the row on screen
+  // with the short name rather than a count of something the reader cannot see.
+  const ordinals = askOrdinals(presented.current.map(({ ask }) => ask));
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
@@ -813,6 +835,9 @@ export function Inbox(): ReactNode {
       {selected.length === 0 ? null : (
         <BulkSnoozeBar
           onClear={() => setMarked(new Set())}
+          onPickerFocus={(from) => {
+            pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
+          }}
           onSnoozed={(snoozed) =>
             setMarked((current) => new Set([...current].filter((id) => !snoozed.includes(id))))
           }

@@ -541,18 +541,26 @@ function AgentMessageComposer({
   // at with a frame or a timer, because the write's latency is the server's.
   const refocusWatcher = useRef<MutationObserver | null>(null);
   useEffect(() => () => refocusWatcher.current?.disconnect(), []);
+  /** Only the focus the disable took is the composer's to give back: through the whole round trip
+   *  it sits on the document, so a reader who has clicked something else in the meantime keeps
+   *  where they went - otherwise the next keys, `Ctrl+Enter` included, would land in the composer
+   *  they have already sent from, addressed to another agent. */
   const refocusComposer = () => {
     const field = box.current?.querySelector("textarea");
     if (field === null || field === undefined) return;
+    const takeBack = () => {
+      const active = document.activeElement;
+      if (active === null || active === document.body) field.focus();
+    };
     refocusWatcher.current?.disconnect();
     if (!field.disabled) {
-      field.focus();
+      takeBack();
       return;
     }
     const watcher = new MutationObserver(() => {
       if (field.disabled) return;
       watcher.disconnect();
-      field.focus();
+      takeBack();
     });
     watcher.observe(field, { attributeFilter: ["disabled"] });
     refocusWatcher.current = watcher;
@@ -709,6 +717,9 @@ function AgentRow({
     <article
       className={`rounded-xl border outline-none focus-visible:ring-2 ${card} ${borderDefault} ${focusVisibleRing}`}
       data-agent-row={agent.session_id}
+      // The issue picker renders only while this row is not answering a message, and a collapsed
+      // row has no picker in the DOM at all, so the row itself carries whether `i` can act.
+      data-agent-can-pick-issue={replyTo === null ? "" : undefined}
       ref={rowRef}
       tabIndex={-1}
     >
@@ -1322,7 +1333,7 @@ export function AgentsPage(): ReactNode {
       label: "Pick an issue for the message",
       run: () =>
         inOpenRow((row) => row.querySelector<HTMLElement>("[data-agent-issue-picker]")?.click()),
-      when: () => focusedAgentRow() !== null,
+      when: () => focusedAgentRow()?.hasAttribute("data-agent-can-pick-issue") === true,
     },
     {
       id: "pin",
