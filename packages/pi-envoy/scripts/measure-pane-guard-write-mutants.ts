@@ -48,11 +48,8 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     'writeArguments(rest, "t", LN_OPTIONS)',
   ],
   ["install directory flag", 'found.flags.has("d") || found.flags.has("--directory")', "false"],
-  [
-    "ln one operand",
-    "found.operands.length === 1 && found.directory === undefined && !found.uncertain",
-    "false",
-  ],
+  ["ln one operand", "found.operands.length === 1 &&", "false &&"],
+  ["ln one field", 'found.operands[0]?.fields !== "unknown"', "true"],
   [
     "ln symbolic operands",
     'const symbolic = found.flags.has("s") || found.flags.has("--symbolic");',

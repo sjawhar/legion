@@ -78,7 +78,10 @@ destination; it is still judged for the other things it may be, an `-r` or a bac
 them. The accepted cost is three shapes that refuse where a person can see they are
 harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln`; `xargs` into `cp` or
 `sed -i` with unreadable operands; and a glob loop into `cp` with neither a literal prefix nor
-`--`. So `cp *.txt dir/` and `mv *.txt dir/` are refused, because a glob can yield a
+`--`; and a read-only `sed` whose options come from an array of `-e` and its script built in a
+loop or an undecidable branch, where the guard cannot pair each `-e` with the element it consumes
+and so reads those elements as words that may stand alone. So `cp *.txt dir/` and
+`mv *.txt dir/` are refused, because a glob can yield a
 `-t<link>` pointing out of the roots, while `cp -- *.txt dir/` and `./*.txt` are allowed.
 Help and version options do not write. `cp` judges the source basename as
 written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`

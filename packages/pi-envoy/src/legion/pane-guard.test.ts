@@ -49,8 +49,10 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   // its last operand certainly the destination. These drivers run the same library first.
   "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
   "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
-  // `sed "${args[@]}"` over an array appended in a loop over unknown hosts: quoted, but its
-  // element count is unknown, so any element may be the `-i` that makes sed write (LEGION-357).
+  // `sed "${args[@]}"` over an array a loop appends `-e` and its script to: quoted, but its
+  // element count is unknown, so the guard cannot pair each `-e` with the element it consumes
+  // and reads them as words that may stand alone. Real sed writes nothing here — `-e` always
+  // takes the next element — so this is a listed cost rather than a leak (LEGION-357).
   "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:385",
   // Creates and sets the mode of a directory outside the roots (`install -d /etc/apt/keyrings`):
   // a script that provisions a host, never one a pane runs (LEGION-357).

@@ -1026,6 +1026,30 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     role: "must-allow",
     command: `sed -n "\${args[*]}" notes.txt`,
   },
+  // `ln` given one operand links into the working directory — but only when that word is
+  // certainly ONE operand. A word bash may make several arguments of carries a link name too, and
+  // `ln -sf` replaces an existing file there (the queue's oracle, #1565).
+  {
+    name: "ln -sf over an unknown-length array after --, which carries its own link name",
+    family: "ln",
+    role: "probe",
+    plant: `printf '%s\\n' notes.txt "$HOME/.bashrc" > list`,
+    command: `mapfile -t a < list; ln -sf -- "\${a[@]}"`,
+  },
+  {
+    name: "ln -sf over an unquoted unknown scalar after --",
+    family: "ln",
+    role: "probe",
+    plant: `printf '%s\\n' 'notes.txt '"$HOME/.bashrc" > list`,
+    command: `s=$(cat list); ln -sf -- $s`,
+  },
+  {
+    name: "ln -sf over one readable source still links into the working directory",
+    family: "ln",
+    role: "must-allow",
+    plant: `mkdir -p sub && printf 'a\\n' > sub/file.txt`,
+    command: `ln -sf -- sub/file.txt`,
+  },
   ...[
     'for f in *.txt; do truncate -s 0 "$f"; done',
     'for f in *.txt; do : > "$f"; done',
