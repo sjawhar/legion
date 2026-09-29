@@ -1231,8 +1231,9 @@ worker on its own `store.WithTransactionTracking` context derived from the serve
 recipient after the one in flight when a tab closes or a deploy shuts the server down). A
 recipient therefore starts with no attempt, and one still carrying none was not sent to.
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
-`GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies; all
-three routes are human-only, like the one-session route they are built from.
+`GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the
+order the send named them; all three routes are human-only, like the one-session route they are
+from.
 
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no
