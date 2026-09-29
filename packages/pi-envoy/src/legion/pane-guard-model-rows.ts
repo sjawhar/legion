@@ -22,9 +22,8 @@ const FALSE_COND = "grep -q zzzNOPE safe.sh";
 const TRUE_COND = "grep -q PRESENT safe.sh";
 export const DESTRUCTIVE = 'rm -rf "$HOME"\n';
 
-/** What the row does when real bash runs it: `destroyed` and `intact` are checked, and `racy` is
- * a write bash performs beside the read, whose outcome one run cannot settle — those rows are
- * held to bash having performed the write. */
+/** What the row does when real bash runs it: `destroyed` and `intact` are checked. A `racy` write
+ * may finish before or after the test reads it, so its timing is not asserted; its guard verdict is. */
 export type Live = "destroyed" | "intact" | "racy";
 
 interface ModelRow {

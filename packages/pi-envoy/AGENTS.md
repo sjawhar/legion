@@ -22,9 +22,6 @@ subject (`session_start`, a session switch, or a Legion handler re-establishing 
 bridge) reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the
 reply's error. `pi.askEphemeral` does not inherit the handler's signal, so the pin is unaffected.
 Role claims are routed by the listener: this extension receives a receipt-backed request on its
-direct agent subject instead of subscribing to a role subject itself. The agent pump replies the
-moment the envelope is decoded — before the inbox update, any Dispatch call, or the session
-injection — so the listener's two-second receipt window measures decoding, not the host's turn: a
 claimed-but-deaf holder still becomes a `delivery_failed` exception, and a busy one no longer does
 (LEGION-101). The receipt goes only to a role-lane frame — one whose envelope `topic` is not the
 direct subject, the shape the listener forwards to the holder. Every other frame carrying a reply
@@ -302,7 +299,7 @@ same command both creates and writes through: it is not on disk when the guard r
 Others are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
 expansion slice (LEGION-376), a `sed` script's own writes (LEGION-377), and a word bash passes no
 argument for read as a command name, a wrapper's or `xargs`'s or `find -exec`'s program, or `cd`'s
-(LEGION-378). `src/legion/pane-guard-write-rows.ts` holds the rows this is measured on, and
+directory (LEGION-378). `src/legion/pane-guard-write-rows.ts` holds the rows this is measured on, and
 `scripts/measure-pane-guard-writes.ts` runs them against any guard build.
 
 Commands are parsed with `unbash` (a bash parser, bundled into `dist/legion.js`) and walked as bash
