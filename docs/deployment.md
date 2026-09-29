@@ -80,14 +80,14 @@ remedy, rather than treating the command as one with no destination. A `-T` the 
 settles which operand is the destination, so an unreadable word after it is no longer a possible
 destination; it is still judged for the other things it may be, an `-r` or a backup option among
 them. The accepted cost is four shapes that refuse where a person can see they are
-harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln`; `xargs` into `cp` or
-`sed -i` with unreadable operands; and a glob loop into `cp` with neither a literal prefix nor
-`--`; and a read-only `sed` whose options come from an array of `-e` and its script built in a
-loop or an undecidable branch, where the guard cannot pair each `-e` with the element it consumes
-and so reads those elements — which are sed scripts it does not read — as words that may stand
-alone and turn on `-i`. So `cp *.txt dir/` and
-`mv *.txt dir/` are refused, because a glob can yield a
-`-t<link>` pointing out of the roots, while `cp -- *.txt dir/` and `./*.txt` are allowed.
+harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln` — so `cp *.txt dir/` and
+`mv *.txt dir/` are refused, because a glob can yield a `-t<link>` pointing out of the roots,
+while `cp -- *.txt dir/` and `./*.txt` are allowed; `xargs` into `cp` or `sed -i` with
+unreadable operands; a glob loop into `cp` with neither a literal prefix nor `--`; and a
+read-only `sed` whose options come from an array of `-e` and its script built in a loop the
+guard cannot decide, where it cannot pair each `-e` with the element it consumes and so reads
+those elements — which are sed scripts it does not read — as words that may stand alone and
+turn on `-i`.
 Help and version options do not write. `cp` judges the source basename as
 written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`
 retains the source path. It inspects only existing destination entries, recursively for a recursive

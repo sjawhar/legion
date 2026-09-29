@@ -1070,6 +1070,25 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     command: `x=; ln -sf payload "$HOME/.bashrc" $x`,
   },
   {
+    name: "cp after -- whose trailing word passes no argument",
+    family: "cp",
+    role: "probe",
+    command: `x=; cp -- payload "$HOME/.bashrc" $x`,
+  },
+  {
+    name: "rsync whose trailing word passes no argument",
+    family: "rsync",
+    role: "probe",
+    command: `x=; rsync payload "$HOME/.bashrc" $x`,
+  },
+  {
+    name: "rsync into a workspace destination with a trailing no-argument word",
+    family: "rsync",
+    role: "must-allow",
+    plant: `mkdir -p from to && printf 'a\\n' > from/f.txt`,
+    command: `x=; rsync -a from/ to/ $x`,
+  },
+  {
     name: "cp into a workspace destination with a trailing no-argument word",
     family: "cp",
     role: "must-allow",

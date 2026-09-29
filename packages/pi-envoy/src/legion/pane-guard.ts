@@ -3408,7 +3408,9 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         "--remote-option",
         "--rsync-path",
         "--temp-dir",
-      ]).operands.at(-1);
+      ])
+        .operands.filter(passesAnArgument)
+        .at(-1);
       if (destination !== undefined) {
         checkTargets(
           "rsync",
@@ -4160,13 +4162,6 @@ interface WriteArguments {
   readonly uncertain: Arg | undefined;
 }
 
-/** A write verb's arguments, read by its own grammar: the operands; the flags, from option words
- * only, never from an option's value or past `--`; and the directory `-t` names. The first
- * value-taking letter ends a cluster and takes the rest of its word, or the next word, as its
- * value, even when that value looks like flags. A long option is resolved once, against the verb's
- * whole table (`completeName`). A word before `--` that the guard cannot read whole and that may be
- * an option is `uncertain`: it may be `-t` with another directory, or `-T`, so `writeDestinations`
- * refuses to read a destination past it. */
 /** Whether bash passes this word to the command at all. A word of no fields — an unquoted empty
  * value, `"${e[@]}"` of an empty array, `"$@"` of no positional parameters — produces NO
  * argument, so it is not the last operand and cannot be the destination. Counting it made the
@@ -4175,6 +4170,13 @@ function passesAnArgument(arg: Arg): boolean {
   return arg.fields !== "none";
 }
 
+/** A write verb's arguments, read by its own grammar: the operands; the flags, from option words
+ * only, never from an option's value or past `--`; and the directory `-t` names. The first
+ * value-taking letter ends a cluster and takes the rest of its word, or the next word, as its
+ * value, even when that value looks like flags. A long option is resolved once, against the verb's
+ * whole table (`completeName`). A word before `--` that the guard cannot read whole and that may be
+ * an option is `uncertain`: it may be `-t` with another directory, or `-T`, so `writeDestinations`
+ * refuses to read a destination past it. */
 function writeArguments(rest: readonly Arg[], valued: string, long: LongOptions): WriteArguments {
   const names = Object.keys(long);
   const operands: Arg[] = [];

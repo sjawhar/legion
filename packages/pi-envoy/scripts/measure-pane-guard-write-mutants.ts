@@ -51,6 +51,8 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["ln one operand", "found.operands.length === 1 &&", "false &&"],
   ["ln one read word", "readableWord(sole).whole", "true"],
   ["a word that passes no argument", 'return arg.fields !== "none";', "return true;"],
+  ["no-argument word after --", "...rest.slice(i + 1).filter(passesAnArgument)", "...rest.slice(i + 1)"],
+  ["rsync destination counts a word", ".operands.filter(passesAnArgument)", ".operands"],
   [
     "ln symbolic operands",
     'const symbolic = found.flags.has("s") || found.flags.has("--symbolic");',
