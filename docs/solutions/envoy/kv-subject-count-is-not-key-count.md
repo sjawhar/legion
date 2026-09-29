@@ -12,6 +12,7 @@ status: active
 module: envoy
 related_issues:
   - "LEGION-360"
+  - "LEGION-374"
 symptoms:
   - "nats stream info shows far more subjects than nats kv ls shows keys"
   - "sizing a startup cost from the bucket's message count"
@@ -88,3 +89,18 @@ production. It would have scaled to 35 s only on a deployment that really held 7
   channel with no marker (`kv.go:1170`) as the other early end. `nats.KeyValue.Keys()` has the
   same timer, so listing keys and reading each one back has the bug too — it is not specific to
   keeping the watch.
+- **For `envoy_interests`, the markers are now collected, and that is the standing answer.** Every
+  listener runs one pass after its interest cache's first warm-up and then every five minutes
+  (`Registry.CollectInterestMarkers`, `packages/envoy/internal/store/interest_markers.go`): it
+  takes the lowest revision a MetaOnly scan of the bucket delivers as a PUT and purges the stream
+  below it, which removes every marker under the live keys in one request. That floor comes from
+  the stream rather than the cache, and `PurgeDeletes` above is deliberately not what runs: it
+  sets no sequence bound, replays the bucket with values, and purges a whole subject, so a key
+  re-created between its watch and its purge goes with the marker (LEGION-360 declined that race).
+  The pass adds one NATS capability, publish on `$JS.API.STREAM.PURGE.KV_envoy_interests`, read
+  off a real server's trace rather than off a call site
+  (`TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow`); a user without it leaves the markers
+  and keeps the listener serving. `envoy_roles` is left alone: its scan costs 0.1-0.28 s, its live
+  claims are not heartbeat-renewed, so a floor purge would reach few of its markers, and
+  `envoy_sessions` has a 5 m `MaxAge` and needs nothing. `packages/envoy/AGENTS.md` (Operational
+  notes) states the floor rule, the refusals and the one window that cannot be guarded.
