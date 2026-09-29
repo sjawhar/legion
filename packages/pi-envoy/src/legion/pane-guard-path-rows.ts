@@ -444,6 +444,16 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: "chmod -R 700 d/..",
     dotdot: true,
   },
+  {
+    name: "chmod.R.dotglob.parent",
+    family: "recursive-mode",
+    role: "probe",
+    // With `globskipdots` off, a leading-dot glob matches `.` and `..` too, so its stem is the
+    // PARENT of the resolved directory, not the directory itself. `000` would chmod the parent
+    // unreadable before `chmod -R` can recurse into it, masking the damage; `700` does not.
+    command: "shopt -u globskipdots; chmod -R 700 .*",
+    dotdot: false,
+  },
 
   // --- extraction and find ---
   {
@@ -537,6 +547,15 @@ export const PATH_ROWS: readonly PathRow[] = [
     family: "run",
     role: "probe",
     command: "bash e/../other.sh",
+    dotdot: true,
+  },
+  {
+    name: "bash.dotdot.symlink.unresolved",
+    family: "run",
+    role: "probe",
+    // `late` does not exist until this same command creates it: `runFile` has its own unknown
+    // check, unrelated to `judgePath`'s, and nothing else in the family exercises it.
+    command: 'ln -s "$HOME/.ssh" late && bash late/../danger.sh',
     dotdot: true,
   },
   {

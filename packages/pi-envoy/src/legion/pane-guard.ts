@@ -1321,6 +1321,10 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
       const here = kernelPath("/", st.cwd);
       if (here === undefined) return undefined;
       const lexical = path.resolve(here, target);
+      // `-s` prints `lexical` unresolved; `-L` walks it physically here. They differ only in
+      // whether a trailing symlink in the printed value is itself expanded, and every site that
+      // consumes this value (`judgePath`, `kernelPath`) re-resolves it physically anyway, so
+      // swapping the two branches has no row that can tell them apart.
       return mode === "s" ? lexical : kernelPath("/", lexical);
     }
   }

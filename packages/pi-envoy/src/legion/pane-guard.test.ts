@@ -315,6 +315,8 @@ describe("resolution", () => {
     expect(bash('rm -rf $(realpath -m -- "$LEGION_WORKSPACE/x" "$HOME/.ssh")')).toBeDefined();
     // GNU `basename /` prints `/`, so this is `$HOME` itself, not a path under the workspace.
     expect(bash(`chmod -R 000 "$(basename /)\${HOME#/}"`)).toBeDefined();
+    // GNU `dirname ///` prints `/` (a path of separators alone), not `.` (a word with none).
+    expect(bash(`chmod -R 000 "$(dirname ///)\${HOME#/}"`)).toBeDefined();
     // `cd -@` is an invalid option on Linux: bash stays where it was.
     expect(bash('cd "$HOME"; cd -@ "$LEGION_WORKSPACE"; rm -f .bashrc')).toBeDefined();
     // `--relative-to`/`--relative-base` override any `-s`/`-L`/`-P` reading: read `-s` first and
