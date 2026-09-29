@@ -418,30 +418,47 @@ function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | 
  * The bar above the bands while rows are marked: how many, one snooze for all of them, and the
  * way out. A pick writes every marked ask through `useAskSnoozeMany`, so the whole set folds into
  * `Later` in one step, with the same optimistic move and rollback the per-row control makes. The
- * ids the server took leave the selection; the ones it refused stay marked and are named by a
- * count, so a second pick retries exactly those.
+ * ids the server took leave the selection; the ones it refused stay marked and are named with the
+ * server's own reason, so a second pick retries exactly those.
+ *
+ * The write's own state - in flight, and what came back - belongs to the Inbox rather than to this
+ * bar, because the optimistic move can empty the selection while the write is still in the air: in
+ * a view that lists only what is waiting on the reader, every marked row leaves the list at once,
+ * and a bar that owned its refusal would be unmounted before the refusal arrived.
  */
 function BulkSnoozeBar({
   onClear,
+  onPending,
   onPickerFocus,
+  onRefusal,
   onSnoozed,
+  pending,
+  refusal,
   selected,
 }: {
   onClear: () => void;
+  /** True the moment a pick is sent, false when it settles; the Inbox keeps this bar mounted for
+   *  as long as it is true. */
+  onPending: (pending: boolean) => void;
   /** Where focus came from as the picker took it - `h` from a row, Tab, or a pointer with nothing
    *  behind it - so Escape knows which row is one level out. */
   onPickerFocus: (from: Element | null) => void;
+  /** What the reader is told about a pick the server refused in part, or `undefined`. */
+  onRefusal: (refusal: string | undefined) => void;
   /** The ids the server took, once a pick has settled. */
   onSnoozed: (snoozed: readonly string[]) => void;
+  pending: boolean;
+  refusal: string | undefined;
   selected: readonly string[];
 }): ReactNode {
   const write = useAskSnoozeMany();
-  const [refused, setRefused] = useState<string | undefined>(undefined);
   const snooze = (until: string) => {
     const ids = [...selected];
-    setRefused(undefined);
+    onRefusal(undefined);
+    onPending(true);
     void write.submit(ids, until).then(({ failed }) => {
-      setRefused(refusalText(failed, ids.length));
+      onPending(false);
+      onRefusal(refusalText(failed, ids.length));
       const refusedIds = new Set(failed.map(({ askId }) => askId));
       onSnoozed(ids.filter((id) => !refusedIds.has(id)));
     });
@@ -458,7 +475,7 @@ function BulkSnoozeBar({
       <span className={`text-sm ${textSecondaryOnCanvas}`}>{selected.length} selected</span>
       <span className={badgeSelectWrapper}>
         <span aria-hidden="true" className={`${badgeSelectBadge} ${badgeLow.bg} ${badgeLow.text}`}>
-          {write.pending ? "Snoozing…" : "Snooze"}
+          {pending ? "Snoozing…" : "Snooze"}
         </span>
         <select
           aria-label="Snooze selected asks"
@@ -486,9 +503,9 @@ function BulkSnoozeBar({
       >
         Clear selection
       </button>
-      {refused === undefined ? null : (
+      {refusal === undefined ? null : (
         <p className={`basis-full text-sm ${dangerText}`} role="alert">
-          {refused}
+          {refusal}
         </p>
       )}
     </fieldset>
@@ -548,6 +565,15 @@ export function Inbox(): ReactNode {
   // unmarked; a mark whose row this view does not list drops out of `selected` below, so the bar
   // never counts - and `h` never writes - a row that is not on the page.
   const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
+  // The bulk write's own state lives here, not in the bar: the optimistic snooze can take every
+  // marked row off this view at once, and a bar that owned its refusal would be unmounted before
+  // the refusal came back. While a pick is in the air, or its refusal is on screen, the bar stays.
+  const [bulkPending, setBulkPending] = useState(false);
+  const [bulkRefusal, setBulkRefusal] = useState<string | undefined>(undefined);
+  const clearSelection = useCallback(() => {
+    setMarked(new Set());
+    setBulkRefusal(undefined);
+  }, []);
   const onMark = useCallback((askId: string) => {
     setMarked((current) => {
       const next = new Set(current);
@@ -725,7 +751,7 @@ export function Inbox(): ReactNode {
       // Escape is one level out, and the selection is the outermost thing a row press made:
       // `back` takes the reader off the row first, and this clears what they marked.
       label: "Clear the selection",
-      run: () => setMarked(new Set()),
+      run: clearSelection,
       when: () => focusedRow() === null && selected.length > 0,
     },
   ]);
@@ -787,12 +813,33 @@ export function Inbox(): ReactNode {
       </Link>
     );
 
+  // The bar outlives an empty list: a pick that empties this view leaves its write in the air, and
+  // the refusal that comes back has to land somewhere the reader can see.
+  const bulkBar =
+    selected.length === 0 && !bulkPending && bulkRefusal === undefined ? null : (
+      <BulkSnoozeBar
+        onClear={clearSelection}
+        onPending={setBulkPending}
+        onPickerFocus={(from) => {
+          pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
+        }}
+        onRefusal={setBulkRefusal}
+        onSnoozed={(snoozed) =>
+          setMarked((current) => new Set([...current].filter((id) => !snoozed.includes(id))))
+        }
+        pending={bulkPending}
+        refusal={bulkRefusal}
+        selected={selected}
+      />
+    );
+
   if (shown.length === 0 && held === undefined) {
     return (
       <div className="space-y-6">
         <CredentialRequestsSection />
         {viewSwitch}
         {chip}
+        {bulkBar}
         <EmptyState
           label="Inbox empty state"
           message={
@@ -848,18 +895,7 @@ export function Inbox(): ReactNode {
       {viewSwitch}
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
-      {selected.length === 0 ? null : (
-        <BulkSnoozeBar
-          onClear={() => setMarked(new Set())}
-          onPickerFocus={(from) => {
-            pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
-          }}
-          onSnoozed={(snoozed) =>
-            setMarked((current) => new Set([...current].filter((id) => !snoozed.includes(id))))
-          }
-          selected={selected}
-        />
-      )}
+      {bulkBar}
       <ul className="space-y-3">
         {sections.flatMap(({ rows, section, shownRows }, index) => [
           <li

@@ -224,6 +224,67 @@ test.describe("inbox selection", () => {
     }
   });
 
+  // In a view that lists only what is waiting on the reader, the optimistic snooze takes every
+  // marked row off the list at once, so the bar's own selection empties while its write is still
+  // in the air. The refusal that comes back has to survive that.
+  test("a refusal reaches the reader even when the optimistic snooze empties the view", async ({
+    browser,
+  }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Needs you" });
+    const refusedAsk = await createAsk(issue.key, { question: "First decision" }, session);
+    await createAsk(issue.key, { question: "Second decision" }, session);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      // Only the asks waiting on the reader, from this one agent: a snoozed row leaves this list
+      // altogether rather than folding into `Later`.
+      await page.goto(`/?agent=${session.actor.id}&section=needs-you`);
+      const rows = page.locator("[data-inbox-row]");
+      await expect(rows).toHaveCount(2);
+      await page.locator("body").focus();
+
+      // Hold one refusal open, so the answer lands well after the optimistic write has emptied
+      // the view.
+      let refuse: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        refuse = resolve;
+      });
+      await page.route(`**/api/v1/me/asks/${refusedAsk.id}/snooze`, async (route) => {
+        await held;
+        return route.fulfill({
+          body: JSON.stringify({ code: "INVALID_SNOOZE", error: "snoozed_until must be a moment" }),
+          contentType: "application/json",
+          status: 400,
+        });
+      });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      // Let go of the row: one under the reader's hand is held on screen whatever the list does,
+      // and this test is about the write, not that mechanism.
+      await page.keyboard.press("Escape");
+      await page.mouse.move(0, 0);
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await expect(bar).toContainText("2 selected");
+      await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
+
+      // Both rows go at once; the bar stays while its write is in the air.
+      await expect(rows).toHaveCount(0);
+      await expect(bar).toHaveCount(1);
+      refuse?.();
+
+      await expect(bar).toContainText("Could not snooze 1 of 2: snoozed_until must be a moment.");
+      await expect(bar).toContainText("1 selected");
+      await expect(rows).toHaveCount(1);
+      await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", refusedAsk.id);
+    } finally {
+      await context.close();
+    }
+  });
+
   // Ticking a box with the pointer leaves focus on the `<input>`, and the registry's editable
   // policy decides whether the next key is a shortcut or typing. A checkbox takes no text.
   test("keys still work with a pointer-ticked checkbox holding focus", async ({ browser }) => {
