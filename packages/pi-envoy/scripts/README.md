@@ -115,7 +115,11 @@ functions, so the numbers in a pull request body and the test cannot drift apart
 ```bash
 cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts
 cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts --summary
+
+# From the repository root, then clean the temporary module when the comparison finishes:
+jj file show -r main@origin root:packages/pi-envoy/src/legion/pane-guard.ts > packages/pi-envoy/src/legion/pane-guard.base.ts
 cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts src/legion/pane-guard.base.ts
+rm packages/pi-envoy/src/legion/pane-guard.base.ts
 ```
 
 ## measure-pane-guard-model.ts
