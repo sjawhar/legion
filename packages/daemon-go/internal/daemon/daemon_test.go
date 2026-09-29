@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -119,6 +120,26 @@ func daemonTestRolePromptsDir(t *testing.T) string {
 		t.Fatal("locate daemon test source")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(source), "../../../pi-envoy/roles"))
+}
+
+func copyPromptBundle(t *testing.T, source, destination string) {
+	t.Helper()
+	if err := fs.WalkDir(os.DirFS(source), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, path)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		body, err := os.ReadFile(filepath.Join(source, path))
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, body, 0o600)
+	}); err != nil {
+		t.Fatalf("copy role prompt bundle: %v", err)
+	}
 }
 
 func randomSuffix(t *testing.T) string {
@@ -737,7 +758,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	if got := tokens.Roles(); len(got) != 2 || got[0] != appauth.Implement || got[1] != appauth.Review {
 		t.Fatalf("App token roles = %v, want implement then review", got)
 	}
-	want := []string{"store", "config", "appauth", "prompts", "worker-bin", "dispatch", "intake", "admission", "outbox", "api"}
+	want := []string{"prompts", "store", "config", "appauth", "worker-bin", "dispatch", "intake", "admission", "outbox", "api"}
 	var got []string
 	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
 		var entry struct {
@@ -987,6 +1008,25 @@ func TestPrepareReadsRoleReferencesFromThePromptSnapshot(t *testing.T) {
 	}
 	if p.roleReferences.Zero() {
 		t.Fatal("prepare collected no role prompt references")
+	}
+}
+
+func TestCheckStartAndPrepareReadTheSameRolePromptFiles(t *testing.T) {
+	t.Setenv("LEGION_TEST_PG_DSN", "postgres://legion:legion@127.0.0.1:1/legion")
+	cfg := testConfig(t)
+	rolesDir := filepath.Join(t.TempDir(), "roles")
+	copyPromptBundle(t, daemonTestRolePromptsDir(t), rolesDir)
+	if err := os.Symlink(filepath.Join(rolesDir, "missing.md"), filepath.Join(rolesDir, "extra.md")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_ROLE_PROMPTS_DIR", rolesDir)
+	t.Setenv("LEGION_OMP_PATH", "/usr/bin/true")
+
+	if _, _, err := CheckStart(cfg, os.LookupEnv); err != nil {
+		t.Fatalf("CheckStart: %v", err)
+	}
+	if _, err := prepare(cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+		t.Fatalf("prepare: %v", err)
 	}
 }
 

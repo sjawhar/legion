@@ -10,7 +10,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
-	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
@@ -172,7 +171,7 @@ func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (paneNats
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := promptrefs.Roles(r.rolesDir); err != nil {
+	if _, err := prompts.RoleReferences(r.rolesDir); err != nil {
 		return "", "", err
 	}
 	if r.nats.source == natsSeedDaemon {

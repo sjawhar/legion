@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // sharedPromptFiles is the complete role-prompt directory the shipped daemon validates at boot
@@ -92,6 +93,20 @@ func CheckRolePrompts(rolesDir string) error {
 		return fmt.Errorf("Role prompts directory %s is missing %s (set LEGION_ROLE_PROMPTS_DIR to the directory holding pi-envoy's roles/*.md)", rolesDir, strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// RoleReferences reads only the prompt files boot snapshots and panes consume. CheckStart uses
+// it against the resolved deployment bundle without writing; normal boot uses it against the
+// snapshot.
+func RoleReferences(rolesDir string) (promptrefs.Names, error) {
+	names := promptrefs.New()
+	for _, name := range sharedPromptFiles {
+		path := filepath.Join(rolesDir, name)
+		if err := names.File(rolesDir, path, "roles"); err != nil {
+			return promptrefs.Names{}, fmt.Errorf("read shared role prompt %s: %w", path, err)
+		}
+	}
+	return names, nil
 }
 
 // New validates the complete shared role bundle (CheckRolePrompts), then snapshots it and each

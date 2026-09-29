@@ -23,7 +23,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
@@ -371,7 +370,7 @@ func (r *liveRig) imageProbe() (ImageProbe, error) {
 	if err != nil {
 		return ImageProbe{}, err
 	}
-	references, err := promptrefs.Roles(rolesDir)
+	references, err := prompts.RoleReferences(rolesDir)
 	if err != nil {
 		return ImageProbe{}, err
 	}

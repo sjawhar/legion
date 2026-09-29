@@ -128,6 +128,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if err != nil {
 		return err
 	}
+	if cfg.DispatchURL != "" {
+		log.Info("legion workflow boot stage", "stage", "prompts")
+	}
 	if plan.gate != nil {
 		if err := plan.gate(ctx); err != nil {
 			if ctx.Err() != nil {
@@ -375,7 +378,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	}
 	roleReferences := o.roleReferences
 	if roleReferences == nil {
-		roleReferences = promptrefs.Roles
+		roleReferences = prompts.RoleReferences
 	}
 	sharedRolesDir, err := composer.SharedRolePromptsDir()
 	if err != nil {
