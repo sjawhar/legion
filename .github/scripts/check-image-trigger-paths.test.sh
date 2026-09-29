@@ -569,6 +569,47 @@ for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img
   check "if: $shape passes" "$(is "$status" 0)"
 done
 
+echo "case: needs.<job>.result is neutral only when it admits 'skipped'"
+# The live shape this guards: envoy-smoke tidied up to reuse envoy-go's setup. always() does not
+# free the build from envoy-go's gate, because `result == 'success'` re-imposes it — GitHub
+# skips the smoke on a change that skips envoy-go, which is #1562's regression exactly.
+root=$(fixture gate-result-requires-success)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    if: always() && needs.gatekeeper.result == 'success' && needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "result == 'success' pulls in the named job's gate, even past always()" "$(is "$status" 1)"
+check "names the job it came from" "$(contains "$out" 'jobs.gatekeeper.if (jobs.changes filter narrow)')"
+
+root=$(fixture gate-result-admits-skipped)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    if: always() && needs.gatekeeper.result != 'failure' && needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "result != 'failure' admits skipped, so it stays neutral" "$(is "$status" 0)"
+
+root=$(fixture gate-result-or-skipped)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    if: always() && (needs.gatekeeper.result == 'success' || needs.gatekeeper.result == 'skipped') && needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "an || that includes 'skipped' stays neutral" "$(is "$status" 0)"
+
+root=$(fixture gate-result-requires-success-bang-cancelled)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    if: \"!cancelled() && needs.gatekeeper.result == 'success' && needs.changes.outputs.img == 'true'\"
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "the same, past !cancelled() rather than always()" "$(is "$status" 1)"
+
 echo "case: a build step's own if: is a gate too, and is allowlisted the same way"
 # step_if <root> <expression>: names and gates the build-push-action step itself.
 step_if() {
@@ -637,6 +678,14 @@ V4-compose-build|docker-compose build listener
 eval|eval "docker build -f docker/Dockerfile ."
 github-env|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
 buildah|buildah bud -f docker/Dockerfile .
+B1-image-build|docker image build -f docker/Dockerfile .
+B2-builder-build|docker builder build -f docker/Dockerfile .
+B3-context-flag|docker --context remote build -f docker/Dockerfile .
+B4-buildx-builder-flag|docker buildx --builder mybuilder build -f docker/Dockerfile .
+podman|podman build -f docker/Dockerfile .
+B5-host-flag|docker -H tcp://x:2375 build -f docker/Dockerfile .
+nerdctl|nerdctl build -f docker/Dockerfile .
+depot|depot build -f docker/Dockerfile .
 kaniko|/kaniko/executor --dockerfile docker/Dockerfile --context .
 SHAPES
 
@@ -651,7 +700,93 @@ open(path, "w").write(f"{head}      - name: Bake\n        uses: docker/bake-acti
 PYEOF
 run_check "$root"
 check "V5 docker/bake-action is refused" "$(is "$status" 1)"
-check "  and names the action" "$(contains "$out" 'builds an image with docker/bake-action@v5')"
+check "  and names the list to add it to" "$(contains "$out" 'add this action to NON_BUILDING_ACTIONS')"
+
+echo "case: the build action's with: keys are an allowlist too"
+# The oracle's repro: build-contexts names another tree the build reads, so dropping that tree
+# from the filter would otherwise pass.
+root=$(fixture with-build-contexts)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "          file: docker/Dockerfile\n",
+    "          file: docker/Dockerfile\n          build-contexts: other=packages/other\n",
+))
+PYEOF
+run_check "$root"
+check "build-contexts is refused" "$(is "$status" 1)"
+check "  and says what to do" "$(contains "$out" 'an input this check has not read')"
+
+root=$(fixture with-secret-files)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "          file: docker/Dockerfile\n",
+    "          file: docker/Dockerfile\n          secret-files: tok=./tok.txt\n",
+))
+PYEOF
+run_check "$root"
+check "secret-files is refused" "$(is "$status" 1)"
+
+root=$(fixture with-known-inputs)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "          file: docker/Dockerfile\n",
+    "          file: docker/Dockerfile\n          push: true\n          platforms: linux/amd64\n"
+    "          cache-from: type=gha\n          secrets: |\n            tok=abc\n",
+))
+PYEOF
+run_check "$root"
+check "the inputs this check has read stay green" "$(is "$status" 0)"
+
+root=$(fixture with-expression-context)
+sed -i 's|          context: .$|          context: ${{ github.workspace }}|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "a context that is not a plain repository path is refused" "$(is "$status" 1)"
+check "  and says so" "$(contains "$out" 'not a plain repository path')"
+
+echo "case: uses: is an allowlist, since a build action cannot be spotted by name"
+for other in "depot/build-push-action@v1" "mr-smithers-excellent/docker-build-push@v6"; do
+  root=$(fixture "uses-$(printf '%s' "$other" | tr -cd '[:alnum:]' | cut -c1-20)")
+  python3 - "$root/.github/workflows/image.yaml" "$other" <<'PYEOF'
+import sys
+path, other = sys.argv[1], sys.argv[2]
+text = open(path).read()
+head, _, _ = text.partition("      - uses: docker/build-push-action@v6")
+open(path, "w").write(f"{head}      - name: Other\n        uses: {other}\n")
+PYEOF
+  run_check "$root"
+  check "$other is refused" "$(is "$status" 1)"
+  check "  and names the list to add it to" "$(contains "$out" 'add this action to NON_BUILDING_ACTIONS')"
+done
+
+root=$(fixture uses-known-action)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "      - uses: docker/build-push-action@v6\n",
+    "      - uses: actions/checkout@v5\n      - uses: docker/build-push-action@v6\n",
+))
+PYEOF
+run_check "$root"
+check "an action known to build nothing passes" "$(is "$status" 0)"
+
+echo "case: a build split across a backslash continuation is still caught"
+root=$(fixture tripwire-continuation)
+run_step "$root" 'docker \
+  buildx build --load -f docker/Dockerfile .'
+run_check "$root"
+check "the continuation form is refused" "$(is "$status" 1)"
+check "  and says how to make it readable" "$(contains "$out" 'build images with docker/build-push-action so this check can read the build')"
 
 root=$(fixture tripwire-not-a-build)
 run_step "$root" 'docker pull debian:trixie-slim'

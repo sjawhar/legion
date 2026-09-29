@@ -560,9 +560,9 @@ jobs:
           load: true
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
       # 5m bounds only what the test does: pull NATS, start both containers behind the test's
-      # own 60 s health wait, and assert. Measured at 1.0 s in this job and 2.2–20.7 s across
-      # four runs on a devbox at load average 80, so the bound is deliberate headroom, not a
-      # build budget.
+      # own 60 s health wait, and assert. This job has measured 1.82 s, 3.16 s and 1.88 s (the
+      # last in run 36508580490), and 2.2–20.7 s across four runs on a devbox at load average
+      # 80, so the bound is deliberate headroom, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
