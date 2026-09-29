@@ -638,13 +638,19 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // A span comes from the live tree unchecked, so the empty cells spans add are bounded per render,
 // across every table of the document (renderer.spanBudget): each column a colspan adds, each
 // position a rowspan covers below and each gap filled up to one is charged, and a span past the
-// budget adds no more cells. A span also covers no column past the wider of maxColspan and the
-// table's widest row as it holds cells. Every cell the table holds is still written with its text.
+// budget adds no more cells. The cells the header is widened by are not charged (maxSpanCells), and
+// past the grid's limit a row reaches only columns where a row holds a cell. Every cell the table
+// holds is still written with its text.
 func (r *renderer) tableGrid(table *Node) [][]*Node {
 	covered := map[[2]int]*Node{}
 	// lastCovered is, for each row, the last column a span from a row above covers, or -1, kept so
 	// that no row scans every covered position: with that scan, 20,000 rows took 24.7 s.
 	lastCovered := make([]int, len(table.Children))
+	// limit bounds the header's width, and so the read-back, which pads every row to the header:
+	// the cells a colspan adds stay short of limit, the wider of maxColspan and the widest row as the
+	// table holds cells, so every column past it is one where a row holds a cell, and the header is
+	// at most limit and the table's cells wide. The budget alone would let one row's colspans widen
+	// the header by maxSpanCells columns, each read back as a cell of every row.
 	limit := maxColspan
 	for index, row := range table.Children {
 		lastCovered[index] = -1
@@ -722,8 +728,11 @@ func tableSpan(value any) int {
 // the grid's width limit reach past it.
 const maxColspan = 1000
 
-// maxSpanCells is how many empty cells the spans of a document's tables add in all (tableGrid): a
-// render reached from a peer's update writes at most that many cells no one wrote.
+// maxSpanCells is how many empty cells the spans of a document's tables add to their rows in all
+// (tableGrid). The header, widened to its table's widest row, adds one more for each column a row
+// reaches past it, over a cell some row holds or a span added, so a render reached from a peer's
+// update writes at most twice that many cells no one wrote, and one more for each cell a row holds
+// past its header.
 const maxSpanCells = 100_000
 
 // emptyTableCell is an empty cell of kind with like's alignment, or none when like is nil.

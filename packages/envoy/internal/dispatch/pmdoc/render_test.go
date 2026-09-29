@@ -916,55 +916,85 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 }
 
 // A span comes from the live tree unchecked, and each position it covers is written as a cell, so
-// the work is bounded per table, not the span alone: a colspan covers at most maxColspan columns, a
-// rowspan the rows below it, and a document's tables together add at most maxSpanCells empty
-// cells. Each case allocates hundreds of megabytes or more without that: the staircases stack
-// rowspans, the flat table repeats a colspan under the per-cell cap on every row, and the many
-// tables repeat one under a per-table budget.
+// each bound on those cells is held by a case below that goes red when that bound alone is removed,
+// its comment naming the check that does. Every case is held to the cells maxSpanCells allows a
+// render to write that no one wrote: twice the budget, and one for each cell the table holds. Each
+// such cell costs a render some 600 bytes, so the case over many tables, which writes all the
+// budget allows, is held to a kibibyte for each as well, a backstop for a cost the count does not
+// see. maxColspan is held by TestRenderWritesAColspanAsWideAsTheEditorDraws.
 func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
-	oneCellRows := func(rows, colspan int, rowspan func(index int) int) func() *Node {
-		return func() *Node {
-			table := &Node{Type: "table"}
-			for index := range rows {
-				kind, row := "table_cell", "table_row"
-				if index == 0 {
-					kind, row = "table_header", "table_header_row"
-				}
-				table.Children = append(table.Children, &Node{Type: row, Children: []*Node{spanCell(kind, colspan, rowspan(index))}})
-			}
-			return &Node{Type: "doc", Children: []*Node{table}}
+	oneCellRows := func(rows, colspan int, rowspan func(index int) int) *Node {
+		spans := make([][][2]int, rows)
+		for index := range spans {
+			spans[index] = [][2]int{{colspan, rowspan(index)}}
 		}
+		return spanTable(spans...)
 	}
 	toTheEnd := func(rows int) func(int) int { return func(index int) int { return rows - index } }
-	spanned := func(attr string) func() *Node {
-		return func() *Node {
-			doc, err := Parse("| h1 | h2 |\n| --- | --- |\n| c1 | c2 |\n")
-			if err != nil {
-				t.Fatal(err)
-			}
-			doc.Children[0].Children[1].Children[0].Attrs[attr] = 2e6
-			return doc
-		}
-	}
+	one := func(int) int { return 1 }
 	for _, test := range []struct {
-		name string
-		doc  func() *Node
+		name   string
+		tables func() []*Node
+		// width is the header's width in cells the case pins, or 0.
+		width    int
+		allocate bool
 	}{
-		{"colspan", spanned("colspan")},
-		{"rowspan", spanned("rowspan")},
-		{"staircase", oneCellRows(100, 1000, toTheEnd(100))},
-		{"colspan-1 staircase", oneCellRows(4000, 1, toTheEnd(4000))},
-		{"flat table", oneCellRows(4000, 1000, func(int) int { return 1 })},
-		{"many tables", func() *Node {
-			doc := &Node{Type: "doc"}
-			for range 5000 {
-				doc.Children = append(doc.Children, oneCellRows(2, 2_000_000, func(int) int { return 1 })().Children...)
+		// The rowspan clamp: without it a rowspan past the last row indexes past the grid's rows,
+		// and the recovered panic fails the render.
+		{name: "rowspan past the last row", tables: func() []*Node {
+			return []*Node{spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{1, 2_000_000}, {1, 1}})}
+		}},
+		// The budget as each colspan spends it: without that, a colspan on each of 1,000 rows adds
+		// 999 cells to every row, 999,000 in all.
+		{name: "a colspan on every row", tables: func() []*Node { return []*Node{oneCellRows(1000, 1000, one)} }},
+		// The budget as a rowspan spends it on the rows below: without that, rowspans stacked to
+		// the end of 1,000 rows cover half a million positions.
+		{name: "rowspans stacked to the end", tables: func() []*Node { return []*Node{oneCellRows(1000, 1, toTheEnd(1000))} }},
+		// The budget as each gap filled up to a rowspan spends it: without that, 1,000 rows each
+		// fill 998 empty cells up to the column a header cell spans all of them in.
+		{name: "gaps up to a rowspan", tables: func() []*Node {
+			spans := [][][2]int{{{999, 1}, {1, 1001}}}
+			for range 1000 {
+				spans = append(spans, [][2]int{{1, 1}})
 			}
-			return doc
+			return []*Node{spanTable(spans...)}
+		}},
+		// One budget for each render, not each table: with one for each table, 500 tables of a
+		// one-cell header over a cell spanning 2,000,000 columns add 999 cells to every body row
+		// and widen every header by 999 more, 999,000 in all. This case writes all the budget
+		// allows: 100,000 cells the spans add and as many the headers are widened by.
+		{name: "many tables", allocate: true, tables: func() []*Node {
+			tables := make([]*Node, 500)
+			for index := range tables {
+				tables[index] = spanTable([][2]int{{1, 1}}, [][2]int{{2_000_000, 1}})
+			}
+			return tables
+		}},
+		// The grid's limit: under a one-cell header, 20 one-cell rows and a row of 100 cells each
+		// spanning 1,000 columns, only the first span is written across 1,000 columns, so the
+		// header, which every row reads back as wide as, is 1,099 cells wide. Without the limit
+		// it is 100,000, and the table reads back as 2,200,000 cells.
+		{name: "a row of wide spans under a one-cell header", width: 1099, tables: func() []*Node {
+			spans := [][][2]int{{{1, 1}}}
+			for range 20 {
+				spans = append(spans, [][2]int{{1, 1}})
+			}
+			wide := make([][2]int, 100)
+			for index := range wide {
+				wide[index] = [2]int{1000, 1}
+			}
+			return []*Node{spanTable(append(spans, wide)...)}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			doc := test.doc()
+			doc := &Node{Type: "doc", Children: test.tables()}
+			held := 0
+			Walk(doc, func(node *Node) bool {
+				if node.Type == "table_cell" || node.Type == "table_header" {
+					held++
+				}
+				return true
+			})
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
 			markdown, err := Render(doc)
@@ -972,8 +1002,14 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 128<<20 {
-				t.Fatalf("Render allocated %d MiB for %d bytes of markdown, want at most 128", allocated>>20, len(markdown))
+			if empty, most := emptyCells(markdown), 2*maxSpanCells+held; empty > most {
+				t.Errorf("Render wrote %d empty cells, want at most %d", empty, most)
+			}
+			if got := headerWidth(markdown); test.width != 0 && got != test.width {
+				t.Errorf("the header is written %d cells wide, want %d", got, test.width)
+			}
+			if allocated, most := after.TotalAlloc-before.TotalAlloc, uint64(2*maxSpanCells+held)<<10; test.allocate && allocated > most {
+				t.Errorf("Render allocated %d MiB, want at most %d", allocated>>20, most>>20)
 			}
 		})
 	}
@@ -1034,6 +1070,28 @@ func spanCell(kind string, colspan, rowspan int) *Node {
 		Attrs:    Attrs{"alignment": nil, "colspan": colspan, "colwidth": nil, "rowspan": rowspan},
 		Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}},
 	}
+}
+
+// emptyCells counts the cells markdown's table rows hold nothing in.
+func emptyCells(markdown string) int {
+	empty := 0
+	for _, line := range strings.Split(markdown, "\n") {
+		if !strings.HasPrefix(line, "| ") {
+			continue
+		}
+		for _, cell := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(line, "| "), " |"), " | ") {
+			if cell == "" {
+				empty++
+			}
+		}
+	}
+	return empty
+}
+
+// headerWidth is how many cells markdown's first line, a table's header row, is written with.
+func headerWidth(markdown string) int {
+	first, _, _ := strings.Cut(markdown, "\n")
+	return strings.Count(first, "|") - 1
 }
 
 // The browser editor draws a colspan past 1000 as 1000, as HTML caps it, so a cell claiming more
