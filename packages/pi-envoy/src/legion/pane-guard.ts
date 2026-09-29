@@ -1320,9 +1320,10 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
     // parent of what it found. Both take a relative operand against `getcwd()`, the PHYSICAL
     // directory, where `st.cwd` is bash's LOGICAL PWD, which a `cd` into a symlink leaves
     // pointed at the link's text rather than its target.
-    // `-s` and `-L` are NOT interchangeable: `-s` never follows a symlink, `-L` still follows
-    // the final component's own — `realpath.s.L.final` pins this, and fails if the two
-    // branches below are swapped.
+    // `-s` and `-L` are NOT interchangeable: `-s` prints the lexical path unexpanded, following
+    // no symlink at all; `-L` re-walks that same lexical path physically, following every
+    // symlink in it, not only the final component's — swapping the two branches below changes
+    // what a command whose lexical path holds an earlier symlink actually touches.
     if (mode === "s" || mode === "L") {
       const here = kernelPath("/", st.cwd);
       if (here === undefined) return undefined;
@@ -4091,7 +4092,11 @@ function checkTargets(
       );
     }
     const text = literalText(target.exp);
-    // `judgePath` above refuses a target the guard cannot resolve, so `kernelPath` answers here.
+    // `kernelPath` may still not resolve here even though `judgePath` above allowed the target:
+    // a `follow: false` caller (`unlink`, `find`'s own delete) lets a dangling or looping final
+    // component through unresolved, where `kernelPath` always requires the final component too.
+    // `file` then stays undefined and the delete below is skipped harmlessly — a pid file model
+    // built from a target this unresolvable was never trustworthy to begin with.
     const file = text === undefined ? undefined : kernelPath(st.cwd, text);
     if (file !== undefined) st.pidFiles.delete(file);
   }

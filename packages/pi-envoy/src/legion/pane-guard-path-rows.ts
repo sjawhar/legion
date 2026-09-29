@@ -713,7 +713,7 @@ export const PATH_ROWS: readonly PathRow[] = [
   // --- a path the guard computes from a command's output ---
   {
     name: "realpath.dotdot.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     command: 'rm -f "$(realpath e/../.bashrc)"',
     dotdot: true,
@@ -721,7 +721,7 @@ export const PATH_ROWS: readonly PathRow[] = [
   {
     name: "readlink.f.dotdot.symlink",
     family: "substitution",
-    role: "probe",
+    role: "must-refuse",
     command: 'rm -f "$(readlink -f e/../.bashrc)"',
     dotdot: true,
   },
@@ -750,14 +750,14 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.symlink.nodotdot",
-    family: "substitution",
+    family: "realpath",
     role: "must-refuse",
     command: 'rm -f "$(realpath hs/.bashrc)"',
     dotdot: false,
   },
   {
     name: "realpath.dotdot.realdir",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     command: 'rm -f "$(realpath d/../inside)"',
     dotdot: true,
@@ -792,7 +792,7 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.s.dotdot.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     // `-s`/`--strip`/`--no-symlinks` expand no symlink at all: bash prints the lexical `..`.
     command: 'chmod -R 000 "$(realpath -s "$HOME/mine/../keep")"',
@@ -800,21 +800,21 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.strip.dotdot.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     command: 'chmod -R 000 "$(realpath --strip "$HOME/mine/../keep")"',
     dotdot: true,
   },
   {
     name: "realpath.no-symlinks.dotdot.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     command: 'chmod -R 000 "$(realpath --no-symlinks "$HOME/mine/../keep")"',
     dotdot: true,
   },
   {
     name: "realpath.L.dotdot.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     // `-L`/`--logical` takes the text's own `..` before following the symlink in front of it.
     command: 'chmod -R 000 "$(realpath -L "$HOME/mine/../keep")"',
@@ -822,14 +822,14 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.logical.dotdot.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     command: 'chmod -R 000 "$(realpath --logical "$HOME/mine/../keep")"',
     dotdot: true,
   },
   {
     name: "realpath.physical.dotdot.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     // Plain `realpath` is physical, the guard's default: `mine` resolves to `sub`, so the `..`
     // lands back in the workspace, on a name that does not exist there.
@@ -838,14 +838,14 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.nodotdot.outside",
-    family: "substitution",
+    family: "realpath",
     role: "must-refuse",
     command: 'chmod -R 000 "$(realpath "$HOME/keep")"',
     dotdot: false,
   },
   {
     name: "realpath.s.logical.cwd",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     // `e` is a symlink: bash's kernel cwd after `cd e` is physically the home, though the
     // logical `$PWD` text still reads `e`. A lexical mode must resolve the cwd itself first.
@@ -854,14 +854,14 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.s.logical.cwd.inside",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     command: 'cd in && chmod -R 700 "$(realpath -s ..)/sub"',
     dotdot: true,
   },
   {
     name: "realpath.L.logical.cwd",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     // Same as `-s` above, for `-L`: after `cd e`, the physical cwd is the canary home, though
     // the logical `$PWD` text still reads `e`.
@@ -870,14 +870,14 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.L.logical.cwd.inside",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     command: 'cd in && chmod -R 700 "$(realpath -L ..)/sub"',
     dotdot: true,
   },
   {
     name: "realpath.P.L.lexical",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     // Bash takes the LAST of `-L` and `-P`, so this is logical: a `P` anywhere is not physical.
     command: 'chmod -R 000 "$(realpath -P -L "$HOME/mine/../keep")"',
@@ -885,14 +885,14 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.L.P.physical",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     command: 'chmod -R 700 "$(realpath -L -P "$HOME/mine/../keep")"',
     dotdot: true,
   },
   {
     name: "realpath.s.P.physical",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     // Bash takes the LAST of `-s` and `-P`, so `-s` does not win merely by being present: this
     // is physical. `e` differs from its physical target, so lexical and physical disagree here.
@@ -901,14 +901,14 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.P.s.lexical",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     command: 'chmod -R 700 "$(realpath -P -s e/../keep)"',
     dotdot: true,
   },
   {
     name: "realpath.strip.physical.long",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
     // `--physical` maps onto the same last-wins letter as `-P`: unmapped, it would count for
     // nothing and leave the earlier `--strip` (lexical) standing.
@@ -917,16 +917,17 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.s.L.final",
-    family: "substitution",
+    family: "realpath",
     role: "probe",
-    // No `..` at all: `-s` never follows any symlink, `-L` still follows the final component's
-    // own. A `-s`-always-wins bug prints the link itself; the fix follows it to the canary home.
+    // No `..` at all: `-s` follows no symlink; `-L` walks the lexical path physically, which
+    // here has only `e` to follow. A `-s`-always-wins bug prints the link itself; the fix
+    // follows it to the canary home.
     command: 'rm -rf "$(realpath -s -L e)"',
     dotdot: false,
   },
   {
     name: "realpath.s.trailing.symlink",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     // The mirror of the probe above: with only `-s` given, swapping the `-s`/`-L` branches
     // would follow `e`'s own symlink physically instead of printing it unresolved.
@@ -996,7 +997,7 @@ export const PATH_ROWS: readonly PathRow[] = [
   },
   {
     name: "realpath.physical.strip.control",
-    family: "substitution",
+    family: "realpath",
     role: "must-allow",
     command: 'chmod -R 700 "$(realpath -P --strip e/../sub)"',
     dotdot: true,
@@ -1224,7 +1225,7 @@ bash unread.sh`,
   },
   {
     name: "retarget.group.key",
-    family: "retarget",
+    family: "unnameable",
     role: "probe",
     // `lnk` is a pre-existing symlink into `a/b`, so `lnk/..` is `ws/a` — inside the workspace,
     // but not `ws` itself: the write really lands on `a/unread.sh`, a file nothing else reads.
