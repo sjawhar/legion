@@ -239,6 +239,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # pane-guard-bash.test.ts's own must-refuse-at-main check needs `origin/main` and a real
+      # merge base, neither of which a default shallow checkout carries.
+      - run: git fetch origin main
       - uses: ./.github/actions/setup-bun
       - uses: ./.github/actions/install-jj
       # extensions/legion-phase-stall-omp.test.ts runs the pinned Oh My Pi against stand-ins and

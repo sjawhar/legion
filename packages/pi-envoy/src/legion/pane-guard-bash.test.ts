@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -397,33 +397,65 @@ test("the path battery's rows measure the property they name", () => {
   expect(families.length).toBeGreaterThan(10);
 }, 60_000);
 
-test("a must-refuse row is a control, not a probe: refused at main's guard too", async () => {
+test("a must-refuse row is a control, not a probe: refused at the merge base's guard too", async () => {
   // A row `PATH_ROWS` names `must-refuse` is meant to hold steady across a fix, distinguishing it
   // from a `probe`, which is meant to flip. The battery only ever measured the CURRENT guard, so
   // a row could be relabelled `must-refuse` for having reached ALLOW → refused across this PR's
-  // own fixes — exactly a probe's signature — and nothing would catch it. This loads `main`'s own
-  // `pane-guard.ts` (its one local import, `./pane-guard-code`, is unchanged by this PR, so it
-  // resolves against the current file) and asks it too.
+  // own fixes — exactly a probe's signature — and nothing would catch it.
+  //
+  // The base is `merge-base(HEAD, origin/main)`, not the `main` branch name: a local bookmark
+  // lags, a shallow checkout has none, and after this change merges, `main` IS this change's own
+  // guard, so comparing against the branch name would compare the guard to itself. The CI job
+  // fetches `origin/main` and checks out full history for exactly this.
+  //
+  // All three of `pane-guard.ts`'s own local imports — `./pane-guard-bash` and
+  // `./pane-guard-code`, neither changed by this PR — are read from that SAME base commit and
+  // written together into one generated directory, so the loaded module resolves its relative
+  // imports to siblings that actually existed on that commit, not a hybrid of the base's
+  // `pane-guard.ts` against a sibling only the current change carries. `git show`, not a
+  // working-copy checkout, so nothing here mutates or snapshots the workspace a concurrent `jj`,
+  // `biome`, or `tsc` run might be reading; the generated directory is a fresh one from
+  // `mkdtempSync` inside the package (so `@legion/envoy-client/errors` and `unbash` still resolve
+  // through its `node_modules` chain) rather than a fixed name two concurrent runs would race on,
+  // and it lives beside `package.json`, not under `src/`, so a glob scoped to tracked source never
+  // sees it even for the moment before cleanup.
   const legionDir = path.dirname(new URL(import.meta.url).pathname);
+  const pkgDir = path.resolve(legionDir, "..", "..");
   const repoRoot = path.resolve(legionDir, "..", "..", "..", "..");
-  const source = execSync("jj file show -r main packages/pi-envoy/src/legion/pane-guard.ts", {
-    cwd: repoRoot,
-    encoding: "utf8",
-    maxBuffer: 1 << 26,
-  });
-  const tempPath = path.join(legionDir, "pane-guard.main-control-check.generated.ts");
-  writeFileSync(tempPath, source);
-  // Dynamic import, not static: the module's content is `main`'s committed text fetched at test
-  // time, written to a path this run generates — genuinely runtime-selected, not a literal known
-  // at author time.
+  let base: string;
+  try {
+    base = execFileSync("git", ["merge-base", "HEAD", "origin/main"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+  } catch (error) {
+    // Fail loudly, never skip: a base this check cannot read is exactly the state that would
+    // silently turn off the one assertion that stops a probe being relabelled as a control.
+    throw new Error(
+      `cannot resolve merge-base(HEAD, origin/main) in ${repoRoot} — is origin/main fetched? (${error})`
+    );
+  }
+  const siblings = ["pane-guard.ts", "pane-guard-bash.ts", "pane-guard-code.ts"];
+  const tempDir = mkdtempSync(path.join(pkgDir, ".base-guard-check-"));
   let baseCreatePaneGuard: typeof createPaneGuard;
   try {
-    const mod = (await import(pathToFileURL(tempPath).href)) as {
+    for (const sibling of siblings) {
+      const content = execFileSync(
+        "git",
+        ["show", `${base}:packages/pi-envoy/src/legion/${sibling}`],
+        { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 26 }
+      );
+      writeFileSync(path.join(tempDir, sibling), content);
+    }
+    // Dynamic import, not static: the module's content is the merge base's committed text,
+    // fetched at test time and written to a path this run generates — genuinely runtime-selected,
+    // not a literal known at author time.
+    const mod = (await import(pathToFileURL(path.join(tempDir, "pane-guard.ts")).href)) as {
       createPaneGuard: typeof createPaneGuard;
     };
     baseCreatePaneGuard = mod.createPaneGuard;
   } finally {
-    rmSync(tempPath, { force: true });
+    rmSync(tempDir, { recursive: true, force: true });
   }
 
   const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-base-control-"));
@@ -431,10 +463,10 @@ test("a must-refuse row is a control, not a probe: refused at main's guard too",
     const mustRefuse = PATH_ROWS.filter(
       (row) => row.role === "must-refuse" && !PATH_ROW_CONTROL_EXEMPT.includes(row.name)
     );
-    const stillAllowedAtMain = mustRefuse
+    const stillAllowedAtBase = mustRefuse
       .filter((row) => measureRow(row, root, baseCreatePaneGuard).refusal === undefined)
       .map((row) => row.name);
-    expect(stillAllowedAtMain).toEqual([]);
+    expect(stillAllowedAtBase).toEqual([]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
