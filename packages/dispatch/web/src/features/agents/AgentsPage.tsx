@@ -67,7 +67,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { deliveryAttempts } from "./attempts";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
-import { focusOwningAgentRow, useAgentsKeymap } from "./keyboard";
+import { leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
@@ -559,6 +559,25 @@ function AgentMessageComposer({
     queryFn: () => api.listIssues({ open: true }),
     queryKey: ["agents", "issue-picker"],
   });
+  // The picker exists to be used, so opening it hands over the control inside it - the same
+  // move `MultiSelect` makes with its search box. It is what `i` needs (a key that opened
+  // something no keystroke could then reach would be a dead end) and what a pointer wants too,
+  // and it waits for the list rather than a frame, since the select renders only once the read
+  // lands. Once per open: a refetch behind the reader must not pull focus back.
+  const issueSelect = useRef<HTMLSelectElement>(null);
+  const pickerTookFocus = useRef(false);
+  useEffect(() => {
+    if (!issuePickerOpen) {
+      pickerTookFocus.current = false;
+      return;
+    }
+    // The list is the dependency that matters: the select renders only once it lands.
+    if (issues.data === undefined || pickerTookFocus.current || issueSelect.current === null) {
+      return;
+    }
+    pickerTookFocus.current = true;
+    issueSelect.current.focus();
+  }, [issuePickerOpen, issues.data]);
   // Replies retain their parent owner: issue-attached legacy messages stay on that issue's
   // message route, while issue-less roots keep the S3-deferred direct session channel.
   const replyIssueKey = replyTo?.issueKey;
@@ -595,6 +614,8 @@ function AgentMessageComposer({
               Issue (optional)
               <select
                 aria-label="Issue"
+                data-agent-issue-select=""
+                ref={issueSelect}
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
                 onChange={(event) => {
                   setIssueKey(event.target.value);
@@ -828,7 +849,7 @@ function AgentRow({
             <AgentMessageComposer
               agent={agent}
               onCancelReply={() => setReplyTo(null)}
-              onClose={focusOwningAgentRow}
+              onClose={leaveAgentComposer}
               replyTo={replyTo}
             />
           </div>

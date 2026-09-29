@@ -1,11 +1,23 @@
 import { expect, test } from "bun:test";
 
-import { askIssueKey, askOrdinals, askOwner, controlName } from "./ask-name";
+import { askIssueKey, askOrdinals, askOwner, controlName, type NamedAsk } from "./ask-name";
 
-const issueAsk = { id: "a", issue: { key: "CORE-12" }, question: "Which release?" };
-const documentAsk = {
+/** A row as the Inbox read carries it: the issue object the row renders, plus its flat key. */
+function onIssue(key: string, rest: Partial<NamedAsk> = {}): NamedAsk {
+  return {
+    id: "a",
+    issue: { assignee: "alice", key, title: "Ship the migration" },
+    issue_key: key,
+    question: "Which release?",
+    ...rest,
+  };
+}
+
+const issueAsk = onIssue("CORE-12");
+const documentAsk: NamedAsk = {
   document: { name: "Rollout plan", project: "CORE", slug: "rollout" },
   id: "b",
+  issue_key: null,
   question: "Sign this off?",
 };
 
@@ -19,19 +31,26 @@ test("an ask belongs to its issue, its document, or neither", () => {
     key: "document:CORE/rollout",
     label: "Rollout plan",
   });
-  expect(askOwner({ id: "d", question: "?" })).toEqual({ key: "none", label: "Document ask" });
+  expect(askOwner({ id: "d", issue_key: null, question: "?" })).toEqual({
+    key: "none",
+    label: "Document ask",
+  });
   expect(askIssueKey(documentAsk)).toBe(null);
 });
 
 test("two documents of one project are two owners", () => {
-  const other = { ...documentAsk, document: { ...documentAsk.document, slug: "cutover" }, id: "e" };
+  const other: NamedAsk = {
+    ...documentAsk,
+    document: { name: "Cutover", project: "CORE", slug: "cutover" },
+    id: "e",
+  };
   expect(askOwner(other).key).not.toBe(askOwner(documentAsk).key);
 });
 
 test("an ordinal is given only where an owner has more than one row, in list order", () => {
-  const first = { ...issueAsk, id: "first" };
-  const second = { ...issueAsk, id: "second", question: "Ship it?" };
-  const alone = { id: "alone", issue: { key: "CORE-99" }, question: "Alone?" };
+  const first = onIssue("CORE-12", { id: "first" });
+  const second = onIssue("CORE-12", { id: "second", question: "Ship it?" });
+  const alone = onIssue("CORE-99", { id: "alone", question: "Alone?" });
   const ordinals = askOrdinals([first, alone, second]);
 
   expect(ordinals.get("first")).toEqual({ index: 1, total: 2 });

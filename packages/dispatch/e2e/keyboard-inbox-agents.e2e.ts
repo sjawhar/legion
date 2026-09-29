@@ -308,11 +308,18 @@ test.describe("inbox selection", () => {
       const bar = page.getByRole("group", { name: "Selected asks" });
       await expect(bar).toContainText("2 selected");
 
-      // j roves off the ticked row, and h reaches the bulk picker.
+      // `h` from the box the reader just ticked is the flow the pointer leaves them in: it
+      // reaches the bulk picker with no roving in between.
+      await page.keyboard.press("h");
+      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("Escape");
+
+      // j roves off the ticked row, and h reaches the picker from a focused row too.
       await page.keyboard.press("j");
       await expect(rows.nth(2)).toBeFocused();
       await page.keyboard.press("h");
-      await expect(bar.getByRole("combobox", { name: "Snooze selected asks" })).toBeFocused();
+      await expect(picker).toBeFocused();
     } finally {
       await context.close();
     }
@@ -636,12 +643,27 @@ test.describe("inbox selection", () => {
       await page.keyboard.press("x");
       const bar = page.getByRole("group", { name: "Selected asks" });
       const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
+      await page.keyboard.press("h");
+      await expect(picker).toBeFocused();
+      const writes: string[] = [];
+      page.on("request", (request) => {
+        if (request.method() === "PUT") writes.push(request.url());
+      });
       await picker.selectOption("tomorrow");
 
+      // Inert, not taken away: a control that disabled itself would drop the reader to the
+      // document mid-write, and Escape would have nothing to leave.
       await expect(bar).toContainText("Snoozing 2…");
       await expect(picker).toBeDisabled();
+      await expect(picker).toBeFocused();
+      // A second pick from the keyboard the reader still holds: an arrow on a focused native
+      // select changes it and fires `change`, and the bar ignores it while its own write is out.
+      await page.keyboard.press("ArrowDown");
+      expect(writes.length).toBe(2);
+
       release?.();
       await expect(bar).toHaveCount(0);
+      expect(writes.length).toBe(2);
     } finally {
       await context.close();
     }
@@ -891,7 +913,12 @@ test.describe("agents page", () => {
         "true"
       );
       await expect(reviewerPicker).toHaveAttribute("aria-expanded", "true");
-      await expect(reviewer.getByRole("combobox", { name: "Issue" })).toBeVisible();
+      // `i` leaves the reader in the picker's own select, where the letters are its type-ahead
+      // and not the page's keys - Escape is the way back to the row, closing it behind them.
+      await expect(reviewer.getByRole("combobox", { name: "Issue" })).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(reviewerPicker).toHaveAttribute("aria-expanded", "false");
+      await expect(reviewer).toBeFocused();
 
       // Shift+P pins the focused agent, and a pin is the viewer's own remembered preference.
       await page.keyboard.press("k");
@@ -923,10 +950,12 @@ test.describe("agents page", () => {
     }
   });
 
-  // Escape is one level out of what the reader opened. On the issue picker's own `<select>` it
-  // is the only dismissal that control has, so leaving the picker expanded behind them would
-  // make the key a move rather than a way back.
-  test("Escape on the issue picker closes it on the way back to the row", async ({ browser }) => {
+  // `i` has to leave the reader inside what it opened: the picker's `<select>` is where the
+  // arrows choose an issue and where Escape is the control's own way out. Left on the row, the
+  // key would open something no keystroke could then use or close.
+  test("i lands in the issue picker, and Escape there closes it and returns to the row", async ({
+    browser,
+  }) => {
     await seedAgents();
     const context = await asUser(browser, "alice");
     try {
@@ -938,7 +967,7 @@ test.describe("agents page", () => {
       const toggle = row.getByRole("button", { name: "Choose issue" });
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
       const picker = row.getByRole("combobox", { name: "Issue" });
-      await picker.focus();
+      await expect(picker).toBeFocused();
 
       await page.keyboard.press("Escape");
       await expect(toggle).toHaveAttribute("aria-expanded", "false");

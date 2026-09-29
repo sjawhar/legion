@@ -79,6 +79,8 @@ const ROW_ATTRIBUTE = "data-inbox-row";
 const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
+/** An ask card: the question, its options and its answer controls, which own their own keys. */
+const ASK_CARD = "[data-ask-card]";
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
@@ -446,17 +448,21 @@ export function Inbox(): ReactNode {
   // on the first render after its moment passes. Computed here, with the selection, rather than
   // after the early returns, because the bar's count and the bindings both read it.
   const place = viewer === undefined ? undefined : { now: Date.now(), view, viewer };
-  // A row in a band folded shut is not on the page: there is no checkbox to untick it with, and
-  // the reader may well have set that row's own moment since marking it, so a pick that wrote it
-  // would overwrite what they chose. A snooze write still in flight keeps its row rendered inside
-  // the fold (`shownRows` below), and those rows do count.
-  const foldedAway = (row: InboxRow): boolean => {
-    if (place === undefined || snoozing.has(row.id)) return false;
-    const section = sectionOf(row, place);
-    return section !== undefined && COLLAPSED_SECTIONS[section] === true && !laterOpen;
-  };
+  // A row in a band the reader has not opened is not on the page: the band renders its heading
+  // and count and none of its rows, so there is no checkbox to untick, and the reader may well
+  // have set that row's own moment since marking it - a pick that wrote it would overwrite what
+  // they chose. A row whose own snooze write is still in flight stays rendered inside the fold,
+  // so it still counts. One rule, read by the selection here and by the render below.
+  const inShutBand = (row: InboxRow, section: InboxSection | undefined): boolean =>
+    section !== undefined &&
+    COLLAPSED_SECTIONS[section] === true &&
+    !laterOpen &&
+    !snoozing.has(row.id);
   const selected = shown
-    .filter((row) => marked.has(row.id) && !foldedAway(row))
+    .filter(
+      (row) =>
+        marked.has(row.id) && (place === undefined || !inShutBand(row, sectionOf(row, place)))
+    )
     .map((row) => row.id);
   // One pick, over the ids the bar is counting: the same optimistic move and rollback the per-row
   // control makes, once per ask. The ids the server took leave the selection; the ones it refused
@@ -501,13 +507,10 @@ export function Inbox(): ReactNode {
   // The bar is reached through its own ref: the empty state a pick can leave behind renders it
   // outside the list.
   const bulkPicker = () => bulkBarRef.current?.querySelector<HTMLElement>(BULK_PICKER_SELECTOR);
-  // Where a key that acts on the list may start: a row, or the page with nothing focused. A
-  // control inside a card - an ask's option radio - is neither, and takes no typed text, so
-  // without this the registry would let the selection's keys fire from inside an answer.
-  const inTheList = () => {
-    const active = document.activeElement;
-    return focusedRow() !== null || active === null || active === document.body;
-  };
+  // Whether the reader is outside an ask card: its options are radios and checkboxes, which take
+  // no typed text, so the registry passes single keys through to this scope - and the card's own
+  // keys are the card's. `IssuePage` withholds its two writing keys on the same question.
+  const outsideAskCard = () => document.activeElement?.closest(ASK_CARD) == null;
   // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
   // has no row to fall back through - is one level out rather than a dead end.
   const pickerOrigin = useRef<string | null>(null);
@@ -590,17 +593,18 @@ export function Inbox(): ReactNode {
       // One key for both: with rows marked it is the whole selection, otherwise the row in hand.
       label: "Snooze the focused ask, or every selected ask",
       run: () => {
-        if (!inTheList() || selected.length === 0) {
+        if (selected.length === 0) {
           inFocusedRow("[data-inbox-snooze]")?.focus();
           return;
         }
         bulkPicker()?.focus();
       },
-      // The selection's own key still starts from the list: an ask's option radio takes no typed
-      // text, so without this `h` would fire while the reader is answering and pull them out of
-      // the card they are in.
+      // The selection's key works from wherever marking leaves the reader - a row, the checkbox
+      // they just ticked, the bar - but not from inside an ask they are answering: an option
+      // radio takes no typed text, so the registry passes the key through, and the card's own
+      // controls are not the list's. The issue page withholds its writing keys the same way.
       when: () =>
-        (inTheList() && selected.length > 0) || inFocusedRow("[data-inbox-snooze]") != null,
+        (selected.length > 0 && outsideAskCard()) || inFocusedRow("[data-inbox-snooze]") != null,
     },
     {
       id: "back-from-bulk",
@@ -733,14 +737,12 @@ export function Inbox(): ReactNode {
     );
   const sections = INBOX_SECTIONS.map((section) => {
     const rows = rowsIn(section);
-    // A folded band renders its heading and count but none of its rows - except a row whose
-    // snooze write is still live, which stays until it settles - so keyboard roving, the
-    // viewport anchor, and `presented` all see exactly what the reader sees.
-    const folded = COLLAPSED_SECTIONS[section] === true && !laterOpen;
+    // The same rule the selection above reads, so keyboard roving, the viewport anchor,
+    // `presented` and the bar all see exactly what the reader sees.
     return {
       rows,
       section,
-      shownRows: folded ? rows.filter((ask) => snoozing.has(ask.id)) : rows,
+      shownRows: rows.filter((ask) => !inShutBand(ask, section)),
     };
   }).filter(({ rows }) => rows.length > 0);
   presented.current = sections.flatMap(({ section, shownRows }) =>

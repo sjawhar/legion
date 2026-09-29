@@ -187,7 +187,10 @@ function isEditableTarget(target: EventTarget | null): boolean {
     return true;
   }
   // An `<input>` takes typed text only in the text-entry types; a checkbox, radio or button
-  // takes none, so a page's single-key shortcuts keep working while one has focus.
+  // takes none, so a page's single-key shortcuts keep working while one has focus. That is a
+  // permission with an obligation attached: the registry stops guarding those controls, so a
+  // page whose key writes something must say for itself where the reader may press it
+  // (`IssuePage`'s `outsideInputsAndAskCards`, the Inbox's `outsideAskCard`).
   if (target instanceof HTMLInputElement) {
     return TEXT_INPUT_TYPES[target.type] === true;
   }

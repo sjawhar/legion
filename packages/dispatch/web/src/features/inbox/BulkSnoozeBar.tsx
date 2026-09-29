@@ -66,13 +66,17 @@ export function BulkSnoozeBar({
           Snooze
         </span>
         {/* One pick at a time: a second while the first is in the air re-sends every id, and its
-            answer can settle after the live one's and overwrite what the reader was told. */}
+            answer can settle after the live one's and overwrite what the reader was told. It is
+            `aria-disabled` rather than `disabled` because the browser takes focus off a control
+            that disables itself under it - dropping the reader on the document mid-write, with
+            no Escape to leave and no way back to the bar. */}
         <select
+          aria-disabled={pending !== 0}
           aria-label="Snooze selected asks"
           className={badgeSelectOverlay}
           data-inbox-bulk-snooze=""
-          disabled={pending !== 0}
           onChange={(event) => {
+            if (pending !== 0) return;
             const preset = SNOOZE_PRESETS.find((option) => option.id === event.target.value);
             if (preset !== undefined) onPick(preset.until(new Date()));
           }}

@@ -5,14 +5,10 @@
  * so the checkbox, the Snooze control and the grouping that counts twins cannot disagree.
  */
 
-/** What the naming rules read off a row. */
-export interface NamedAsk {
-  readonly id: string;
-  readonly question: string;
-  readonly issue?: { readonly key: string };
-  readonly issue_key?: string | null;
-  readonly document?: { readonly project: string; readonly slug: string; readonly name: string };
-}
+import type { Ask } from "../../api/types";
+
+/** What the naming rules read off a row: the ask's own fields, not a copy of their shapes. */
+export type NamedAsk = Pick<Ask, "id" | "question" | "issue" | "issue_key" | "document">;
 
 /** How much of a question a control's name can carry before it stops being a name. */
 const CONTROL_NAME_QUESTION_CHARS = 48;

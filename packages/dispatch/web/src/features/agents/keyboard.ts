@@ -1,13 +1,12 @@
-import type { RefObject } from "react";
-
-import { useKeymap, useKeymapScope } from "../shell/keymap";
-import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
-
 /**
  * The `agents` scope: `j`/`k` over the session rows, and the four keys that act on the row in
  * hand. Every one of them finds its control through a `data-agent-*` handle on the row, so the
  * page's markup is the only contract between them.
  */
+import type { RefObject } from "react";
+
+import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 
 const AGENT_ROW_ATTRIBUTE = "data-agent-row";
 const AGENT_ROW_SELECTOR = `[${AGENT_ROW_ATTRIBUTE}]`;
@@ -20,11 +19,10 @@ function focusedAgentRow(): HTMLElement | null {
 }
 
 /**
- * One level out of a row's composer: the row that contains the focused element takes focus back,
- * and anything the reader opened on the way in is closed behind them. The issue picker is the
- * one of those: it is a `<select>`, where only `inEditable` bindings run, so this Escape is the
- * only dismissal that control has - leaving it expanded would make the key a move rather than a
- * way back.
+ * Out of a row's composer and back to the row, closing anything the reader opened on the way in.
+ * The issue picker is the one of those: it is a `<select>`, where only `inEditable` bindings run,
+ * so this Escape is the only dismissal that control has - leaving it expanded would make the key
+ * a move rather than a way back.
  *
  * Two callers run this, and they are the same act. `MentionComposer` owns Escape on its own form
  * and stops it before the window dispatcher sees it (`MentionComposer.tsx:551`), so the composer
@@ -32,7 +30,7 @@ function focusedAgentRow(): HTMLElement | null {
  * function so `?` describes what Escape does there - and so the binding takes over if the
  * composer ever stops swallowing it.
  */
-export function focusOwningAgentRow(): void {
+export function leaveAgentComposer(): void {
   const row = closestMatching(document.activeElement, AGENT_ROW_SELECTOR);
   row?.querySelector<HTMLElement>(`${ISSUE_PICKER_SELECTOR}[aria-expanded="true"]`)?.click();
   row?.focus();
@@ -88,6 +86,9 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       id: "issue-picker",
       keys: "i",
       label: "Pick an issue for the message",
+      // The picker takes focus itself once its list lands (`AgentsPage.tsx`'s `issueSelect`), so
+      // the key that opens it leaves the reader inside it, where the arrows choose an issue and
+      // Escape is the control's own way out.
       run: () => inOpenRow((row) => row.querySelector<HTMLElement>(ISSUE_PICKER_SELECTOR)?.click()),
       when: () => focusedAgentRow()?.hasAttribute("data-agent-can-pick-issue") === true,
     },
@@ -110,7 +111,7 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       inEditable: true,
       keys: "Escape",
       label: "Back to the agent row from its composer",
-      run: focusOwningAgentRow,
+      run: leaveAgentComposer,
       when: inAgentComposer,
     },
   ]);
