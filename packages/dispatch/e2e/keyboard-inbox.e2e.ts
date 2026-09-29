@@ -218,6 +218,80 @@ test.describe("inbox selection", () => {
     }
   });
 
+  // Escape with no row focused is the keyboard's Clear, and it is offered whenever the bar's Clear
+  // is - including while a pick is in flight, when the optimistic move has folded the marked rows
+  // into Later and the bar counts nothing on the page. It clears every mark, a mark made in
+  // another view included; the late refusal then re-marks only the id it refused.
+  test("Escape during a pending bulk snooze clears every mark, and a late refusal re-marks only its own", async ({
+    browser,
+  }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const mine = await createIssue({ project: "CORE", title: "Mine to answer" });
+    await patchIssue(mine.key, { assignee: "alice" });
+    const refusedAsk = await createAsk(mine.key, { question: "Ship it?" }, session);
+    const takenAsk = await createAsk(mine.key, { question: "Hold it?" }, session);
+    const theirs = await createIssue({ project: "CORE", title: "Bob answers this" });
+    await patchIssue(theirs.key, { assignee: "bob" });
+    const hidden = await createAsk(theirs.key, { question: "Wait on it?" }, session);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      const held = Promise.withResolvers<void>();
+      const requested = Promise.withResolvers<void>();
+      await page.route(`**/api/v1/me/asks/${refusedAsk.id}/snooze`, async (route) => {
+        requested.resolve();
+        await held.promise;
+        return route.fulfill({
+          body: JSON.stringify({ code: "INVALID_SNOOZE", error: "snoozed_until must be a moment" }),
+          contentType: "application/json",
+          status: 400,
+        });
+      });
+      const checkbox = (askId: string) =>
+        page.locator(`[data-inbox-row="${askId}"]`).getByRole("checkbox");
+
+      // A mark made under Everyone, on a row Mine does not list.
+      await page.goto("/?view=everyone");
+      const rows = page.locator("[data-inbox-row]");
+      await expect(rows).toHaveCount(3);
+      await checkbox(hidden.id).check();
+      await page.getByRole("button", { name: "Mine" }).click();
+      await expect(rows).toHaveCount(2);
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await expect(bar).toContainText("2 selected");
+      await page.keyboard.press("h");
+      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
+      await expect(picker).toBeFocused();
+      await picker.selectOption("tomorrow");
+      await requested.promise;
+      await expect(bar).toContainText("Snoozing 2…");
+
+      // Both marked rows have folded into Later, so Escape leaves the picker for the bar, and
+      // Escape from the bar clears the selection while the pick is still in the air.
+      await page.keyboard.press("Escape");
+      await expect(bar).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(bar).toContainText("Snoozing 2…");
+      held.resolve();
+
+      await expect(bar).toContainText("Could not snooze 1 of 2: snoozed_until must be a moment");
+      await expect(bar).toContainText("1 selected");
+      await expect(checkbox(refusedAsk.id)).toBeChecked();
+      await page.getByRole("button", { name: /^Later \(1\)/ }).click();
+      await expect(checkbox(takenAsk.id)).not.toBeChecked();
+      await page.getByRole("button", { name: "Everyone" }).click();
+      await expect(checkbox(hidden.id)).not.toBeChecked();
+    } finally {
+      await context.close();
+    }
+  });
+
   // Two rows can fail for two reasons; the bar names the first and says there are others rather
   // than flattening a sign-out and a validation refusal into one sentence.
   test("a bulk snooze refused two different ways names the first reason and says so", async ({

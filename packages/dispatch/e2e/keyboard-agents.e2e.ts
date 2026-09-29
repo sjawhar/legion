@@ -13,6 +13,17 @@ async function openAgents(page: Page): Promise<void> {
   await page.locator("body").focus();
 }
 
+/** Resolves once every timer queued before it has run: the next task, the soonest a reader's
+ *  pick can follow a key. The issue picker's keyboard-step mark lasts until then, so a row that
+ *  presses a key on the select and then picks has to be this far along before it picks. */
+async function nextTask(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const turn = Promise.withResolvers<void>();
+    setTimeout(turn.resolve, 0);
+    return turn.promise;
+  });
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
   if (!process.env.PLAYWRIGHT_BASE_URL) {
@@ -513,6 +524,7 @@ test.describe("agents page", () => {
       // with no key and no press on the select in front of it.
       await page.keyboard.press("i");
       await expect(picker).toBeFocused();
+      await nextTask(page);
       await picker.selectOption("CORE-2");
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(toggle).toContainText("CORE-2");
@@ -542,6 +554,7 @@ test.describe("agents page", () => {
       await expect(picker).toBeFocused();
       await page.keyboard.press("Alt+ArrowDown");
       await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await nextTask(page);
       await picker.selectOption("CORE-2");
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(toggle).toContainText("CORE-2");
@@ -570,6 +583,7 @@ test.describe("agents page", () => {
       await expect(picker).toBeFocused();
       await page.keyboard.press("ArrowUp");
       await expect(picker).toHaveValue("");
+      await nextTask(page);
       await picker.selectOption("CORE-1");
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(toggle).toContainText("CORE-1");
@@ -601,12 +615,7 @@ test.describe("agents page", () => {
       const cdp = await context.newCDPSession(page);
       const key = { code: "KeyC", key: "c", windowsVirtualKeyCode: 67 };
       await cdp.send("Input.dispatchKeyEvent", { ...key, type: "rawKeyDown" });
-      // A timer queued after any the keydown queued, so they have all run when it resolves.
-      await page.evaluate(() => {
-        const turn = Promise.withResolvers<void>();
-        setTimeout(turn.resolve, 0);
-        return turn.promise;
-      });
+      await nextTask(page);
       await cdp.send("Input.dispatchKeyEvent", { ...key, text: "c", type: "char" });
       await cdp.send("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
       await expect(picker).toHaveValue("CORE-1");
@@ -688,6 +697,7 @@ test.describe("agents page", () => {
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
       await page.keyboard.type("who owns this");
       await pick("CORE-1");
       await expect(field).toHaveValue("@Planner who owns this");

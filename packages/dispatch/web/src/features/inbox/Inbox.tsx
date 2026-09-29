@@ -483,6 +483,11 @@ export function Inbox(): ReactNode {
       });
     });
   };
+  // The bar, and the Clear it carries, shows while a mark is on the page, a pick is in the air or a
+  // refusal is showing. Escape with no row focused is the keyboard's Clear and is offered on this
+  // same predicate, so the two cannot drift: a pick whose optimistic move folds every marked row
+  // into Later empties `selected`, not the marks behind it, and Clear still has work to do.
+  const bulkBarShown = selected.length > 0 || bulkSnoozing !== 0 || bulkRefusal !== undefined;
   const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
@@ -628,12 +633,12 @@ export function Inbox(): ReactNode {
       id: "clear-selection",
       keys: "Escape",
       // Escape is one level out, and the selection is the outermost thing a row press made:
-      // `back` takes the reader off the row first, and this clears what they marked. A refusal
-      // the reader has since unticked the rows of is the same level out, and the keyboard that
-      // raised it is the keyboard that dismisses it.
+      // `back` takes the reader off the row first, and this clears what they marked. It is
+      // offered exactly while the bar's Clear is, a pick in flight and a refusal the reader has
+      // since unticked the rows of included - the keyboard that raised them dismisses them.
       label: "Clear the selection",
       run: clearSelection,
-      when: () => focusedRow() === null && (selected.length > 0 || bulkRefusal !== undefined),
+      when: () => focusedRow() === null && bulkBarShown,
     },
   ]);
 
@@ -693,20 +698,19 @@ export function Inbox(): ReactNode {
 
   // The bar outlives an empty list: a pick that empties this view leaves its write in the air, and
   // the refusal that comes back has to land somewhere the reader can see.
-  const bulkBar =
-    selected.length === 0 && bulkSnoozing === 0 && bulkRefusal === undefined ? null : (
-      <BulkSnoozeBar
-        barRef={bulkBarRef}
-        count={selected.length}
-        onClear={clearSelection}
-        onPick={snoozePick}
-        onPickerFocus={(from) => {
-          pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
-        }}
-        pending={bulkSnoozing}
-        refusal={bulkRefusal}
-      />
-    );
+  const bulkBar = bulkBarShown ? (
+    <BulkSnoozeBar
+      barRef={bulkBarRef}
+      count={selected.length}
+      onClear={clearSelection}
+      onPick={snoozePick}
+      onPickerFocus={(from) => {
+        pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
+      }}
+      pending={bulkSnoozing}
+      refusal={bulkRefusal}
+    />
+  ) : null;
 
   if (shown.length === 0 && held === undefined) {
     return (
