@@ -66,10 +66,15 @@ than assumed: `cp` and `install` write their last operand, or the directory `-t`
 every other operand is a source they read. `mv` uses the same option reader and also judges the
 sources it moves. The reader stops at `--` and at the first value-taking letter in a cluster,
 and accepts GNU's unambiguous long-option abbreviations. An unreadable option that may hide a
-destination is refused as `UNREADABLE`, not treated as a command with no destination; `-T`
-explicitly makes the last operand the destination. `cp` also judges the source basename under
-an existing destination directory and its recursive descendants, including symlinks already
-there. `dd` writes the path inside its `of=` word, wherever that word stands. `ln` writes its last
+destination is refused with its written word and the `--` or `-T` remedy, not treated as a command
+with no destination. Help and version options do not write. `cp` judges the source basename as
+written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`
+retains the source path. It inspects only existing destination entries, recursively for a recursive
+copy and under the same walk limit as shell syntax, without traversing the source tree. After `--`,
+an unreadable basename is allowed when the possible destination entries stay inside the roots.
+A single glob in a `for` loop retains its literal prefix: `./*.txt` is not an option, while `*.txt`
+may yield one and still requires `--`. `dd` writes the path inside its `of=` word, wherever that
+word stands. `ln` writes its last
 operand, or the working directory when given one readable operand, and a hard link (no `-s`)
 also makes its source writable under the new name, which no later command can resolve as it can
 a symlink. `sed` writes the files it names only with `-i`, including inside a cluster (`-ni`) and
@@ -121,9 +126,11 @@ runner, `npm run`), a program whose name is itself a variable or a command's out
 (`$cmd`, `eval "$(tool)"`), Python or JavaScript whose paths or pids come from values it cannot
 evaluate (the `eval` tool's kernels included; known prefixes are still judged), and interpreters
 the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above (`tar -cf`,
-`patch`, `gzip`, `ex`), a directory reached through a `cd` that failed, and the `write` and `edit`
-tools. The write-verb checks prevent the named overwrites, not every shell write: `>>` and
-`tee -a` appends outside the roots remain unjudged. A `>>` append to a file the guard holds no model
+`tar -xPf` with absolute members, `patch`, `gzip`, `ex`), a directory reached through a `cd` that
+failed, and the `write` and `edit` tools. The write-verb checks prevent the named overwrites, not
+every shell write: `>>` and `tee -a` appends outside the roots remain unjudged
+([tracked separately](https://dispatch.internal.trajectorylabs.com/issues/LEGION-368)).
+A `>>` append to a file the guard holds no model
 of — one no redirect or `tee` in the same command named — leaves that file's contents unknown,
 never empty: the append is allowed, and running that file in the same command is refused rather
 than read as holding only what was appended. A file the same command wrote is read

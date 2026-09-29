@@ -86,9 +86,10 @@
 import {
   closeSync,
   existsSync,
+  lstatSync,
+  opendirSync,
   openSync,
   readFileSync,
-  readdirSync,
   readSync,
   realpathSync,
   statSync,
@@ -2138,7 +2139,11 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
           name,
           signalSafe
             ? [unknown(`\`$${name}\`, a loop variable`, true)]
-            : [unknown(`\`$${name}\`, a loop variable`)]
+            : node.type === "For" &&
+                words.length === 1 &&
+                words[0]?.exp.some((piece) => piece.kind === "glob")
+              ? words[0].exp
+              : [unknown(`\`$${name}\`, a loop variable`)]
         );
         if (node.type === "Select")
           assignScalar(body, "REPLY", [unknown("`$REPLY`, read from input")]);
@@ -3226,18 +3231,28 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     case "mv": {
       const found = writeArguments(rest, "tS", ["--target-directory", "--suffix"]);
-      const targets = [...found.operands, ...writeDestinations(found)];
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
+      const targets = [...found.operands, ...writeDestinations(found, site)];
       checkTargets("mv", "move", targets, ACTS_ON_LINK, st, ctx, site);
       return;
     }
     case "cp": {
-      const found = writeArguments(rest, "tS", ["--target-directory", "--suffix"]);
+      const found = writeArguments(rest, "tS", [
+        "--target-directory",
+        "--suffix",
+        "--sparse",
+        "--no-preserve",
+      ]);
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
       // `cp` writes its destination through a symlink; with an option that unlinks or renames
       // that destination first it acts on the link itself instead, so both are judged. Only the
       // destination: every other operand is a source `cp` reads.
-      const unlinks = found.flags.has("b") || found.flags.has("--backup") ||
-        found.flags.has("--remove-destination") || found.uncertain;
-      const destinations = writeDestinations(found);
+      const unlinks =
+        found.flags.has("b") ||
+        found.flags.has("--backup") ||
+        found.flags.has("--remove-destination") ||
+        found.uncertain;
+      const destinations = writeDestinations(found, site);
       checkTargets(
         "cp",
         "overwrite",
@@ -3247,7 +3262,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         ctx,
         site
       );
-      checkCopyContents(found.operands, destinations, st, ctx, site);
+      checkCopyContents(found, destinations, st, ctx, site);
       return;
     }
     case "install": {
@@ -3259,12 +3274,13 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         "--suffix",
         "--strip-program",
       ]);
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
       // `install -d` makes every operand a directory it creates, or chmods when it is there.
       const directories = found.flags.has("d") || found.flags.has("--directory");
       checkTargets(
         "install",
         directories ? "create or change the mode of" : "overwrite",
-        directories ? found.operands : writeDestinations(found),
+        directories ? found.operands : writeDestinations(found, site),
         WRITES_EITHER,
         st,
         ctx,
@@ -3277,6 +3293,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       const targets: Arg[] = [];
       for (const arg of rest) {
         const { text, whole } = readableWord(arg);
+        if (whole && longOption(text, ["--help", "--version"]) !== undefined) return;
         if (text.startsWith("of=")) {
           const carried = valueInWord(arg, 3);
           targets.push({
@@ -3298,11 +3315,12 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     }
     case "ln": {
       const found = writeArguments(rest, "St", ["--suffix", "--target-directory"]);
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
       // A readable single source uses the working directory; an unreadable word may hide -t.
       const destinations =
         found.operands.length === 1 && found.directory === undefined && !found.uncertain
           ? [{ text: ".", exp: [literal(".")] }]
-          : writeDestinations(found);
+          : writeDestinations(found, site);
       checkTargets("ln", "overwrite", destinations, WRITES_EITHER, st, ctx, site);
       // A hard link makes its source writable under a name inside the roots that resolves to
       // nothing else — no later command can see where it leads, as it can through a symlink — so
@@ -3991,19 +4009,35 @@ interface WriteArguments {
   readonly operands: Arg[];
   readonly flags: Set<string>;
   readonly directory: Arg | undefined;
-  readonly uncertain: boolean;
+  readonly uncertain: Arg | undefined;
 }
 
 /** Read flags and -t only where `operands` sees an option, never in a consumed value or after
  * `--`. The first value-taking letter ends a cluster, even when its value contains flags. */
-function writeArguments(rest: readonly Arg[], valued: string, longValued: readonly string[]): WriteArguments {
+function writeArguments(
+  rest: readonly Arg[],
+  valued: string,
+  longValued: readonly string[]
+): WriteArguments {
   const flags = new Set<string>();
   let directory: Arg | undefined;
-  let uncertain = false;
-  const names = [...longValued, "--backup", "--remove-destination", "--directory", "--symbolic", "--no-target-directory"];
+  let uncertain: Arg | undefined;
+  const names = [
+    ...longValued,
+    "--backup",
+    "--remove-destination",
+    "--directory",
+    "--symbolic",
+    "--no-target-directory",
+    "--parents",
+    "--recursive",
+    "--archive",
+    "--help",
+    "--version",
+  ];
   const found = operands(rest, valued, longValued, (arg) => {
     const { text, whole } = readableWord(arg);
-    if (!whole && mayBeOption(arg, () => false)) uncertain = true;
+    if (!whole && mayBeOption(arg, () => false)) uncertain = arg;
     if (!text.startsWith("-") || text === "-") return;
     let offset: number | undefined;
     let option: string | undefined;
@@ -4028,48 +4062,83 @@ function writeArguments(rest: readonly Arg[], valued: string, longValued: readon
 }
 
 /** No readable -t and too few operands is unreadable, not a command that writes nothing. */
-function writeDestinations(found: WriteArguments): Arg[] {
-  if (found.operands.length > 1 && (found.flags.has("T") || found.flags.has("--no-target-directory"))) {
+function writeDestinations(found: WriteArguments, site: Site): Arg[] {
+  if (
+    found.operands.length > 1 &&
+    (found.flags.has("T") || found.flags.has("--no-target-directory"))
+  ) {
     return [found.operands.at(-1) as Arg];
   }
   if (found.directory !== undefined && !found.uncertain) return [found.directory];
   if (found.operands.length < 2 || found.uncertain) {
-    return [{ text: "destination", exp: [unknown("UNREADABLE write destination")] }];
+    const word = found.uncertain?.text ?? found.operands.at(-1)?.text ?? "missing destination";
+    throw new Refusal(
+      site.snippet,
+      site.line,
+      `the guard cannot read a write destination from \`${word}\`; put \`--\` before operands, or use \`-T\` to name the last operand as the destination`
+    );
   }
   return [found.operands.at(-1) as Arg];
 }
 
-/** `cp source dir` also writes `dir/basename(source)`, and a recursive copy writes descendants.
- * Check those existing entries too: an earlier tool call may have put a symlink there. */
+/** Inspect existing destinations, not the source tree: a fresh copy has nothing to overwrite.
+ * Source spelling matters: `src/.` names the contents, and --parents keeps the written path. */
 function checkCopyContents(
-  sources: readonly Arg[],
+  found: WriteArguments,
   destinations: readonly Arg[],
   st: State,
   ctx: Ctx,
   site: Site
 ): void {
+  const recursive = ["r", "R", "a", "--recursive", "--archive"].some((flag) =>
+    found.flags.has(flag)
+  );
+  const direct = found.flags.has("T") || found.flags.has("--no-target-directory");
   for (const destination of destinations) {
     const text = literalText(destination.exp);
     if (text === undefined || (!path.isAbsolute(text) && st.cwd === undefined)) continue;
-    const dir = path.resolve(st.cwd ?? "/", text);
+    const dir = realExisting(path.resolve(st.cwd ?? "/", text));
     if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) continue;
-    for (const source of sources) {
+    for (const source of found.operands) {
       if (destinations.includes(source)) continue;
       const name = literalText(source.exp);
-      if (name === undefined) {
-        checkTargets("cp", "overwrite", [{ text: source.text, exp: [unknown("UNREADABLE copy source basename")] }], WRITES_THROUGH_LINK, st, ctx, site);
-        continue;
-      }
-      const from = path.resolve(st.cwd ?? "/", name);
-      const to = path.join(dir, path.basename(from));
-      const targets = [{ text: to, exp: [literal(to)] }];
-      if (statSync(from, { throwIfNoEntry: false })?.isDirectory()) {
-        for (const entry of readdirSync(from, { recursive: true })) {
-          const target = path.join(to, entry);
-          targets.push({ text: target, exp: [literal(target)] });
+      const from = name === undefined ? undefined : path.resolve(st.cwd ?? "/", name);
+      const knownTree =
+        from !== undefined && statSync(from, { throwIfNoEntry: false })?.isDirectory();
+      const root =
+        direct || name === undefined
+          ? dir
+          : path.join(dir, found.flags.has("--parents") ? name : path.basename(name));
+      const pending = [root];
+      while (pending.length > 0) {
+        const target = pending.pop() as string;
+        checkTargets(
+          "cp",
+          "overwrite",
+          [{ text: name === undefined ? source.text : target, exp: [literal(target)] }],
+          WRITES_THROUGH_LINK,
+          st,
+          ctx,
+          site
+        );
+        if (!recursive && !(name === undefined && target === root)) continue;
+        if (!lstatSync(target, { throwIfNoEntry: false })?.isDirectory()) continue;
+        const entries = opendirSync(target);
+        try {
+          for (let entry = entries.readSync(); entry !== null; entry = entries.readSync()) {
+            if (++ctx.steps.count > MAX_WALK_STEPS) {
+              throw new Refusal(site.snippet, site.line, WALK_LIMIT);
+            }
+            const child = path.join(target, entry.name);
+            // An existing source tree cannot write an entry absent from it. When the source is
+            // unreadable or not on disk yet, any destination entry may be selected.
+            if (knownTree && !existsSync(path.join(from, path.relative(root, child)))) continue;
+            pending.push(child);
+          }
+        } finally {
+          entries.closeSync();
         }
       }
-      checkTargets("cp", "overwrite", targets, WRITES_THROUGH_LINK, st, ctx, site);
     }
   }
 }
@@ -4121,8 +4190,17 @@ function sedWrites(list: readonly Arg[]): {
     }
     if (text.startsWith("--")) {
       const option = longOption(text, [
-        "--in-place", "--follow-symlinks", "--expression", "--file", "--line-length",
+        "--in-place",
+        "--follow-symlinks",
+        "--expression",
+        "--file",
+        "--line-length",
+        "--help",
+        "--version",
       ]);
+      if (option === "--help" || option === "--version") {
+        return { inPlace: false, inferred: false, follow: false, files: [] };
+      }
       if (option === "--in-place") inPlace = true;
       if (option === "--follow-symlinks") follow = true;
       if (option === "--expression" || option === "--file") {

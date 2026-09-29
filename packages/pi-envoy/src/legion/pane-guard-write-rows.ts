@@ -35,6 +35,7 @@ export interface WriteRow {
   readonly command: string;
   /** A separate, earlier tool call, judged and run before the command under test. */
   readonly plant?: string;
+  readonly unreadableWord?: string;
 }
 
 /** What the guard is given and what bash is given: one directory per row. `e` and `f` are links
@@ -506,12 +507,14 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     "cp payload f",
     'ln "$HOME/.bashrc" laundered; echo pwned > laundered',
     'ln -- "$HOME/.bashrc" -s; echo pwned > ./-s',
-  ].map((command): WriteRow => ({
-    name: `review pair: ${command}`,
-    family: "review",
-    role: "probe",
-    command,
-  })),
+  ].map(
+    (command): WriteRow => ({
+      name: `review pair: ${command}`,
+      family: "review",
+      role: "probe",
+      command,
+    })
+  ),
   ...["cp payload dir/", "cp payload dir", "cp -t dir payload"].map(
     (command): WriteRow => ({
       name: `earlier link: ${command}`,
@@ -538,12 +541,14 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     'ln -s "$HOME/.bashrc" link-out',
     `sed -i --expression='s/NOTES/n/' notes.txt`,
     `sed -n 1p "$HOME/.bashrc"`,
-  ].map((command): WriteRow => ({
-    name: `review keep: ${command}`,
-    family: "review",
-    role: "must-allow",
-    command,
-  })),
+  ].map(
+    (command): WriteRow => ({
+      name: `review keep: ${command}`,
+      family: "review",
+      role: "must-allow",
+      command,
+    })
+  ),
   ...[
     'cp -S -tX payload "$HOME/.bashrc"',
     'install -b -S -t payload "$HOME/.bashrc"',
@@ -561,12 +566,14 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     `cp payload .bashrc; cp "${HIDDEN('"--target-directory=$HOME"')}" .bashrc`,
     `cp payload .bashrc; install "${HIDDEN('"--target-directory=$HOME"')}" .bashrc`,
     `cp payload .bashrc; ln -sf "${HIDDEN('"--target-directory=$HOME"')}" .bashrc`,
-  ].map((command): WriteRow => ({
-    name: `reader boundary: ${command}`,
-    family: "reader",
-    role: "probe",
-    command,
-  })),
+  ].map(
+    (command): WriteRow => ({
+      name: `reader boundary: ${command}`,
+      family: "reader",
+      role: "probe",
+      command,
+    })
+  ),
   ...[
     'cp --target dir "$HOME/.bashrc"',
     'cp --target=dir "$HOME/.bashrc"',
@@ -577,30 +584,39 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     'cp -S -t"$HOME" payload notes.txt',
     'cp -T "$(printf %s payload)" copy',
     'ln -sfT "$(printf %s payload)" link-here',
-  ].map((command): WriteRow => ({
-    name: `reader keep: ${command}`,
-    family: "reader",
-    role: "must-allow",
-    command,
-  })),
-  ...[
-    'cp --suff -tX payload "$HOME/.bashrc"',
-    'install -d -m700 "$HOME/.ssh" localdir',
-  ].map((command): WriteRow => ({
-    name: `value consumption: ${command}`, family: "reader", role: "probe", command,
-  })),
+  ].map(
+    (command): WriteRow => ({
+      name: `reader keep: ${command}`,
+      family: "reader",
+      role: "must-allow",
+      command,
+    })
+  ),
+  ...['cp --suff -tX payload "$HOME/.bashrc"', 'install -d -m700 "$HOME/.ssh" localdir'].map(
+    (command): WriteRow => ({
+      name: `value consumption: ${command}`,
+      family: "reader",
+      role: "probe",
+      command,
+    })
+  ),
   ...[
     "install -d localdir",
     'ln -s "$HOME/.bashrc"',
     `sed -i --line-l 80 "$(printf %s s/NOTES/notes/)" notes.txt`,
-  ].map((command): WriteRow => ({
-    name: `value keep: ${command}`, family: "reader", role: "must-allow", command,
-  })),
+  ].map(
+    (command): WriteRow => ({
+      name: `value keep: ${command}`,
+      family: "reader",
+      role: "must-allow",
+      command,
+    })
+  ),
   {
     name: "copy does not treat its destination as another source",
     family: "cp",
     role: "must-allow",
-    plant: 'cp payload dir; mkdir dir/dir; ln -s "$HOME/.bashrc" dir/dir/payload',
+    plant: 'ln -s "$HOME/.bashrc" dir/dir',
     command: "cp payload dir",
   },
   {
@@ -614,12 +630,18 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     name: "copy resolves deep destination descendants",
     family: "cp",
     role: "probe",
-    plant: 'mkdir -p sub/deep dir/sub/deep; echo SUB > sub/deep/in; ln -s "$HOME/.bashrc" dir/sub/deep/in',
+    plant:
+      'mkdir -p sub/deep dir/sub/deep; echo SUB > sub/deep/in; ln -s "$HOME/.bashrc" dir/sub/deep/in',
     command: "cp -r sub dir",
   },
-  ...["cp payload", "install payload", "ln"].map((command): WriteRow => ({
-    name: `missing destination: ${command}`, family: "reader", role: "unreadable", command,
-  })),
+  ...["cp payload", "install payload", "ln"].map(
+    (command): WriteRow => ({
+      name: `missing destination: ${command}`,
+      family: "reader",
+      role: "unreadable",
+      command,
+    })
+  ),
   {
     name: "cp unknown replacement option with explicit last destination",
     family: "cp",
@@ -631,6 +653,132 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     family: "cp",
     role: "probe",
     command: 'cp --back payload "$HOME/link"',
+  },
+  ...["cp src/.bashrc trap/", "cp -r src/. trap/", "cp -rT src trap"].map(
+    (command): WriteRow => ({
+      name: `copy content root: ${command}`,
+      family: "cp",
+      role: "probe",
+      plant: 'mkdir -p src trap; echo NEW > src/.bashrc; ln -s "$HOME/.bashrc" trap/.bashrc',
+      command,
+    })
+  ),
+  {
+    name: "copy parents retains the written source path",
+    family: "cp",
+    role: "probe",
+    plant: 'mkdir -p src trap/src; echo NEW > src/.bashrc; ln -s "$HOME/.bashrc" trap/src/.bashrc',
+    command: "cp --parents src/.bashrc trap/",
+  },
+  {
+    name: "unreadable basename cannot select an escaping destination entry",
+    family: "cp",
+    role: "probe",
+    plant: 'ln -s "$HOME/.bashrc" dir/notes.txt',
+    command: 'for f in *.txt; do cp -- "$f" dir/; done',
+  },
+  ...[
+    'for f in *.txt; do cp -- "$f" dir/; done',
+    'for f in ./*.txt; do cp "$f" copy-of-notes; done',
+  ].map(
+    (command): WriteRow => ({
+      name: `unreadable basename keep: ${command}`,
+      family: "cp",
+      role: "must-allow",
+      command,
+    })
+  ),
+  ...["cp -r src/. fresh/", "cp --parents src/a fresh/"].map(
+    (command): WriteRow => ({
+      name: `fresh copy keep: ${command}`,
+      family: "cp",
+      role: "must-allow",
+      plant: "mkdir -p src fresh; echo A > src/a",
+      command,
+    })
+  ),
+  {
+    name: "wildcard-led loop can still supply a target-directory option",
+    family: "cp",
+    role: "probe",
+    plant:
+      'touch -- -tsub.txt; mkdir sub.txt; cp payload copy-of-notes; ln -s "$HOME/.bashrc" sub.txt/copy-of-notes',
+    command: 'for f in *.txt; do cp "$f" copy-of-notes; done',
+  },
+  {
+    name: "recursive copy does not overwrite an unrelated destination entry",
+    family: "cp",
+    role: "must-allow",
+    plant: 'mkdir -p src trap/src; echo A > src/a; ln -s "$HOME/.bashrc" trap/src/unrelated',
+    command: "cp -r src trap",
+  },
+  {
+    name: "unreadable target option names its word and the operand remedies",
+    family: "cp",
+    role: "probe",
+    plant: "cp payload .bashrc",
+    command: `cp "${HIDDEN('"--target-directory=$HOME"')}" .bashrc`,
+    unreadableWord: `"${HIDDEN('"--target-directory=$HOME"')}"`,
+  },
+  {
+    name: "unreadable recursive basename tolerates a safe destination cycle",
+    family: "cp",
+    role: "must-allow",
+    plant: "ln -s . dir/cycle",
+    command: 'cp -r -- "$(printf %s notes.txt)" dir',
+  },
+  ...[
+    'cp payload "$HOME/.bashrc" --suffix never',
+    'cp payload "$HOME/.bashrc" --sparse never',
+    'cp payload "$HOME/.bashrc" --sp never',
+    'cp payload "$HOME/.bashrc" --no-preserve mode',
+    'cp -S --help payload "$HOME/.bashrc"',
+  ].map(
+    (command): WriteRow => ({
+      name: `trailing valued option: ${command}`,
+      family: "cp",
+      role: "probe",
+      command,
+    })
+  ),
+  ...[
+    "cp --version",
+    "mv --version",
+    "install --help",
+    "ln --help",
+    'mv --version "$HOME/.bashrc" dir/',
+    "cp -- *.txt dir/",
+    "mv -- *.txt dir/",
+    'cp -- "$(ls -t | head -1)" latest.txt',
+  ].map(
+    (command): WriteRow => ({
+      name: `read-only or explicit operand keep: ${command}`,
+      family: "reader",
+      role: "must-allow",
+      command,
+    })
+  ),
+  {
+    name: "fresh recursive copy does not traverse a source symlink cycle",
+    family: "cp",
+    role: "must-allow",
+    plant: "mkdir src; ln -s . src/cycle",
+    command: "cp -r src dir",
+  },
+  ...['dd of="$HOME/.bashrc" --version', 'sed -i --help "s/CANARY/PWNED/" "$HOME/.bashrc"'].map(
+    (command): WriteRow => ({
+      name: `GNU informational option keep: ${command}`,
+      family: "reader",
+      role: "must-allow",
+      command,
+    })
+  ),
+  {
+    name: "sed script-file value is not an informational option",
+    family: "sed",
+    role: "probe",
+    plant: `echo 's/CANARY/PWNED/' > ./--help`,
+    command: 'sed -i -f --help "$HOME/.bashrc"',
   },
 
   // --- The documented boundary, which these verbs do not change -----------------------------
@@ -668,9 +816,23 @@ export interface WriteResult {
   readonly row: WriteRow;
   /** What `guard.bash` returned: the refusal text, or undefined for a command it allowed. */
   readonly refusal: string | undefined;
+  /** A thrown guard error is neither ALLOW nor REFUSE, and is a cost on a must-allow row. */
+  readonly error: string | undefined;
   /** Whether real bash changed anything under the canary home. */
   readonly live: boolean;
   readonly exit: number | null;
+}
+
+/** The unreadable-option refusal names the operand, not just the outer command snippet. */
+export function writeRefusalMatches(result: WriteResult): boolean {
+  const word = result.row.unreadableWord;
+  return (
+    word === undefined ||
+    (result.refusal?.includes(`cannot read a write destination from \`${word}\``) &&
+      !result.refusal.includes("outside the issue workspace") &&
+      result.refusal.includes("`--`") &&
+      result.refusal.includes("`-T`")) === true
+  );
 }
 
 /** The one thing this battery needs of a guard build, so any revision's file satisfies it and
@@ -713,14 +875,20 @@ export function measureWriteRow(
       throw new Error(`fixture plant failed or changed HOME: ${row.plant}`);
     }
   }
-  const refusal = guard.bash(row.command, fixture.workspace, env);
+  let refusal: string | undefined;
+  let error: string | undefined;
+  try {
+    refusal = guard.bash(row.command, fixture.workspace, env);
+  } catch (caught) {
+    error = caught instanceof Error ? caught.message : String(caught);
+  }
   const before = canaryDigest(fixture.home);
   const ran = spawnSync("bash", ["-c", row.command], {
     cwd: fixture.workspace,
     env,
     timeout: 20_000,
   });
-  return { row, refusal, live: canaryDigest(fixture.home) !== before, exit: ran.status };
+  return { row, refusal, error, live: canaryDigest(fixture.home) !== before, exit: ran.status };
 }
 
 /** The fixture's own properties, as booleans rather than as prose: a row means nothing if the

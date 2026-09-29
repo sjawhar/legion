@@ -5,7 +5,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
 import { DESTRUCTIVE, KILL_PID, type Live, MODEL_ROWS, PID_ROWS } from "./pane-guard-model-rows";
-import { fixtureProperties, measureWriteRow, WRITE_ROWS } from "./pane-guard-write-rows";
+import {
+  fixtureProperties,
+  measureWriteRow,
+  WRITE_ROWS,
+  writeRefusalMatches,
+} from "./pane-guard-write-rows";
 
 // The guard evaluates `${v#…}`, `${v%…}` and `${v/…/…}` itself (pane-guard-bash.ts), decides
 // `${v-…}` and `${v+…}` by whether a parameter is set, and binds a function's arguments. Held to
@@ -443,11 +448,18 @@ test("a command that writes a path it names is judged, whatever grammar names it
   expect(Object.entries(fixtureProperties(base)).filter(([, held]) => !held)).toEqual([]);
   // The measurement discriminates: most rows really do change something outside the roots.
   expect(results.filter((result) => result.live).length).toBeGreaterThan(WRITE_ROWS.length / 2);
-  expect(results.filter((r) => r.row.role === "probe" && !r.live).map((r) => r.row.name)).toEqual([]);
+  expect(results.filter((r) => r.row.role === "probe" && !r.live).map((r) => r.row.name)).toEqual(
+    []
+  );
   expect(
-    results.filter((r) => r.row.role === "unreadable" && !r.refusal?.includes("UNREADABLE"))
+    results.filter((r) => r.error !== undefined).map((r) => `${r.row.name}: ${r.error}`)
+  ).toEqual([]);
+  expect(
+    results
+      .filter((r) => r.row.role === "unreadable" && r.refusal === undefined)
       .map((r) => r.row.name)
   ).toEqual([]);
+  expect(results.filter((r) => !writeRefusalMatches(r)).map((r) => r.row.name)).toEqual([]);
 
   // Every row the guard allows while bash changed the canary, by name. The list is the documented
   // boundary, not a tolerance: a path that does not exist yet overwrites nothing (`judgePath`'s

@@ -20,33 +20,53 @@ let env: NodeJS.ProcessEnv;
 
 const repository = path.resolve(import.meta.dir, "../../../..");
 
-// The tracked-script cost census checks which scripts are refused, not the incidental line
-// where the first refusal happens. The walker still reports each site for diagnosis.
-const EXPECTED_SCRIPT_REFUSALS = [
-  // Write or delete under the operator's home.
-  "packages/envoy/deploy/scripts/autodeploy.sh",
-  "packages/pi-envoy/scripts/grant-rig/setup.sh",
-  "packages/claude-envoy/scripts/smoke-clear-rebind.sh",
-  // Delete paths read from a command's output.
-  "packages/envoy/deploy/scripts/autodeploy_test.sh",
-  // An unreadable cp source may instead be an attached -t option. The destination is not
-  // proven just because the last word is inside the workspace; -T would make it explicit.
-  "scripts/e2e/lib/install-plugin-profile.sh",
-  "scripts/e2e/controller-start-tmux.sh",
-  "scripts/e2e/stage4b-sandbox-tree.sh",
-  "scripts/e2e/lib/built-from.sh",
-  "scripts/e2e/stage1-skeleton.sh",
-  "scripts/e2e/stage4a-sandbox-runtime.sh",
-  // Creates and chmods a host directory outside the pane roots.
-  "packages/envoy/deploy/scripts/install-docker-debian.sh",
-  // A bare library without its caller's arguments leaves the sed option word unknown.
-  "scripts/e2e/lib/check-model-route.sh",
-  // Run a generated gateway key command whose content the guard cannot read.
-  "scripts/e2e/lib/install-model-gateway.sh",
-  "scripts/e2e/stage2-tmux-supervision.sh",
-  "scripts/e2e/stage3-4b13b-acceptance.sh",
-  "scripts/e2e/stage3-devbox-workflow.sh",
-];
+// Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
+// Every entry is pane-guard-scripts.ts's output, never typed by hand, filed under the comment that
+// says why its script is refused. A failure has one of two shapes, and they want opposite responses:
+//
+// - Entries changed (`Expected - N`, `Received + N`) for files the branch contains: a refusal moved
+//   to another line or file. If the guard or the script changed it on purpose, regenerate;
+//   otherwise the change is the finding.
+// - An entry added or removed for a file the branch does not contain: the table is derived from the
+//   checkout, and CI tests a pull request merged with main, so a script that lands on main changes
+//   this expectation without the branch changing. Merge main forward and regenerate. An entry added
+//   by hand for a file the branch lacks fails the other way on the branch itself.
+//
+// This is the accepted cost of recording `file:line` rather than a substring of each refusal, which
+// is what makes a refusal that moves fail here. The test is not flaky: it is right about a
+// population that changed.
+const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
+  // Writes or deletes under the operator's home: the dispatch backups, a profile's plugin tree, a
+  // Claude project directory.
+  "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
+  "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
+  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
+    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:62",
+  // Deletes the backups `find` lists: a path read from a command's output.
+  "packages/envoy/deploy/scripts/autodeploy_test.sh":
+    "packages/envoy/deploy/scripts/autodeploy.sh:80",
+  // A cp source read from a command's output can instead carry an option; no -- or -T makes
+  // its last operand certainly the destination. These drivers run the same library first.
+  "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
+  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
+  // Creates and sets the mode of a directory outside the roots (`install -d /etc/apt/keyrings`):
+  // a script that provisions a host, never one a pane runs (LEGION-357).
+  "packages/envoy/deploy/scripts/install-docker-debian.sh":
+    "packages/envoy/deploy/scripts/install-docker-debian.sh:7",
+  // A library run bare, without the arguments every caller passes: bash stops at its argument
+  // check, and the guard, which walks a command whatever a test before it decides, reaches the
+  // paths an empty argument makes. Its first is a `sed` whose operand word it cannot read, which
+  // may be the `-i` that would rewrite the file the next word names (LEGION-357); two lines
+  // later the same walk reaches `--control` and `--dest`.
+  "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:97",
+  // Runs the gateway key command it writes, whose `command=(%s)` line takes a value built from
+  // `$(command -v hawk-token)`: a script the guard cannot read. The drivers run it before any pane.
+  "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+};
 
 beforeAll(() => {
   base = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-"));
@@ -1174,9 +1194,7 @@ describe("scripts a command runs", () => {
   // `bun packages/pi-envoy/src/legion/pane-guard-walk.ts <script>` lists every refusal a script
   // meets, where this test sees only the first.
   test("checks every tracked shell script against the documented allow-list", () => {
-    expect(Object.keys(trackedScriptRefusals(repository)).sort()).toEqual(
-      [...EXPECTED_SCRIPT_REFUSALS].sort()
-    );
+    expect(trackedScriptRefusals(repository)).toEqual(EXPECTED_SCRIPT_REFUSALS);
   });
 
   test("refuses the incident's shape: a probe script whose last line removes its work dir and $HOME", () => {
