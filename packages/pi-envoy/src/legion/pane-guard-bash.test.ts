@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import * as os from "node:os";
@@ -586,6 +587,12 @@ test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(rowWorkspace, { recursive: true });
     writeFileSync(path.join(rowWorkspace, "safe.sh"), "PRESENT\n");
+    // A pre-existing symlink and a foreign pid file, for the two rows that need a physical
+    // ancestor a lexical read would misresolve, and a target `mv` overwrites out from under
+    // a stale model.
+    mkdirSync(path.join(dir, "home", ".ssh"), { recursive: true });
+    symlinkSync(path.join(dir, "home", ".ssh"), path.join(rowWorkspace, "e"));
+    writeFileSync(path.join(rowWorkspace, "victim.pid"), "999999\n");
     const rowEnv: NodeJS.ProcessEnv = {
       HOME: path.join(dir, "home"),
       LEGION_WORKSPACE: rowWorkspace,
@@ -598,10 +605,13 @@ test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
     });
     const verdict = rowGuard.bash(row.payload, rowWorkspace, rowEnv);
     // The same payload with the `kill` replaced by a report of what it would have signalled and
-    // of every child this shell holds, so the signal is never actually sent from a test.
+    // of every child this shell holds, so the signal is never actually sent from a test. The
+    // read expression is whatever the payload's own `kill "$(< …)"` names, not always `pid`.
+    const killMatch = /kill "\$\(<\s*([^)]+?)\s*\)"/.exec(row.payload);
+    const readExpr = killMatch?.[1] ?? "pid";
     const probe = row.payload.replace(
-      KILL_PID,
-      'printf "%s|%s" "$(<pid)" "$(jobs -p | tr "\\n" ",")"'
+      killMatch?.[0] ?? KILL_PID,
+      `printf "%s|%s" "$(<${readExpr})" "$(jobs -p | tr "\\n" ",")"`
     );
     const seen = spawnSync("bash", ["-c", probe], {
       cwd: rowWorkspace,

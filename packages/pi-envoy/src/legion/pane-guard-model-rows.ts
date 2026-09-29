@@ -547,4 +547,26 @@ export const PID_ROWS = [
     guard: "refused",
     ownChild: false,
   },
+  {
+    // `$(< f)` reads the file key physically, the same as any other site that resolves a
+    // target: `e` is a pre-existing symlink into the canary home, so `e/../kept.pid` names the
+    // home's own `kept.pid`, not the workspace's. A lexical read would instead collapse the
+    // symlink away and find the workspace's own model — this pane's real child — under a key
+    // real bash never touches.
+    name: "a $(< f) read through a symlinked ancestor is the physical file, not the lexical one",
+    payload:
+      'sleep 5 & echo $! > kept.pid; echo 999999 > "$HOME/kept.pid"; kill "$(< e/../kept.pid)"',
+    guard: "refused",
+    ownChild: false,
+  },
+  {
+    // `checkTargets` forgets a pid model at any path a command like `mv` overwrites, so a stale
+    // model never outlives the file it described. `victim.pid` is a foreign pid on disk before
+    // this command runs; the `mv` retargets `pid` onto it, over the model the straight-line
+    // write just made.
+    name: "checkTargets forgets a pid model its own command overwrites",
+    payload: `${START_PID}; mv victim.pid pid; ${KILL_PID}`,
+    guard: "refused",
+    ownChild: false,
+  },
 ];

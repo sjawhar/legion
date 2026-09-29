@@ -320,6 +320,10 @@ describe("resolution", () => {
     // `--relative-to`/`--relative-base` override any `-s`/`-L`/`-P` reading: read `-s` first and
     // the substitution gets a lexical path as if `--relative-to` were not there at all.
     expect(bash('rm -rf $(realpath -s --relative-to=d "$LEGION_WORKSPACE/keep")')).toBeDefined();
+    // `path.dirname` leaves a doubled separator GNU's own dirname strips: it would print
+    // `$LEGION_WORKSPACE/` (trailing slash) for a `//` input, and the `0` suffix below then
+    // names the sibling workspace `…10` rather than a path inside this one.
+    expect(bash('rm -rf "$(dirname "$LEGION_WORKSPACE//x")0"')).toBeDefined();
     // A `..` after a component that is not there is never resolved to the path the text reads
     // as: whatever creates that component decides where the `..` leads, so the guard models no
     // path at all and the value stays a command's output (LEGION-355).

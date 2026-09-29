@@ -50,6 +50,7 @@ export function buildPathFixture(base: string): PathFixture {
     path.join(ws, "sub"),
     path.join(ws, "perm"),
     path.join(ws, "stage"),
+    path.join(ws, "a", "b"),
     path.join(scratch, "s"),
     home,
     path.join(home, ".ssh"),
@@ -80,6 +81,9 @@ export function buildPathFixture(base: string): PathFixture {
   symlinkSync(path.join(home, ".ssh"), path.join(ws, "e"));
   symlinkSync(home, path.join(ws, "hs"));
   symlinkSync(path.join(ws, "sub"), path.join(ws, "in"));
+  // `lnk` points at a nested subdirectory two levels below the workspace, so `lnk/..` is a
+  // sibling of the workspace root a lexical reading of `lnk/../unread.sh` would miss.
+  symlinkSync(path.join(ws, "a", "b"), path.join(ws, "lnk"));
   // A link in the operator's home pointing back into the workspace: `cd`'s logical and physical
   // modes land in different places through it, which is what `-L`/`-P` precedence decides.
   symlinkSync(path.join(ws, "sub"), path.join(home, "mine"));
@@ -229,6 +233,30 @@ export const PATH_ROWS: readonly PathRow[] = [
     family: "delete",
     role: "must-allow",
     command: 'rm -f "$TMPDIR"/s/../s/f',
+    dotdot: true,
+  },
+  {
+    name: "rm.glob.dotdot.symlink",
+    family: "delete",
+    role: "probe",
+    // A glob's stem is resolved the same as any other target: `e` followed before the `..`.
+    command: "rm -f e/../keep/*",
+    dotdot: true,
+  },
+  {
+    name: "rm.glob.stem.unresolved",
+    family: "delete",
+    role: "probe",
+    // `late` does not exist until this same command creates it, so at check time the stem is
+    // unresolvable — the unknown rule, not automatically harmless, has to refuse this too.
+    command: 'ln -s "$HOME/.ssh" late && rm -f late/../.bash*',
+    dotdot: true,
+  },
+  {
+    name: "rm.glob.dotdot.realdir",
+    family: "delete",
+    role: "must-allow",
+    command: "rm -f d/../sub/*",
     dotdot: true,
   },
 
@@ -643,6 +671,21 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: "env -C d/.. rm -f inside",
     dotdot: true,
   },
+  {
+    name: "env.chdir.eq.dotdot",
+    family: "cwd",
+    role: "probe",
+    // The `--chdir=DIR` spelling chdirs the same as `-C DIR`, and must resolve the same way.
+    command: "env --chdir=e/.. rm -f .bashrc",
+    dotdot: true,
+  },
+  {
+    name: "env.chdir.eq.dotdot.realdir",
+    family: "cwd",
+    role: "must-allow",
+    command: "env --chdir=d/.. rm -f inside",
+    dotdot: true,
+  },
 
   // --- a path the guard computes from a command's output ---
   {
@@ -657,6 +700,15 @@ export const PATH_ROWS: readonly PathRow[] = [
     family: "substitution",
     role: "probe",
     command: 'rm -f "$(readlink -f e/../.bashrc)"',
+    dotdot: true,
+  },
+  {
+    name: "readlink.nof.letter.f",
+    family: "substitution",
+    role: "probe",
+    // `fup` contains the letter `f`; a target-text search for it, instead of reading `-f` from
+    // the options, wrongly treats a plain `readlink` as canonicalizing.
+    command: 'ln -s .. sub/fup && rm -rf "$(readlink sub/fup)"/home/keep',
     dotdot: true,
   },
   {
@@ -829,6 +881,31 @@ export const PATH_ROWS: readonly PathRow[] = [
     family: "substitution",
     role: "must-allow",
     command: 'chmod -R 700 "$(realpath -P -s e/../keep)"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.strip.physical.long",
+    family: "substitution",
+    role: "probe",
+    // `--physical` maps onto the same last-wins letter as `-P`: unmapped, it would count for
+    // nothing and leave the earlier `--strip` (lexical) standing.
+    command: 'chmod -R 000 "$(realpath --strip --physical e/../keep)"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.s.L.final",
+    family: "substitution",
+    role: "probe",
+    // No `..` at all: `-s` never follows any symlink, `-L` still follows the final component's
+    // own. A `-s`-always-wins bug prints the link itself; the fix follows it to the canary home.
+    command: 'rm -rf "$(realpath -s -L e)"',
+    dotdot: false,
+  },
+  {
+    name: "realpath.physical.strip.control",
+    family: "substitution",
+    role: "must-allow",
+    command: 'chmod -R 700 "$(realpath -P --strip e/../sub)"',
     dotdot: true,
   },
 
@@ -1050,6 +1127,18 @@ bash unread.sh`,
     family: "unnameable",
     role: "probe",
     command: `mkdir -p a/b; ln -s a/b late; echo 'echo hi' > late/../unread.sh; bash unread.sh`,
+    dotdot: true,
+  },
+  {
+    name: "retarget.group.key",
+    family: "retarget",
+    role: "probe",
+    // `lnk` is a pre-existing symlink into `a/b`, so `lnk/..` is `a`, a sibling of the
+    // workspace root: the write really lands on `a/unread.sh`, a file nothing else reads. A
+    // lexical key collapses `lnk/..` away and plants the benign content on the TOP-LEVEL
+    // `unread.sh` instead — the file `bash unread.sh` actually runs, still holding its
+    // original disk payload in reality.
+    command: `{ echo 'echo hi'; } > lnk/../unread.sh; bash unread.sh`,
     dotdot: true,
   },
   {

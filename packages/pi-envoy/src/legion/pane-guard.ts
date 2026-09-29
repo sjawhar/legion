@@ -1291,7 +1291,15 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
       ? name.slice(0, -suffix.length)
       : name;
   }
-  if (base === "readlink" && !list.some((arg) => literalText(arg.exp)?.includes("f")))
+  if (
+    base === "readlink" &&
+    !found.options.some(
+      (option) =>
+        /^-[a-zA-Z]*[fem]/.test(option) ||
+        option === "--canonicalize" ||
+        option.startsWith("--canonicalize-")
+    )
+  )
     return undefined;
   if (base === "realpath") {
     // `--relative-to`/`--relative-base` print a path relative to another directory, which this
