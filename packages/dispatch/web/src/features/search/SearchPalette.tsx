@@ -287,6 +287,15 @@ export function SearchPalette({
   const searching = mode !== "projects";
   const queryEnabled = searching && searchText.length >= 2;
 
+  // Each open starts empty. The palette stays mounted while closed, so a query left behind would
+  // come back on the next open and filter the new page's actions down to nothing.
+  useEffect(() => {
+    if (mode !== null) {
+      setQuery("");
+      setDebouncedQuery("");
+    }
+  }, [mode]);
+
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(searchText), 150);
     return () => window.clearTimeout(timeout);

@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { createIssue, createProject, getIssue } from "./api";
+import { createAsk, createIssue, createProject, getIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -48,6 +48,16 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     ]);
     await expect(actions.getByRole("option", { name: "Set priority P2" })).toBeVisible();
     await expect(actions.getByRole("option", { name: "Reopen issue" })).toHaveCount(0);
+    // A binding whose whole job is to open a palette cannot be a palette row: selecting one runs
+    // it and then closes the palette in the same batch, so the row would do nothing at all.
+    for (const opensThePalette of [
+      "Go to project…",
+      "Search",
+      "Search only",
+      "Keyboard shortcuts",
+    ]) {
+      await expect(actions.getByRole("option", { name: opensThePalette })).toHaveCount(0);
+    }
     await page.screenshot({
       path: testInfo.outputPath(`palette-actions-${testInfo.project.name}.png`),
     });
@@ -143,6 +153,7 @@ test("g d opens the project's Documents and g p picks a project", async ({ brows
   );
   await createProject({ key: "CORE", name: "Core" });
   await createProject({ key: "OPS", name: "Operations" });
+  const issue = await createIssue({ project: "CORE", title: "Documents from an issue" });
   const context = await asUser(browser, "alice");
 
   try {
@@ -168,6 +179,18 @@ test("g d opens the project's Documents and g p picks a project", async ({ brows
     });
     await input.press("Enter");
     await expect(page).toHaveURL(/\/projects\/OPS\/issues/);
+
+    // An issue page names its project too, in its key, so `g d` and the palette row work there.
+    await openIssue(page, issue.key, "Documents from an issue");
+    const issueActions = page
+      .getByRole("dialog", { name: "Search" })
+      .getByRole("group", { name: "Actions" });
+    await page.keyboard.press("Control+k");
+    await expect(issueActions.getByRole("option", { name: "Go to Documents" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("g");
+    await page.keyboard.press("d");
+    await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
   } finally {
     await context.close();
   }
@@ -224,6 +247,132 @@ test("the rail's Search control shows the same actions as the keyboard palette",
     const actions = dialog.getByRole("group", { name: "Actions" });
     await expect(actions.getByRole("option", { name: "Close issue" })).toBeVisible();
     await expect(actions.getByRole("option", { name: "Go to Inbox" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("the Inbox offers its ask actions and not its movement keys", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Inbox palette" });
+  await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
+    { actor: { id: "e2e-palette", kind: "session" }, as: "agent" }
+  );
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto("/");
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
+    await page.locator("body").focus();
+    // Every other inbox binding is gated on a focused row, so `j` first: with one focused, the
+    // movement rows are still absent while the row's own action is offered.
+    await page.keyboard.press("j");
+    await expect(page.locator("[data-inbox-row]").first()).toBeFocused();
+    await page.keyboard.press("Control+k");
+
+    const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
+      name: "Actions",
+    });
+    await expect(
+      actions.getByRole("option", { name: "Open the ask's issue or document" })
+    ).toHaveCount(1);
+    await expect(actions.getByRole("option", { name: "Next ask" })).toHaveCount(0);
+    await expect(actions.getByRole("option", { name: "Previous ask" })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a fresh open starts on an empty query, so it lists the new page's actions", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Astrolabe calibration" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    const input = page.getByRole("combobox", { name: "Search" });
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const actions = dialog.getByRole("group", { name: "Actions" });
+
+    await page.goto("/projects/CORE/issues");
+    await expect(page.getByRole("heading", { level: 1, name: "Core" })).toBeVisible();
+    await page.locator("body").focus();
+    await page.keyboard.press("Control+k");
+    await input.fill("astrolabe");
+    await expect(dialog.getByRole("option")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    // In-app navigation, never a reload: a reload would reset the palette's own state, which is
+    // exactly what must not be what makes this work.
+    await page
+      .getByRole("link", { name: /Astrolabe calibration/ })
+      .first()
+      .click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Astrolabe calibration" })
+    ).toBeVisible();
+    await page.locator("body").focus();
+    await page.keyboard.press("Control+k");
+    await expect(input).toHaveValue("");
+    await expect(actions.getByRole("option", { name: "Close issue" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a header write in flight withdraws the rows whose buttons it disables", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "In-flight guard" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    // Hold the PATCH so the header's write stays in flight for the whole assertion.
+    const release = Promise.withResolvers<void>();
+    await page.route(`**/api/v1/issues/${issue.key}`, async (route) => {
+      if (route.request().method() === "PATCH") {
+        await release.promise;
+      }
+      await route.continue();
+    });
+    await openIssue(page, issue.key, "In-flight guard");
+
+    const closeButton = page.getByRole("button", { name: "Close issue" });
+    await closeButton.click();
+    await expect(closeButton).toBeDisabled();
+    await expect(page.getByLabel(`Priority of ${issue.key}`)).toBeDisabled();
+
+    await page.locator("body").focus();
+    await page.keyboard.press("Control+k");
+    const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
+      name: "Actions",
+    });
+    await expect(actions.getByRole("option", { name: "Go to Inbox" })).toBeVisible();
+    await expect(actions.getByRole("option", { name: "Close issue" })).toHaveCount(0);
+    await expect(actions.getByRole("option", { name: "Set priority P2" })).toHaveCount(0);
+    release.resolve();
   } finally {
     await context.close();
   }

@@ -393,7 +393,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // The registry as described when `?` fired (focus still on the caller); `null` while closed.
   const [helpSnapshot, setHelpSnapshot] = useState<readonly KeyBindingDescription[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const routeProject = parseProjectPath(location.pathname)?.project;
+  // The project the route is about, from a project path or from an issue's key — an issue key is
+  // `<PROJECT>-<n>` (`features/refs/routes.ts:49`), so its project is the part before the last `-`.
+  const routeIssueKey = parseIssuePath(location.pathname)?.key;
+  const routeProject =
+    parseProjectPath(location.pathname)?.project ??
+    routeIssueKey?.slice(0, routeIssueKey.lastIndexOf("-"));
   useKeymap("global", [
     {
       // The palette is its own row in the palette; `?` lists the key instead.
@@ -407,7 +412,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     {
       id: "search-only",
       keys: "/",
-      label: "Search",
+      label: "Search only",
       palette: false,
       run: () => setPaletteMode("search"),
     },
@@ -430,9 +435,11 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       when: () => routeProject !== undefined,
     },
     {
+      // The palette is its own row in the palette; `?` lists the key instead.
       id: "go-project",
       keys: "g p",
       label: "Go to project…",
+      palette: false,
       run: () => setPaletteMode("projects"),
     },
     {
@@ -464,9 +471,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // genuine page change — a different issue, or a different top-level route —
   // should move focus to the main region.
   const pageIdentity =
-    parseIssuePath(location.pathname)?.key ??
-    parseProjectPath(location.pathname)?.project ??
-    location.pathname;
+    routeIssueKey ?? parseProjectPath(location.pathname)?.project ?? location.pathname;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run only to move focus to main on a real page change
   useEffect(() => {

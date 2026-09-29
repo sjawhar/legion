@@ -382,11 +382,20 @@ export function Inbox(): ReactNode {
   const inFocusedRow = (selector: string) => focusedRow()?.querySelector<HTMLElement>(selector);
   useKeymapScope("inbox");
   useKeymap("inbox", [
-    { id: "next", keys: "j", label: "Next ask", run: () => step(1), when: () => rows().length > 0 },
+    // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
+    {
+      id: "next",
+      keys: "j",
+      label: "Next ask",
+      palette: false,
+      run: () => step(1),
+      when: () => rows().length > 0,
+    },
     {
       id: "previous",
       keys: "k",
       label: "Previous ask",
+      palette: false,
       run: () => step(-1),
       when: () => rows().length > 0,
     },
