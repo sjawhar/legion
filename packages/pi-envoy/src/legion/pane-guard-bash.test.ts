@@ -363,8 +363,11 @@ test("a file a branch or an unwaited command writes is never modelled as its tex
         : existsSync(path.join(rowHome, "victim"))
           ? "intact"
           : "destroyed";
+    // A write this shell does not wait for may finish before or after this read. Its guard verdict
+    // stays the assertion; pinning which real-Bash timing won made the comparison flaky.
+    const expectedLive = row.live === "racy" ? live : row.live;
     observed.push(`${row.name}: ${verdict === undefined ? "allowed" : "refused"}, bash ${live}`);
-    expected.push(`${row.name}: ${row.guard}, bash ${row.live}`);
+    expected.push(`${row.name}: ${row.guard}, bash ${expectedLive}`);
   }
   expect(observed).toEqual(expected);
   // Which shapes the rule does not reach is a claim about this batch, so it is read off the
