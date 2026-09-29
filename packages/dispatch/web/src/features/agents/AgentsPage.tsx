@@ -1285,15 +1285,19 @@ export function AgentsPage(): ReactNode {
   // successful send clears it.
   const [draft, setDraft] = useState("");
   const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
-  const matching = filterAgents(agents, filters);
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
   const { active, quiet, inactive } = partitionAgents(
-    matching,
+    filterAgents(agents, filters),
     pinned,
     needsYouBySession,
     Date.now()
   );
+  // The rows the filters match, in the order the page shows them - the open list, then each fold.
+  // Select-all ticks this set in order and the composer names the selection in tick order, so a
+  // set ordered any other way (the registry's own, say) would name the recipients in an order the
+  // reader never sees, and send them in it.
+  const matching = [...active, ...quiet, ...inactive];
   const togglePin = (sessionID: string) => {
     const next = pinned.includes(sessionID)
       ? pinned.filter((candidate) => candidate !== sessionID)
