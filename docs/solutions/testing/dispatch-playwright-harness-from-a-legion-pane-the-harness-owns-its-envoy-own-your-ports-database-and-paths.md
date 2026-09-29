@@ -68,7 +68,8 @@ with no caller Home or XDG directory, so
 `~/.config/opencode/envoy.json` and
 `~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
 Envoy is the only Envoy this harness is ever meant to talk to
-(`e2e:deployed` runs against `PLAYWRIGHT_BASE_URL`, starts no server and probes no port).
+(with `PLAYWRIGHT_BASE_URL` exported, which is what `bun run e2e:deployed` expects and does not
+set itself, no server starts and no port is probed).
 
 Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix script
 answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection
@@ -86,11 +87,12 @@ The server and fake-listener defaults — Go server on `8777`, fake Envoy on
 the box. The database is deliberately not a default: `e2e/seed.ts` truncates it
 before every scenario, so each run must name its own isolated database.
 
-Sharing a port is no longer silent. Before any web server starts, the Playwright config probes all
-three and fails the run with `The Dispatch e2e harness cannot start: <port> (<variable>) already
-in use`, one message listing every taken port beside its own variable, so a run can no longer
+Sharing a port is no longer silent: before any web server starts, the Playwright config probes all
+three and fails the run naming every taken port beside its own variable, so a run can no longer
 truncate the database behind another lane's server. Sharing a database still is silent — nothing
-probes it — so name your own.
+probes it — so name your own. `packages/dispatch/AGENTS.md`'s end-to-end section is where that
+rule is written out: the message, the remedies, what a bad or duplicated port does, and which
+invocations skip the probe.
 
 ```sh
 docker exec dispatch-pg createdb -U postgres dispatch_<issue>      # once
@@ -99,16 +101,15 @@ DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN \
   bun run e2e
 ```
 
-`DATABASE_URL`, `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT` and `FAKE_GITHUB_PORT` are read by the
-config, the server script, the seed, and the API helpers alike (`e2e/api.ts`, `e2e/agents.ts`,
-`e2e/seed.ts`), so those variables move the whole harness together. Start nothing else: the
-container from `packages/envoy/scripts/dev-postgres.sh` and what the Playwright config starts are
-the harness.
+`DATABASE_URL` is read by the server script and the seed; the three ports are resolved for the
+whole TypeScript suite by `e2e/harness-ports.ts`, which the config, the seeds, the API helpers and
+both fake listeners import, so those variables move the whole harness together. Start nothing
+else: the container from `packages/envoy/scripts/dev-postgres.sh` and what the Playwright config
+starts are the harness.
 
 To run the suite repeatedly against a harness you started yourself — `run-server.sh` and the two
-fakes, left listening on your ports — set `DISPATCH_E2E_REUSE_SERVERS=1`. That is its only
-accepted value: unset or empty starts this run's own servers, and any other value is refused at
-config load naming the variable and the value.
+fakes, left listening on your ports — set `DISPATCH_E2E_REUSE_SERVERS=1` (see AGENTS.md for the
+value rule).
 
 ## 3. Test output goes to `testInfo.outputPath()`, never a fixed `/tmp` name
 

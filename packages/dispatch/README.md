@@ -54,15 +54,14 @@ setting nor `~/.config/opencode/envoy.json` /
 `DATABASE_URL` is required and must name an isolated database: `e2e/seed.ts`
 truncates it before every scenario and never selects a shared default. The
 harness ports `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`) and `FAKE_GITHUB_PORT` (default `9022`) are its other inputs; the
-Playwright config and test helpers read them too, and a value that is not a
-port number is refused naming its variable. A run starts its own servers on
-those three ports and refuses before any of them starts if one is already in
-use, naming every taken port beside its variable, so it never truncates the
-database behind a server it did not start. `DISPATCH_E2E_REUSE_SERVERS=1` is
-the opt-in for running against a harness you started yourself: `1` is the only
-accepted value, unset or empty means no reuse, and any other value is refused
-at config load. The harness starts `e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT`
+`9021`) and `FAKE_GITHUB_PORT` (default `9022`) are its other inputs, resolved
+for the whole suite by `e2e/harness-ports.ts`. A run starts its own servers on
+those three ports and refuses before any of them starts if one is taken, so it
+never truncates the database behind a server it did not start;
+`DISPATCH_E2E_REUSE_SERVERS=1` is the opt-in for running against a harness you
+started yourself. `AGENTS.md`'s end-to-end section states that rule in full —
+the accepted values, what a bad or duplicated port does, and which invocations
+skip the probe. The harness starts `e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT`
 and that listener is the only Envoy the server ever talks to; tests seed its
 live sessions with `setLiveSessions` from `e2e/agents.ts`.
 

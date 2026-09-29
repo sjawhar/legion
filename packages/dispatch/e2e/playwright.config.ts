@@ -1,27 +1,12 @@
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
+import { dispatchPort, fakeEnvoyPort, fakeGithubPort } from "./harness-ports";
 
-// The three harness ports are shared inputs: `run-server.sh` and the e2e helpers resolve the same
-// variables. A value that is not a port number is refused here, naming its variable, because every
-// later consumer turns it into something that names nothing — `net.connect` raises `RangeError:
-// Port should be >= 0 and < 65536` on `NaN`, and a `webServer` entry would wait on it.
-function harnessPort(variable: string, resolved: string): number {
-  const port = Number(resolved);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`${variable} must be a port number, not ${JSON.stringify(resolved)}.`);
-  }
-  return port;
-}
-
-const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
-const e2ePortNumber = harnessPort("DISPATCH_E2E_PORT", e2ePort);
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${e2ePort}`;
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchPort}`;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
-const fakeEnvoyPort = harnessPort("FAKE_ENVOY_PORT", process.env.FAKE_ENVOY_PORT ?? "9021");
 const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
-const fakeGithubPort = harnessPort("FAKE_GITHUB_PORT", process.env.FAKE_GITHUB_PORT ?? "9022");
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
 // `DISPATCH_E2E_REUSE_SERVERS=1` runs the suite against a harness the caller started and left
@@ -43,10 +28,34 @@ function resolveReuseServers(): boolean {
 const reuseServers = resolveReuseServers();
 
 const harnessPorts = [
-  { variable: "DISPATCH_E2E_PORT", port: e2ePortNumber },
+  { variable: "DISPATCH_E2E_PORT", port: dispatchPort },
   { variable: "FAKE_ENVOY_PORT", port: fakeEnvoyPort },
   { variable: "FAKE_GITHUB_PORT", port: fakeGithubPort },
 ];
+
+// Two variables naming one port pass the probe below — each port is free on its own — and then
+// reach Playwright's own refusal, which names no variable. Refused here rather than inside the
+// probe's gate, so a `--list` run and the deployed path catch it too.
+const collisions = [...new Set(harnessPorts.map((entry) => entry.port))]
+  .map((port) => ({
+    port,
+    variables: harnessPorts.filter((entry) => entry.port === port).map((entry) => entry.variable),
+  }))
+  .filter((collision) => collision.variables.length > 1);
+if (collisions.length > 0) {
+  const named = collisions
+    .map(({ port, variables }) => {
+      const names =
+        variables.length > 2
+          ? `${variables.slice(0, -1).join(", ")} and ${variables[variables.length - 1]}`
+          : variables.join(" and ");
+      return `${names} name port ${port}`;
+    })
+    .join("; ");
+  throw new Error(
+    `The Dispatch e2e harness cannot start: ${named}. Give each harness server its own port.`
+  );
+}
 
 // Playwright's own port predicate (playwright@1.63.0 `lib/runner/index.js:958-977`): a port counts
 // as used when either `127.0.0.1` or `::1` accepts a connection. A probe that dialled only
@@ -74,24 +83,42 @@ function isPortUsed(port: number): Promise<boolean> {
   return promise;
 }
 
+// A listing run starts no web server: `listMode` builds only a load task and a report-begin task
+// (`lib/runner/index.js:6946-6949`), where an ordinary run's in-process load sits at `:6952`,
+// beneath `createGlobalSetupTasks`. This argv test is a CLI-shape proxy for that, not the rule
+// itself: it counts `--list` only before a `--` separator and never as the value of the preceding
+// option, and it yields to a UI token, because `--ui`/`--ui-*` outrank the computed `listMode`
+// (`lib/cli/testActions.js:52`, `:62`). Both of its errors are safe. A false skip leaves
+// Playwright's own refusal (`lib/runner/index.js:865`), never a reuse; a false probe only replaces
+// a listing with our named refusal — which is also what the test server's own list path
+// (`lib/runner/index.js:6763-6784`) gets, since it carries no `--list` in argv and nothing in this
+// repository uses it.
+function isListMode(argv: readonly string[]): boolean {
+  if (argv.some((arg) => arg === "--ui" || arg.startsWith("--ui-"))) return false;
+  const separator = argv.indexOf("--");
+  const scanned = separator === -1 ? argv : argv.slice(0, separator);
+  return scanned.some((arg, index) => {
+    if (arg !== "--list") return false;
+    const previous = scanned[index - 1];
+    return previous === undefined || !previous.startsWith("-") || previous.includes("=");
+  });
+}
+
 // The probe runs while this module evaluates because no Playwright hook runs before the web
 // servers: `webServer` entries become plugins, and `createGlobalSetupTasks` puts `globalSetup`
-// after `createPluginSetupTasks` (`lib/runner/index.js:6321-6328`). Two things must not reach it.
-// Every worker re-imports this config once the servers are up
-// (`lib/worker/workerProcessEntry.js:1481`), when the harness ports are legitimately taken by this
-// run's own servers, and so does the out-of-process test loader
+// after `createPluginSetupTasks` (`lib/runner/index.js:6321-6328`). Every worker re-imports this
+// config once the servers are up (`lib/worker/workerProcessEntry.js:1481`), when the harness ports
+// are legitimately taken by this run's own servers, and so does the out-of-process test loader
 // (`lib/loader/loaderProcessEntry.js:16`) under the test server — UI mode and the editor
-// extension; the plain CLI loads tests in-process (`lib/runner/index.js:6947`). Each is a
+// extension; the plain CLI loads tests in-process (`lib/runner/index.js:6952`). Each is a
 // `child_process.fork` whose stdio carries an `"ipc"` channel (`lib/runner/index.js:1915-1929`),
 // so `process.send` is a function there and undefined in the CLI that starts the servers;
-// `TEST_WORKER_INDEX` cannot discriminate them, because the loader never sets it. `--list` starts
-// no web server at all: `listMode` builds only a load task and a report-begin task
-// (`lib/runner/index.js:6946-6949`), with no `createGlobalSetupTasks`.
+// `TEST_WORKER_INDEX` cannot discriminate them, because the loader never sets it.
 if (
   startsOwnServers &&
   !reuseServers &&
   typeof process.send !== "function" &&
-  !process.argv.includes("--list")
+  !isListMode(process.argv)
 ) {
   const used = await Promise.all(harnessPorts.map((entry) => isPortUsed(entry.port)));
   const taken = harnessPorts.filter((_, index) => used[index]);
@@ -100,7 +127,8 @@ if (
     throw new Error(
       `The Dispatch e2e harness cannot start: ${ports} already in use. Stop whatever listens ` +
         "there, or move this run to free ports with DISPATCH_E2E_PORT/FAKE_ENVOY_PORT/" +
-        "FAKE_GITHUB_PORT. To run against a harness you started yourself, set " +
+        "FAKE_GITHUB_PORT and to its own DATABASE_URL, since the server already listening still " +
+        "holds the database you named. To run against a harness you started yourself, set " +
         "DISPATCH_E2E_REUSE_SERVERS=1."
     );
   }
@@ -139,7 +167,7 @@ export default defineConfig({
           },
           {
             command: `bash ${runServer}`,
-            port: e2ePortNumber,
+            port: dispatchPort,
             reuseExistingServer: reuseServers,
           },
         ],
