@@ -4,7 +4,7 @@ import type { IssuePriority } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { badgeLow, priorityBadge } from "../../theme/classes";
 import { badgeSelectBadge, badgeSelectOverlay, badgeSelectWrapper } from "./badge-select";
-import { useIssuePriority } from "./useIssuePriority";
+import { type IssuePriorityWrite, useIssuePriority } from "./useIssuePriority";
 
 const priorityOptions: readonly { label: string; value: IssuePriority | null }[] = [
   { label: "Unset", value: null },
@@ -15,20 +15,11 @@ const priorityOptions: readonly { label: string; value: IssuePriority | null }[]
 ];
 
 /**
- * The single priority editor: shows the issue's priority as the `P0`–`P3` badge (a muted
- * "Priority" tag when unset) and, on click, tap, Enter or Space, opens a native `<select>` to
- * pick P0–P3 or Unset — the same picker on desktop and iPhone. The select is laid invisibly over
- * the badge so the tap target stays 44 px (32 px from `md`) while the badge keeps its size, and
- * the wrapper draws the keyboard focus ring. The write goes through `useIssuePriority`, so every
- * surface gets the same optimistic update, rollback and list refetch. The select stays enabled
- * while a save is in flight: a disabled control drops the focus it holds and leaves the tab
- * order, and a pick made meanwhile is queued behind the save rather than refused. A press on the
- * select stays on the select: a board card is a drag activator, and a held tap on the badge must
- * open the picker, not lift the card. The select is labelled `Priority of <KEY>`; the board's `p`
- * reaches it through the focused card.
+ * The priority editor for a surface that owns no write of its own - a list row, a board card,
+ * an Inbox row - where this control is the only thing that writes that issue's priority.
  */
 export function PriorityControl({
-  disabled = false,
+  disabled,
   issueKey,
   priority,
 }: {
@@ -37,6 +28,39 @@ export function PriorityControl({
   priority: IssuePriority | null;
 }): ReactNode {
   const write = useIssuePriority(issueKey);
+  return (
+    <PriorityEditor disabled={disabled} issueKey={issueKey} priority={priority} write={write} />
+  );
+}
+
+/**
+ * The single priority editor: shows the issue's priority as the `P0`–`P3` badge (a muted
+ * "Priority" tag when unset) and, on click, tap, Enter or Space, opens a native `<select>` to
+ * pick P0–P3 or Unset — the same picker on desktop and iPhone. The select is laid invisibly over
+ * the badge so the tap target stays 44 px (32 px from `md`) while the badge keeps its size, and
+ * the wrapper draws the keyboard focus ring. `write` goes through `useIssuePriority`, so every
+ * surface gets the same optimistic update, rollback and list refetch. The select stays enabled
+ * while a save is in flight: a disabled control drops the focus it holds and leaves the tab
+ * order, and a pick made meanwhile is queued behind the save rather than refused. A press on the
+ * select stays on the select: a board card is a drag activator, and a held tap on the badge must
+ * open the picker, not lift the card. The select is labelled `Priority of <KEY>`; the board's `p`
+ * reaches it through the focused card.
+ *
+ * The host passes the write when it has other ways to set the same priority: the issue page
+ * creates one for the page and shares it with the keyboard's `0`–`3`, so one refusal is
+ * reported once, here, by the control the reader is looking at.
+ */
+export function PriorityEditor({
+  disabled = false,
+  issueKey,
+  priority,
+  write,
+}: {
+  disabled?: boolean;
+  issueKey: string;
+  priority: IssuePriority | null;
+  write: IssuePriorityWrite;
+}): ReactNode {
   const tone = priority === null ? badgeLow : priorityBadge[priority];
   return (
     <>

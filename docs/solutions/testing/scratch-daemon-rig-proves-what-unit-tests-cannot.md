@@ -113,7 +113,7 @@ are weak evidence of absence: a write can fail silently, land late, or come from
 The tester's answer was a logging reverse proxy between the rig daemon and Dispatch:
 
 - the rig daemon's `DISPATCH_URL` pointed at `http://127.0.0.1:19580`, a small forwarder to the
-  real Dispatch (`http://sami-agents:8766`) that appends one line per request — timestamp, method,
+  real Dispatch (`http://example-host-devbox:8766`) that appends one line per request — timestamp, method,
   path, body — to a file;
 - BEFORE/AFTER snapshots around each driven call recorded the proxy line count next to the daemon
   log line count, `state.issues[key].status`, and `pendingStatusWrites`;

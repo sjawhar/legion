@@ -120,7 +120,7 @@ func NewRig(t *testing.T) *Rig {
 	rulesYAML := `version: 1
 secrets:
   TEST_SECRET:
-    source: dev1/agent-secrets/TEST_SECRET
+    source: example/agent-secrets/TEST_SECRET
     owner: ` + operator + `
     delivery: inject
     max_lifetime_seconds: 43200
@@ -162,7 +162,7 @@ approvers:
 	enr.Chain = enroll.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: cur, Secrets: secrets.Fake{"dev1/agent-secrets/TEST_SECRET": "test-secret-v1"},
+		Store: st, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/TEST_SECRET": "test-secret-v1"},
 		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}

@@ -112,7 +112,7 @@ unguarded. The workflow's `packages`/`contents` permissions apply to same-repo p
 repository takes no fork PRs, whose token would be read-only).
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
-— no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the sami-agents
+— no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
 host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is not a workstation). Iterate by
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
@@ -318,7 +318,7 @@ runtime:
     storage_class: gp2          # required: the tree volume's class (the cluster has no default)
     tree_volume: 20Gi           # default 20Gi
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production   # relative to legion.yaml's directory
-    context: legion-daemon@production   # required when the kubeconfig sets no current context
+    context: legion-daemon@example   # required when the kubeconfig sets no current context
     scheduling:                 # optional, beyond the Legion pool the runtime always selects
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
@@ -584,7 +584,7 @@ first pod placed decides the node, and a request on a later pod would strand it.
 
 **The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
 trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
-raises the pool's `limits.cpu` in agent-c's Legion component to at least `4 × admission_cap`; until
+raises the `legion` NodePool's `limits.cpu` to at least `4 × admission_cap`; until
 then an `admission_cap` above 16 admits trees whose pods cannot schedule.
 
 ### Trust model: the provisioning token
@@ -625,8 +625,8 @@ on its way to github.com.
 
 ### RBAC the Go daemon needs
 
-The daemon runs as a restricted identity (production: the `legion-daemon` group, as the
-`production-legion-daemon` role). It needs:
+The daemon runs as a restricted identity (in production, an IAM role mapped to the `legion-daemon`
+group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
@@ -777,7 +777,8 @@ claim's pod and the image probe's.
 
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
-  `service_account_token` must last at least 600 s, the least the API server issues. `volume_mounts`
+  `service_account_token` must last at least 600 s, the least the API server issues, and its
+  `audience` may not still hold a `${…}` placeholder, which nothing expands. `volume_mounts`
   are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
   ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
@@ -801,7 +802,7 @@ claim's pod and the image probe's.
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a human
   approves the code there. On expiry or revocation the daemon starts a fresh login and logs a new
   code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
-  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, agent-c's admission cap)
+  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
   operator's middleman token. With the block, the worker container mounts that token read-only at
   `/var/run/legion/agent-secrets-token/token`, a memory-backed key directory at

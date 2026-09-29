@@ -17,6 +17,7 @@ export type KeymapScope =
   | "project"
   | "architecture"
   | "board"
+  | "issue"
   | "agents";
 
 export interface KeyBinding {

@@ -17,8 +17,8 @@ import (
 // Nothing infers the reach, because nothing can tell the deployed Dispatch from the same binary
 // run out of a checkout: both read natsUrls from ~/.config/opencode/envoy.json, which on an
 // agent's machine names production (LEGION-249). Each deployment states its reach instead
-// (packages/envoy/deploy/compose/*.compose.yml, agent-c's listener and dispatch task
-// definitions, and the on-prem fleet's Pulumi), and it must be set there BEFORE a binary that
+// (packages/envoy/deploy/compose/*.compose.yml, the production deployment's listener and Dispatch
+// service definitions, and the on-prem fleet's Pulumi), and it must be set there BEFORE a binary that
 // reads it runs on that deployment: without it, this one refuses the shared NATS its deployment
 // names and exits. Setting it early costs nothing, because a binary built before the variable
 // ignores it.

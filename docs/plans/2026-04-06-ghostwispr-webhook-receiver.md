@@ -9,7 +9,7 @@ Previous workers (architect + implementer) have completed ~95% of this work. Thi
 ## Assumptions
 
 1. Ghost Wispr webhook push capability exists and sends the documented payload format to a configured URL.
-2. The Ghost Wispr machine (`ghost-wispr`, Tailscale IP `<tailscale-ip>`) already runs the Envoy listener and has SSH access configured.
+2. The Ghost Wispr machine (`example-host-gw`, Tailscale IP `<tailscale-ip>`) already runs the Envoy listener and has SSH access configured.
 3. Port 9012 is used for the receiver (following GitHub=9010, Slack=9011).
 4. The signing secret is optional — when `ENVOY_GHOSTWISPR_SIGNING_SECRET` env var is empty/unset, signature verification is skipped. Deliberate: Ghost Wispr runs on localhost behind Tailscale.
 5. Session IDs from Ghost Wispr are timestamp strings like `20260326041405` — safe for NATS subject segments.
@@ -43,7 +43,7 @@ The following tasks are already complete on this branch. The implementer should 
 - ✅ `packages/envoy/infra/machines.ts`: `ghostwispr?: boolean` in `ReceiverConfig`
 - ✅ `packages/envoy/infra/services.ts`: `ghostWisprSigningSecret?: pulumi.Output<string>` in `ServiceSecrets`, `createGhostWisprReceiver()` function
 - ✅ `packages/envoy/infra/index.ts`: conditional creation wired up, `ghostWisprSigningSecret` via `cfg.getSecret()`
-- ✅ `packages/envoy/infra/Pulumi.prod.yaml`: ghost-wispr machine has `receivers: { ghostwispr: true }`
+- ✅ `packages/envoy/infra/Pulumi.prod.yaml`: example-host-gw machine has `receivers: { ghostwispr: true }`
 
 ### Envoy Skill Documentation (#269 scope — DONE)
 - ✅ `.opencode/skills/envoy/SKILL.md`: Ghost Wispr section with topic format, parameters, examples
@@ -192,7 +192,7 @@ curl -X POST http://127.0.0.1:9012/webhook/ghostwispr \
 | Docker image includes binary | `docker build` succeeds |
 | Compose file valid | `docker compose -f packages/envoy/deploy/compose/ghostwispr.compose.yml config` |
 | Pulumi types check | `npx tsc --noEmit` in infra/ succeeds |
-| Pulumi config has ghost-wispr receiver | `grep ghostwispr packages/envoy/infra/Pulumi.prod.yaml` shows `ghostwispr: true` |
+| Pulumi config has example-host-gw receiver | `grep ghostwispr packages/envoy/infra/Pulumi.prod.yaml` shows `ghostwispr: true` |
 | Envoy skill docs updated | Ghost Wispr section present in `.opencode/skills/envoy/SKILL.md` |
 | AGENTS.md updated | `grep ghostwispr packages/envoy/AGENTS.md` |
 | All existing tests pass | `go test ./...` and `bun test` both green |
