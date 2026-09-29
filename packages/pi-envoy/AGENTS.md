@@ -277,9 +277,8 @@ there every operand is judged; `dd` on the path inside its `of=` word, wherever 
 `ln` on its last operand, the directory `-t` or `--target-directory` names, or on the working
 directory when it is given one operand the guard reads whole, plus its source when it makes a hard
 link, which is a second name for a file outside the roots that no later command can resolve; `sed`
-on the files it names with `-i`, in a cluster (`-ni`) or with a suffix joined to it (`-i.bak`) as
-well as
-alone — never on
+on the files it names with `-i`: standalone, in a cluster (`-ni`), or with a suffix joined to it
+(`-i.bak`) — never on
 the files its script names through `w`, `W`, `s///w`, `e` or `s///e`, which it does not read
 (LEGION-377). Which of the
 link and its target is judged follows what each verb does to a symlink — `sed -i` replaces the
