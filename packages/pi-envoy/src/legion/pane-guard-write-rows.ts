@@ -1221,6 +1221,24 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     command: `printf '%s' dir > esc.txt; x=$(cat esc.txt); rm -rf "$LEGION_WORKSPACE/$x/../../home/.ssh"`,
   },
   {
+    name: "unknown after a workspace glob",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../../home/.ssh' > esc.txt; x=$(cat esc.txt); rm -rf "$LEGION_WORKSPACE"/*/"$x"`,
+  },
+  {
+    name: "workspace glob with a known final leaf",
+    family: "unknown workspace component",
+    role: "must-allow",
+    command: 'rm -rf "$LEGION_WORKSPACE"/*/in',
+  },
+  {
+    name: "RESIDUAL a redirection through an unknown workspace component",
+    family: "residual",
+    role: "residual",
+    command: `printf '%s' '../home/.ssh' > esc.txt; x=$(cat esc.txt); echo PWNED > "$LEGION_WORKSPACE/$x/out.log"`,
+  },
+  {
     name: "a redirection to an unknown workspace leaf",
     family: "unknown workspace component",
     role: "must-allow",

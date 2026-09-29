@@ -63,9 +63,11 @@ such a here-document as its program is refused too. A target with no proven path
 as is a command the parser reports as malformed. A visible `..` after a glob or a value the guard
 cannot read is refused. For a file command or tmux socket, every unknown component after a
 permitted-root prefix is refused, even if it is final: that one component can contain `/` and `..`
-itself. Redirections and `tee` deliberately keep an unknown final component under a
-permitted-root prefix allowed; it can still overwrite an existing file outside the roots, a
-residual tracked in LEGION-379. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
+itself. Redirections and `tee` deliberately allow unknown components anywhere after a
+permitted-root prefix: both `echo v > "$LEGION_WORKSPACE/$x"` and
+`echo v > "$LEGION_WORKSPACE/$x/out.log"` can overwrite outside the roots. Refusing only the
+middle-component form raises the all-refusal walk from 63 to 110: 46 redirections and one `tee`.
+LEGION-379 tracks this residual. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
 kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`,
 then `$TMUX`, then the default socket) and refuses a resolved path outside the pane roots. `kill`
 only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every

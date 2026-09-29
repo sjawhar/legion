@@ -21,9 +21,15 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     "function judgePath(",
   ],
   [
-    "unknown descendant under a proven root",
-    'if (piece.kind === "unknown" && options.rejectUnknownDescendant) {',
-    "if (false) {",
+    "unknown after a glob",
+    'const unknownIndex = exp.findIndex((part, index) => index >= open && part.kind === "unknown");',
+    "const unknownIndex = -1;",
+    "function judgePath(",
+  ],
+  [
+    "file command unknown descendant",
+    "unknown !== undefined && options.rejectUnknownDescendant",
+    "false",
     "function judgePath(",
   ],
   [

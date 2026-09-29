@@ -591,7 +591,8 @@ type Verdict = { readonly ok: true } | { readonly ok: false; readonly resolution
  * redirection or `tee`: a device, or a file that does not exist yet, overwrites nothing.
  * File commands and tmux sockets set `rejectUnknownDescendant`: an unknown component after a
  * proven root can carry `/` and `..`, so it cannot establish containment. Redirections and `tee`
- * leave an unknown leaf allowed, a documented residual that can overwrite outside the roots. */
+ * allow an unknown component after a proven root whether it is final or followed by another path
+ * component, a documented residual that can overwrite outside the roots. */
 function judgePath(
   exp: Expansion,
   st: State,
@@ -637,6 +638,8 @@ function judgePath(
     .map((p) => p.text)
     .join("");
   const source = piece.kind === "glob" ? "a glob" : (piece.why ?? "a value the guard cannot know");
+  const unknownIndex = exp.findIndex((part, index) => index >= open && part.kind === "unknown");
+  const unknown = unknownIndex === -1 ? undefined : (exp[unknownIndex] as Piece);
   if (/\/\.\.(?:\/|$)/.test(trailing)) {
     return { ok: false, resolution: `a visible \`..\` after ${source}` };
   }
@@ -665,8 +668,9 @@ function judgePath(
       component !== "" &&
       !isProtectedScratchComponent(component, roots, true));
   if (allowed) {
-    if (piece.kind === "unknown" && options.rejectUnknownDescendant) {
-      return { ok: false, resolution: `${source}, after a prefix inside ${real}` };
+    if (unknown !== undefined && options.rejectUnknownDescendant) {
+      const unknownSource = unknown.why ?? "a value the guard cannot know";
+      return { ok: false, resolution: `${unknownSource}, after a prefix inside ${real}` };
     }
     return { ok: true };
   }
