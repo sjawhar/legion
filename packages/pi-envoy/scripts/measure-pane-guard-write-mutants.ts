@@ -51,6 +51,24 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     "function writeArguments(",
   ],
   [
+    "partially readable cluster stops at its first valued letter",
+    "if (!valued.includes(letter)) continue;",
+    'if (letter !== "t") continue;',
+    "function writeArguments(",
+  ],
+  [
+    "partially readable cluster ends at a valued letter",
+    "          break;",
+    "          continue;",
+    "function writeArguments(",
+  ],
+  [
+    "partially readable target option carries its value",
+    "if (carried !== undefined) {",
+    "if (false) {",
+    "function writeArguments(",
+  ],
+  [
     "GNU separate value",
     'takesValue = long[option] === true && !text.includes("=");',
     "takesValue = false;",

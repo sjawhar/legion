@@ -4550,12 +4550,12 @@ function writeArguments(rest: readonly Arg[], valued: string, long: LongOptions)
           break;
         }
       }
-      if (targetOffset !== undefined) {
-        const value = valueInWord(arg, targetOffset);
-        if (value !== undefined) {
-          directory = { text: arg.text, exp: value };
-          continue;
-        }
+      // The literal prefix covers the offset and an unread piece follows it, so a target option
+      // the guard found here always carries a value.
+      const carried = targetOffset === undefined ? undefined : valueInWord(arg, targetOffset);
+      if (carried !== undefined) {
+        directory = { text: arg.text, exp: carried };
+        continue;
       }
       if (mayBeSomeOption(text)) uncertain = arg;
       operands.push(arg);

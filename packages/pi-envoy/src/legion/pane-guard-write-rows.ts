@@ -1415,6 +1415,40 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     role: "probe",
     command: `printf '%s' '../../home' > esc.txt; x=$(cat esc.txt); ln -s -t"$TMPDIR/mine/$x" payload`,
   },
+  // The reviewer's forms the rows above do not already spell: each verb's full long option over
+  // an unknown component, after both the workspace and the pane's own /tmp directory.
+  {
+    name: "install --target-directory through an unknown workspace component",
+    family: "target directory",
+    role: "probe",
+    command: `printf '%s' '../home/.ssh' > esc.txt; x=$(cat esc.txt); install --target-directory="$LEGION_WORKSPACE/$x" payload`,
+  },
+  {
+    name: "cp --target-directory through an unknown scratch component",
+    family: "target directory",
+    role: "probe",
+    command: `printf '%s' '../../home/.ssh' > esc.txt; x=$(cat esc.txt); cp --target-directory="$TMPDIR/mine/$x" payload`,
+  },
+  {
+    name: "install --target-directory through an unknown scratch component",
+    family: "target directory",
+    role: "probe",
+    command: `printf '%s' '../../home/.ssh' > esc.txt; x=$(cat esc.txt); install --target-directory="$TMPDIR/mine/$x" payload`,
+  },
+  {
+    name: "ln --target-directory through an unknown scratch component",
+    family: "target directory",
+    role: "probe",
+    command: `printf '%s' '../../home/.ssh' > esc.txt; x=$(cat esc.txt); ln -s --target-directory="$TMPDIR/mine/$x" payload`,
+  },
+  // `-S` takes the rest of the cluster as its suffix, so the `t` after it names no directory and
+  // the last operand is still the destination. The glob keeps the word from being read whole.
+  {
+    name: "cp -S whose partly read suffix holds a t, before a destination outside the roots",
+    family: "target directory",
+    role: "probe",
+    command: 'cp -St"$LEGION_WORKSPACE"/*/dir payload "$HOME/.bashrc"',
+  },
   {
     name: "cp --target-directory inside the workspace",
     family: "target directory",
