@@ -912,3 +912,34 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 		t.Fatalf("%q reads back with the first item holding %q", markdown, first.Children[0].Children[0].Text)
 	}
 }
+
+// A span comes from the live tree unchecked, and each position it covers is written as a cell, so
+// an absurd colspan is written across at most maxColspan columns and a rowspan across the rows
+// below it: one update holding a span of two million must not render megabytes.
+func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		span func(table *Node)
+	}{
+		{"colspan", func(table *Node) { table.Children[1].Children[0].Attrs["colspan"] = 2e6 }},
+		{"rowspan", func(table *Node) { table.Children[1].Children[0].Attrs["rowspan"] = 2e6 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse("| h1 | h2 |\n| --- | --- |\n| c1 | c2 |\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.span(doc.Children[0])
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lines := strings.Count(markdown, "\n"); len(markdown) > 16*maxColspan || lines != 3 {
+				t.Fatalf("Render wrote %d bytes on %d lines, want at most %d bytes on 3", len(markdown), lines, 16*maxColspan)
+			}
+			if _, err := Parse(markdown); err != nil {
+				t.Fatalf("Parse(Render()) = %v", err)
+			}
+		})
+	}
+}

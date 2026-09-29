@@ -641,7 +641,8 @@ func tableGrid(table *Node) [][]*Node {
 		for _, cell := range row.Children {
 			fill(0)
 			column := len(cells)
-			columns, rows := tableSpan(cell.Attrs["colspan"]), tableSpan(cell.Attrs["rowspan"])
+			columns := min(tableSpan(cell.Attrs["colspan"]), maxColspan)
+			rows := min(tableSpan(cell.Attrs["rowspan"]), len(table.Children)-rowIndex)
 			cells = append(cells, cell)
 			for range columns - 1 {
 				cells = append(cells, emptyTableCell(kind, cell))
@@ -679,6 +680,11 @@ func tableGrid(table *Node) [][]*Node {
 func tableSpan(value any) int {
 	return max(1, int(num(value, 1)))
 }
+
+// maxColspan is the most columns a cell is written across, as HTML caps colspan. A span comes from
+// the live tree unchecked, and each column it covers is written as a cell; a rowspan is bounded by
+// the rows below it instead, which loses nothing.
+const maxColspan = 1000
 
 // emptyTableCell is an empty cell of kind with like's alignment, or none when like is nil.
 func emptyTableCell(kind string, like *Node) *Node {
