@@ -58,16 +58,18 @@ cannot decide it and will not assume it; write the script with the write tool fi
 the straight-line path is read as before, and so is one in a subshell, a brace group, a command
 substitution, a called function or an `EXIT` handler this shell certainly registered. The same
 rule governs a file holding a pid that `kill "$(<file)"` reads, except that a body which can only
-replace one pid this shell started with another leaves it signalable. A shell or interpreter
-reading such a here-document as its program is refused too. A target with no proven path prefix
-is refused, as is a command the
-parser reports as malformed. An unknown trailing component under a prefix already proven inside a
-permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For
-`tmux kill-*`, the guard resolves the socket as tmux does
-(`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then the default socket) and refuses
-a resolved path outside the pane roots. `kill` only reaches a pid that `/proc` shows descending
-from the pane's own Oh My Pi process. Every refusal names the target, where it resolved, and the
-rule, so the agent can rewrite the command.
+replace one pid this shell started with another leaves it signalable. A shell or interpreter reading
+such a here-document as its program is refused too. A target with no proven path prefix is refused,
+as is a command the parser reports as malformed. A visible `..` after a glob or a value the guard
+cannot read is refused. For a file command or tmux socket, every unknown component after a
+permitted-root prefix is refused, even if it is final: that one component can contain `/` and `..`
+itself. Redirections and `tee` deliberately keep an unknown final component under a
+permitted-root prefix allowed; it can still overwrite an existing file outside the roots, a
+residual tracked in LEGION-379. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
+kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`,
+then `$TMUX`, then the default socket) and refuses a resolved path outside the pane roots. `kill`
+only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every
+refusal names the target, where it resolved, and the rule, so the agent can rewrite the command.
 
 Which operand a write verb's destination is comes from that verb's own grammar, measured rather
 than assumed: `cp` and `install` write their last operand, or the directory `-t` names, where

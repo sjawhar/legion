@@ -15,6 +15,18 @@ import {
 // [name, old line fragment, replacement on that line, optional preceding scope anchor].
 const mutants: readonly (readonly [string, string, string, string?])[] = [
   [
+    "visible parent after an unreadable component",
+    "if (/\\/\\.\\.(?:\\/|$)/.test(trailing)) {",
+    "if (false) {",
+    "function judgePath(",
+  ],
+  [
+    "unknown descendant under a proven root",
+    'if (piece.kind === "unknown" && options.rejectUnknownDescendant) {',
+    "if (false) {",
+    "function judgePath(",
+  ],
+  [
     "option terminator",
     'if (whole && text === "--") {',
     "if (false) {",

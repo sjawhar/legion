@@ -36,15 +36,21 @@ const repository = path.resolve(import.meta.dir, "../../../..");
 // is what makes a refusal that moves fail here. The test is not flaky: it is right about a
 // population that changed.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
+  // Fixture helpers append an unreadable function argument to their temporary workspace root.
+  // A file command cannot take that component as a leaf: it may carry `/` and `..`.
+  ".github/scripts/check-bun-version.test.sh": ".github/scripts/check-bun-version.test.sh:38",
+  ".github/scripts/check-image-trigger-paths.test.sh":
+    ".github/scripts/check-image-trigger-paths.test.sh:32",
   // Writes or deletes under the operator's home: the dispatch backups, a profile's plugin tree, a
   // Claude project directory.
   "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
   "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
   "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
     "packages/claude-envoy/scripts/smoke-clear-rebind.sh:62",
-  // Deletes the backups `find` lists: a path read from a command's output.
+  // The backup's name appends a commit identifier the guard cannot read, so its cleanup is refused
+  // before `prune_backups` reaches the command-output path it previously refused.
   "packages/envoy/deploy/scripts/autodeploy_test.sh":
-    "packages/envoy/deploy/scripts/autodeploy.sh:80",
+    "packages/envoy/deploy/scripts/autodeploy.sh:147",
   // A cp source read from a command's output can instead carry an option; no -- or -T makes
   // its last operand certainly the destination. These drivers run the same library first.
   "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
@@ -407,8 +413,13 @@ describe("resolution", () => {
     expect(bash('rm -rf "$NOT_SET_ANYWHERE"')).toContain("`$NOT_SET_ANYWHERE`");
     expect(bash('rm -rf "$(cat target.txt)"')).toContain("a command's output");
     expect(bash('for d in a "$X"; do rm -rf "$d"; done')).toContain("loop variable");
-    // A known prefix inside the workspace bounds what follows it.
-    expect(bash('rm -rf "$LEGION_WORKSPACE/build/$(date +%s)"')).toBeUndefined();
+    expect(bash('rm -rf "$LEGION_WORKSPACE/build/$(date +%s)"')).toContain("a command's output");
+  });
+
+  test("does not treat an unknown workspace component as a recursive owner-change leaf", () => {
+    expect(bash('x=$(cat esc); chown -R nobody "$LEGION_WORKSPACE/$x"')).toContain(
+      "after a prefix"
+    );
   });
 
   test("refuses a command the parser reports as malformed", () => {
@@ -513,11 +524,11 @@ describe("resolution", () => {
   test("charges one pattern expansion its worst-case matching, and refuses one past the budget", () => {
     // `//` over the longest value it is evaluated over (512 characters) with a pattern of 772
     // positions: its worst case is a budget of matching (`globWork`, 131,841 characters stepped
-    // times 780), so it is refused before it runs, though the target would be inside the
-    // workspace. A charge that under-counts the pattern or the value lets it through.
+    // times 780). Past the budget its output is unknown, and a file command refuses that component
+    // even under the workspace prefix; a charge that under-counts it makes the command run.
     const v = `v=${"a".repeat(512)}`;
     const over = `${"*a".repeat(385)}*b`;
-    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${over}/x}"`)).toContain("walk limit");
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${over}/x}"`)).toBeDefined();
     // A quarter of it is matched, and bash's value is the target.
     const under = `${"*a".repeat(100)}*b`;
     expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${under}/x}"`)).toBeUndefined();
@@ -549,21 +560,20 @@ describe("resolution", () => {
   test("builds no value longer than it judges: a replacement's output, a doubling", () => {
     // A replacement of a replacement reaches 134 million characters in a tenth of a second, and
     // judging each read of it took seconds; past the longest value the guard builds, a value is
-    // unknown, and a refusal names why.
+    // unknown, and a file command refuses it rather than assuming it is a workspace leaf.
     const v = `v=${"a".repeat(512)}`;
     const grown = `${v}; w="\${v//?/$v}"; x="\${v//?/$w}"`;
     expect(bash(`${grown}; rm -rf "/$x"`)).toContain("longer than");
     const reads = Array.from({ length: 10 }, () => 'rm -rf "$LEGION_WORKSPACE/$x"').join("; ");
-    expect(bash(`${grown}; ${reads}`)).toBeUndefined();
+    expect(bash(`${grown}; ${reads}`)).toBeDefined();
     const doubled = `x=aaaa; ${Array.from({ length: 24 }, () => 'x="$x$x"').join("; ")}`;
     expect(bash(`${doubled}; rm -rf "/$x"`)).toContain("longer than");
     // `printf -v` assigns what it renders without a join, and an unquoted read scans the value
     // whole before any join bound applies: 2,000 arguments of 65,536 characters read back as
-    // `$y` took seconds. The first row covers that unquoted-read route and is a timing canary: it
-    // is allowed either way, only slowly without the bound. The second pins `printf -v`'s own
-    // check by the reason only it gives; without it, the join's bound refuses as "a word".
+    // `$y` took seconds. The workspace path that appends that unknown value is refused; the
+    // second assertion pins `printf -v`'s own bound by the reason only it gives.
     const rendered = `b=${"b".repeat(65_536)}; printf -v y '%s' ${Array.from({ length: 2000 }, () => '"$b"').join(" ")}`;
-    expect(bash(`${rendered}; w=$y; rm -rf "$LEGION_WORKSPACE/$w"`)).toBeUndefined();
+    expect(bash(`${rendered}; w=$y; rm -rf "$LEGION_WORKSPACE/$w"`)).toBeDefined();
     expect(bash(`${rendered}; rm -rf $y`)).toContain("`$y` (printf -v), longer than");
     // Zero characters doubled 24 times is 16 million pieces the length bound never sees.
     const pieces = `z=""; ${Array.from({ length: 24 }, () => 'z="$z$z"').join("; ")}`;
@@ -1690,6 +1700,16 @@ describe("signals", () => {
         attachedEnv
       )
     ).toBeUndefined();
+  });
+
+  test("refuses an unknown tmux socket component after a workspace prefix", () => {
+    for (const command of [
+      'x=$(cat esc); tmux -S "$LEGION_WORKSPACE/$x" kill-server',
+      'TMUX_TMPDIR="$LEGION_WORKSPACE/t"; x=$(cat esc); tmux -L "$x" kill-server',
+      'TMUX_TMPDIR="$TMPDIR/mine"; x=$(cat esc); tmux -L "$x" kill-server',
+    ]) {
+      expect(bash(command), command).toContain("needs a socket");
+    }
   });
 
   test("follows a trap handler after `--`", () => {

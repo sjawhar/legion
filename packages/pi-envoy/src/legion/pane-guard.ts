@@ -588,12 +588,19 @@ function describeRoots(roots: Roots): string {
 type Verdict = { readonly ok: true } | { readonly ok: false; readonly resolution: string };
 
 /** Whether an operation on `exp` stays inside the pane's writable roots. `overwrite` is a
- * redirection or `tee`: a device, or a file that does not exist yet, overwrites nothing. */
+ * redirection or `tee`: a device, or a file that does not exist yet, overwrites nothing.
+ * File commands and tmux sockets set `rejectUnknownDescendant`: an unknown component after a
+ * proven root can carry `/` and `..`, so it cannot establish containment. Redirections and `tee`
+ * leave an unknown leaf allowed, a documented residual that can overwrite outside the roots. */
 function judgePath(
   exp: Expansion,
   st: State,
   ctx: Ctx,
-  options: { readonly follow: boolean; readonly overwrite: boolean }
+  options: {
+    readonly follow: boolean;
+    readonly overwrite: boolean;
+    readonly rejectUnknownDescendant: boolean;
+  }
 ): Verdict {
   const { roots } = ctx;
   const text = exp.map((piece) => piece.text).join("");
@@ -625,10 +632,18 @@ function judgePath(
     .slice(0, open)
     .map((p) => p.text)
     .join("");
+  const trailing = exp
+    .slice(open + 1)
+    .map((p) => p.text)
+    .join("");
+  const source = piece.kind === "glob" ? "a glob" : (piece.why ?? "a value the guard cannot know");
+  if (/\/\.\.(?:\/|$)/.test(trailing)) {
+    return { ok: false, resolution: `a visible \`..\` after ${source}` };
+  }
   const slash = prefix.lastIndexOf("/");
   if (exp.some((p) => p.lenient) && prefix === "") return { ok: true };
   if (piece.kind === "unknown" && prefix === "") {
-    return { ok: false, resolution: piece.why ?? "a value the guard cannot know" };
+    return { ok: false, resolution: source };
   }
   if (!prefix.startsWith("/") && st.cwd === undefined) {
     return { ok: false, resolution: `relative to a working directory unknown after ${st.cwdWhy}` };
@@ -649,11 +664,13 @@ function judgePath(
     (real === roots.scratch &&
       component !== "" &&
       !isProtectedScratchComponent(component, roots, true));
-  if (allowed) return { ok: true };
-  const what =
-    piece.kind === "glob"
-      ? `a glob over ${real}`
-      : `${piece.why ?? "a value the guard cannot know"}, under ${real}`;
+  if (allowed) {
+    if (piece.kind === "unknown" && options.rejectUnknownDescendant) {
+      return { ok: false, resolution: `${source}, after a prefix inside ${real}` };
+    }
+    return { ok: true };
+  }
+  const what = piece.kind === "glob" ? `a glob over ${real}` : `${source}, under ${real}`;
   return {
     ok: false,
     resolution:
@@ -2305,7 +2322,11 @@ function checkRedirects(
     }
     for (const exp of expandWord(redirect.target, st, ctx)) {
       if (writes || operator === ">&") {
-        const verdict = judgePath(exp, st, ctx, { follow: true, overwrite: true });
+        const verdict = judgePath(exp, st, ctx, {
+          follow: true,
+          overwrite: true,
+          rejectUnknownDescendant: false,
+        });
         if (!verdict.ok) {
           throw refusal(
             site,
@@ -3520,7 +3541,11 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       const heredoc = invocation.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
       for (const arg of found.operands) {
         if (!append) {
-          const verdict = judgePath(arg.exp, st, ctx, { follow: true, overwrite: true });
+          const verdict = judgePath(arg.exp, st, ctx, {
+            follow: true,
+            overwrite: true,
+            rejectUnknownDescendant: false,
+          });
           if (!verdict.ok) {
             throw refusal(site, `tee would overwrite \`${arg.text}\` (${verdict.resolution})`, ctx);
           }
@@ -3707,7 +3732,11 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       }
       if (
         resolvedSocket !== undefined &&
-        judgePath(resolvedSocket, st, ctx, { follow: true, overwrite: false }).ok
+        judgePath(resolvedSocket, st, ctx, {
+          follow: true,
+          overwrite: false,
+          rejectUnknownDescendant: true,
+        }).ok
       ) {
         return;
       }
@@ -4029,7 +4058,11 @@ function checkTargets(
   for (const target of targets) {
     for (const follow of [true, false]) {
       if (!(follow ? reach.followed : reach.unfollowed)) continue;
-      const verdict = judgePath(target.exp, st, ctx, { follow, overwrite: reach.overwrite });
+      const verdict = judgePath(target.exp, st, ctx, {
+        follow,
+        overwrite: reach.overwrite,
+        rejectUnknownDescendant: true,
+      });
       if (!verdict.ok) {
         throw refusal(
           site,
@@ -5211,6 +5244,7 @@ function checkCode(
         const verdict = judgePath(pieces, { ...st, cwd: cwd ?? "/" }, ctx, {
           follow: verb !== "delete" && verb !== "move",
           overwrite: verb === "overwrite",
+          rejectUnknownDescendant: false,
         });
         if (!verdict.ok) {
           throw refusal(

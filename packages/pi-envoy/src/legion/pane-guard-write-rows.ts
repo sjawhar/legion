@@ -1134,6 +1134,105 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     command: 'for f in ./*.txt; do truncate -s 0 "$f"; done',
   },
 
+  // An unknown component can carry both slashes and `..`, so a proved workspace prefix does not
+  // contain it. The path from this fixture's workspace to its canary home is `../home`.
+  {
+    name: "rm through a command-substitution workspace escape",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.ssh' > esc.txt; x=$(cat esc.txt); rm -rf "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "rm through read's workspace escape",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.ssh' > esc.txt; read -r x < esc.txt; rm -rf "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "mv through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.ssh' > esc.txt; x=$(cat esc.txt); mv "$LEGION_WORKSPACE/$x" moved`,
+  },
+  {
+    name: "shred through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); shred -u "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "truncate through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); truncate -s 0 "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "chmod -R through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); chmod -R 700 "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "cp through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); cp payload "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "dd of= through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); dd if=payload of="$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "install through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); install payload "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "ln through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); ln -sf payload "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "sed -i through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); sed -i 's/CANARY/PWNED/' "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "rsync through an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' '../home/.bashrc' > esc.txt; x=$(cat esc.txt); rsync -a payload "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "visible .. after a glob",
+    family: "unknown workspace component",
+    role: "probe",
+    command: 'rm -rf "$LEGION_WORKSPACE"/*/../../home/.ssh',
+  },
+  {
+    name: "visible .. after an unknown workspace component",
+    family: "unknown workspace component",
+    role: "probe",
+    command: `printf '%s' dir > esc.txt; x=$(cat esc.txt); rm -rf "$LEGION_WORKSPACE/$x/../../home/.ssh"`,
+  },
+  {
+    name: "a redirection to an unknown workspace leaf",
+    family: "unknown workspace component",
+    role: "must-allow",
+    command: `printf '%s' notes.txt > esc.txt; x=$(cat esc.txt); echo written > "$LEGION_WORKSPACE/$x"`,
+  },
+  {
+    name: "tee to an unknown workspace leaf",
+    family: "unknown workspace component",
+    role: "must-allow",
+    command: `printf '%s' notes.txt > esc.txt; x=$(cat esc.txt); echo written | tee "$LEGION_WORKSPACE/$x"`,
+  },
+
   // --- The documented boundary, which these verbs do not change -----------------------------
   // A path that does not exist yet overwrites nothing: the rule `>` and `tee` are judged by
   // (`judgePath`'s `overwrite`). These rows create a file outside the roots and are allowed, as
