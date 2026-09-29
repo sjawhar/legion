@@ -2501,11 +2501,11 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // — whether edited in or produced by load ending the run early — reds this test instead of passing
 // it. Held against three builds of this package:
 //
-//	88f9fbaa  Keys() plus a Get per key                FAIL  "restoring 132 of 400 claims", err=nil
-//	3fa4774d  one watch, closed-channel check only     FAIL  "restoring 137 of 400 claims", err=nil
-//	this build                                         PASS  "the bucket's watch stopped after 153
-//	                                                         keys: nats: key watcher timed out
-//	                                                         waiting for initial keys"
+//	88f9fbaa  Keys() plus a Get per key             FAIL  "restoring 232 of 400 claims", err=nil
+//	3fa4774d  one watch, closed-channel check only  FAIL  "restoring 232 of 400 claims", err=nil
+//	this build                                      PASS  "the bucket's watch stopped after 232
+//	                                                      keys: nats: key watcher timed out
+//	                                                      waiting for initial keys"
 //
 // How far each partial scan got varies with the link; that it completed and returned no error is
 // the constant. A one-hour hold, the weakening, reds here on the Flush: "the link never came back
