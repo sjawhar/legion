@@ -1265,7 +1265,7 @@ function substitutionInvocation(
 ): { readonly base: string; readonly command: Command; readonly rest: readonly Arg[] } | undefined {
   if (node?.type !== "Command" || node.name === undefined || node.prefix.length !== 0)
     return undefined;
-  const argv = args([node.name, ...node.suffix], st, ctx);
+  const argv = commandArgs([node.name, ...node.suffix], st, ctx);
   const name = literalText(argv[0]?.exp);
   if (name === undefined) return undefined;
   return { base: path.basename(name), command: node, rest: argv.slice(1) };
@@ -1567,6 +1567,14 @@ function args(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
       return { text: word.text, exp };
     });
   });
+}
+/** A simple command's argv after bash drops words that produce no fields. */
+function commandArgs(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
+  const argv = args(words, st, ctx);
+  for (let index = argv.length - 1; index >= 0; index -= 1) {
+    if (argv[index]?.fields === "none") argv.splice(index, 1);
+  }
+  return argv;
 }
 
 /** The positional parameters a list of arguments gives a script, function or `set --`: undefined
@@ -2685,8 +2693,9 @@ function statementOutput(statement: Statement, st: State, ctx: Ctx): string | un
     return undefined;
   }
   if (command.name === undefined) return command.redirects.length === 0 ? "" : undefined;
-  const name = literalText(expandWord(command.name, st, ctx)[0]);
-  const rest = args(command.suffix, st, ctx);
+  const argv = commandArgs([command.name, ...command.suffix], st, ctx);
+  const name = literalText(argv[0]?.exp);
+  const rest = argv.slice(1);
   if (name === "cat" && rest.length === 0) {
     const [heredoc, ...others] = command.redirects;
     if (heredoc === undefined || others.length > 0) return undefined;
@@ -2876,7 +2885,7 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
     checkRedirects(command.redirects, undefined, site, st, ctx);
     return;
   }
-  const argv = args(words, st, ctx);
+  const argv = commandArgs(words, st, ctx);
   checkRedirects(
     command.redirects,
     { name: literalText(argv[0]?.exp), args: argv.slice(1) },
@@ -3690,9 +3699,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         "--remote-option",
         "--rsync-path",
         "--temp-dir",
-      ])
-        .operands.filter(passesAnArgument)
-        .at(-1);
+      ]).operands.at(-1);
       if (destination !== undefined) {
         checkTargets(
           "rsync",
@@ -4471,14 +4478,6 @@ interface WriteArguments {
   readonly uncertain: Arg | undefined;
 }
 
-/** Whether bash passes this word to the command at all. A word of no fields — an unquoted empty
- * value, `"${e[@]}"` of an empty array, `"$@"` of no positional parameters — produces NO
- * argument, so it is not the last operand and cannot be the destination. Counting it made the
- * real destination a source: `x=; cp payload "$HOME/.bashrc" $x` overwrote the profile. */
-function passesAnArgument(arg: Arg): boolean {
-  return arg.fields !== "none";
-}
-
 /** A write verb's arguments, read by its own grammar: the operands; the flags, from option words
  * only, never from an option's value or past `--`; and the directory `-t` names. The first
  * value-taking letter ends a cluster and takes the rest of its word, or the next word, as its
@@ -4496,12 +4495,12 @@ function writeArguments(rest: readonly Arg[], valued: string, long: LongOptions)
     const arg = rest[i] as Arg;
     const { text, whole } = readableWord(arg);
     if (whole && text === "--") {
-      operands.push(...rest.slice(i + 1).filter(passesAnArgument));
+      operands.push(...rest.slice(i + 1));
       break;
     }
     if (!whole || !text.startsWith("-") || text === "-") {
       if (!whole && mayBeSomeOption(text)) uncertain = arg;
-      if (passesAnArgument(arg)) operands.push(arg);
+      operands.push(arg);
       continue;
     }
     let takesValue = false;
