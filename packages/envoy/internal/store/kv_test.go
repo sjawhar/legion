@@ -2241,6 +2241,50 @@ func putRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder string) uint64 
 	return revision
 }
 
+// A restart's own log says how much of the role bucket it read. The SRE reading a staging restart
+// (listener ready 84 s after the update began) could not tell from the logs whether the revision
+// scan had completed, because nothing recorded its size. The two counts differ for a reason worth
+// seeing: restored is the claims that got their grace back, keys is everything the bucket made the
+// listener stream to find them, delete markers included, which is what grows without bound.
+func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	const (
+		claims  = 5
+		markers = 3
+	)
+	for i := range claims {
+		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%d", i), fmt.Sprintf("ses_%d", i))
+	}
+	for i := range markers {
+		gone := fmt.Sprintf("gone-%d", i)
+		putRoleClaim(t, rawRoles, gone, "ses_gone")
+		if err := rawRoles.Delete(gone); err != nil {
+			t.Fatalf("delete %s: %v", gone, err)
+		}
+	}
+
+	logs := captureRegistryLogs(t)
+	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+
+	want := fmt.Sprintf(`msg="restored role claims" restored=%d keys=%d`, claims, claims+markers)
+	if got := logs.String(); !strings.Contains(got, want) {
+		t.Fatalf("the restart logged no line saying how much of the role bucket it read.\nwant: %s\ngot:\n%s", want, got)
+	}
+}
+
 // earlyEndKV hands out a watcher over the real bucket that ends its scan early, the two ways
 // nats.go ends one early (nats.go v1.50.0 kv.go). With no fault it closes the updates channel
 // after `after` entries and never sends the nil marker, which is what a subscription that ends
@@ -2452,16 +2496,25 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // The stall shape is load-bearing and a weaker one hides the defect, so do not simplify it to a
 // link that stays down. stallingProxy holds the server's bytes past Open's JetStream MaxWait, so
 // the timer fires, and then sends them on, so the reader is free to carry on and succeed with part
-// of the bucket instead of failing on a later request. Held against three builds of this package:
+// of the bucket instead of failing on a later request. That recovery is asserted, not assumed: the
+// stalled.Flush below has to answer before Open's outcome is judged, so a hold that never releases
+// — whether edited in or produced by load ending the run early — reds this test instead of passing
+// it. Held against three builds of this package:
 //
-//	88f9fbaa  Keys() plus a Get per key   FAIL  "restoring 232 of 400 claims", Open err=nil
-//	3fa4774d  one watch, closed-channel check only   FAIL  "restoring 232 of 400 claims", err=nil
-//	6ee51e4a  this build                  PASS  "the bucket's watch stopped after 232 keys: nats:
-//	                                            key watcher timed out waiting for initial keys"
+//	88f9fbaa  Keys() plus a Get per key                FAIL  "restoring 132 of 400 claims", err=nil
+//	3fa4774d  one watch, closed-channel check only     FAIL  "restoring 137 of 400 claims", err=nil
+//	this build                                         PASS  "the bucket's watch stopped after 153
+//	                                                         keys: nats: key watcher timed out
+//	                                                         waiting for initial keys"
+//
+// How far each partial scan got varies with the link; that it completed and returned no error is
+// the constant. A one-hour hold, the weakening, reds here on the Flush: "the link never came back
+// after the hold ... nats: timeout".
 //
 // 88f9fbaa is main, so the defect predates the one-pass read: Keys() is itself a watch carrying
-// the same timer. With a stall that never recovers all three pass, main because its per-key Gets
-// then time out on a dead link — a second route to a failed start that hides the first.
+// the same timer. With a stall that never recovers all three would pass, main because its per-key
+// Gets then time out on a dead link — a second route to a failed start that hides the first — and
+// that is the run the Flush assertion refuses.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	names := testBuckets(t)
 	direct, cleanup := connectNATS(t)
@@ -2484,9 +2537,16 @@ func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	defer stalled.Close()
 
 	registry, err := Open(stalled, WithReplicas(1), withTestBuckets(t))
+	// The link has to have come back before Open's outcome means anything: a stall that stays down
+	// fails every build, main by its per-key Gets timing out, so this run could not tell them
+	// apart. Assert it rather than trusting the hold, since load can end a run before the release
+	// too.
+	if err := stalled.Flush(); err != nil {
+		t.Fatalf("the link never came back after the hold, so this run cannot tell a build that fails the stalled scan from one that returns part of the bucket: %v", err)
+	}
 	if err == nil {
 		t.Cleanup(registry.StopWatch)
 		t.Fatalf("Open succeeded over a link that stopped mid-scan, restoring %d of %d claims; the rest lose their grace", len(registry.restoredRoleRevisions), claims)
 	}
-	t.Logf("Open over a stalled link: %v", err)
+	t.Logf("Open over a stalled link that came back: %v", err)
 }

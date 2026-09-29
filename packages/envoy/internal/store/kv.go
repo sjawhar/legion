@@ -160,12 +160,16 @@ func (r *Registry) roles() bus.KeyValue {
 // holder gets to register again. It takes them from one watch over the bucket's existing keys, the
 // way the interest, session and CI caches read theirs (internal/kvwatch), so readiness costs one
 // pass over the bucket rather than a round trip per stored claim. That is the watch nats.go's
-// kv.Keys() runs — IgnoreDeletes and MetaOnly over every key — which discards each entry's
-// revision; this keeps it. The watch names no key, so a claim whose key this build cannot read
-// (bus.ErrRefused: an earlier build stored it past what a read of it may send) gets a revision
-// here; it still gets no grace, because ReleaseExpiredRoleClaim, the only reader of these
-// revisions, reads the claim itself first and cannot. A delete marker is not a claim and is
-// skipped.
+// kv.Keys() runs — MetaOnly over every key — which discards each entry's revision; this keeps it.
+// The watch names no key, so a claim whose key this build cannot read (bus.ErrRefused: an earlier
+// build stored it past what a read of it may send) gets a revision here; it still gets no grace,
+// because ReleaseExpiredRoleClaim, the only reader of these revisions, reads the claim itself
+// first and cannot.
+//
+// The scan keeps the delete markers rather than letting nats.go's IgnoreDeletes drop them, because
+// it costs nothing — they are on the wire either way — and the two counts it then has are what a
+// restart's log needs: how many claims were restored, and how many keys the bucket made the
+// listener stream to find them. A marker is not a claim and gets no revision.
 //
 // A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
 // restored holder that loses its grace and is released a session TTL early, so a scan that did not
@@ -173,12 +177,12 @@ func (r *Registry) roles() bus.KeyValue {
 // nats.go v1.50.0): it sends a nil entry once it has delivered every existing key (:1096-1099,
 // :1140-1142); its idle timer sends the same nil when no entry arrived within the JetStream
 // MaxWait, after putting ErrKeyWatcherTimeout on Error() under the watcher's lock (:1145-1156), so
-// the error is there to read by the time the nil arrives; and it closes the updates channel with no
-// nil at all when the subscription ends first (:1170, which closes Error() at :1171 too), an ordered
-// consumer it could not recreate or
-// a closed connection. Only the first is a complete scan.
+// the error is there to read by the time the nil arrives; and it closes the updates channel with
+// no nil at all when the subscription ends first (:1170, which closes Error() at :1171 too), an
+// ordered consumer it could not recreate or a closed connection. Only the first is a complete
+// scan, and only it logs.
 func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
-	watcher, err := kv.Watch(nats.AllKeys, nats.IgnoreDeletes(), nats.MetaOnly())
+	watcher, err := kv.Watch(nats.AllKeys, nats.MetaOnly())
 	if err != nil {
 		return nil, err
 	}
@@ -188,21 +192,26 @@ func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
 		}
 	}()
 	revisions := map[string]uint64{}
+	keys := 0
 	for entry := range watcher.Updates() {
 		if entry != nil {
-			revisions[entry.Key()] = entry.Revision()
+			keys++
+			if entry.Operation() == nats.KeyValuePut {
+				revisions[entry.Key()] = entry.Revision()
+			}
 			continue
 		}
 		select {
 		case err := <-watcher.Error():
 			if err != nil {
-				return nil, fmt.Errorf("role revisions: the bucket's watch stopped after %d keys: %w", len(revisions), err)
+				return nil, fmt.Errorf("role revisions: the bucket's watch stopped after %d keys: %w", keys, err)
 			}
 		default:
 		}
+		slog.Info("restored role claims", slog.Int("restored", len(revisions)), slog.Int("keys", keys))
 		return revisions, nil
 	}
-	return nil, fmt.Errorf("role revisions: the bucket's watch ended after %d keys, before it had delivered them all", len(revisions))
+	return nil, fmt.Errorf("role revisions: the bucket's watch ended after %d keys, before it had delivered them all", keys)
 }
 
 func (r *Registry) cachedRevision(sessionID string) uint64 {
