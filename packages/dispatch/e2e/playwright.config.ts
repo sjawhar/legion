@@ -1,7 +1,7 @@
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
-import { dispatchPort, fakeEnvoyPort, fakeGithubPort } from "./harness-ports";
+import { dispatchPort, fakeEnvoyPort, fakeGithubPort, harnessPorts } from "./harness-ports";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchPort}`;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
@@ -26,12 +26,6 @@ function resolveReuseServers(): boolean {
 }
 
 const reuseServers = resolveReuseServers();
-
-const harnessPorts = [
-  { variable: "DISPATCH_E2E_PORT", port: dispatchPort },
-  { variable: "FAKE_ENVOY_PORT", port: fakeEnvoyPort },
-  { variable: "FAKE_GITHUB_PORT", port: fakeGithubPort },
-];
 
 // Two variables naming one port pass the probe below — each port is free on its own — and then
 // reach Playwright's own refusal, which names no variable. Refused here rather than inside the

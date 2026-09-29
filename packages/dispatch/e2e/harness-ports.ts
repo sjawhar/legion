@@ -25,3 +25,10 @@ function harnessPort(variable: string, fallback: string): number {
 export const dispatchPort = harnessPort("DISPATCH_E2E_PORT", "8777");
 export const fakeEnvoyPort = harnessPort("FAKE_ENVOY_PORT", "9021");
 export const fakeGithubPort = harnessPort("FAKE_GITHUB_PORT", "9022");
+
+/** The same three, paired with the variable a message has to name. */
+export const harnessPorts = [
+  { variable: "DISPATCH_E2E_PORT", port: dispatchPort },
+  { variable: "FAKE_ENVOY_PORT", port: fakeEnvoyPort },
+  { variable: "FAKE_GITHUB_PORT", port: fakeGithubPort },
+];
