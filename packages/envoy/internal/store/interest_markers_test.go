@@ -451,9 +451,10 @@ func TestAPassWhoseStreamWasReplacedFromTheSameFirstSequencePurgesNothing(t *tes
 	}
 }
 
-// A pass that cannot read the bucket's stream changes nothing, and says so: a listener that has
-// stopped collecting must not look like one with nothing to collect, which is the state LEGION-374
-// exists because nobody could see. Each read names itself.
+// A pass that cannot read the bucket's stream says so: a listener that has stopped collecting must
+// not look like one with nothing to collect, which is the state LEGION-374 exists because nobody
+// could see. A read before the purge refuses the pass and names itself; the read after the purge
+// only counts what it removed, so the purge is logged as done with its count unknown.
 func TestAPassThatCannotReadTheStreamSaysWhichReadFailed(t *testing.T) {
 	t.Run("the first read", func(t *testing.T) {
 		conn, cleanup := connectNATS(t)
@@ -498,6 +499,44 @@ func TestAPassThatCannotReadTheStreamSaysWhichReadFailed(t *testing.T) {
 			t.Fatalf("the refusal lost the first read it did take: %v", refusal)
 		}
 	})
+	t.Run("the read after the purge", func(t *testing.T) {
+		conn, cleanup := connectNATS(t)
+		defer cleanup()
+		js, kv := rawInterestBucket(t, conn)
+		seedMarkers(t, kv, 3)
+		seedLive(t, kv, 2)
+		records := captureJSONLogs(t)
+		registry := openRegistry(t, conn)
+		gone := purgeThenDelete{JetStreamContext: js, bucket: testBuckets(t).interests}
+		if _, err := collectorOf(registry).pass(gone, nil); err == nil {
+			t.Fatal("a pass whose purged stream could not be read returned no error")
+		}
+		collected := jsonRecord(t, records(), "interest markers collected")
+		if collected["level"] != "WARN" || !strings.Contains(fmt.Sprint(collected["error"]), "purged stream") {
+			t.Fatalf("a purge whose count could not be read logged %v; want the purge at WARN with the read's error", collected)
+		}
+		if _, ok := collected["purged"]; ok {
+			t.Fatalf("a purge whose count could not be read reported one: %v", collected)
+		}
+		if collected["floor"] == nil || collected["read2_last_seq"] == nil {
+			t.Fatalf("the purge's line lost the values it was decided on: %v", collected)
+		}
+	})
+}
+
+// purgeThenDelete purges as the server does, then deletes the bucket, so the read a pass makes after
+// its purge finds no stream.
+type purgeThenDelete struct {
+	natsgo.JetStreamContext
+
+	bucket string
+}
+
+func (j purgeThenDelete) PurgeStream(name string, opts ...natsgo.JSOpt) error {
+	if err := j.JetStreamContext.PurgeStream(name, opts...); err != nil {
+		return err
+	}
+	return j.DeleteKeyValue(j.bucket)
 }
 
 // A live key whose value this build cannot decode is still a live key. The cache evicts it
