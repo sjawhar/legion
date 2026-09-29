@@ -808,133 +808,137 @@ echo "case: every build shape is refused, and only a listed step is excused"
 # step is named and that the matched text is printed, so no row can pass on the zero-build
 # guard. `\n` in a body is a newline: a build under a wrapper, or after an inspecting command,
 # is the shape that hid an escape hatch in every pattern-based veto this replaced.
-while IFS='|' read -r label body; do
+while IFS='|' read -r label certain body; do
   [ -n "$label" ] || continue
   root=$(fixture "build-$label")
   run_step "$root" "$body"
   run_check "$root"
   check "build shape $label is refused" "$(is "$status" 1)"
   check "  and names the step" "$(contains "$out" "Build builds an image in a run step")"
-  check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ('")"
-  check "  and the last remedy asks for an id and an entry" "$(contains "$out" "give the step an \`id:\` and add")"
+  check "  and prints the whole command" "$(contains "$out" "builds an image in a run step ('")"
+  if [ "$certain" = "yes" ]; then
+    check "  and the list is not offered for a certain build" "$(contains "$out" "This shape cannot be listed in NOT_A_BUILD_STEPS")"
+  else
+    check "  and the last remedy asks for an id and an entry" "$(contains "$out" "give the step an \`id:\` and add")"
+  fi
 done <<'BUILDS'
-docker-build-f-docker|docker build -f docker/Dockerfile .
-docker-buildx-build-load|docker buildx build --load -f docker/Dockerfile .
-docker-buildx-b-load|docker buildx b --load -f docker/Dockerfile .
-docker-buildx-b|docker buildx b .
-docker-buildx-b-t|docker buildx b -t x .
-docker-buildx-b-2|docker  buildx   b .
-docker-buildx-bake-load|docker buildx bake --load listener
-docker-image-build-f|docker image build -f docker/Dockerfile .
-docker-builder-build-f|docker builder build -f docker/Dockerfile .
-docker-context-remote-build|docker --context remote build -f docker/Dockerfile .
-docker-h-tcp-x|docker -H tcp://x:2375 build -f docker/Dockerfile .
-docker-buildx-builder-mybuilder|docker buildx --builder mybuilder build -f docker/Dockerfile .
-sudo-docker-build-f|sudo docker build -f docker/Dockerfile .
-docker-buildkit-1-docker|DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile .
-img-docker-buildx-build|img=$(docker buildx build --load -q -f docker/Dockerfile .)
-img-docker-buildx-build-2|img=`docker buildx build --load -q -f docker/Dockerfile .`
-echo-img-docker-buildx|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
-eval-docker-build-f|eval "docker build -f docker/Dockerfile ."
-bash-c-docker-buildx|bash -c "docker buildx build --load -f docker/Dockerfile ."
-docker-buildx-build-load-2|(docker buildx build --load -f docker/Dockerfile .)
-docker-compose-up-build|docker compose up --build -d
-docker-compose-build-listener|docker-compose build listener
-podman-compose-up-build|podman compose up --build -d
-podman-build-f-docker|podman build -f docker/Dockerfile .
-nerdctl-build-f-docker|nerdctl build -f docker/Dockerfile .
-depot-build-f-docker|depot build -f docker/Dockerfile .
-buildah-bud-f-docker|buildah bud -f docker/Dockerfile .
-buildctl-build-frontend-dockerfile|buildctl build --frontend dockerfile.v0
-ko-build-cmd-listener|ko build ./cmd/listener
-pack-build-app-path|pack build app --path .
-skaffold-build-file-output|skaffold build --file-output out.json
-earthly-docker|earthly +docker
-crane-append-f-layer|crane append -f layer.tar -t app:ci
-mvn-compile-jib-dockerbuild|mvn compile jib:dockerBuild
-docker-build-f-docker-2|"$DOCKER" build -f docker/Dockerfile .
-kaniko-executor-dockerfile-docker|/kaniko/executor --dockerfile docker/Dockerfile --context .
-docker-build-f-docker-3|"docker" build -f docker/Dockerfile .
-which-docker-build-f|$(which docker) build -f docker/Dockerfile .
-docker-docker-build-f|${DOCKER:-docker} build -f docker/Dockerfile .
-docker-docker-build-f-2|"${DOCKER:-docker}" build -f docker/Dockerfile .
-docker-config-tmp-a|docker --config "/tmp/a b" build -f docker/Dockerfile .
-docker-context-env-x|docker --context ${{ env.X }} build -f docker/Dockerfile .
-docker-buildx-builder-steps|docker buildx --builder ${{ steps.buildx.outputs.name }} build -f docker/Dockerfile .
-nerdctl-compose-build|nerdctl compose build
-nerdctl-compose-up-build|nerdctl compose up --build
-depot-bake-listener|depot bake listener
-buildah-from-scratch-buildah|buildah from scratch && buildah commit working-container app:ci
-buildctl-addr-tcp-x|buildctl --addr tcp://x:1234 build --frontend dockerfile.v0
-buildctl-daemonless-sh-build|buildctl-daemonless.sh build --frontend dockerfile.v0
-docker-buildx-build-f|docker-buildx build -f docker/Dockerfile .
-buildx-build-f-docker|buildx build -f docker/Dockerfile .
-img-build-f-docker|img build -f docker/Dockerfile .
-docker-commit-working-app|docker commit working app:ci
-docker-import-rootfs-tar|docker import rootfs.tar app:ci
-ko-resolve-f-config|ko resolve -f config/
-ko-apply-f-config|ko apply -f config/
-skaffold-run|skaffold run
-docker-compose-f-compose|docker compose -f compose/listener.compose.yml up -d
-docker-compose-f-compose-2|docker compose -f compose/listener.compose.yml run app
-docker-compose-f-compose-3|docker compose -f compose/listener.compose.yml create
-docker-compose-f-compose-4|docker compose -f compose/listener.compose.yml watch
-ko-verbose-build-cmd|ko --verbose build ./cmd/listener
-pack-quiet-build-app|pack --quiet build app --path .
-skaffold-default-repo-r|skaffold --default-repo=r build
-img-debug-build-f|img --debug build -f docker/Dockerfile .
-docker-build-f-docker-4|docker "build" -f docker/Dockerfile .
-finch-build-f-docker|finch build -f docker/Dockerfile .
-gradlew-jibdockerbuild|./gradlew jibDockerBuild
-df-h-then-docker|df -h\ndocker buildx build --load -f docker/Dockerfile .
-docker-version-then-docker|docker --version\ndocker buildx build --load -f docker/Dockerfile .
-sha256sum-check-sums-txt|sha256sum --check sums.txt\ndocker build -f docker/Dockerfile .
-kubectl-apply-dry-run|kubectl apply --dry-run=client -f k8s/\ndocker build -f docker/Dockerfile .
-helm-template-help-then|helm template --help\ndocker build -f docker/Dockerfile .
-docker-buildx-bake-print|docker buildx bake --print\ndocker buildx build --load -f docker/Dockerfile .
-docker-build-f-docker-5|docker build -f docker/Dockerfile . && df -h
-timeout-900-docker-build|timeout 900 docker build -f docker/Dockerfile .
-time-docker-build-f|time docker build -f docker/Dockerfile .
-nice-n-10-docker|nice -n 10 docker build -f docker/Dockerfile .
-exec-docker-build-f|exec docker build -f docker/Dockerfile .
-sudo-e-docker-build|sudo -E docker build -f docker/Dockerfile .
-command-docker-build-f|command docker build -f docker/Dockerfile .
-env-foo-1-docker|env FOO=1 docker build -f docker/Dockerfile .
-usr-bin-docker-build|/usr/bin/docker build -f docker/Dockerfile .
-if-docker-build-f|if ! docker build -f docker/Dockerfile .; then exit 1; fi
-for-t-in-a|for t in a b; do docker build -f docker/Dockerfile . ; done
-until-docker-build-f|until docker build -f docker/Dockerfile .; do sleep 1; done
-docker-build-f-docker-6|{ docker build -f docker/Dockerfile . ; }
-sh-euc-docker-build|sh -euc "docker build -f docker/Dockerfile ."
-sleep-5-then-docker|sleep 5\ndocker build -f docker/Dockerfile .
-echo-run-docker-build|echo run docker build now
-docker-compose-up-d|docker compose up -d\n# we pass --no-build in CI
-docker-compose-f-x|docker compose -f x.yml run --rm --build app
-docker-then-buildx-build|docker \\\n  buildx build --load -f docker/Dockerfile .
-docker-buildx-build-load-3|docker buildx build --load -f docker/Dockerfile . # --help
-podman-compose-up|podman-compose up
-docker-debug-build-f|docker --debug build -f docker/Dockerfile .
-docker-d-buildx-build|docker -D buildx build --load -f docker/Dockerfile .
-buildctl-addr-tcp-h|buildctl --addr tcp://h:1234 --debug build --frontend dockerfile.v0
-docker-context-ci-compose|docker --context ci compose build
-docker-h-ssh-builder|docker -H ssh://builder compose build
-podman-log-level-debug|podman --log-level debug compose build
-nerdctl-namespace-k8s-io|nerdctl --namespace k8s.io compose build
-docker-context-ci-compose-2|docker --context ci compose run --build app true
-docker-context-ci-compose-3|docker --context ci compose up -d --build
-docker-buildx-build-call|docker buildx build --call build --load -f docker/Dockerfile .
-docker-context-ci-compose-4|docker --context ci compose up -d
-docker-config-cat-f|docker --config "$(cat f | head -1)" build -t x .
-docker-build-build-arg|docker build --build-arg NODE_VERSION=$(node --version | tr -d v) -f docker/Dockerfile .
-docker-build-build-arg-2|docker build --build-arg BUN_VERSION="$(bun --version | cut -d. -f1-2)" -f docker/Dockerfile .
-docker-buildx-build-f-2|docker "buildx" build -f docker/Dockerfile .
-docker-image-build-f-2|docker "image" build -f docker/Dockerfile .
-podman-url-build-example|podman --url build.example:8888 build -f docker/Dockerfile .
-docker-compose-f-build|docker compose -f build-compose.yml up -d
-docker-compose-p-run|docker compose -p run-tests up -d
-docker-compose-profile-up|docker compose --profile up-stack up -d
-docker-compose-project-directory|docker compose --project-directory=${{ env.COMPOSE_DIR }} -f x.yml up -d
-docker-build-f-docker-7|docker build -f docker/Dockerfile .\ndocker buildx bake --load listener
+docker-build-f-docker|yes|docker build -f docker/Dockerfile .
+docker-buildx-build-load|yes|docker buildx build --load -f docker/Dockerfile .
+docker-buildx-b-load|yes|docker buildx b --load -f docker/Dockerfile .
+docker-buildx-b|yes|docker buildx b .
+docker-buildx-b-t|yes|docker buildx b -t x .
+docker-buildx-b-2|yes|docker  buildx   b .
+docker-buildx-bake-load|yes|docker buildx bake --load listener
+docker-image-build-f|yes|docker image build -f docker/Dockerfile .
+docker-builder-build-f|yes|docker builder build -f docker/Dockerfile .
+docker-context-remote-build|yes|docker --context remote build -f docker/Dockerfile .
+docker-h-tcp-x|yes|docker -H tcp://x:2375 build -f docker/Dockerfile .
+docker-buildx-builder-mybuilder|yes|docker buildx --builder mybuilder build -f docker/Dockerfile .
+sudo-docker-build-f|yes|sudo docker build -f docker/Dockerfile .
+docker-buildkit-1-docker|yes|DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile .
+img-docker-buildx-build|yes|img=$(docker buildx build --load -q -f docker/Dockerfile .)
+img-docker-buildx-build-2|yes|img=`docker buildx build --load -q -f docker/Dockerfile .`
+echo-img-docker-buildx|yes|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
+eval-docker-build-f|yes|eval "docker build -f docker/Dockerfile ."
+bash-c-docker-buildx|yes|bash -c "docker buildx build --load -f docker/Dockerfile ."
+docker-buildx-build-load-2|yes|(docker buildx build --load -f docker/Dockerfile .)
+docker-compose-up-build|yes|docker compose up --build -d
+docker-compose-build-listener|yes|docker-compose build listener
+podman-compose-up-build|yes|podman compose up --build -d
+podman-build-f-docker|yes|podman build -f docker/Dockerfile .
+nerdctl-build-f-docker|yes|nerdctl build -f docker/Dockerfile .
+depot-build-f-docker|yes|depot build -f docker/Dockerfile .
+buildah-bud-f-docker|yes|buildah bud -f docker/Dockerfile .
+buildctl-build-frontend-dockerfile|yes|buildctl build --frontend dockerfile.v0
+ko-build-cmd-listener|yes|ko build ./cmd/listener
+pack-build-app-path|yes|pack build app --path .
+skaffold-build-file-output|yes|skaffold build --file-output out.json
+earthly-docker|yes|earthly +docker
+crane-append-f-layer|yes|crane append -f layer.tar -t app:ci
+mvn-compile-jib-dockerbuild|yes|mvn compile jib:dockerBuild
+docker-build-f-docker-2|yes|"$DOCKER" build -f docker/Dockerfile .
+kaniko-executor-dockerfile-docker|yes|/kaniko/executor --dockerfile docker/Dockerfile --context .
+docker-build-f-docker-3|yes|"docker" build -f docker/Dockerfile .
+which-docker-build-f|yes|$(which docker) build -f docker/Dockerfile .
+docker-docker-build-f|yes|${DOCKER:-docker} build -f docker/Dockerfile .
+docker-docker-build-f-2|yes|"${DOCKER:-docker}" build -f docker/Dockerfile .
+docker-config-tmp-a|yes|docker --config "/tmp/a b" build -f docker/Dockerfile .
+docker-context-env-x|yes|docker --context ${{ env.X }} build -f docker/Dockerfile .
+docker-buildx-builder-steps|yes|docker buildx --builder ${{ steps.buildx.outputs.name }} build -f docker/Dockerfile .
+nerdctl-compose-build|yes|nerdctl compose build
+nerdctl-compose-up-build|yes|nerdctl compose up --build
+depot-bake-listener|yes|depot bake listener
+buildah-from-scratch-buildah|no|buildah from scratch && buildah commit working-container app:ci
+buildctl-addr-tcp-x|yes|buildctl --addr tcp://x:1234 build --frontend dockerfile.v0
+buildctl-daemonless-sh-build|yes|buildctl-daemonless.sh build --frontend dockerfile.v0
+docker-buildx-build-f|yes|docker-buildx build -f docker/Dockerfile .
+buildx-build-f-docker|yes|buildx build -f docker/Dockerfile .
+img-build-f-docker|yes|img build -f docker/Dockerfile .
+docker-commit-working-app|no|docker commit working app:ci
+docker-import-rootfs-tar|no|docker import rootfs.tar app:ci
+ko-resolve-f-config|yes|ko resolve -f config/
+ko-apply-f-config|yes|ko apply -f config/
+skaffold-run|yes|skaffold run
+docker-compose-f-compose|yes|docker compose -f compose/listener.compose.yml up -d
+docker-compose-f-compose-2|yes|docker compose -f compose/listener.compose.yml run app
+docker-compose-f-compose-3|yes|docker compose -f compose/listener.compose.yml create
+docker-compose-f-compose-4|yes|docker compose -f compose/listener.compose.yml watch
+ko-verbose-build-cmd|yes|ko --verbose build ./cmd/listener
+pack-quiet-build-app|yes|pack --quiet build app --path .
+skaffold-default-repo-r|yes|skaffold --default-repo=r build
+img-debug-build-f|yes|img --debug build -f docker/Dockerfile .
+docker-build-f-docker-4|yes|docker "build" -f docker/Dockerfile .
+finch-build-f-docker|yes|finch build -f docker/Dockerfile .
+gradlew-jibdockerbuild|yes|./gradlew jibDockerBuild
+df-h-then-docker|yes|df -h\ndocker buildx build --load -f docker/Dockerfile .
+docker-version-then-docker|yes|docker --version\ndocker buildx build --load -f docker/Dockerfile .
+sha256sum-check-sums-txt|yes|sha256sum --check sums.txt\ndocker build -f docker/Dockerfile .
+kubectl-apply-dry-run|yes|kubectl apply --dry-run=client -f k8s/\ndocker build -f docker/Dockerfile .
+helm-template-help-then|yes|helm template --help\ndocker build -f docker/Dockerfile .
+docker-buildx-bake-print|yes|docker buildx bake --print\ndocker buildx build --load -f docker/Dockerfile .
+docker-build-f-docker-5|yes|docker build -f docker/Dockerfile . && df -h
+timeout-900-docker-build|yes|timeout 900 docker build -f docker/Dockerfile .
+time-docker-build-f|yes|time docker build -f docker/Dockerfile .
+nice-n-10-docker|yes|nice -n 10 docker build -f docker/Dockerfile .
+exec-docker-build-f|yes|exec docker build -f docker/Dockerfile .
+sudo-e-docker-build|yes|sudo -E docker build -f docker/Dockerfile .
+command-docker-build-f|yes|command docker build -f docker/Dockerfile .
+env-foo-1-docker|yes|env FOO=1 docker build -f docker/Dockerfile .
+usr-bin-docker-build|yes|/usr/bin/docker build -f docker/Dockerfile .
+if-docker-build-f|yes|if ! docker build -f docker/Dockerfile .; then exit 1; fi
+for-t-in-a|yes|for t in a b; do docker build -f docker/Dockerfile . ; done
+until-docker-build-f|yes|until docker build -f docker/Dockerfile .; do sleep 1; done
+docker-build-f-docker-6|yes|{ docker build -f docker/Dockerfile . ; }
+sh-euc-docker-build|yes|sh -euc "docker build -f docker/Dockerfile ."
+sleep-5-then-docker|yes|sleep 5\ndocker build -f docker/Dockerfile .
+echo-run-docker-build|yes|echo run docker build now
+docker-compose-up-d|yes|docker compose up -d\n# we pass --no-build in CI
+docker-compose-f-x|yes|docker compose -f x.yml run --rm --build app
+docker-then-buildx-build|yes|docker \\\n  buildx build --load -f docker/Dockerfile .
+docker-buildx-build-load-3|yes|docker buildx build --load -f docker/Dockerfile . # --help
+podman-compose-up|yes|podman-compose up
+docker-debug-build-f|yes|docker --debug build -f docker/Dockerfile .
+docker-d-buildx-build|yes|docker -D buildx build --load -f docker/Dockerfile .
+buildctl-addr-tcp-h|yes|buildctl --addr tcp://h:1234 --debug build --frontend dockerfile.v0
+docker-context-ci-compose|yes|docker --context ci compose build
+docker-h-ssh-builder|yes|docker -H ssh://builder compose build
+podman-log-level-debug|yes|podman --log-level debug compose build
+nerdctl-namespace-k8s-io|yes|nerdctl --namespace k8s.io compose build
+docker-context-ci-compose-2|yes|docker --context ci compose run --build app true
+docker-context-ci-compose-3|yes|docker --context ci compose up -d --build
+docker-buildx-build-call|yes|docker buildx build --call build --load -f docker/Dockerfile .
+docker-context-ci-compose-4|yes|docker --context ci compose up -d
+docker-config-cat-f|yes|docker --config "$(cat f | head -1)" build -t x .
+docker-build-build-arg|yes|docker build --build-arg NODE_VERSION=$(node --version | tr -d v) -f docker/Dockerfile .
+docker-build-build-arg-2|yes|docker build --build-arg BUN_VERSION="$(bun --version | cut -d. -f1-2)" -f docker/Dockerfile .
+docker-buildx-build-f-2|yes|docker "buildx" build -f docker/Dockerfile .
+docker-image-build-f-2|yes|docker "image" build -f docker/Dockerfile .
+podman-url-build-example|yes|podman --url build.example:8888 build -f docker/Dockerfile .
+docker-compose-f-build|yes|docker compose -f build-compose.yml up -d
+docker-compose-p-run|yes|docker compose -p run-tests up -d
+docker-compose-profile-up|yes|docker compose --profile up-stack up -d
+docker-compose-project-directory|yes|docker compose --project-directory=${{ env.COMPOSE_DIR }} -f x.yml up -d
+docker-build-f-docker-7|yes|docker build -f docker/Dockerfile .\ndocker buildx bake --load listener
 BUILDS
 
 # The continuation form cannot go in the table: its body spans two lines.
@@ -964,23 +968,41 @@ while IFS='|' read -r label hits body; do
   check "  and goes green once listed" "$(is "$status" 0)"
   check "  and the excusal names the id, hits and reason" "$(contains "$out" "job docker: step not-a-build: $hits - runs a build word without building an image")"
 done <<'FALSEPOSITIVES'
-docker-h-build-example|'docker -H build'|docker -H build.example.com:2375 pull alpine
-docker-config-build-docker|'docker --config build'|docker --config build/.docker pull alpine
-docker-buildx-bake-print-2|'docker buildx bake'|docker buildx bake --print
-docker-buildx-build-check|'docker buildx build'|docker buildx build --check .
-docker-buildx-build-help|'docker buildx build'|docker buildx build --help
-docker-buildx-build-call-2|'docker buildx build'|docker buildx build --call=check .
-docker-buildx-bake-list|'docker buildx bake'|docker buildx bake --list=targets
-docker-compose-build-dry|'docker compose build'|docker compose build --dry-run
-docker-context-build-pull|'docker --context build'|docker --context build pull alpine
-docker-h-build-corp|'docker -H build'|docker -H build.corp pull alpine
-docker-run-rm-golang|'docker run --rm golang go build'|docker run --rm golang go build ./...
+docker-h-build-example|'docker -H build.example.com:2375 pull alpine'|docker -H build.example.com:2375 pull alpine
+docker-config-build-docker|'docker --config build/.docker pull alpine'|docker --config build/.docker pull alpine
+docker-context-build-pull|'docker --context build pull alpine'|docker --context build pull alpine
+docker-h-build-corp|'docker -H build.corp pull alpine'|docker -H build.corp pull alpine
+docker-run-rm-golang|'docker run --rm golang go build ./...'|docker run --rm golang go build ./...
 docker-exec-app-make|'docker exec app make build'|docker exec app make build
 docker-run-alpine-echo|'docker run alpine echo a b'|docker run alpine echo a b
-docker-run-v-pwd|'docker run -v $PWD:/w -w /w golang go build'|docker run -v "$PWD":/w -w /w golang go build ./...
+docker-run-v-pwd|'docker run -v $PWD:/w -w /w golang go build ./...'|docker run -v "$PWD":/w -w /w golang go build ./...
 docker-compose-run-no|'docker compose run --no-build app ./test.sh --build'|docker compose run --no-build app ./test.sh --build
-earthly-test|'earthly +t'|earthly +test
 FALSEPOSITIVES
+
+echo "case: a false positive the anchored layer calls certain cannot be listed at all"
+while IFS='|' read -r label hits body; do
+  [ -n "$label" ] || continue
+  root=$(fixture "unlistable-$label")
+  extra_step "$root" "$body"
+  run_check "$root"
+  check "certain shape $label is refused" "$(is "$status" 1)"
+  check "  and the list is not offered" "$(contains "$out" "This shape cannot be listed in NOT_A_BUILD_STEPS")"
+  root=$(fixture "unlistable-listed-$label")
+  extra_step "$root" "$body"
+  step_id "$root" "Extra" "not-a-build"
+  allowlist "$root" "not-a-build" "$hits" "the reviewer thought it built nothing"
+  run_check "$root"
+  check "  and an entry for it is refused" "$(is "$status" 1)"
+  check "  saying it cannot be listed" "$(contains "$out" "cannot be:")"
+done <<'UNLISTABLE'
+docker-buildx-bake-print-2|'docker buildx bake --print'|docker buildx bake --print
+docker-buildx-build-check|'docker buildx build --check .'|docker buildx build --check .
+docker-buildx-build-help|'docker buildx build --help'|docker buildx build --help
+docker-buildx-build-call-2|'docker buildx build --call=check .'|docker buildx build --call=check .
+docker-buildx-bake-list|'docker buildx bake --list=targets'|docker buildx bake --list=targets
+docker-compose-build-dry|'docker compose build --dry-run'|docker compose build --dry-run
+earthly-test|'earthly +test'|earthly +test
+UNLISTABLE
 
 echo "case: a command the detector does not see needs no entry"
 while IFS='|' read -r label body; do
@@ -1007,23 +1029,23 @@ docker-compose-logs-run|docker compose logs run-worker
 docker-compose-exec-app|docker compose exec app ./bin/up.sh up
 UNSEEN
 
-echo "case: an entry names a step by its id, pinned to the hits a reviewer saw"
+echo "case: an entry names a step by its id, pinned to the command a reviewer read"
 root=$(fixture listed-by-id)
-extra_step "$root" "docker buildx bake --print"
-step_id "$root" "Extra" "inspect-only"
-allowlist "$root" "inspect-only" "'docker buildx bake'" "prints the bake plan, builds nothing"
+extra_step "$root" "docker run --rm golang go build ./..."
+step_id "$root" "Extra" "compiles-only"
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "compiles a Go binary in a container"
 run_check "$root"
 check "a listed step is excused" "$(is "$status" 0)"
-check "  and the excusal names the id, the hits and the reason" \
-  "$(contains "$out" "listed in NOT_A_BUILD_STEPS: .github/workflows/image.yaml: job docker: step inspect-only: 'docker buildx bake' - prints the bake plan, builds nothing")"
+check "  and the excusal names the id, the command and the reason" \
+  "$(contains "$out" "listed in NOT_A_BUILD_STEPS: .github/workflows/image.yaml: job docker: step compiles-only: 'docker run --rm golang go build ./...' - compiles a Go binary in a container")"
 
 echo "case: a step with no id cannot be listed, and its refusal says to give it one"
 root=$(fixture listed-needs-an-id)
-extra_step "$root" "docker buildx bake --print"
-allowlist "$root" "inspect-only" "'docker buildx bake'" "would excuse it if ids did not matter"
+extra_step "$root" "docker run --rm golang go build ./..."
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "would excuse it if ids did not matter"
 run_check "$root"
-check "an unnamed, unidentified step is still refused" "$(is "$status" 1)"
-check "  and the remedy asks for an id" "$(contains "$out" "give the step an \`id:\` and add")"
+check "a step without an id is still refused" "$(is "$status" 1)"
+check "  and the remedy asks for an id" "$(contains "$out" "give the step an \`id:\`")"
 check "  and the entry matching nothing fails too" "$(contains "$out" "which matches 0 steps that build")"
 
 echo "case: T1 - two unnamed steps are two steps, not one"
@@ -1036,14 +1058,14 @@ path = sys.argv[1]
 text = open(path).read()
 open(path, "w").write(
     text
-    + "      - run: docker buildx bake --print\n"
+    + "      - run: docker run --rm golang go build ./...\n"
     + "      - run: docker build -f docker/Dockerfile .\n"
 )
 PYEOF
 run_check "$root"
 check "both unnamed steps are refused" "$(is "$status" 1)"
-check "  the inspecting one" "$(contains "$out" "'docker buildx bake'")"
-check "  and the real build" "$(contains "$out" "'docker build'")"
+check "  the compiling one" "$(contains "$out" "'docker run --rm golang go build ./...'")"
+check "  and the real build" "$(contains "$out" "'docker build -f docker/Dockerfile .'")"
 
 echo "case: T2 - two steps sharing a name are told apart by id"
 root=$(fixture listed-duplicate-names)
@@ -1053,26 +1075,25 @@ path = sys.argv[1]
 text = open(path).read()
 open(path, "w").write(
     text
-    + "      - name: Extra\n        id: inspect-only\n        run: docker buildx bake --print\n"
+    + "      - name: Extra\n        id: compiles-only\n        run: docker run --rm golang go build ./...\n"
     + "      - name: Extra\n        id: really-builds\n        run: docker build -f docker/Dockerfile .\n"
 )
 PYEOF
-allowlist "$root" "inspect-only" "'docker buildx bake'" "prints the bake plan, builds nothing"
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "compiles a Go binary in a container"
 run_check "$root"
 check "the twin that builds is still refused" "$(is "$status" 1)"
-check "  and it is the build that is named" "$(contains "$out" "'docker build'")"
-check "  while its namesake is excused" "$(contains "$out" "step inspect-only: 'docker buildx bake'")"
+check "  and it is the build that is named" "$(contains "$out" "'docker build -f docker/Dockerfile .'")"
+check "  while its namesake is excused" "$(contains "$out" "step compiles-only: 'docker run --rm golang go build ./...'")"
 
 echo "case: T3 - a listed step that grows a build is refused, not carried by its entry"
 root=$(fixture listed-drifted)
-extra_step "$root" 'docker buildx bake --print\ndocker buildx build --load -f docker/Dockerfile .'
-step_id "$root" "Extra" "inspect-only"
-allowlist "$root" "inspect-only" "'docker buildx bake'" "prints the bake plan, builds nothing"
+extra_step "$root" 'docker run --rm golang go build ./...\ndocker buildx build --load -f docker/Dockerfile .'
+step_id "$root" "Extra" "compiles-only"
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "compiles a Go binary in a container"
 run_check "$root"
 check "a drifted step is refused" "$(is "$status" 1)"
-check "  and the message says the entry no longer describes it" "$(contains "$out" "the entry no longer describes it")"
-check "  and names what was reviewed" "$(contains "$out" "reviewed as building 'docker buildx bake'")"
-check "  and names what it builds now" "$(contains "$out" "now builds 'docker buildx bake', 'docker buildx build'")"
+check "  and the entry cannot cover a certain build" "$(contains "$out" "cannot be:")"
+check "  naming both commands" "$(contains "$out" "'docker run --rm golang go build ./...', 'docker buildx build --load -f docker/Dockerfile .'")"
 
 echo "case: a deleted step's entry fails even when another step takes its name"
 root=$(fixture listed-stale-by-deletion)
@@ -1081,20 +1102,20 @@ import sys
 path = sys.argv[1]
 text = open(path).read()
 open(path, "w").write(
-    text + "      - name: Extra\n        id: successor\n        run: docker buildx bake --print\n"
+    text + "      - name: Extra\n        id: successor\n        run: docker run --rm golang go build ./...\n"
 )
 PYEOF
-allowlist "$root" "inspect-only" "'docker buildx bake'" "the step this described was deleted"
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "the step this described was deleted"
 run_check "$root"
 check "the stale entry fails" "$(is "$status" 1)"
-check "  and names the id it cannot find" "$(contains "$out" "step id 'inspect-only', which matches 0 steps that build")"
+check "  and names the id it cannot find" "$(contains "$out" "step id 'compiles-only', which matches 0 steps that build")"
 check "  and the successor is refused on its own" "$(contains "$out" "Extra builds an image in a run step")"
 
 echo "case: a listed step that stops reading as a build fails its entry"
 root=$(fixture listed-no-longer-a-build)
 extra_step "$root" "docker pull debian:trixie-slim"
-step_id "$root" "Extra" "inspect-only"
-allowlist "$root" "inspect-only" "'docker buildx bake'" "no longer runs any build word"
+step_id "$root" "Extra" "compiles-only"
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "no longer runs any build word"
 run_check "$root"
 check "the entry with nothing left to excuse fails" "$(is "$status" 1)"
 check "  and says to remove it or correct the id" "$(contains "$out" "remove it or correct the id")"
@@ -1107,9 +1128,9 @@ name: Helper
 runs:
   using: composite
   steps:
-    - id: inspect
+    - id: compiles
       shell: bash
-      run: docker buildx bake --print
+      run: docker run --rm golang go build ./...
 YAML
 python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
 import sys
@@ -1119,28 +1140,144 @@ open(path, "w").write(text + "      - name: Helper\n        id: helper\n        
 PYEOF
 run_check "$root"
 check "the inner step is refused before it is listed" "$(is "$status" 1)"
-allowlist "$root" "helper/inspect" "'docker buildx bake'" "prints the bake plan, builds nothing"
+allowlist "$root" "helper/compiles" "'docker run --rm golang go build ./...'" "compiles a Go binary in a container"
 run_check "$root"
 check "  and excused once listed under caller/inner" "$(is "$status" 0)"
-check "  with the joined id in the log" "$(contains "$out" "step helper/inspect:")"
+check "  with the joined id in the log" "$(contains "$out" "step helper/compiles:")"
 
-echo "case: every hit in a step is reported, not just the first"
+echo "case: every command in a step is reported, not just the first"
 root=$(fixture listed-every-hit)
-extra_step "$root" 'docker buildx bake --print\ndocker buildx build --load -f docker/Dockerfile .'
+extra_step "$root" 'docker run --rm golang go build ./...\ndocker buildx build --load -f docker/Dockerfile .'
 run_check "$root"
-check "the refusal lists both hits" "$(contains "$out" "('docker buildx bake', 'docker buildx build')")"
+check "the refusal lists both commands" "$(contains "$out" "('docker run --rm golang go build ./...', 'docker buildx build --load -f docker/Dockerfile .')")"
+
+echo "case: P1 - an entry pins the whole command, not the span the regex matched"
+# `docker buildx build --check .` and `docker buildx build --load -t x .` share the matched
+# span `docker buildx build`, so a span-pinned entry for the lint excused the real build.
+root=$(fixture pinned-full-text)
+extra_step "$root" "docker run --rm golang go build ./..."
+step_id "$root" "Extra" "compiles-only"
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "compiles a Go binary in a container"
+run_check "$root"
+check "the reviewed command is excused" "$(is "$status" 0)"
+
+root=$(fixture pinned-full-text-edited)
+extra_step "$root" "docker run --rm golang go build ./cmd/..."
+step_id "$root" "Extra" "compiles-only"
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "compiles a Go binary in a container"
+run_check "$root"
+check "an edited command is no longer described by the entry" "$(is "$status" 1)"
+check "  and the message names what was reviewed" "$(contains "$out" "reviewed as running 'docker run --rm golang go build ./...'")"
+check "  and what it runs now" "$(contains "$out" "now runs 'docker run --rm golang go build ./cmd/...'")"
+
+echo "case: P1 - a repeated command is reported twice, not folded into one"
+root=$(fixture pinned-not-deduplicated)
+extra_step "$root" 'docker run --rm golang go build ./...\ndocker run --rm golang go build ./...'
+run_check "$root"
+check "both lines are printed" "$(contains "$out" "('docker run --rm golang go build ./...', 'docker run --rm golang go build ./...')")"
+
+echo "case: P2 - a certain build cannot be listed, whatever its entry says"
+# `--check` is a lint, but the shape is the anchored one, and pinning text cannot vouch for it:
+# swapping `--check` for `--load` is the same shape. The list is not offered for these.
+root=$(fixture unlistable-buildx-check)
+extra_step "$root" "docker buildx build --check --file docker/Dockerfile ."
+step_id "$root" "Extra" "lint-only"
+allowlist "$root" "lint-only" "'docker buildx build --check --file docker/Dockerfile .'" "lints the Dockerfile"
+run_check "$root"
+check "the entry is refused" "$(is "$status" 1)"
+check "  and says why it cannot be listed" "$(contains "$out" "cannot be:")"
+check "  and names the shape" "$(contains "$out" "is certainly a build, or a compose verb that builds from a file this step only names")"
+
+root=$(fixture unlistable-not-offered)
+extra_step "$root" "docker buildx build --check --file docker/Dockerfile ."
+run_check "$root"
+check "an unlisted certain build is refused" "$(is "$status" 1)"
+check "  and the list is not offered" "$(contains "$out" "This shape cannot be listed in NOT_A_BUILD_STEPS")"
+
+echo "case: P2 - a compose entry cannot outlive the compose file gaining build:"
+# The step names a file it does not contain, so its own text cannot say whether it builds. An
+# entry for it would stay green after x.yml grows a `build:`, so there is no entry to make.
+root=$(fixture unlistable-compose-up)
+extra_step "$root" "docker compose -f x.yml up -d"
+step_id "$root" "Extra" "starts-services"
+allowlist "$root" "starts-services" "'docker compose -f x.yml up -d'" "x.yml has no build: today"
+run_check "$root"
+check "the compose entry is refused" "$(is "$status" 1)"
+check "  and --no-build is the remedy" "$(contains "$out" "Remove the entry and add --no-build if the step should not build")"
+
+echo "case: P2 - an earthly entry is refused: its image comes from the Earthfile"
+root=$(fixture unlistable-earthly)
+extra_step "$root" "earthly +test"
+step_id "$root" "Extra" "runs-tests"
+allowlist "$root" "runs-tests" "'earthly +test'" "+test runs tests"
+run_check "$root"
+check "the earthly entry is refused" "$(is "$status" 1)"
+check "  and says it cannot be listed" "$(contains "$out" "cannot be:")"
+
+echo "case: P3 - an inner step under a caller with no id cannot be listed"
+# Keyed by its bare id, it answered to an entry written for a job-level step of the same id,
+# and inherited that entry the moment the job-level step was removed.
+root=$(fixture composite-caller-without-id)
+mkdir -p "$root/.github/actions/helper"
+cat > "$root/.github/actions/helper/action.yml" <<'YAML'
+name: Helper
+runs:
+  using: composite
+  steps:
+    - id: compiles-only
+      shell: bash
+      run: docker run --rm golang go build ./...
+YAML
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text + "      - name: Helper\n        uses: ./.github/actions/helper\n")
+PYEOF
+allowlist "$root" "compiles-only" "'docker run --rm golang go build ./...'" "an entry written for a job-level step"
+run_check "$root"
+check "the inner step does not answer to the bare id" "$(is "$status" 1)"
+check "  and the remedy asks for the calling step's id" "$(contains "$out" "give the CALLING step an \`id:\`")"
+check "  and the entry matches nothing" "$(contains "$out" "which matches 0 steps that build")"
+
+echo "case: P3 - one composite used twice is two keys"
+root=$(fixture composite-used-twice)
+mkdir -p "$root/.github/actions/helper"
+cat > "$root/.github/actions/helper/action.yml" <<'YAML'
+name: Helper
+runs:
+  using: composite
+  steps:
+    - id: compiles-only
+      shell: bash
+      run: docker run --rm golang go build ./...
+YAML
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(
+    text
+    + "      - name: First\n        id: first\n        uses: ./.github/actions/helper\n"
+    + "      - name: Second\n        id: second\n        uses: ./.github/actions/helper\n"
+)
+PYEOF
+allowlist "$root" "first/compiles-only" "'docker run --rm golang go build ./...'" "compiles a Go binary"
+run_check "$root"
+check "the second use is still refused" "$(is "$status" 1)"
+check "  while the first is excused" "$(contains "$out" "step first/compiles-only:")"
 
 echo "case: an entry names one step, and only that step"
 root=$(fixture listed-one-step-only)
-extra_step "$root" "docker build -f docker/Dockerfile ."
+extra_step "$root" "docker run --rm golang go build ./..."
 step_id "$root" "Extra" "listed"
 python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
 import sys
 path = sys.argv[1]
 text = open(path).read()
-open(path, "w").write(text + "      - name: Another\n        run: |\n          docker build -f docker/Dockerfile .\n")
+open(path, "w").write(text + "      - name: Another\n        run: |\n          docker run --rm golang go build ./...\n")
 PYEOF
-allowlist "$root" "listed" "'docker build'" "a listed step"
+allowlist "$root" "listed" "'docker run --rm golang go build ./...'" "a listed step"
 run_check "$root"
 check "the same command in an unlisted step is still refused" "$(is "$status" 1)"
 check "  and it is the unlisted step that is named" "$(contains "$out" "Another builds an image in a run step")"
