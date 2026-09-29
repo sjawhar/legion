@@ -142,6 +142,11 @@ interface Piece {
   readonly unset?: true;
   /** Only on `NO_ELEMENTS`'s piece. */
   readonly noElements?: true;
+  /** An `@` expansion whose ELEMENT COUNT the guard does not know: `"$@"` of unknown positional
+   * parameters, or `"${arr[@]}"` of an array it could not read. Quoted, such a word is not one
+   * argument — bash gives one per element — so `args` types it `fields: "unknown"`. Without it a
+   * verb reading its operands positionally took the whole expansion as a single operand. */
+  readonly unknownCount?: true;
   /** A value whose name may also be unset: a branch may have unset it, or a write the guard could
    * not read (`forgetVariables`). Whether it is set is unknown, so `-` and `+` cannot decide. */
   readonly maybeUnset?: true;
@@ -809,7 +814,9 @@ function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): stri
  * as one word when bash would split or glob it. */
 function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][] {
   if (name === "@" || name === "*") {
-    if (st.positional === undefined) return [[unknown(`\`$${name}\` (the positional parameters)`)]];
+    if (st.positional === undefined) {
+      return [[{ ...unknown(`\`$${name}\` (the positional parameters)`), unknownCount: true }]];
+    }
     return elements(st.positional, name === "*" && quoted);
   }
   if (/^[0-9]+$/.test(name)) {
@@ -898,10 +905,19 @@ function parameterExpansion(
   if (part.index === "@" || part.index === "*") {
     if (array !== undefined) {
       const unknownElement = array.get(UNKNOWN_ARRAY_INDEX);
-      if (unknownElement !== undefined) return [[...unknownElement]];
+      // The array's own elements are unknown, so how many arguments it gives is unknown too.
+      if (unknownElement !== undefined) {
+        return [unknownElement.map((piece) => ({ ...piece, unknownCount: true as const }))];
+      }
       return elements([...array.values()], part.index === "*" && quoted);
     }
-    return parameter(name, quoted, st, ctx);
+    // A name the guard never saw assigned may be an array of any length, so `[@]` over it gives an
+    // unknown number of arguments; a scalar it did see gives exactly one, which `parameter` types.
+    return parameter(name, quoted, st, ctx).map((alt) =>
+      alt.some((piece) => piece.kind === "unknown")
+        ? alt.map((piece) => ({ ...piece, unknownCount: true as const }))
+        : alt
+    );
   }
   if (part.index !== undefined) {
     const index = resolveArrayIndex(part.index, st, ctx);
@@ -1307,6 +1323,12 @@ function args(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
     const onlyExpansions = parts.length > 0 && parts.every((part) => SPLIT_PARTS.has(part.type));
     return expandWord(word, st, ctx).map((exp): Arg => {
       if (exp.some((piece) => piece.kind === "glob")) {
+        return { text: word.text, exp, fields: "unknown" };
+      }
+      // Quoted or not, an `@` expansion whose element count the guard does not know is not one
+      // argument: bash gives one per element, so a verb reading its operands positionally must not
+      // take the whole expansion as a single operand.
+      if (exp.some((piece) => piece.unknownCount === true)) {
         return { text: word.text, exp, fields: "unknown" };
       }
       // Unquoted, an expansion bash splits on whitespace (`$*`, `$(…)`) or that the guard cannot read

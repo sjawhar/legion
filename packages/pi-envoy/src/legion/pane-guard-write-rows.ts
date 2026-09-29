@@ -872,6 +872,70 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     plant: `echo 's/CANARY/PWNED/' > ./--help`,
     command: 'sed -i -f --help "$HOME/.bashrc"',
   },
+  // A quoted `@` expansion whose element count the guard does not know is not one argument: any
+  // element may be the `-i` that makes sed write, or the file it writes. Every other verb already
+  // refused such a word because its value is unknown; sed read it as a single part.
+  {
+    name: "sed -i over an array read from a file, quoted",
+    family: "sed",
+    role: "probe",
+    plant: `printf '%s\\n' s/CANARY/PWNED/ "$HOME/.bashrc" > list`,
+    command: 'mapfile -t args < list; sed -i "${args[@]}"',
+  },
+  {
+    name: "sed -i over an array read -a splits, quoted",
+    family: "sed",
+    role: "probe",
+    plant: `printf '%s\\n' "s/CANARY/PWNED/ $HOME/.bashrc" > words`,
+    command: 'read -ra args < words; sed -i "${args[@]}"',
+  },
+  {
+    name: "sed -i over an array built from a command's output, quoted",
+    family: "sed",
+    role: "probe",
+    plant: `printf '%s\\n' s/CANARY/PWNED/ "$HOME/.bashrc" > list`,
+    command: 'args=($(cat list)); sed -i "${args[@]}"',
+  },
+  {
+    name: "sed -i over a function's own arguments, quoted",
+    family: "sed",
+    role: "probe",
+    plant: `printf '%s\\n' s/CANARY/PWNED/ "$HOME/.bashrc" > list`,
+    command: 'f() { sed -i "$@"; }; f $(cat list)',
+  },
+  {
+    name: "sed -n over an array that may carry -i, quoted",
+    family: "sed",
+    role: "probe",
+    plant: `printf '%s\\n' -i s/CANARY/PWNED/ "$HOME/.bashrc" > list`,
+    command: 'mapfile -t args < list; sed -n "${args[@]}"',
+  },
+  {
+    name: "sed over an array that may carry -i, before a workspace file",
+    family: "sed",
+    role: "probe",
+    plant: `printf '%s\\n' -i s/CANARY/PWNED/ "$HOME/.bashrc" > list`,
+    command: 'mapfile -t args < list; sed "${args[@]}" notes.txt',
+  },
+  {
+    name: "sed over a known array with no -i",
+    family: "sed",
+    role: "must-allow",
+    command: 'args=(-n 1p); sed "${args[@]}" notes.txt',
+  },
+  {
+    name: "sed -i over a known array, inside the workspace",
+    family: "sed",
+    role: "must-allow",
+    command: 'args=(-i s/NOTES/n/); sed "${args[@]}" notes.txt',
+  },
+  {
+    name: "sed -n with the unknown array after --, where it can only be files",
+    family: "sed",
+    role: "must-allow",
+    plant: `printf '%s\\n' -i s/CANARY/PWNED/ "$HOME/.bashrc" > list`,
+    command: 'mapfile -t args < list; sed -n 1p -- "${args[@]}"',
+  },
   ...[
     'for f in *.txt; do truncate -s 0 "$f"; done',
     'for f in *.txt; do : > "$f"; done',

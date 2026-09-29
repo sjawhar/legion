@@ -49,7 +49,9 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   // its last operand certainly the destination. These drivers run the same library first.
   "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
   "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
+  // `sed "${args[@]}"` over an array appended in a loop over unknown hosts: quoted, but its
+  // element count is unknown, so any element may be the `-i` that makes sed write (LEGION-357).
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:377",
   // Creates and sets the mode of a directory outside the roots (`install -d /etc/apt/keyrings`):
   // a script that provisions a host, never one a pane runs (LEGION-357).
   "packages/envoy/deploy/scripts/install-docker-debian.sh":
