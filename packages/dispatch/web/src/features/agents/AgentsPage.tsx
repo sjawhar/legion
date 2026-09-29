@@ -624,7 +624,6 @@ function AgentMessageComposer({
   useEffect(() => {
     if (!issuePickerOpen) return;
     setPendingIssue(issueKey);
-    movedByKeyboard.current = false;
   }, [issueKey, issuePickerOpen]);
   useEffect(() => {
     if (!issuePickerOpen) {

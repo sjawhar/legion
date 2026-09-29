@@ -1282,7 +1282,8 @@ test.describe("agents page", () => {
     }
   });
 
-  // A key pressed in the last open must not make this one's pointer pick wait for an Enter.
+  // A key pressed in the last open must not make this one's pointer pick wait for an Enter: the
+  // mark a key leaves lasts one task, so nothing of it is left by the time the picker reopens.
   test("a pointer pick commits at once after an arrow and Escape in the last open", async ({
     browser,
   }) => {
