@@ -104,17 +104,18 @@ and the Legion pane guard refuses it there.
 
 ## measure-pane-guard-paths.ts
 
-The pane guard's path battery, run against whatever guard the checkout holds. Each row of
-`src/legion/pane-guard-path-rows.ts` is measured twice — what `guard.bash` returns, and what real
-bash does to a canary HOME in the same fixture — so a row is a leak only when the guard allowed it
-and bash damaged the canary. Swap `src/legion/pane-guard.ts` for another revision's and diff the
-output to get that revision's column. `src/legion/pane-guard-bash.test.ts` asserts the same
-measurement through the same functions, so the numbers in a pull request body and the test cannot
-drift apart.
+The pane guard's path battery runs against the checkout's guard or a guard module named on the
+command line. Each row of `src/legion/pane-guard-path-rows.ts` is measured twice — what
+`guard.bash` returns, and what real bash does to a canary HOME in the same fixture — so a row is a
+leak only when the guard allowed it and bash damaged the canary. Pass another revision's
+`pane-guard.ts` to measure that revision without replacing the checkout's source.
+`src/legion/pane-guard-bash.test.ts` asserts the current-guard measurement through the same
+functions, so the numbers in a pull request body and the test cannot drift apart.
 
 ```bash
 cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts
 cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts --summary
+cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts src/legion/pane-guard.base.ts
 ```
 
 ## measure-pane-guard-model.ts
