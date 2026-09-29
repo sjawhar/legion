@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Single-line mutations of the write reader, measured against the same live canary rows.
+/** Single-line mutations of the write and find readers, measured against their live canary rows.
  * Usage: nice -n 19 bun <this file> <absolute path to pane-guard.ts>
  * Each temporary guard stays beside its imports; the source guard is never modified. */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -11,6 +11,7 @@ import {
   WRITE_ROWS,
   writeRefusalMatches,
 } from "../src/legion/pane-guard-write-rows";
+import { FIND_MUTANT_ROWS, measureRow } from "../src/legion/pane-guard-path-rows";
 
 // [name, old line fragment, replacement on that line, optional preceding scope anchor].
 const mutants: readonly (readonly [string, string, string, string?])[] = [
@@ -341,6 +342,24 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     "if (false) followed.push(operand.arg);",
   ],
   ["shred through its link", "ACTS_ON_BOTH,", "ACTS_ON_LINK,", 'case "shred":'],
+  [
+    "find follows command-line roots",
+    'mode !== "P" || text.endsWith("/")',
+    "false",
+    "function checkFindRoots(",
+  ],
+  [
+    "find L walk",
+    'verdict = mode === "L" ? checkFindLinkWalk(resolved.real, ctx) : { ok: true };',
+    "verdict = { ok: true };",
+    "function checkFindRoots(",
+  ],
+  [
+    "find L link stays in roots",
+    "!inWorkspace(resolved.real, ctx.roots) && !inScratch(resolved.real, ctx.roots)",
+    "false",
+    "function checkFindLinkWalk(",
+  ],
 ];
 
 const sourcePath = process.argv[2];
@@ -351,7 +370,12 @@ const baseline = (await import(sourcePath)) as { createPaneGuard: GuardFactory }
 const base = mkdtempSync(path.join(os.tmpdir(), "pane-write-mutants-"));
 let survivors = 0;
 try {
-  const expected = WRITE_ROWS.map((row) => measureWriteRow(base, row, baseline.createPaneGuard));
+  const expectedWrites = WRITE_ROWS.map((row) =>
+    measureWriteRow(base, row, baseline.createPaneGuard)
+  );
+  const expectedFinds = FIND_MUTANT_ROWS.map((row) =>
+    measureRow(row, base, baseline.createPaneGuard)
+  );
   for (const [index, [name, from, to, scope]] of mutants.entries()) {
     const start = scope === undefined ? 0 : source.indexOf(scope);
     const at = source.indexOf(from, start);
@@ -365,7 +389,7 @@ try {
       writeFileSync(modulePath, source.slice(0, at) + to + source.slice(at + from.length));
       const mutant = (await import(modulePath)) as { createPaneGuard: GuardFactory };
       const killed: string[] = [];
-      for (const result of expected) {
+      for (const result of expectedWrites) {
         try {
           const measured = measureWriteRow(base, result.row, mutant.createPaneGuard);
           if (
@@ -380,6 +404,12 @@ try {
           if (!(error instanceof Error) || !error.message.startsWith("fixture plant refused:"))
             throw error;
           killed.push(`must-allow plant for ${result.row.name}`);
+        }
+      }
+      for (const result of expectedFinds) {
+        const measured = measureRow(result.row, base, mutant.createPaneGuard);
+        if ((result.refusal === undefined) !== (measured.refusal === undefined)) {
+          killed.push(result.row.name);
         }
       }
       const line = source.slice(0, at).split("\n").length;

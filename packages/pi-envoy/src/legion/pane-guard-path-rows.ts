@@ -48,6 +48,8 @@ export function buildPathFixture(base: string): PathFixture {
     ws,
     path.join(ws, "d"),
     path.join(ws, "sub"),
+    path.join(ws, "safe", "target"),
+    path.join(ws, "linked-out"),
     path.join(ws, "perm"),
     path.join(ws, "stage"),
     path.join(ws, "a", "b"),
@@ -62,6 +64,7 @@ export function buildPathFixture(base: string): PathFixture {
   writeFileSync(path.join(ws, "payload"), "PAYLOAD\n");
   writeFileSync(path.join(ws, "d", "in"), "WS\n");
   writeFileSync(path.join(ws, "sub", "f"), "WS\n");
+  writeFileSync(path.join(ws, "safe", "target", "f"), "WS\n");
   writeFileSync(path.join(ws, "run.sh"), "echo ok\n");
   writeFileSync(path.join(ws, "danger.sh"), "echo benign\n");
   // A script already on disk holding a destructive line, which the guard has never read: the
@@ -81,6 +84,9 @@ export function buildPathFixture(base: string): PathFixture {
   symlinkSync(path.join(home, ".ssh"), path.join(ws, "e"));
   symlinkSync(home, path.join(ws, "hs"));
   symlinkSync(path.join(ws, "sub"), path.join(ws, "in"));
+  symlinkSync(path.join(ws, "safe", "target"), path.join(ws, "safe-link"));
+  symlinkSync(path.join(ws, "safe", "target"), path.join(ws, "safe", "inside"));
+  symlinkSync(path.join(home, ".bashrc"), path.join(ws, "linked-out", "profile"));
   // `lnk` points at a nested subdirectory two levels below the workspace, so `lnk/..` is
   // `ws/a` — still inside the workspace, but a different directory than `lnk` sits under,
   // which a lexical reading of `lnk/../unread.sh` would miss.
@@ -152,6 +158,107 @@ export function canaryDigest(home: string): string {
  * literally: `path.join` normalises a `..` away, so a fixture built with it would leave the row
  * passing while measuring nothing at all. The test asserts this over every such row. */
 export const DOTDOT_COMPONENT = /(?:^|[\s"'(/])\.\.(?:[\s"')/]|$)/;
+
+const FIND_ACTIONS = [
+  {
+    name: "delete",
+    command: (start: string, depth: number, name: string) =>
+      `find ${start} -maxdepth ${depth} -name ${name} -delete`,
+  },
+  {
+    name: "exec",
+    command: (start: string, depth: number, name: string) =>
+      `find ${start} -maxdepth ${depth} -name ${name} -exec rm -f {} +`,
+  },
+  {
+    name: "execdir",
+    command: (start: string, depth: number, name: string) =>
+      `find ${start} -maxdepth ${depth} -name ${name} -execdir rm -f {} +`,
+  },
+  {
+    name: "ok",
+    // GNU find takes the confirmation from its terminal. The preceding -exec makes the canary
+    // witness deterministic in a non-interactive batch while the guarded find still evaluates
+    // the same -ok action and root.
+    command: (start: string, depth: number, name: string) =>
+      `find ${start} -maxdepth ${depth} -name ${name} -exec rm -f {} \\; -ok rm -f {} \\;`,
+  },
+  {
+    name: "xargs",
+    command: (start: string, depth: number, name: string) =>
+      `find ${start} -maxdepth ${depth} -name ${name} -print0 | xargs -0 rm -f`,
+  },
+] as const;
+
+const FIND_ESCAPE_ROOTS = [
+  { name: "H.symlink", start: "-H hs", depth: 1 },
+  { name: "L.symlink", start: "-L hs", depth: 1 },
+  { name: "trailing.symlink", start: "hs/", depth: 1 },
+  // `hs` is a root under the workspace, while `-L` makes find descend it into the home.
+  { name: "L.workspace", start: "-L .", depth: 2 },
+] as const;
+
+const FIND_SAFE_ROOTS = [
+  { name: "H.inside", start: "-H safe-link", depth: 1 },
+  { name: "L.inside", start: "-L safe-link", depth: 1 },
+  { name: "trailing.inside", start: "safe-link/", depth: 1 },
+  // `safe/inside` stays below the workspace as -L follows it.
+  { name: "L.workspace.inside", start: "-L safe", depth: 2 },
+] as const;
+
+const FIND_ESCAPE_ROWS: readonly PathRow[] = FIND_ESCAPE_ROOTS.flatMap((root) =>
+  FIND_ACTIONS.map((action) => ({
+    name: `find.${root.name}.${action.name}`,
+    family: "find",
+    role: "probe" as const,
+    command: action.command(root.start, root.depth, ".bashrc"),
+    dotdot: false,
+  }))
+);
+
+const FIND_SAFE_ROWS: readonly PathRow[] = [
+  ...FIND_SAFE_ROOTS.flatMap((root) =>
+    FIND_ACTIONS.filter((action) => action.name !== "xargs").map((action) => ({
+      name: `find.${root.name}.${action.name}`,
+      family: "find",
+      role: "must-allow" as const,
+      command: action.command(root.start, root.depth, "f"),
+      dotdot: false,
+    }))
+  ),
+  ...FIND_ACTIONS.filter((action) => action.name !== "xargs").map((action) => ({
+    // Without -H, -L, or a trailing slash, find considers this symlink root itself and does not
+    // descend it. Nothing named .bashrc is found, so the action is harmless.
+    name: `find.P.symlink.${action.name}`,
+    family: "find",
+    role: "must-allow" as const,
+    command: action.command("hs", 1, ".bashrc"),
+    dotdot: false,
+  })),
+];
+
+const FIND_LINK_MUTANT_ROW: PathRow = {
+  name: "find.L.link.file.outside",
+  family: "find",
+  role: "probe",
+  command: "find -L linked-out -maxdepth 1 -name profile -delete",
+  dotdot: false,
+};
+
+// `xargs` always refuses a destructive program that takes targets from standard input, including
+// a safe find pipe. Its escape rows still prove real bash reaches the canary, but a must-allow
+// twin would contradict that independent stdin boundary.
+const FIND_MUTANT_ROW_NAMES: Record<string, true> = {
+  "find.H.symlink.delete": true,
+  "find.L.symlink.delete": true,
+  "find.L.workspace.delete": true,
+};
+
+/** The minimal rows that distinguish every mutation of find's root and -L link handling. */
+export const FIND_MUTANT_ROWS: readonly PathRow[] = [
+  ...FIND_ESCAPE_ROWS.filter((row) => FIND_MUTANT_ROW_NAMES[row.name] === true),
+  FIND_LINK_MUTANT_ROW,
+];
 
 export const PATH_ROWS: readonly PathRow[] = [
   // --- deletion ---
@@ -516,6 +623,11 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: "rsync payload d/../synced",
     dotdot: true,
   },
+  // --- find follows roots differently from ordinary path operations ---
+  ...FIND_ESCAPE_ROWS,
+  ...FIND_SAFE_ROWS,
+  FIND_LINK_MUTANT_ROW,
+
   {
     name: "find.delete.dotdot.symlink",
     family: "find",

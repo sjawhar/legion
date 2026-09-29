@@ -272,6 +272,13 @@ not a descendant of the pane's Oh My Pi process (`/proc` read at check time). It
 both daemons set on every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify,
 `LEGION_WORKSPACE`, `HOME`), so it adds nothing to either daemon contract.
 
+For a destructive `find`, each search root is resolved with `find`'s link rule: `-H` and `-L`
+follow a command-line symlink root, and a trailing slash follows it even without either option.
+Under `-L`, the guard walks the root's current directory tree and permits the command only when
+every symlink it could follow resolves inside the pane roots. An outside, dangling, or unreadable
+link refuses; the check deliberately walks the whole root rather than trusting the expression or
+depth limit, because a permitted `-L` walk must be proved unable to escape.
+
 A verb that writes a path it names is judged on the operand its own grammar makes the destination,
 which is the whole of what LEGION-357 fixed: `cp` and `install` on their last operand, or on the
 directory `-t` names, where every other operand is a source they read — except `install -d`,

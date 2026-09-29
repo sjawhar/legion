@@ -95,6 +95,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
+import type { Dir, Stats } from "node:fs";
 import * as path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
 import type {
@@ -4856,12 +4857,160 @@ function checkRecursiveMode(
   }
 }
 
+/** Under -L, find follows every directory symlink it encounters. Check the current directory
+ * tree, not the textual root, before allowing a destructive predicate. The kernel resolver above
+ * is still the one source of truth for each link's target. */
+function checkFindLinkWalk(root: string, ctx: Ctx): Verdict {
+  const pending = [root];
+  const seen = new Set<string>();
+  while (pending.length > 0) {
+    const directory = pending.pop() as string;
+    if (seen.has(directory)) continue;
+    seen.add(directory);
+    let info: Stats;
+    try {
+      info = lstatSync(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return {
+        ok: false,
+        resolution: `\`${directory}\`, which the guard cannot read (${messageFor(error)})`,
+        unresolved: true,
+      };
+    }
+    if (!info.isDirectory()) continue;
+    let entries: Dir;
+    try {
+      entries = opendirSync(directory);
+    } catch (error) {
+      return {
+        ok: false,
+        resolution: `\`${directory}\`, which the guard cannot search (${messageFor(error)})`,
+        unresolved: true,
+      };
+    }
+    try {
+      for (let entry = entries.readSync(); entry !== null; entry = entries.readSync()) {
+        if (++ctx.steps.count > MAX_WALK_STEPS) return { ok: false, resolution: WALK_LIMIT };
+        const child = path.join(directory, entry.name);
+        let childInfo: Stats;
+        try {
+          childInfo = lstatSync(child);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          return {
+            ok: false,
+            resolution: `\`${child}\`, which the guard cannot read (${messageFor(error)})`,
+            unresolved: true,
+          };
+        }
+        if (!childInfo.isSymbolicLink()) {
+          if (childInfo.isDirectory()) pending.push(child);
+          continue;
+        }
+        const resolved = physical("/", child, true);
+        if ("unknown" in resolved) {
+          return { ok: false, resolution: resolved.unknown, unresolved: true };
+        }
+        if (!inWorkspace(resolved.real, ctx.roots) && !inScratch(resolved.real, ctx.roots)) {
+          return {
+            ok: false,
+            resolution: `the link \`${child}\` resolves to ${resolved.real}`,
+          };
+        }
+        let destination: Stats;
+        try {
+          destination = lstatSync(resolved.real);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          return {
+            ok: false,
+            resolution: `\`${resolved.real}\`, which the guard cannot read (${messageFor(error)})`,
+            unresolved: true,
+          };
+        }
+        if (destination.isDirectory()) pending.push(resolved.real);
+      }
+    } finally {
+      entries.closeSync();
+    }
+  }
+  return { ok: true };
+}
+
+/** A destructive find predicate acts under a search root rather than directly on the root. Its
+ * symlink following is find's: -H and -L follow a command-line root, a trailing slash requires
+ * kernel resolution, and -L also follows links met while walking. */
+function checkFindRoots(
+  program: string,
+  verb: string,
+  targets: readonly Arg[],
+  mode: "H" | "L" | "P",
+  st: State,
+  ctx: Ctx,
+  site: Site
+): void {
+  for (const target of targets) {
+    const text = literalText(target.exp);
+    let verdict: Verdict;
+    if (text === undefined) {
+      verdict = {
+        ok: false,
+        resolution: "a search root the guard cannot resolve",
+        unresolved: true,
+      };
+    } else if (!text.startsWith("/") && st.cwd === undefined) {
+      verdict = {
+        ok: false,
+        resolution: `relative to a working directory unknown after ${st.cwdWhy}`,
+      };
+    } else {
+      const resolved = physical(st.cwd ?? "/", text, mode !== "P" || text.endsWith("/"));
+      if ("unknown" in resolved) {
+        verdict = { ok: false, resolution: resolved.unknown, unresolved: true };
+      } else if (!inWorkspace(resolved.real, ctx.roots) && !inScratch(resolved.real, ctx.roots)) {
+        const absolute = path.resolve(st.cwd ?? "/", text);
+        verdict = {
+          ok: false,
+          resolution:
+            resolved.real === absolute
+              ? resolved.real
+              : `${absolute}, which resolves to ${resolved.real}`,
+        };
+      } else {
+        verdict = mode === "L" ? checkFindLinkWalk(resolved.real, ctx) : { ok: true };
+      }
+    }
+    if (!verdict.ok) {
+      throw refusal(
+        site,
+        `${program} would ${verb} \`${target.text}\` (${verdict.resolution})`,
+        ctx,
+        verdict.unresolved
+      );
+    }
+  }
+}
+
 function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void {
   let i = 0;
-  // Leading options: -H, -L, -P, -D <debug>, -O<level>.
+  let mode: "H" | "L" | "P" = "P";
+  // Leading options: -H, -L, -P, -D <debug>, -O<level>. The last of -H, -L and -P wins.
   for (; i < list.length; i += 1) {
     const text = literalText(list[i]?.exp);
-    if (text === "-H" || text === "-L" || text === "-P" || text?.startsWith("-O")) continue;
+    if (text === "-H") {
+      mode = "H";
+      continue;
+    }
+    if (text === "-L") {
+      mode = "L";
+      continue;
+    }
+    if (text === "-P") {
+      mode = "P";
+      continue;
+    }
+    if (text?.startsWith("-O")) continue;
     if (text === "-D") {
       i += 1;
       continue;
@@ -4931,26 +5080,18 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
     if (rootsBeforePredicate === undefined) return;
     const under =
       rootsBeforePredicate.length > 0 ? rootsBeforePredicate : [{ text: ".", exp: [literal(".")] }];
-    checkTargets(
+    checkFindRoots(
       "find with a root the guard cannot read, which may be a predicate",
       "delete or change what it finds under",
       under,
-      ACTS_ON_LINK,
+      mode,
       st,
       ctx,
       site
     );
     return;
   }
-  checkTargets(
-    action,
-    "delete or change what it finds under",
-    targets,
-    ACTS_ON_LINK,
-    st,
-    ctx,
-    site
-  );
+  checkFindRoots(action, "delete or change what it finds under", targets, mode, st, ctx, site);
   if (shell === undefined) return;
   const found = targets.length === 1 ? (targets[0]?.exp ?? []) : [unknown("a path `find` found")];
   const argv = shell.map((arg) =>

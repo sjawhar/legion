@@ -28,6 +28,14 @@ expansion slice (LEGION-376), the files a `sed` SCRIPT names through `w`, `W`, `
 `s///e`, which the guard does not read (LEGION-377), and a word bash passes no argument for — an
 unquoted empty value, an empty `"${a[@]}"` — read as a command name, a wrapper's or `xargs`'s or
 `find -exec`'s program, or `cd`'s directory (LEGION-378).**
+
+A destructive `find` resolves every search root as `find` will: `-H` and `-L` follow a
+command-line symlink root, and a trailing slash is physically resolved even without either option.
+Under `-L`, the guard also walks the current directory tree and allows the command only when every
+symlink it could follow resolves inside the pane roots. It refuses an outside, dangling or unreadable
+link rather than assuming the walk stays inside; this full check is deliberately independent of
+`find` predicates and depth limits, because the guard must prove an `-L` walk cannot escape.
+
 It parses the command with a bash parser and resolves each
 target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
 assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
