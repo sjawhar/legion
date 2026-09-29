@@ -916,9 +916,10 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 
 // A span comes from the live tree unchecked, and each position it covers is written as a cell, so
 // the work is bounded per table, not the span alone: a colspan covers at most maxColspan columns, a
-// rowspan the rows below it, and every table's spans add at most maxSpanCells empty cells. Each
-// case allocates hundreds of megabytes or more without that: the staircases stack rowspans, and
-// the flat table repeats a colspan under the per-cell cap on every row.
+// rowspan the rows below it, and a document's tables together add at most maxSpanCells empty
+// cells. Each case allocates hundreds of megabytes or more without that: the staircases stack
+// rowspans, the flat table repeats a colspan under the per-cell cap on every row, and the many
+// tables repeat one under a per-table budget.
 func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 	oneCellRows := func(rows, colspan int, rowspan func(index int) int) func() *Node {
 		return func() *Node {
@@ -928,11 +929,7 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 				if index == 0 {
 					kind, row = "table_header", "table_header_row"
 				}
-				table.Children = append(table.Children, &Node{Type: row, Children: []*Node{{
-					Type:     kind,
-					Attrs:    Attrs{"alignment": nil, "colspan": colspan, "colwidth": nil, "rowspan": rowspan(index)},
-					Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}},
-				}}})
+				table.Children = append(table.Children, &Node{Type: row, Children: []*Node{spanCell(kind, colspan, rowspan(index))}})
 			}
 			return &Node{Type: "doc", Children: []*Node{table}}
 		}
@@ -957,6 +954,13 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 		{"staircase", oneCellRows(100, 1000, toTheEnd(100))},
 		{"colspan-1 staircase", oneCellRows(4000, 1, toTheEnd(4000))},
 		{"flat table", oneCellRows(4000, 1000, func(int) int { return 1 })},
+		{"many tables", func() *Node {
+			doc := &Node{Type: "doc"}
+			for range 5000 {
+				doc.Children = append(doc.Children, oneCellRows(2, 2_000_000, func(int) int { return 1 })().Children...)
+			}
+			return doc
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			doc := test.doc()
@@ -971,5 +975,32 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 				t.Fatalf("Render allocated %d MiB for %d bytes of markdown, want at most 128", allocated>>20, len(markdown))
 			}
 		})
+	}
+}
+
+// spanCell is a table cell of kind holding `x`, spanning colspan columns and rowspan rows.
+func spanCell(kind string, colspan, rowspan int) *Node {
+	return &Node{
+		Type:     kind,
+		Attrs:    Attrs{"alignment": nil, "colspan": colspan, "colwidth": nil, "rowspan": rowspan},
+		Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}},
+	}
+}
+
+// The browser editor draws a colspan past 1000 as 1000, as HTML caps it, so a cell claiming more
+// is written across 1000 columns, even in a table whose widest row would let the grid reach past.
+func TestRenderWritesAColspanAsWideAsTheEditorDraws(t *testing.T) {
+	header := &Node{Type: "table_header_row"}
+	for range 1500 {
+		header.Children = append(header.Children, spanCell("table_header", 1, 1))
+	}
+	body := &Node{Type: "table_row", Children: []*Node{spanCell("table_cell", 1500, 1)}}
+	markdown, err := Render(&Node{Type: "doc", Children: []*Node{{Type: "table", Children: []*Node{header, body}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(markdown, "\n"), "\n")
+	if cells := strings.Count(lines[len(lines)-1], "|") - 1; cells != maxColspan {
+		t.Fatalf("the body row is written %d cells wide, want %d", cells, maxColspan)
 	}
 }

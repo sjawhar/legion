@@ -35,8 +35,10 @@ type renderer struct {
 	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
-	err                                error
-	blockOffsets                       []BlockOffset
+	// spanBudget is how many more empty cells the tables' spans may add (maxSpanCells).
+	spanBudget   int
+	err          error
+	blockOffsets []BlockOffset
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -106,7 +108,7 @@ func render(doc *Node) (r *renderer, err error) {
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
 // its fences alone when bareEmptyCode says so.
 func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool) *renderer {
-	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode}
+	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: maxSpanCells}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return r
@@ -557,7 +559,7 @@ func (r *renderer) table(table *Node, prefix string) {
 		r.err = fmt.Errorf("%w: table requires a header row", ErrSchema)
 		return
 	}
-	grid := tableGrid(table)
+	grid := r.tableGrid(table)
 	r.tableRow(table.Children[0], grid[0], true, prefix)
 	r.writeSyntax("\n" + prefix + "| ")
 	for i, cell := range grid[0] {
@@ -617,21 +619,21 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // table's to Go's parser, is as wide as the widest row, its added cells taking the alignment of the
 // first cell under them, so that no cell past it is lost. A body row keeps its own width, since
 // Parse pads a short row. A table with no span and no row wider than its header is its own rows.
-// A span comes from the live tree unchecked, so the empty cells spans add are bounded per table
-// (maxSpanCells): each column a colspan adds, each position a rowspan covers below and each gap
-// filled up to one is charged, and a span past the budget adds no more cells. A span also covers
-// no column past the wider of maxColspan and the table's widest row as it holds cells. Every cell
-// the table holds is still written with its text.
-func tableGrid(table *Node) [][]*Node {
+// A span comes from the live tree unchecked, so the empty cells spans add are bounded per render,
+// across every table of the document (renderer.spanBudget): each column a colspan adds, each
+// position a rowspan covers below and each gap filled up to one is charged, and a span past the
+// budget adds no more cells. A span also covers no column past the wider of maxColspan and the
+// table's widest row as it holds cells. Every cell the table holds is still written with its text.
+func (r *renderer) tableGrid(table *Node) [][]*Node {
 	covered := map[[2]int]*Node{}
-	// lastCovered is, for each row, the last column a span from a row above covers, or -1.
+	// lastCovered is, for each row, the last column a span from a row above covers, or -1, kept so
+	// that no row scans every covered position: with that scan, 20,000 rows took 24.7 s.
 	lastCovered := make([]int, len(table.Children))
 	limit := maxColspan
 	for index, row := range table.Children {
 		lastCovered[index] = -1
 		limit = max(limit, len(row.Children))
 	}
-	budget := maxSpanCells
 	grid := make([][]*Node, len(table.Children))
 	width := 0
 	for rowIndex, row := range table.Children {
@@ -645,11 +647,11 @@ func tableGrid(table *Node) [][]*Node {
 		fill := func(until int) {
 			for {
 				spanning, spanned := covered[[2]int{rowIndex, len(cells)}]
-				if !spanned && (len(cells) >= until || budget == 0) {
+				if !spanned && (len(cells) >= until || r.spanBudget == 0) {
 					return
 				}
 				if !spanned {
-					budget--
+					r.spanBudget--
 				}
 				cells = append(cells, emptyTableCell(kind, spanning))
 			}
@@ -658,16 +660,19 @@ func tableGrid(table *Node) [][]*Node {
 			fill(0)
 			column := len(cells)
 			columns := max(1, min(tableSpan(cell.Attrs["colspan"]), maxColspan, limit-column))
+			// A rowspan past the last row covers nothing more, and without this clamp it indexes
+			// lastCovered past its end: the panic is recovered, so every render of the table fails
+			// and its document gets no version.
 			rows := min(tableSpan(cell.Attrs["rowspan"]), len(table.Children)-rowIndex)
 			cells = append(cells, cell)
-			tail := min(columns-1, budget)
-			budget -= tail
+			tail := min(columns-1, r.spanBudget)
+			r.spanBudget -= tail
 			for range tail {
 				cells = append(cells, emptyTableCell(kind, cell))
 			}
-			for below := 1; below < rows && budget > 0; below++ {
-				covers := min(1+tail, budget)
-				budget -= covers
+			for below := 1; below < rows && r.spanBudget > 0; below++ {
+				covers := min(1+tail, r.spanBudget)
+				r.spanBudget -= covers
 				for offset := range covers {
 					covered[[2]int{rowIndex + below, column + offset}] = cell
 				}
@@ -697,11 +702,12 @@ func tableSpan(value any) int {
 }
 
 // maxColspan is the most columns a cell is written across, as HTML caps colspan, so the markdown
-// holds no more of a span than the browser editor draws.
+// holds no more of a span than the browser editor draws, where a row as wide as the span would let
+// the grid's width limit reach past it.
 const maxColspan = 1000
 
-// maxSpanCells is how many empty cells the spans of one table add in all (tableGrid): a render
-// reached from a peer's update writes at most that many cells no one wrote.
+// maxSpanCells is how many empty cells the spans of a document's tables add in all (tableGrid): a
+// render reached from a peer's update writes at most that many cells no one wrote.
 const maxSpanCells = 100_000
 
 // emptyTableCell is an empty cell of kind with like's alignment, or none when like is nil.
