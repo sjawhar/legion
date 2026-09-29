@@ -74,14 +74,15 @@ type openOpts struct {
 	log            *slog.Logger
 }
 
-// WithLogger sets the logger the registry writes through. The listener passes its own, so the
-// registry's lines are the JSON records with machine_id that the rest of its output is; the default
-// is slog.Default(), which is what every other caller and the tests use. The listener must not set
-// that default instead: it also routes the stdlib log package's output into the same handler, and
-// the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream
-// subjects are space-delimited text patterns anchored on that package's date and time prefix
+// WithLogger sets the logger the registry and its cache watcher write through. The listener passes
+// its own, so the registry's lines and the watcher's (internal/kvwatch) are the JSON records with
+// machine_id that the rest of its output is; the default is slog.Default(), which is what every
+// other caller and the tests use. The listener must not set that default instead: it also routes
+// the stdlib log package's output into the same handler, and the deployed CloudWatch metric filters
+// for publish failures, webhook refusals and dropped stream subjects are space-delimited text
+// patterns anchored on that package's date and time prefix
 // (agent-c meta/infra/pulumi/components/envoy/listener.py), so JSON there silently stops three
-// alarms. No deployed pattern matches a line from this package.
+// alarms. No deployed pattern matches a line from this package or from internal/kvwatch.
 func WithLogger(log *slog.Logger) OpenOption {
 	return func(o *openOpts) { o.log = log }
 }
@@ -128,7 +129,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
 	}
-	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
 	// No eager load: the watcher populates the cache asynchronously. A synchronous load of N
 	// individual kv.Get() calls blocks indefinitely when the KV stream leader is on a remote node.
 	r.watcher.Start()
@@ -182,65 +183,25 @@ func (r *Registry) roles() bus.KeyValue {
 }
 
 // roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
-// holder gets to register again. It takes them from one watch over the bucket's existing keys, the
-// way the interest, session and CI caches read theirs (internal/kvwatch), so readiness costs one
-// pass over the bucket rather than a round trip per stored claim. That is the watch nats.go's
-// kv.Keys() runs — MetaOnly over every key — which discards each entry's revision; this keeps it.
-// The watch names no key, so a claim whose key this build cannot read (bus.ErrRefused: an earlier
-// build stored it past what a read of it may send) gets a revision here; it still gets no grace,
-// because ReleaseExpiredRoleClaim, the only reader of these revisions, reads the claim itself
-// first and cannot.
-//
-// The scan keeps the delete markers rather than letting nats.go's IgnoreDeletes drop them, because
-// it costs nothing — they are on the wire either way — and the two counts it then has are what a
-// restart's log needs, as disjoint fields: restored claims, and the markers it streamed past to
-// find them. They must not be reported as one total of "keys": production's 9 claims beside 766
-// subjects reads as 757 claims left unrestored, which is the misreading LEGION-360 itself was
-// filed on. A marker is not a claim and gets no revision.
+// holder gets to register again. It takes them from one scan over the bucket's existing keys
+// (kvwatch.ScanExistingKeys), the way the interest, session and CI caches read theirs, so readiness
+// costs one pass over the bucket rather than a round trip per stored claim. A claim whose key this
+// build cannot read gets a revision here; it still gets no grace, because ReleaseExpiredRoleClaim,
+// the only reader of these revisions, reads the claim itself first and cannot.
 //
 // A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
-// restored holder that loses its grace and is released a session TTL early, so a scan that did not
-// reach the end of the bucket fails the caller instead. nats.go ends a scan three ways (kv.go in
-// nats.go v1.50.0): it sends a nil entry once it has delivered every existing key (:1096-1099,
-// :1140-1142); its idle timer sends the same nil when no entry arrived within the JetStream
-// MaxWait, after putting ErrKeyWatcherTimeout on Error() under the watcher's lock (:1145-1156), so
-// the error is there to read by the time the nil arrives; and it closes the updates channel with
-// no nil at all when the subscription ends first (:1170, which closes Error() at :1171 too), an
-// ordered consumer it could not recreate or a closed connection. Only the first is a complete
-// scan, and only it logs.
+// restored holder that loses its grace and is released a session TTL early, so an incomplete scan
+// fails the caller, and only a complete one logs.
 func roleRevisions(kv bus.KeyValue, log *slog.Logger) (map[string]uint64, error) {
-	watcher, err := kv.Watch(nats.AllKeys, nats.MetaOnly())
+	revisions := map[string]uint64{}
+	scan, err := kvwatch.ScanExistingKeys(kv, "role revisions", log, func(entry nats.KeyValueEntry) {
+		revisions[entry.Key()] = entry.Revision()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := watcher.Stop(); err != nil {
-			log.Warn("role registry could not stop its revision watch", slog.String("error", err.Error()))
-		}
-	}()
-	revisions := map[string]uint64{}
-	entries, markers := 0, 0
-	for entry := range watcher.Updates() {
-		if entry != nil {
-			entries++
-			if entry.Operation() == nats.KeyValuePut {
-				revisions[entry.Key()] = entry.Revision()
-			} else {
-				markers++
-			}
-			continue
-		}
-		select {
-		case err := <-watcher.Error():
-			if err != nil {
-				return nil, fmt.Errorf("role revisions: the bucket's watch stopped after %d entries: %w", entries, err)
-			}
-		default:
-		}
-		log.Info("restored role claims", slog.Int("restored", len(revisions)), slog.Int("delete_markers", markers))
-		return revisions, nil
-	}
-	return nil, fmt.Errorf("role revisions: the bucket's watch ended after %d entries, before it had delivered them all", entries)
+	log.Info("restored role claims", slog.Int("restored", len(revisions)), slog.Int("delete_markers", scan.Markers))
+	return revisions, nil
 }
 
 func (r *Registry) cachedRevision(sessionID string) uint64 {

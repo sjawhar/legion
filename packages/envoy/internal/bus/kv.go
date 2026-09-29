@@ -3,6 +3,7 @@ package bus
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -163,4 +164,36 @@ func (kv KeyValue) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEn
 		return nil, err
 	}
 	return kv.KeyValue.History(key, opts...)
+}
+
+// StreamState is what one STREAM.INFO read says about the stream behind a KV bucket: its name, the
+// sequence space it holds, how many messages are in it, and when it was created. A KV revision is
+// a stream sequence, so a caller comparing revisions against the bucket's sequence space reads
+// them from here.
+type StreamState struct {
+	Name     string
+	FirstSeq uint64
+	LastSeq  uint64
+	Msgs     uint64
+	Created  time.Time
+}
+
+// ReadStreamState reads the stream behind kv (one KV Status round trip, which is a STREAM.INFO).
+func ReadStreamState(kv nats.KeyValue) (StreamState, error) {
+	status, err := kv.Status()
+	if err != nil {
+		return StreamState{}, err
+	}
+	bucket, ok := status.(*nats.KeyValueBucketStatus)
+	if !ok {
+		return StreamState{}, fmt.Errorf("KV status of %s is a %T, not a JetStream bucket's", kv.Bucket(), status)
+	}
+	info := bucket.StreamInfo()
+	return StreamState{
+		Name:     info.Config.Name,
+		FirstSeq: info.State.FirstSeq,
+		LastSeq:  info.State.LastSeq,
+		Msgs:     info.State.Msgs,
+		Created:  info.Created,
+	}, nil
 }
