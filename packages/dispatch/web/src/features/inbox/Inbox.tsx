@@ -146,27 +146,76 @@ function AssignToMe({
 /** How much of a question a control's name can carry before it stops being a name. */
 const CONTROL_NAME_QUESTION_CHARS = 48;
 
+/** Where an ask sits among the rows of its own owner, when that owner has more than one listed. */
+interface AskOrdinal {
+  index: number;
+  total: number;
+}
+
+/** Which issue or document a row belongs to, as a key: two asks share a name only if they share
+ *  this. A document has no issue key, so it is keyed by its own route. */
+function ownerKey(ask: InboxRow): string {
+  const issue = ask.issue?.key ?? ask.issue_key;
+  if (issue !== null && issue !== undefined) return `issue:${issue}`;
+  return ask.document === undefined
+    ? "none"
+    : `document:${ask.document.project}/${ask.document.slug}`;
+}
+
+/**
+ * The position of each ask among the rows sharing its owner, in the order the list shows them,
+ * for the owners that have more than one. One ask on an issue needs no ordinal, which keeps the
+ * common name short.
+ */
+function askOrdinals(rows: readonly InboxRow[]): ReadonlyMap<string, AskOrdinal> {
+  const byOwner = new Map<string, string[]>();
+  for (const row of rows) {
+    const key = ownerKey(row);
+    const ids = byOwner.get(key);
+    if (ids === undefined) byOwner.set(key, [row.id]);
+    else ids.push(row.id);
+  }
+  const ordinals = new Map<string, AskOrdinal>();
+  for (const ids of byOwner.values()) {
+    if (ids.length < 2) continue;
+    for (const [at, id] of ids.entries()) {
+      ordinals.set(id, { index: at + 1, total: ids.length });
+    }
+  }
+  return ordinals;
+}
+
 /**
  * What the row's controls are called. Two open asks on one issue are two different questions, so
  * a name taken from the owner alone says the same thing twice - `Select CORE-12` beside `Select
  * CORE-12` - and a screen reader gives the reader nothing to choose between. The owner answers
- * "which issue", the start of the question answers "which ask".
+ * "which issue"; the start of the question answers "which ask", and where an issue has several
+ * asks the position carries that on its own, since two questions can agree for as long as they
+ * like and the question is cut to a name's length.
  */
-function controlName(ask: InboxRow, owner: string | null, title: string): string {
+function controlName(
+  ask: InboxRow,
+  owner: string | null,
+  title: string,
+  ordinal: AskOrdinal | undefined
+): string {
   const where = owner ?? ask.document?.name ?? title;
+  const which =
+    ordinal === undefined ? where : `${where}, ask ${ordinal.index} of ${ordinal.total}`;
   const question = ask.question.replace(/\s+/g, " ").trim();
-  if (question === "") return where;
+  if (question === "") return which;
   const short =
     question.length > CONTROL_NAME_QUESTION_CHARS
       ? `${question.slice(0, CONTROL_NAME_QUESTION_CHARS).trimEnd()}…`
       : question;
-  return `${where}: ${short}`;
+  return `${which}: ${short}`;
 }
 
 function InboxItem({
   ask,
   assignLive,
   marked,
+  ordinal,
   onAnswered,
   onAssignLive,
   onMark,
@@ -182,6 +231,8 @@ function InboxItem({
   assignLive: boolean;
   /** Whether the reader has marked this row for a bulk action. */
   marked: boolean;
+  /** This ask's place among its owner's rows, when the owner has more than one listed. */
+  ordinal: AskOrdinal | undefined;
   onAnswered: (id: string) => void;
   onAssignLive: (askId: string, live: boolean) => void;
   /** Marks or unmarks this row; `x` and the row's own checkbox are the two ways in. */
@@ -201,7 +252,7 @@ function InboxItem({
 }): ReactNode {
   const owner = ask.issue?.key ?? ask.issue_key;
   const title = ask.issue?.title ?? owner ?? "Document ask";
-  const name = controlName(ask, owner, title);
+  const name = controlName(ask, owner, title, ordinal);
   const releaseOnFocusOut =
     onRelease === undefined
       ? undefined
@@ -649,6 +700,9 @@ export function Inbox(): ReactNode {
   const inView = (rows: readonly InboxRow[]) =>
     view === "everyone" ? rows : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
   const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
+  // Names are read off the list the reader sees, so an issue that contributes one row to this
+  // view keeps the short name even when it has other asks elsewhere.
+  const ordinals = askOrdinals(shown);
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn
   // band on the first render after its moment passes.
   const place = { now: Date.now(), view, viewer };
@@ -791,6 +845,7 @@ export function Inbox(): ReactNode {
               ask={ask}
               assignLive={assigning.has(ask.id)}
               marked={marked.has(ask.id)}
+              ordinal={ordinals.get(ask.id)}
               key={ask.id}
               onAnswered={recordAnswered}
               onAssignLive={onAssignLive}

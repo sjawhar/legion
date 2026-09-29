@@ -241,29 +241,48 @@ test.describe("inbox selection", () => {
   // says the same thing twice.
   test("each row's controls are named after its own ask", async ({ browser }) => {
     await createProject({ key: "CORE", name: "Core" });
-    const issue = await createIssue({ project: "CORE", title: "Two asks on one issue" });
-    await createAsk(issue.key, { question: "First decision" }, session);
-    await createAsk(issue.key, { question: "Second decision" }, session);
+    const twins = await createIssue({ project: "CORE", title: "Two asks on one issue" });
+    // Two questions that agree far past any cut: only the position tells these two apart.
+    await createAsk(
+      twins.key,
+      { question: "Which of the two long-running migration strategies should we adopt: A?" },
+      session
+    );
+    await createAsk(
+      twins.key,
+      { question: "Which of the two long-running migration strategies should we adopt: B?" },
+      session
+    );
+    const alone = await createIssue({ project: "CORE", title: "Release checklist" });
+    await createAsk(alone.key, { question: "Ship it?" }, session);
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
-      await openInbox(page, 2);
+      await openInbox(page, 3);
       const rows = page.locator("[data-inbox-row]");
-      await expect(rows.nth(0).getByRole("checkbox")).toHaveAttribute(
-        "aria-label",
-        /^Select CORE-1: (First|Second) decision$/
+      const named = async (attribute: string) =>
+        rows.evaluateAll(
+          (items, selector: string) =>
+            items.map((item) => item.querySelector(selector)?.getAttribute("aria-label") ?? "none"),
+          attribute
+        );
+
+      // An issue with one listed ask keeps the short name; the twins carry their position.
+      const checkboxes = await named("input[type=checkbox]");
+      expect(checkboxes).toContain("Select CORE-2: Ship it?");
+      expect(checkboxes.filter((name) => name.startsWith("Select CORE-1")).sort()).toEqual([
+        "Select CORE-1, ask 1 of 2: Which of the two long-running migration strategi…",
+        "Select CORE-1, ask 2 of 2: Which of the two long-running migration strategi…",
+      ]);
+      expect(new Set(checkboxes).size).toBe(checkboxes.length);
+
+      // Snooze is named from the same place, so the two controls of a row agree.
+      const pickers = await named("[data-inbox-snooze]");
+      expect(pickers).toContain("Snooze CORE-2: Ship it?");
+      expect(new Set(pickers).size).toBe(pickers.length);
+      expect(pickers.map((name) => name.replace(/^Snooze /, "")).sort()).toEqual(
+        checkboxes.map((name) => name.replace(/^Select /, "")).sort()
       );
-      await expect(rows.nth(0).locator("[data-inbox-snooze]")).toHaveAttribute(
-        "aria-label",
-        /^Snooze CORE-1: (First|Second) decision$/
-      );
-      const names = await rows.evaluateAll((items) =>
-        items.map(
-          (item) => item.querySelector("input[type=checkbox]")?.getAttribute("aria-label") ?? "none"
-        )
-      );
-      expect(names).toHaveLength(2);
-      expect(new Set(names).size).toBe(names.length);
     } finally {
       await context.close();
     }
