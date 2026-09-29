@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"html"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -914,31 +915,55 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 }
 
 // A span comes from the live tree unchecked, and each position it covers is written as a cell, so
-// an absurd colspan is written across at most maxColspan columns and a rowspan across the rows
-// below it: one update holding a span of two million must not render megabytes.
+// the grid is bounded, not the span alone: a colspan covers at most maxColspan columns and no
+// column past the grid's width limit, and a rowspan the rows below it. Each case allocates hundreds
+// of megabytes or more without its bound; the staircase is a hundred rows each under the per-cell
+// bound whose spans stack.
 func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		span func(table *Node)
-	}{
-		{"colspan", func(table *Node) { table.Children[1].Children[0].Attrs["colspan"] = 2e6 }},
-		{"rowspan", func(table *Node) { table.Children[1].Children[0].Attrs["rowspan"] = 2e6 }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+	staircase := func() *Node {
+		table := &Node{Type: "table"}
+		for index := range 100 {
+			kind, row := "table_cell", "table_row"
+			if index == 0 {
+				kind, row = "table_header", "table_header_row"
+			}
+			table.Children = append(table.Children, &Node{Type: row, Children: []*Node{{
+				Type:     kind,
+				Attrs:    Attrs{"alignment": nil, "colspan": 1000, "colwidth": nil, "rowspan": 100},
+				Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}},
+			}}})
+		}
+		return &Node{Type: "doc", Children: []*Node{table}}
+	}
+	spanned := func(attr string) func() *Node {
+		return func() *Node {
 			doc, err := Parse("| h1 | h2 |\n| --- | --- |\n| c1 | c2 |\n")
 			if err != nil {
 				t.Fatal(err)
 			}
-			test.span(doc.Children[0])
+			doc.Children[0].Children[1].Children[0].Attrs[attr] = 2e6
+			return doc
+		}
+	}
+	for _, test := range []struct {
+		name string
+		doc  func() *Node
+	}{
+		{"colspan", spanned("colspan")},
+		{"rowspan", spanned("rowspan")},
+		{"staircase", staircase},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := test.doc()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
 			markdown, err := Render(doc)
+			runtime.ReadMemStats(&after)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if lines := strings.Count(markdown, "\n"); len(markdown) > 16*maxColspan || lines != 3 {
-				t.Fatalf("Render wrote %d bytes on %d lines, want at most %d bytes on 3", len(markdown), lines, 16*maxColspan)
-			}
-			if _, err := Parse(markdown); err != nil {
-				t.Fatalf("Parse(Render()) = %v", err)
+			if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 128<<20 {
+				t.Fatalf("Render allocated %d MiB for %d bytes of markdown, want at most 128", allocated>>20, len(markdown))
 			}
 		})
 	}

@@ -617,8 +617,18 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // table's to Go's parser, is as wide as the widest row, its added cells taking the alignment of the
 // first cell under them, so that no cell past it is lost. A body row keeps its own width, since
 // Parse pads a short row. A table with no span and no row wider than its header is its own rows.
+// A span covers no column past the grid's width limit, the wider of maxColspan and the table's
+// widest row as it holds cells, so a cell's text is written though a span before it runs out, and
+// the grid grows with the cells the table holds rather than with the spans it claims.
 func tableGrid(table *Node) [][]*Node {
 	covered := map[[2]int]*Node{}
+	// lastCovered is, for each row, the last column a span from a row above covers, or -1.
+	lastCovered := make([]int, len(table.Children))
+	limit := maxColspan
+	for index, row := range table.Children {
+		lastCovered[index] = -1
+		limit = max(limit, len(row.Children))
+	}
 	grid := make([][]*Node, len(table.Children))
 	width := 0
 	for rowIndex, row := range table.Children {
@@ -641,7 +651,7 @@ func tableGrid(table *Node) [][]*Node {
 		for _, cell := range row.Children {
 			fill(0)
 			column := len(cells)
-			columns := min(tableSpan(cell.Attrs["colspan"]), maxColspan)
+			columns := max(1, min(tableSpan(cell.Attrs["colspan"]), maxColspan, limit-column))
 			rows := min(tableSpan(cell.Attrs["rowspan"]), len(table.Children)-rowIndex)
 			cells = append(cells, cell)
 			for range columns - 1 {
@@ -651,15 +661,10 @@ func tableGrid(table *Node) [][]*Node {
 				for offset := range columns {
 					covered[[2]int{rowIndex + below, column + offset}] = cell
 				}
+				lastCovered[rowIndex+below] = max(lastCovered[rowIndex+below], column+columns-1)
 			}
 		}
-		last := -1
-		for position := range covered {
-			if position[0] == rowIndex {
-				last = max(last, position[1])
-			}
-		}
-		fill(last + 1)
+		fill(lastCovered[rowIndex] + 1)
 		grid[rowIndex] = cells
 		width = max(width, len(cells))
 	}
