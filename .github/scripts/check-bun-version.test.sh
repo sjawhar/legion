@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# PROBE (#1578, never merged): one line added above the pinned refusal at :74, moving it to :75.
 # Tests for `check-bun-version.sh`: every rule it enforces, one case each, plus the shapes six
 # review rounds planted by hand and threw away. The gate's rule set changed in four of those
 # rounds — twice because a rule was missing rather than wrong — so the probes live here now.
