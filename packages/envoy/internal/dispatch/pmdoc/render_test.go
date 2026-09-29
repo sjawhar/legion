@@ -950,6 +950,17 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 		// The budget as a rowspan spends it on the rows below: without that, rowspans stacked to
 		// the end of 1,000 rows cover half a million positions.
 		{name: "rowspans stacked to the end", tables: func() []*Node { return []*Node{oneCellRows(1000, 1, toTheEnd(1000))} }},
+		// The budget as a rowspan spends it for each position it covers in a row below, not once
+		// for the row: charged once a row, a cell spanning 1,000 columns and 1,000 rows covers all
+		// 999,000 positions below it, where it covers 99,001 and the table writes 100,001 empty
+		// cells.
+		{name: "a cell spanning 1,000 columns and rows", tables: func() []*Node {
+			spans := [][][2]int{{{1000, 1000}}}
+			for range 999 {
+				spans = append(spans, [][2]int{{1, 1}})
+			}
+			return []*Node{spanTable(spans...)}
+		}},
 		// The budget as each gap filled up to a rowspan spends it: without that, 1,000 rows each
 		// fill 998 empty cells up to the column a header cell spans all of them in.
 		{name: "gaps up to a rowspan", tables: func() []*Node {
@@ -1042,6 +1053,19 @@ func TestBlockChecksSpendNoSpanBudgetForEachBlock(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 64<<20 {
 		t.Fatalf("the checks over %d tables allocated %d MiB, want at most 64", len(blocks), allocated>>20)
+	}
+}
+
+// BlockShapeError writes a table spanless, so a table reads back in its shape exactly when every
+// row holds as many cells: a header cell spanning two columns over a body cell spanning two, a cell
+// in each row, does, where written with its spans each row would read back two cells wide; a
+// two-cell header over one body cell spanning both does not.
+func TestBlockShapeErrorReadsATableInItsShapeWhenItsRowsHoldAsManyCells(t *testing.T) {
+	if err := BlockShapeError(spanTable([][2]int{{2, 1}}, [][2]int{{2, 1}})); err != nil {
+		t.Errorf("a header cell over a body cell, each spanning two columns: %v, want the table's shape", err)
+	}
+	if err := BlockShapeError(spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{2, 1}})); !errors.Is(err, ErrSchema) {
+		t.Errorf("a two-cell header over one body cell spanning both: %v, want it read back as another shape", err)
 	}
 }
 
