@@ -93,6 +93,31 @@ func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T)
 	}
 }
 
+// A linked image is read as the browser editor stores it: the image without the link, which the
+// editor's store keeps on text alone (LEGION-365). A refusal would leave a document the editor
+// holds unsavable, so the link's text around the image keeps its link and the write is taken.
+func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
+	for _, test := range []struct{ linked, stored string }{
+		{"[![x](i.png)](https://u.com)\n", "![x](i.png)\n"},
+		{"see [a ![x](i.png) b](https://u.com \"t\") now\n", "see [a ](https://u.com \"t\")![x](i.png)[ b](https://u.com \"t\") now\n"},
+		{"- **[![x](i.png)](https://u.com)**\n", "- ![x](i.png)\n"},
+	} {
+		got, err := ParseForWrite(test.linked, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", test.linked, err)
+			continue
+		}
+		want, err := Parse(test.stored)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.stored, err)
+		}
+		if !got.Equal(want) {
+			markdown, _ := Render(got)
+			t.Errorf("ParseForWrite(%q) reads as %q, want what %q reads as", test.linked, markdown, test.stored)
+		}
+	}
+}
+
 // The browser editor's parser matches a reference to its definition by the labels as written,
 // before their character references are decoded, and a label is stored and written decoded, so a
 // reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
