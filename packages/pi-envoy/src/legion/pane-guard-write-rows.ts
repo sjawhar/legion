@@ -1010,6 +1010,22 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     plant: `printf '%s\\n' 1p > list`,
     command: `f() { sed -n "$*" notes.txt; }; f $(cat list)`,
   },
+  // A name the guard never saw assigned is reachable in one command: an `eval` of text it cannot
+  // read leaves every name unknown and possibly unset, which is the same state a name an earlier
+  // tool call assigned is in. `[@]` over it may be any number of arguments; `[*]` is one.
+  {
+    name: "sed -i over an array an unreadable eval may have assigned",
+    family: "sed",
+    role: "probe",
+    plant: `printf '%s\\n' 'args=(s/CANARY/PWNED/ "$HOME/.bashrc")' > setter`,
+    command: `eval "$(cat setter)"; sed -i "\${args[@]}"`,
+  },
+  {
+    name: "sed -n over an array set nowhere, joined into one argument",
+    family: "sed",
+    role: "must-allow",
+    command: `sed -n "\${args[*]}" notes.txt`,
+  },
   ...[
     'for f in *.txt; do truncate -s 0 "$f"; done',
     'for f in *.txt; do : > "$f"; done',
