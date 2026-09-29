@@ -402,8 +402,8 @@ and signing keys, and gives the server no caller Home or XDG directory. A
 caller's environment or `~/.config/opencode/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
-exports `ENVOY_URL`). The harness ports stay inputs because the Playwright
-config, seeds and API helpers resolve the same values.
+exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
+the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
@@ -413,6 +413,7 @@ post-update text selection; Yjs document transport and local editing remain acti
 the room's next durable append for 20 s with a `doc_updates` trigger and cancels that backend, so
 it costs about 40 s and does not belong in the suite CI runs. Run it as
 `DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
+That recipe loads the same config, so it refuses the harness ports while another run holds them.
 It is the end-to-end check for a failed document room: the writer inside the docs layer when the
 room fails is answered `503 DOC_SERVICE_UNAVAILABLE` rather than waiting for a recovery that
 cannot finish, the writer behind it is answered the same way or admitted once the room has
@@ -451,9 +452,36 @@ still listening on `DISPATCH_E2E_PORT` — keeps a client backend out of `idle`,
 never clears and `resetDatabase` throws in `beforeEach`. Because it throws in the hook, **every**
 spec in the file reports failed, each carrying the `psql … DO $$` wait loop in its message, which
 reads as a catastrophic regression in the change under test. Recognise that shape as the rig: kill
-whatever holds the port and run again. Relatedly, `e2e/playwright.config.ts` reuses an
-already-running harness server only while `CI` is unset; with `CI` set it refuses the port instead
-of reusing it, so a shell that exports `CI` cannot share one harness across runs.
+whatever holds the port and run again. With reuse off a run cannot reach that shape through the
+port at all, and this paragraph is where the harness-port rule lives — `README.md` and the
+`docs/solutions` learning point here rather than restating it.
+
+`e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
+`9021`) and `FAKE_GITHUB_PORT` (default `9022`) once for every reader in `e2e/`, the Playwright
+config and the two fake listeners included. An empty value means the default for all three alike,
+matching `run-server.sh`'s `${VAR:-default}`; anything that is not a port in canonical decimal is
+refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
+`08777` are all refused, rather than binding one port while every URL built from the raw string
+points somewhere else, or writing one port two ways). Two variables naming one port are refused
+together, naming both: each port passes a per-port check on its own, and every consumer would
+otherwise fail in its own words — Playwright refusing the second `webServer` without naming a
+variable, the second fake listener dying on `EADDRINUSE`. Because the check lives with the
+resolution, the fake listeners refuse it too, not only the Playwright config.
+
+`e2e/playwright.config.ts` then probes the three ports before any web server starts and fails the
+run with one message listing every taken port beside its own variable, before a single spec runs.
+Its remedies are to stop whatever listens there, or to move the run to free ports **and its own
+`DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
+the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
+new port, so that server's live rooms stay open for the `TRUNCATE` to deadlock against. Reuse is
+opt-in through `DISPATCH_E2E_REUSE_SERVERS`, whose only accepted value is `1`: unset or empty
+starts this run's own servers, and any other value is refused at config load naming the variable
+and the value. `CI` takes no part in that decision, so a shell that exports it and one that does
+not behave alike; a lane that shares one hand-started harness across runs sets
+`DISPATCH_E2E_REUSE_SERVERS=1`. Two invocations never probe, because neither starts a web server:
+one where `PLAYWRIGHT_BASE_URL` selects a deployed server, and a listing run, whose task list is a
+load task and a report-begin task with no global setup. The port validation above is not gated on
+either, so a malformed or duplicated port is refused in every invocation.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` alone. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
