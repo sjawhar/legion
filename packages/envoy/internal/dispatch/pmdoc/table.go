@@ -22,7 +22,7 @@ type lazyAwareTable struct{}
 // formsTable tries.
 var tableTransformer = extension.NewTableParagraphTransformer()
 
-const maxTablePaddingCells = 100_000
+const maxTablePaddingCells = 10_000
 
 var (
 	tablePaddingErrorKey  = parser.NewContextKey()

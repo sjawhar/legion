@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1189,6 +1190,8 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 	}
 }
 
+const maximumCumulativeTablePaddingAllocation = 128 << 20
+
 func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cumulative table padding", "Before.\n")
@@ -1198,12 +1201,21 @@ func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
 		ops[index] = map[string]string{"op": "insert", "after": "end", "markdown": tablePaddingInsert(100)}
 	}
 
+	runtime.GC()
+	var beforeAlloc, afterAlloc runtime.MemStats
+	runtime.ReadMemStats(&beforeAlloc)
 	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 		"ops": ops,
 	}, "alice")
 	body := rejected.Body.String()
+	runtime.ReadMemStats(&afterAlloc)
+	allocated := afterAlloc.TotalAlloc - beforeAlloc.TotalAlloc
+	t.Logf("allocated=%d", allocated)
+	if allocated > maximumCumulativeTablePaddingAllocation {
+		t.Fatalf("allocated %d bytes, want at most %d", allocated, maximumCumulativeTablePaddingAllocation)
+	}
 	if rejected.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) ||
-		!strings.Contains(body, `field \"markdown\"`) || !strings.Contains(body, "table ") || !strings.Contains(body, "limit 100000") {
+		!strings.Contains(body, `field \"markdown\"`) || !strings.Contains(body, "table ") || !strings.Contains(body, "limit 10000") {
 		t.Fatalf("cumulative table padding edit: status=%d body=%s", rejected.Code, body)
 	}
 	if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {

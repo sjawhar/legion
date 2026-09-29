@@ -386,7 +386,7 @@ func TestParseRejectsExcessiveTablePaddingBeforeAllocation(t *testing.T) {
 				if !errors.Is(err, ErrSchema) {
 					t.Errorf("parse error = %v, want ErrSchema", err)
 				} else {
-					for _, want := range []string{"table 1", "writes", "header implies", "limit 100000"} {
+					for _, want := range []string{"table 1", "writes", "header implies", "limit 10000"} {
 						if !strings.Contains(err.Error(), want) {
 							t.Errorf("parse error = %q, want it to name %q", err, want)
 						}
@@ -401,10 +401,10 @@ func TestParseRejectsExcessiveTablePaddingBeforeAllocation(t *testing.T) {
 }
 
 func TestParseRejectsTablePaddingBudgetAcrossTables(t *testing.T) {
-	markdown := tablePaddingBomb(250) + "\n" + tablePaddingBomb(250)
+	markdown := tablePaddingBomb(70) + "\n" + tablePaddingBomb(70) + "\n" + tablePaddingBomb(70)
 	_, err := Parse(markdown)
-	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 2") {
-		t.Fatalf("Parse() error = %v, want ErrSchema naming table 2", err)
+	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 3") {
+		t.Fatalf("Parse() error = %v, want ErrSchema naming table 3", err)
 	}
 }
 

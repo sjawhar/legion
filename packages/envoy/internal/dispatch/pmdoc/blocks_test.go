@@ -289,12 +289,13 @@ func TestPadTablesBoundsShortRowsBeforeAllocation(t *testing.T) {
 }
 
 func TestPadTablesSharesThePaddingBudgetAcrossTables(t *testing.T) {
-	doc := shortTableForPadding(250, 250)
-	doc.Children = append(doc.Children, shortTableForPadding(250, 250).Children...)
+	doc := shortTableForPadding(70, 70)
+	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
+	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
 
-	_, err := PadTables(doc, 0, 1)
-	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 2") {
-		t.Fatalf("PadTables error = %v, want ErrSchema naming table 2", err)
+	_, err := PadTables(doc, 0, 2)
+	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 3") {
+		t.Fatalf("PadTables error = %v, want ErrSchema naming table 3", err)
 	}
 }
 
