@@ -55,7 +55,7 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   // element, so no element of THIS construction turns on `-i`; the elements are sed scripts
   // the guard does not read, whose own writes are LEGION-377. A listed cost rather than a
   // leak (LEGION-357).
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:385",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:387",
   // Creates and sets the mode of a directory outside the roots (`install -d /etc/apt/keyrings`):
   // a script that provisions a host, never one a pane runs (LEGION-357).
   "packages/envoy/deploy/scripts/install-docker-debian.sh":
