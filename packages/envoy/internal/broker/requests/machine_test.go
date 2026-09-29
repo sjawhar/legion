@@ -82,7 +82,7 @@ func approversYAML(login string, entry approvers.KeyEntry) string {
 const baseRulesYAML = `version: 1
 secrets:
   DEEL_API_KEY:
-    source: dev1/agent-secrets/DEEL_API_KEY
+    source: example/agent-secrets/DEEL_API_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
@@ -90,13 +90,13 @@ secrets:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
       - {kind: pod, decision: approval, approver: "login:sjawhar"}
   AUTO_TOKEN:
-    source: dev1/agent-secrets/AUTO_TOKEN
+    source: example/agent-secrets/AUTO_TOKEN
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
     requesters: [{kind: box, operator: sjawhar, decision: automatic}]
   DENIED_KEY:
-    source: dev1/agent-secrets/DENIED_KEY
+    source: example/agent-secrets/DENIED_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
@@ -197,8 +197,8 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 		Store: st,
 		Rules: cur,
 		Secrets: secrets.Fake{
-			"dev1/agent-secrets/DEEL_API_KEY": "deel-v1",
-			"dev1/agent-secrets/AUTO_TOKEN":   "auto-v1",
+			"example/agent-secrets/DEEL_API_KEY": "deel-v1",
+			"example/agent-secrets/AUTO_TOKEN":   "auto-v1",
 		},
 		Approvers:  approversSvc,
 		MaxGrant:   time.Hour,
@@ -737,7 +737,7 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	enr, key := newEnrollment(t, st, "box", "box-a-"+t.Name(), str("sjawhar"), nil)
 	m := &Machine{
 		Store: st, Rules: cur,
-		Secrets:    secrets.Fake{"dev1/agent-secrets/DEEL_API_KEY": "deel-v1", "dev1/agent-secrets/AUTO_TOKEN": "auto-v1"},
+		Secrets:    secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1", "example/agent-secrets/AUTO_TOKEN": "auto-v1"},
 		Approvers:  approversSvc,
 		MaxGrant:   time.Hour,
 		PendingTTL: 12 * time.Hour,
@@ -793,7 +793,7 @@ func TestCoalescingComparesWholeNames(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 	rule := `
-    source: dev1/agent-secrets/%s
+    source: example/agent-secrets/%s
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 3600
@@ -828,7 +828,7 @@ func TestAuditSurvivesControlCharactersInSecretNames(t *testing.T) {
 	withRules(t, m, `version: 1
 secrets:
   "BELL\aNAME\vTAB":
-    source: dev1/agent-secrets/odd-name
+    source: example/agent-secrets/odd-name
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
@@ -876,7 +876,7 @@ func TestApprovalAfterTheEnrollmentLapsedDenies(t *testing.T) {
 const tightenedRules = `version: 1
 secrets:
   AUTO_TOKEN:
-    source: dev1/agent-secrets/AUTO_TOKEN
+    source: example/agent-secrets/AUTO_TOKEN
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
@@ -942,7 +942,7 @@ func TestProxyGrantNeverWidensToInject(t *testing.T) {
 	proxied := `version: 1
 secrets:
   AUTO_TOKEN:
-    source: dev1/agent-secrets/AUTO_TOKEN
+    source: example/agent-secrets/AUTO_TOKEN
     owner: sjawhar
     delivery: %s
     max_lifetime_seconds: 43200
@@ -971,7 +971,7 @@ func TestValuesNamesASecretMissingFromTheStore(t *testing.T) {
 	withRules(t, m, `version: 1
 secrets:
   GHOST_KEY:
-    source: dev1/agent-secrets/GHOST_KEY
+    source: example/agent-secrets/GHOST_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 3600
@@ -1020,7 +1020,7 @@ func TestPodRulesMatchTheVerifiedServiceAccount(t *testing.T) {
 	withRules(t, m, `version: 1
 secrets:
   WORKER_KEY:
-    source: dev1/agent-secrets/AUTO_TOKEN
+    source: example/agent-secrets/AUTO_TOKEN
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 3600

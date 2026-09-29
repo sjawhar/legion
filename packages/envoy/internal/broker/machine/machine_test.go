@@ -123,7 +123,7 @@ func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: "sami-agents"},
+		{Type: "launcher_credential", Identifier: "example-host-devbox"},
 	}, "", "sjawhar", time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -141,8 +141,8 @@ func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupByCode: %v", err)
 	}
-	if view.Host != "sami-agents" || view.Approver != "sjawhar" || view.State != "pending" {
-		t.Fatalf("LookupByCode = %+v, want host sami-agents, approver sjawhar, state pending", view)
+	if view.Host != "example-host-devbox" || view.Approver != "sjawhar" || view.State != "pending" {
+		t.Fatalf("LookupByCode = %+v, want host example-host-devbox, approver sjawhar, state pending", view)
 	}
 	if len(view.ApproveChallenge) != 32 || len(view.DenyChallenge) != 32 {
 		t.Fatalf("LookupByCode challenges = %d/%d bytes, want 32/32", len(view.ApproveChallenge), len(view.DenyChallenge))
@@ -200,7 +200,7 @@ func TestApproveWithWrongCodeRefuses(t *testing.T) {
 	svc, approverAuth := newFixture(t)
 	ctx := context.Background()
 
-	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	compact := signMachineLogin(t, "sjawhar", "example-host-devbox", "")
 	_, code, err := svc.Login(ctx, compact)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
@@ -226,7 +226,7 @@ func TestLoginRefusesAReplayedRequestObject(t *testing.T) {
 	svc, _ := newFixture(t)
 	ctx := context.Background()
 
-	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	compact := signMachineLogin(t, "sjawhar", "example-host-devbox", "")
 	if _, _, err := svc.Login(ctx, compact); err != nil {
 		t.Fatalf("first Login: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestExpiredCredentialRefuses(t *testing.T) {
 	svc, approverAuth := newFixture(t)
 	ctx := context.Background()
 
-	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	compact := signMachineLogin(t, "sjawhar", "example-host-devbox", "")
 	_, code, err := svc.Login(ctx, compact)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
@@ -395,7 +395,7 @@ func TestAuthenticateLauncherSucceedsOnRepeatedChainReVerification(t *testing.T)
 	svc, approverAuth := newFixture(t)
 	ctx := context.Background()
 
-	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	compact := signMachineLogin(t, "sjawhar", "example-host-devbox", "")
 	_, code, err := svc.Login(ctx, compact)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
@@ -428,7 +428,7 @@ func TestChainVerificationRefusesAForgedAssertionSignature(t *testing.T) {
 	svc, approverAuth := newFixture(t)
 	ctx := context.Background()
 
-	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	compact := signMachineLogin(t, "sjawhar", "example-host-devbox", "")
 	_, code, err := svc.Login(ctx, compact)
 	if err != nil {
 		t.Fatalf("Login: %v", err)

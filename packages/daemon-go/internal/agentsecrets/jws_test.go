@@ -98,7 +98,7 @@ func thumbprintOfJWKForTest(m map[string]any) (string, error) {
 func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 	key := mustTestKey(t)
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	compact, err := signRequestObject(key, "https://secrets.test", "sami-agents.legion", "legion-daemon", "sjawhar", now)
+	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "legion-daemon", "sjawhar", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 	if got := sortedKeys(detail); !reflect.DeepEqual(got, wantDetailKeys) {
 		t.Fatalf("authorization_details[0] keys = %v, want %v", got, wantDetailKeys)
 	}
-	if detail["type"] != "launcher_credential" || detail["identifier"] != "sami-agents.legion" || detail["service"] != "legion-daemon" {
+	if detail["type"] != "launcher_credential" || detail["identifier"] != "example-host-devbox.legion" || detail["service"] != "legion-daemon" {
 		t.Fatalf("detail = %+v", detail)
 	}
 }
@@ -165,7 +165,7 @@ func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 // credential rather than a service one) never puts an empty string on the wire.
 func TestSignRequestObjectWithNoServiceOmitsIt(t *testing.T) {
 	key := mustTestKey(t)
-	compact, err := signRequestObject(key, "https://secrets.test", "sami-agents.legion", "", "sjawhar", time.Now())
+	compact, err := signRequestObject(key, "https://secrets.test", "example-host-devbox.legion", "", "sjawhar", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

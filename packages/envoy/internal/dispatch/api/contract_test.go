@@ -95,7 +95,7 @@ func newContractRig(t *testing.T) *contractRig {
 	rulesYAML := `version: 1
 secrets:
   DEEL_API_KEY:
-    source: dev1/agent-secrets/DEEL_API_KEY
+    source: example/agent-secrets/DEEL_API_KEY
     owner: ` + contractApprover + `
     delivery: inject
     max_lifetime_seconds: 43200
@@ -129,7 +129,7 @@ approvers:
 	enr := &enroll.Service{Store: brokerStore, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(brokerStore, approversSvc, brokerServer.URL, time.Minute)
 	reqMachine := &requests.Machine{
-		Store: brokerStore, Rules: cur, Secrets: secrets.Fake{"dev1/agent-secrets/DEEL_API_KEY": "deel-v1"},
+		Store: brokerStore, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1"},
 		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}

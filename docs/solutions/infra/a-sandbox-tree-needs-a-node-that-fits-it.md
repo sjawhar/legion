@@ -47,7 +47,7 @@ available: 2 Insufficient cpu`. Under required colocation a request on a later p
 ## What to do
 
 Size the node where every pod of every tree gets it, so whichever pod is first gets a node that
-fits the tree: the `legion` NodePool in agent-c (`components/legion`) requires
+fits the tree: the cluster's `legion` NodePool requires
 `karpenter.k8s.aws/instance-cpu Gt 3`, so Karpenter launches the cheapest 4-vCPU type, with 58 pod
 slots, while no Legion pod requests anything. A node selector on the same label does the same
 only if every pod carries it, the image probe's included; the pool's floor needs nothing on any pod.
