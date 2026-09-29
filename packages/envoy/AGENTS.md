@@ -70,7 +70,9 @@ its own markdown reads back otherwise: a row inserted under an aligned column is
 alignment and reads back with the column's, and a row whose cells the upload path refuses for
 reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
 Every other insert is spliced and read back on the document it leaves against the one it started
-from, as an accept is (`400 INVALID_OP` on `markdown`). The reading rules refuse every shape they
+from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans
+unwritten: it runs once for each insert of a batch, and an insert, written between document-level
+blocks, changes no table, so each span reads back the same on both. The reading rules refuse every shape they
 know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
 write whose markdown reads back otherwise`). Wherever a check reads a write back - here, and in an
 accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;

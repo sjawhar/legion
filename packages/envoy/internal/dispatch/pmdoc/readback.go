@@ -29,11 +29,17 @@ func (s skip) has(name string) bool { return s.all || s.names[name] }
 
 // ReadBack is what doc's markdown reads back as.
 func ReadBack(doc *Node) (*Node, error) {
-	markdown, err := Render(doc)
+	return readBack(doc, maxSpanCells)
+}
+
+// readBack is what doc's markdown, its tables' spans adding at most spanCells cells (render),
+// reads back as.
+func readBack(doc *Node, spanCells int) (*Node, error) {
+	r, err := render(doc, spanCells)
 	if err != nil {
 		return nil, err
 	}
-	return Parse(markdown)
+	return Parse(r.b.String())
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before
@@ -49,7 +55,13 @@ func ReadBack(doc *Node) (*Node, error) {
 // leaves unreadable. Only a refusal (ErrSchema) reading either back is a verdict; any other error,
 // a panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
 func NewMisread(before, after *Node) (string, error) {
-	backAfter, err := ReadBack(after)
+	return newMisread(before, after, maxSpanCells)
+}
+
+// newMisread is NewMisread reading before and after back with their tables' spans adding at most
+// spanCells cells each.
+func newMisread(before, after *Node, spanCells int) (string, error) {
+	backAfter, err := readBack(after, spanCells)
 	if err != nil && !errors.Is(err, ErrSchema) {
 		return "", err
 	}
@@ -57,7 +69,7 @@ func NewMisread(before, after *Node) (string, error) {
 	if err == nil && readDifference(written, backAfter, skip{}) == "" {
 		return "", nil
 	}
-	backBefore, beforeErr := ReadBack(before)
+	backBefore, beforeErr := readBack(before, spanCells)
 	if beforeErr != nil && !errors.Is(beforeErr, ErrSchema) {
 		return "", beforeErr
 	}
@@ -116,9 +128,15 @@ func RefuseMisreadDocument(doc *Node) error {
 	return refuseMisread(documentMisread(doc))
 }
 
-// RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument.
+// RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument. It reads both
+// documents back as renderSpanless writes them. An insert checks its write with it once for each
+// operation of a batch, and a batch holds as many as a request carries, where a budget of span
+// cells for each read-back would let one batch spend two for every operation. An insert writes
+// markdown, which carries no span, between document-level blocks, so it changes no table and every
+// span reads back the same before and after it either way; spanless, a read-back costs no more
+// than the cells the tables hold.
 func RefuseMisreadWrite(before, after *Node) error {
-	return refuseMisread(NewMisread(before, after))
+	return refuseMisread(newMisread(before, after, 0))
 }
 
 func refuseMisread(misread string, err error) error {
