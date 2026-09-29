@@ -1140,7 +1140,7 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     name: "an unquoted empty scalar before a harmless xargs program stays allowed",
     family: "no-argument word",
     role: "must-allow",
-    command: `printf '%s\\n' harmless | xargs $x true`,
+    command: `x=; printf '%s\\n' harmless | xargs $x true`,
   },
   {
     name: "an unquoted empty scalar before a harmless find-exec program stays allowed",
