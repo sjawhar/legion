@@ -3,7 +3,9 @@
 // telling the current watcher from one it replaced, recording the terminal error when the current
 // watcher ends on its own, emptying the cache when the bucket was recreated, and arming nothing
 // once stopped. The interest registry, the session registry and the CI store each keep one, so
-// the listener rewatches, health-checks and stops all three the same way.
+// the listener rewatches, health-checks and stops all three the same way. It also owns the
+// one-shot scan of a bucket's existing keys (ScanExistingKeys), and the one reading of how
+// nats.go ended a scan that both share (idleTimeout).
 package kvwatch
 
 import (
@@ -25,6 +27,7 @@ type Watcher struct {
 	bucket string
 	apply  func(nats.KeyValueEntry)
 	reset  func()
+	log    *slog.Logger
 
 	ready     chan struct{}
 	readyOnce sync.Once
@@ -49,6 +52,17 @@ type Watcher struct {
 	stream time.Time
 }
 
+// Option configures a Watcher.
+type Option func(*Watcher)
+
+// WithLogger sets the logger the watcher writes its lines through: its warm-up, a first start that
+// failed, a recreated bucket and its own end. The listener passes its own, so they are JSON records
+// with machine_id, as internal/store's are (store.WithLogger says why the listener never sets the
+// default instead). Without it the watcher logs where slog.Default() points.
+func WithLogger(log *slog.Logger) Option {
+	return func(w *Watcher) { w.log = log }
+}
+
 // New returns the watcher for the bucket kv is a handle on. name labels its log lines and its
 // terminal error ("<name> watcher stopped"). apply takes each entry the current watcher delivers,
 // one at a time; an entry from a watcher already replaced is dropped rather than applied. reset
@@ -57,8 +71,8 @@ type Watcher struct {
 // until Start. kv is a bus.KeyValue, the handle bus.EnsureKeyValue opens, and each Rewatch opens its
 // replacement with bus.OpenKeyValue, so every handle the store reads and writes through checks its
 // keys.
-func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset func()) *Watcher {
-	return &Watcher{
+func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset func(), options ...Option) *Watcher {
+	w := &Watcher{
 		name:   name,
 		bucket: kv.Bucket(),
 		apply:  apply,
@@ -67,6 +81,18 @@ func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset fun
 		first:  kv,
 		kv:     kv,
 	}
+	for _, option := range options {
+		option(w)
+	}
+	return w
+}
+
+// logger is the logger WithLogger set, or the default one.
+func (w *Watcher) logger() *slog.Logger {
+	if w.log == nil {
+		return slog.Default()
+	}
+	return w.log
 }
 
 // Start arms the first watcher in the background, so a store's Open never waits on WatchAll. A
@@ -80,7 +106,7 @@ func (w *Watcher) Start() {
 		if err == nil {
 			return
 		}
-		slog.Error(w.name+" watch failed", slog.String("error", err.Error()))
+		w.logger().Error(w.name+" watch failed", slog.String("error", err.Error()))
 		w.mu.Lock()
 		current := w.watcher != nil
 		if !current && !w.stopped {
@@ -138,13 +164,13 @@ func (w *Watcher) KV() bus.KeyValue {
 // 503. When Check meets it first, /healthz answers 503 until the next self-health rebuild does
 // the same. Either way the cost is one refill, and Check is quiet from then on.
 func (w *Watcher) Check() error {
-	stream, err := streamCreated(w.KV())
+	stream, err := bus.ReadStreamState(w.KV())
 	if err != nil {
 		return err
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.stopped && w.err == nil && !w.stream.IsZero() && !stream.Equal(w.stream) {
+	if !w.stopped && w.err == nil && !w.stream.IsZero() && !stream.Created.Equal(w.stream) {
 		w.err = fmt.Errorf("%s bucket %s was recreated under its watcher", w.name, w.bucket)
 	}
 	return nil
@@ -211,10 +237,14 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 	if stopped {
 		return nil
 	}
-	stream, err := streamCreated(kv)
+	// The warm-up's cost as the caller waiting on readiness sees it: the stream read and the
+	// watcher's create request are part of it, not just the entries that follow.
+	started := time.Now()
+	state, err := bus.ReadStreamState(kv)
 	if err != nil {
 		return err
 	}
+	stream := state.Created
 	watcher, err := kv.WatchAll()
 	if err != nil {
 		return err
@@ -260,27 +290,47 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 	}
 	w.applyMu.Unlock()
 	if recreated {
-		slog.Info(w.name+" bucket was recreated; its cache is refilled from the new bucket",
+		w.logger().Info(w.name+" bucket was recreated; its cache is refilled from the new bucket",
 			slog.String("bucket", w.bucket))
 	}
 	if previous != nil {
 		// Stop reports a consumer the server has lost to its caller, never at ERROR.
 		_ = previous.Stop()
 	}
-	go w.consume(watcher, generation)
+	go w.consume(watcher, generation, started)
 	return nil
 }
 
-func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64) {
+func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started time.Time) {
+	var scan KeyScan
+	scanning := true
 	for entry := range watcher.Updates() {
 		if entry == nil {
-			// WatchAll emits a nil sentinel once it has delivered the current value of every key.
-			// Only the current watcher's releases readiness: a replaced one's scan says nothing
+			// WatchAll emits a nil sentinel once it has delivered the current value of every key,
+			// and nats.go's idle timer emits the same sentinel when it gives up on that scan. Only
+			// the current watcher's releases readiness, or logs: a replaced one's scan says nothing
 			// about what the current watcher has delivered.
-			if w.current(generation) {
+			current := w.current(generation)
+			if scanning {
+				scanning = false
+				// A scan the idle timer ended is logged and never recorded as this watcher's
+				// error: the watcher is still running and its cache still follows the bucket, so
+				// Err(), Ping(), /healthz and the self-health rebuild must not read it as dead.
+				// Reading the timeout consumes nats.go's one buffered error (idleTimeout), so a
+				// watcher that later ends after a timed-out scan records "<name> watcher stopped"
+				// instead of the timeout -- a non-nil error either way.
+				timedOut := idleTimeout(watcher) != nil
+				if current {
+					w.logWarmUp(scan, time.Since(started), timedOut)
+				}
+			}
+			if current {
 				w.signalReady()
 			}
 			continue
+		}
+		if scanning {
+			scan.count(entry)
 		}
 		w.applyCurrent(entry, generation)
 	}
@@ -296,8 +346,30 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64) {
 	w.mu.Unlock()
 	// The watcher ended on its own: the connection it was on closed, or the bucket went away. The
 	// cache is frozen until a Rewatch replaces it, and Err says so.
-	slog.Error(w.name+" watcher stopped", slog.String("error", err.Error()))
+	w.logger().Error(w.name+" watcher stopped", slog.String("error", err.Error()))
 	w.signalReady()
+}
+
+// logWarmUp logs the line that says what one initial scan cost: the cache, the bucket, how long it
+// took, the live keys the scan delivered, the delete markers it streamed past to find them, and how
+// it ended. A restart's own log then names its cost, which is what LEGION-374 could not read off a
+// 17-25 s readiness gap. The two counts are disjoint, as the role restore line's are: a marker is
+// not a key the cache keeps, and one total of both reads as keys the warm-up failed to apply.
+// entries counts what the scan delivered, which is what sizes the replay; a cache can hold fewer,
+// since each one evicts a value it cannot decode. A scan the idle timer gave up on logs the same
+// line at WARN, since the cache behind it is short of the bucket.
+func (w *Watcher) logWarmUp(scan KeyScan, elapsed time.Duration, timedOut bool) {
+	level, outcome := slog.LevelInfo, "completed"
+	if timedOut {
+		level, outcome = slog.LevelWarn, "timed out"
+	}
+	w.logger().Log(context.Background(), level, w.name+" cache warm-up",
+		slog.String("bucket", w.bucket),
+		slog.Int64("elapsed_ms", elapsed.Milliseconds()),
+		slog.Int("entries", scan.Puts),
+		slog.Int("delete_markers", scan.Markers),
+		slog.String("outcome", outcome),
+	)
 }
 
 // applyCurrent applies entry only while generation is still the current watcher's.
@@ -330,28 +402,11 @@ func (w *Watcher) signalReady() {
 	w.readyOnce.Do(func() { close(w.ready) })
 }
 
-// streamCreated is when the stream behind kv was created.
-func streamCreated(kv nats.KeyValue) (time.Time, error) {
-	status, err := kv.Status()
-	if err != nil {
-		return time.Time{}, err
-	}
-	bucket, ok := status.(*nats.KeyValueBucketStatus)
-	if !ok {
-		return time.Time{}, fmt.Errorf("KV status of %s is a %T, not a JetStream bucket's", kv.Bucket(), status)
-	}
-	return bucket.StreamInfo().Created, nil
-}
-
-// terminalError is the error the watcher reported on its Error channel, if any (for example
-// nats.ErrKeyWatcherTimeout), and otherwise "<name> watcher stopped".
+// terminalError is the error the watcher left on its Error channel, if any (idleTimeout), and
+// otherwise "<name> watcher stopped".
 func terminalError(watcher nats.KeyWatcher, name string) error {
-	select {
-	case err, ok := <-watcher.Error():
-		if ok && err != nil {
-			return err
-		}
-	default:
+	if err := idleTimeout(watcher); err != nil {
+		return err
 	}
 	return errors.New(name + " watcher stopped")
 }

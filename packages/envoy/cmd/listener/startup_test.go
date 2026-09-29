@@ -329,14 +329,15 @@ func do(t *testing.T, request *http.Request) (int, string) {
 }
 
 // Two packages the listener calls into log two different ways, and both are load-bearing.
-// internal/store's lines exist for the SRE to query a restart, so they go through the listener's
-// own handler and arrive as JSON records with this machine's id. internal/bus's lines, and the
-// stdlib log package's, must stay in Go's text format: the deployed CloudWatch metric filters for
-// publish failures, webhook refusals and dropped stream subjects are space-delimited patterns
-// anchored on that format's date and time prefix (agent-c
-// meta/infra/pulumi/components/envoy/listener.py), so routing them into the JSON handler with
-// slog.SetDefault stops three alarms without failing anything. This test holds both halves, so
-// reintroducing that SetDefault reds it.
+// internal/store's and internal/kvwatch's lines exist for the SRE to query a restart (the role
+// restore and every cache's warm-up cost), so they go through the listener's own handler and
+// arrive as JSON records with this machine's id. internal/bus's lines, and the stdlib log
+// package's, must stay in Go's text format: the deployed CloudWatch metric filters for publish
+// failures, webhook refusals and dropped stream subjects are space-delimited patterns anchored on
+// that format's date and time prefix (agent-c meta/infra/pulumi/components/envoy/listener.py), so
+// routing them into the JSON handler with slog.SetDefault stops three alarms without failing
+// anything. This test holds both halves, so reintroducing that SetDefault reds it. The listener
+// mounts the GitHub route, so all three caches warm up.
 func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	const machineID = "logger-split"
 	container, uri := testnats.Start(t)
@@ -354,7 +355,7 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	registry.StopWatch()
 	client.Close()
 
-	listener := startListenerProcess(t, buildListener(t), uri, machineID)
+	listener := startListenerProcess(t, buildListener(t), uri, machineID, githubWebhookEnv...)
 	listener.waitHealthy(t)
 
 	restored := listenerJSONRecord(t, listener, "restored role claims")
@@ -369,6 +370,22 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	}
 	if _, ok := restored["delete_markers"].(float64); !ok {
 		t.Fatalf("the role-restore record has no numeric delete_markers field: %v", restored)
+	}
+	// Every cache's warm-up line, which names what a restart spent before it served. The CI
+	// cache's readiness is not on the healthy path, so its line can arrive just after.
+	for _, cache := range []string{"interest registry", "session registry", "cistore"} {
+		msg := cache + " cache warm-up"
+		warmUp := listenerJSONRecord(t, listener, msg)
+		for deadline := time.Now().Add(30 * time.Second); warmUp == nil && time.Now().Before(deadline); {
+			time.Sleep(100 * time.Millisecond)
+			warmUp = listenerJSONRecord(t, listener, msg)
+		}
+		if warmUp == nil {
+			t.Fatalf("internal/kvwatch's %q line is not a JSON record in the listener's output:\n%s", msg, listener.output.String())
+		}
+		if warmUp["machine_id"] != machineID {
+			t.Fatalf("the %q record's machine_id = %v, want %q", msg, warmUp["machine_id"], machineID)
+		}
 	}
 
 	// internal/bus logs its connection lines through the default logger. Taking the server away is

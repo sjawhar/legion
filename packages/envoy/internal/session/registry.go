@@ -34,6 +34,7 @@ type SessionRegistryOption func(*sessionRegistryOpts)
 type sessionRegistryOpts struct {
 	replicas int
 	ttl      time.Duration
+	log      *slog.Logger
 }
 
 func WithSessionReplicas(n int) SessionRegistryOption {
@@ -42,6 +43,14 @@ func WithSessionReplicas(n int) SessionRegistryOption {
 
 func WithSessionTTL(d time.Duration) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.ttl = d }
+}
+
+// WithSessionLogger sets the logger the registry and its cache watcher write through. The listener
+// passes its own, so their lines are JSON records with machine_id, as internal/store's are
+// (store.WithLogger says why the listener never sets the default instead); without it they log
+// where slog.Default() points.
+func WithSessionLogger(log *slog.Logger) SessionRegistryOption {
+	return func(o *sessionRegistryOpts) { o.log = log }
 }
 
 // cachedSession is a SessionEntry plus its local expiry deadline. JetStream
@@ -83,6 +92,8 @@ type SessionRegistry struct {
 	// watcher feeds the cache from the session bucket and holds the handle the registry writes
 	// through. Once it is ready the cache is consistent with the bucket.
 	watcher *kvwatch.Watcher
+
+	log *slog.Logger
 }
 
 func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*SessionRegistry, error) {
@@ -119,8 +130,9 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		cache:          map[string]cachedSession{},
 		cacheRevisions: map[string]uint64{},
 		lastSeen:       map[string]lastSeenSession{},
+		log:            opts.log,
 	}
-	r.watcher = kvwatch.New("session registry", kv, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("session registry", kv, r.applyWatched, r.resetCache, kvwatch.WithLogger(opts.log))
 	// The watcher populates the cache asynchronously. A synchronous Keys()+per-key Get() loop
 	// blocks for seconds when the KV stream leader is on a remote node.
 	r.watcher.Start()
@@ -148,6 +160,14 @@ func (r *SessionRegistry) Rewatch(conn *nats.Conn) error {
 	return r.watcher.Rewatch(conn)
 }
 
+// logger is the logger WithSessionLogger set, or the default one.
+func (r *SessionRegistry) logger() *slog.Logger {
+	if r.log == nil {
+		return slog.Default()
+	}
+	return r.log
+}
+
 // resetCache empties the cache and its revision fence, for a recreated session bucket.
 func (r *SessionRegistry) resetCache() {
 	r.mu.Lock()
@@ -165,7 +185,7 @@ func (r *SessionRegistry) applyWatched(entry nats.KeyValueEntry) {
 		var item SessionEntry
 		if err := json.Unmarshal(entry.Value(), &item); err != nil {
 			r.evictCachedSessionLocked(entry.Key(), entry.Revision())
-			slog.Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
+			r.logger().Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
 		} else {
 			r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
 		}
@@ -295,7 +315,7 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 		var item SessionEntry
 		if err := json.Unmarshal(latest.Value(), &item); err != nil {
 			r.evictCachedSessionLocked(sessionID, latest.Revision())
-			slog.Warn("session registry cache evicted malformed value",
+			r.logger().Warn("session registry cache evicted malformed value",
 				slog.String("key", latest.Key()),
 				slog.Uint64("revision", latest.Revision()),
 				slog.String("error", err.Error()),
