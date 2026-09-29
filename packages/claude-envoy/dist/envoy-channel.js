@@ -36946,8 +36946,8 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC", route_status: "no_holder" },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
+    example: { project: "AGENTC", limit: 250, offset: 250 },
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are paged after the server returns the full response: limit sets the page size (default 50, " + "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " + "enumerate every matching issue.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -36956,7 +36956,8 @@ var dispatchToolSpecs = [
       priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
-      limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional()
+      limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional(),
+      offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional()
     })
   },
   {
@@ -40505,6 +40506,7 @@ async function executeDispatchTool(input) {
       const updatedSince = optionalString(args, "updated_since");
       const routeStatus = optionalString(args, "route_status");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
+      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
       const issues = await client.listIssues({
         project,
         ...status === undefined ? {} : { status },
@@ -40514,7 +40516,8 @@ async function executeDispatchTool(input) {
         ...updatedSince === undefined ? {} : { updated_since: updatedSince },
         ...routeStatus === undefined ? {} : { route_status: routeStatus }
       });
-      const rows = issues.slice(0, limit).map((row) => ({
+      const total = issues.length;
+      const rows = issues.slice(offset, offset + limit).map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -40529,13 +40532,15 @@ async function executeDispatchTool(input) {
         updated_at: row.updated_at
       }));
       const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
+      const isPartial = offset !== 0 || rows.length !== total;
+      const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
       return {
-        text: rows.length === 0 ? `No issues in ${project}.` : [
-          `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (issues.length > rows.length ? ` (showing ${rows.length} of ${issues.length})` : ""),
+        text: rows.length === 0 ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}` : [
+          `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
           ...rows.map((row) => `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`))
         ].join(`
 `),
-        details: { issues: rows }
+        details: { issues: rows, total, offset, limit }
       };
     }
     case "dispatch_architecture_sync": {
