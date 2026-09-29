@@ -84,10 +84,11 @@ harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln` — so `cp 
 `mv *.txt dir/` are refused, because a glob can yield a `-t<link>` pointing out of the roots,
 while `cp -- *.txt dir/` and `./*.txt` are allowed; `xargs` into `cp` or `sed -i` with
 unreadable operands; a glob loop into `cp` with neither a literal prefix nor `--`; and a
-read-only `sed` whose options come from an array of `-e` and its script built in a loop the
-guard cannot decide, where it cannot pair each `-e` with the element it consumes and so reads
-those elements — which are sed scripts it does not read — as words that may stand alone and
-turn on `-i`.
+read-only `sed` whose options come from an array of `-e` and its script built inside a loop, an
+`if`, or an `&&`/`||` list — even one whose condition is known, since the guard merges the
+branches and forgets the elements (a `case` over a literal keeps them) — so it cannot pair each
+`-e` with the element it consumes and reads those elements, which are sed scripts it does not
+read, as words that may stand alone and turn on `-i`.
 Help and version options do not write. `cp` judges the source basename as
 written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`
 retains the source path. It inspects only existing destination entries, recursively for a recursive
