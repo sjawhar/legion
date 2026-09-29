@@ -164,4 +164,3 @@ issue:
 
 - [Receipt-backed core NATS delivery to current holders](../architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md) — the pattern these locks protect, and its *Pitfalls learned on LEGION-108* section for why the flush and receipt exits needed distinct errors.
 - [Race regression tests: gate the racing side, hard-assert the precondition, prove the pre-fix failure](race-regression-tests-that-fail-before-the-fix.md) — the Bun-side twin of "a lock must fail before the fix".
-- [testcontainers-go resolves all Docker credhelpers](testcontainers-go-resolves-all-docker-credhelpers.md) — the fixture these tests share, and its one known local failure mode.

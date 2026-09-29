@@ -35,8 +35,11 @@ type renderer struct {
 	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
-	err                                error
-	blockOffsets                       []BlockOffset
+	// spanBudget is how many more empty cells the tables' spans may add: maxSpanCells, or none in
+	// a spanless render (renderSpanless).
+	spanBudget   int
+	err          error
+	blockOffsets []BlockOffset
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -51,24 +54,59 @@ type BlockOffset struct {
 // (renderedMarkTypes) cannot change it: the document is rendered with its anchor marks stripped,
 // which merges the text runs an anchor split, and an escape is decided over a whole run.
 func Render(doc *Node) (string, error) {
-	r, err := render(doc)
+	r, err := render(doc, maxSpanCells)
 	if err != nil {
 		return "", err
 	}
 	return r.b.String(), nil
 }
 
+// renderSpanless is Render writing no cell for a table's spans: each cell once, and the header as
+// wide as the widest row as it holds cells (tableGrid). The checks that read one document-level
+// block at a time (BlockReadError, BlockShapeError) read it so. They run once for each block a
+// write changed, where a budget for each render would let a write across many tables add
+// maxSpanCells cells for every one of them; a render of the whole document, the one a write stores
+// or reads back (NewMisread), spends one budget in all.
+func renderSpanless(doc *Node) (string, error) {
+	r, err := render(doc, 0)
+	if err != nil {
+		return "", err
+	}
+	return r.b.String(), nil
+}
+
+// SpanBudget is one budget of the empty cells tables' spans add (maxSpanCells) that several renders
+// share, where together they write what one render of a document writes: each spends what its
+// tables' spans add, and the next has what is left.
+type SpanBudget struct{ cells int }
+
+// NewSpanBudget is a whole budget.
+func NewSpanBudget() *SpanBudget {
+	return &SpanBudget{cells: maxSpanCells}
+}
+
+// Render is Render spending b.
+func (b *SpanBudget) Render(doc *Node) (string, error) {
+	r, err := render(doc, b.cells)
+	if err != nil {
+		return "", err
+	}
+	b.cells = r.spanBudget
+	return r.b.String(), nil
+}
+
 // RenderWithBlockOffsets renders a document and records each identified block's
 // byte range in the returned markdown.
 func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
-	r, err := render(doc)
+	r, err := render(doc, maxSpanCells)
 	if err != nil {
 		return "", nil, err
 	}
 	return r.b.String(), r.blockOffsets, nil
 }
 
-func render(doc *Node) (r *renderer, err error) {
+// render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid).
+func render(doc *Node, spanCells int) (r *renderer, err error) {
 	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
 	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
@@ -82,19 +120,20 @@ func render(doc *Node) (r *renderer, err error) {
 	}
 	// Anchor marks render nothing, but one that starts or ends inside a word splits its text into
 	// runs, and an escape is decided within one run: rendering the document without them merges
-	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`).
-	doc = StripAnchorMarks(doc)
+	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`). The line
+	// breaks the browser editor holds that markdown has no form for are written as it draws them.
+	doc = asWritten(doc)
 	if holdsOnlyAnEmptyParagraph(doc) {
-		return &renderer{}, nil
+		return &renderer{spanBudget: spanCells}, nil
 	}
 	labels := definedFootnoteLabels(doc)
-	r = renderBlocks(doc, labels, false)
+	r = renderBlocks(doc, labels, false, spanCells)
 	// An empty code block in a typed block in a spread list item is written with a line between its
 	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
 	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
 	// written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
-		r = renderBlocks(doc, labels, true)
+		r = renderBlocks(doc, labels, true, spanCells)
 	}
 	if r.err != nil {
 		return nil, r.err
@@ -103,9 +142,9 @@ func render(doc *Node) (r *renderer, err error) {
 }
 
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
-// its fences alone when bareEmptyCode says so.
-func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool) *renderer {
-	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode}
+// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int) *renderer {
+	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return r
@@ -495,17 +534,18 @@ func opensWithUnwrittenParagraph(item *Node) bool {
 // itemBlocks writes blocks the browser editor's parser reads as a list item's lines - the item's
 // own, or those of a footnote definition the item holds - at indent, their lines' prefix, where
 // prefix is the list's. A tight item writes its blocks on consecutive lines, where a paragraph
-// would run on into a paragraph after it and underline itself with a rule's `---`. The browser
+// would run on into a paragraph after it and underline itself with a rule's `---`, and a block
+// whose first line would be a row of a table before it (continuesTable) would be one. The browser
 // editor's writer puts a blank line between two paragraphs (the item then reads back spread) and
-// writes a rule `***`, and so does this renderer; firstRule reports whether a rule opening the
-// blocks is written `***` too.
+// writes a rule `***`, and so does this renderer, which writes a blank line after such a table too;
+// firstRule reports whether a rule opening the blocks is written `***` too.
 func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string, firstRule bool) {
 	otherMarkers := otherListMarkers(blocks)
 	for index, child := range blocks {
 		afterParagraph := index > 0 && blocks[index-1].Type == "paragraph"
 		if index > 0 {
 			blanks := 0
-			if spread || afterParagraph && child.Type == "paragraph" {
+			if spread || afterParagraph && child.Type == "paragraph" || blocks[index-1].Type == "table" && continuesTable(child) {
 				blanks = 1
 			}
 			if previous := blocks[index-1]; isList(previous) {
@@ -548,61 +588,6 @@ func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string
 		r.otherListMarker = otherMarkers[index]
 		r.block(child, indent)
 	}
-}
-
-func (r *renderer) table(table *Node, prefix string) {
-	if len(table.Children) == 0 || table.Children[0].Type != "table_header_row" {
-		r.err = fmt.Errorf("%w: table requires a header row", ErrSchema)
-		return
-	}
-	header := table.Children[0]
-	r.tableRow(header, true, prefix)
-	r.writeSyntax("\n" + prefix + "| ")
-	for i, cell := range header.Children {
-		if i > 0 {
-			r.writeSyntax(" | ")
-		}
-		r.writeSyntax(tableAlignment(cell.Attrs["alignment"]))
-	}
-	r.writeSyntax(" |")
-	for _, row := range table.Children[1:] {
-		// A row with no cells is written as nothing: a table with only such rows reads back
-		// holding one, as the browser editor's parser reads a table with no body row.
-		if len(row.Children) == 0 {
-			continue
-		}
-		r.writeSyntax("\n" + prefix)
-		r.tableRow(row, false, prefix)
-	}
-}
-
-func (r *renderer) tableRow(row *Node, header bool, prefix string) {
-	want := "table_cell"
-	rowType := "table_row"
-	if header {
-		want = "table_header"
-		rowType = "table_header_row"
-	}
-	if row.Type != rowType {
-		r.err = fmt.Errorf("%w: unexpected table row %q", ErrSchema, row.Type)
-		return
-	}
-	r.writeSyntax("| ")
-	for i, cell := range row.Children {
-		if cell.Type != want {
-			r.err = fmt.Errorf("%w: table row contains %q", ErrSchema, cell.Type)
-			return
-		}
-		if i > 0 {
-			r.writeSyntax(" | ")
-		}
-		if len(cell.Children) != 1 || cell.Children[0].Type != "paragraph" {
-			r.err = fmt.Errorf("%w: table cell requires one paragraph", ErrSchema)
-			return
-		}
-		r.tableCellInline(cell.Children[0].Children, prefix)
-	}
-	r.writeSyntax(" |")
 }
 
 func (r *renderer) writeCodeText(node *Node, prefix string) {
@@ -697,14 +682,37 @@ func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
+// isBareAutolink reports whether a link whose text is its href can be written as that bare text for
+// linkify to link again. A backtick in it would be written escaped, which linkify stops at, so such
+// a link is written as an autolink (isAngleURLLink).
 func isBareAutolink(value string) bool {
 	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
 	}
-	if strings.ContainsAny(value, " \t\n()<>") {
+	if strings.ContainsAny(value, " \t\n()<>`") {
 		return false
 	}
 	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
+}
+
+// isAngleURLLink reports whether node is a link whose text is its href, holding a backtick, which
+// is written `<href>`, as the browser editor writes it: both parsers read an autolink's text as
+// written, escapes and references included, where bare text would be escaped and linkify would stop
+// at the escape. One an autolink cannot hold (whitespace, `<`, `>`, a pipe in a table cell) is
+// written as an explicit link.
+func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
+	for _, mark := range marks {
+		if mark.Type != "link" {
+			continue
+		}
+		href, _ := mark.Attrs["href"].(string)
+		title, _ := mark.Attrs["title"].(string)
+		value := node.Text
+		return href == value && title == "" && strings.Contains(value, "`") &&
+			(strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")) &&
+			!strings.ContainsAny(value, " \t\n\r<>") && !(escapePipes && strings.Contains(value, "|"))
+	}
+	return false
 }
 
 func escapeLinkDestination(href string, escapePipes bool) string {
@@ -809,21 +817,85 @@ func hardBreaksAsSpaces(nodes []*Node) []*Node {
 	return out
 }
 
-// tableAlignment is the delimiter row's cell for a column's alignment. A column with none - null,
-// or the "none" this parser once stored - is written `---`, which both parsers read as no
-// alignment; `:---` reads as left.
-func tableAlignment(value any) string {
-	alignment, _ := value.(string)
-	switch alignment {
-	case "left":
-		return ":---"
-	case "center":
-		return ":---:"
-	case "right":
-		return "---:"
+// asWritten is doc as its markdown writes it: without the marks the rendering does not write
+// (StripAnchorMarks), and with each line break its textblocks hold in the one form markdown
+// carries. The browser editor holds two more. A soft line break it keeps from a paste (a hard break
+// with isInline) it draws as a space, and one is written: both parsers read a soft break as one too.
+// A line feed in text outside code it draws as a line break (white-space: break-spaces), and a
+// hard break is written, which both parsers read back as the editor draws it, except where nothing
+// but whitespace follows it in its textblock: a hard break there reads back as a backslash, and a
+// line feed as nothing, as trailing whitespace does.
+func asWritten(doc *Node) *Node {
+	out := StripAnchorMarks(doc)
+	writeLineBreaksIn(out)
+	return out
+}
+
+// writeLineBreaksIn gives every textblock under node its line breaks as asWritten writes them.
+func writeLineBreaksIn(node *Node) {
+	switch node.Type {
+	case "paragraph", "heading":
+		node.Children = writtenLineBreaks(node.Children)
+	case "code_block":
 	default:
-		return "---"
+		for _, child := range node.Children {
+			writeLineBreaksIn(child)
+		}
 	}
+}
+
+// writtenLineBreaks is a textblock's inline nodes with each soft break a space and each line feed
+// in text outside code followed by more than whitespace a hard break (asWritten), adjacent text
+// with the same marks merged, as the parser reads it.
+func writtenLineBreaks(nodes []*Node) []*Node {
+	out := make([]*Node, 0, len(nodes))
+	appendText := func(text string, marks []Mark) {
+		if text == "" {
+			return
+		}
+		if last := len(out) - 1; last >= 0 && out[last].Type == "text" && marksEqual(out[last].Marks, marks) {
+			out[last] = &Node{Type: "text", Text: out[last].Text + text, Marks: marks}
+			return
+		}
+		out = append(out, &Node{Type: "text", Text: text, Marks: marks})
+	}
+	for index, node := range nodes {
+		switch {
+		case node.Type == "hardbreak" && node.Attrs["isInline"] == true:
+			appendText(" ", nil)
+		case node.Type == "text" && !nodeHasMark(node, "inlineCode") && strings.Contains(node.Text, "\n"):
+			lines := strings.Split(node.Text, "\n")
+			for line, text := range lines {
+				if line > 0 {
+					if onlyWhitespaceFollows(strings.Join(lines[line:], "\n"), nodes[index+1:]) {
+						appendText("\n", node.Marks)
+					} else {
+						out = append(out, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
+					}
+				}
+				appendText(text, node.Marks)
+			}
+		case node.Type == "text":
+			appendText(node.Text, node.Marks)
+		default:
+			out = append(out, node)
+		}
+	}
+	return out
+}
+
+// onlyWhitespaceFollows reports whether text, and after it every one of rest, holds nothing but
+// whitespace.
+func onlyWhitespaceFollows(text string, rest []*Node) bool {
+	if strings.TrimSpace(text) != "" {
+		return false
+	}
+	for _, node := range rest {
+		if node.Type != "text" || strings.TrimSpace(node.Text) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func num(value any, fallback float64) float64 {

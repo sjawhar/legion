@@ -1,3 +1,5 @@
+import { fakeEnvoyPort } from "./harness-ports";
+
 interface FakeSession {
   readonly session_id: string;
   readonly title: string;
@@ -18,7 +20,6 @@ interface SentMessage {
   readonly expects_reply: string;
 }
 
-const port = Number(process.env.FAKE_ENVOY_PORT ?? "9021");
 let sessions: FakeSession[] = [];
 let liveSessions = new Set<string>();
 const sendStatuses = new Map<string, 200 | 404>();
@@ -31,7 +32,7 @@ const unsubscribeCalls: unknown[] = [];
 
 Bun.serve({
   hostname: "127.0.0.1",
-  port,
+  port: fakeEnvoyPort,
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/sessions") {
@@ -152,4 +153,4 @@ Bun.serve({
   },
 });
 
-console.log(`fake envoy listener on 127.0.0.1:${port}`);
+console.log(`fake envoy listener on 127.0.0.1:${fakeEnvoyPort}`);

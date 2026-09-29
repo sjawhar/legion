@@ -1,11 +1,10 @@
 import { expect, test } from "@playwright/test";
-
 import { createIssue, createProject } from "./api";
+import { dispatchPort } from "./harness-ports";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${e2ePort}`;
+const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
 
 async function createAskWithToken(issue: string, token: string): Promise<Response> {
   return fetch(new URL(`/api/v1/issues/${issue}/asks`, baseUrl), {

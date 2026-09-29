@@ -70,7 +70,9 @@ its own markdown reads back otherwise: a row inserted under an aligned column is
 alignment and reads back with the column's, and a row whose cells the upload path refuses for
 reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
 Every other insert is spliced and read back on the document it leaves against the one it started
-from, as an accept is (`400 INVALID_OP` on `markdown`). The reading rules refuse every shape they
+from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans
+unwritten: it runs once for each insert of a batch, and an insert, written between document-level
+blocks, changes no table, so each span reads back the same on both. The reading rules refuse every shape they
 know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
 write whose markdown reads back otherwise`). Wherever a check reads a write back - here, and in an
 accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;
@@ -239,7 +241,10 @@ accept left unchanged whose spread already read back otherwise before it, such a
 markdown never carried, keeps that spread. Every other block, mark and node stays as it was. An empty replacement keeps the paragraph it empties, which is not written beside other
 blocks. Outside an ask it then runs, over every document-level block it changed,
 `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
-(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
+(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). Both write a table without the empty cells its
+colspans and rowspans add, which the read-back of the whole document below writes, so an accept
+across many tables costs no more there than the cells those tables hold. A non-empty replacement
+inside a typed block is
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
@@ -758,10 +763,22 @@ updates cannot carry a carriage return. No stored document holds one, and `pmdoc
 feeds alone. Marks are read as that parser reads them, as a set, where goldmark nests them: a mark
 opened where the same mark is already open adds nothing, and its close ends the mark for the rest
 of the text around it, up to the node that opened it (`parseInlineMarks`), so `*x *y* z*` is
-`x y` in emphasis and ` z` without, and `****a****` is strong once. Delimiter runs pair as that
-parser pairs them: CommonMark's rule of three is judged on the lengths two runs have left after
-the pairs already made from them (`emphasisDelimiters`), where goldmark judged the lengths they were
-written with, so in `***a.****&#32;b*` the closer's last `**` is text. A code span keeps the whitespace that
+`x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
+marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
+mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
+refused. Delimiter runs pair as that parser pairs them: CommonMark's rule of three is judged on the
+lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
+goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`
+is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one
+precedes it, as that parser's attention markers let it (`emphasisParser`), where goldmark's
+flanking rules alone decide, so in `b_*a**` the `*` can both open and close, the rule of three
+keeps it from the `**`, and the line is text. That parser counts `~` as such a marker too, and Go
+does not: beside a `~` its strikethrough resolver pairs runs apart from and sometimes before the
+`*` and `_` runs, which goldmark's one delimiter stack does not model, so the `~` half alone would
+misread `[**~~**d**~~**](u)`, which both parsers read as strong struck `d` under the flanking rules.
+The writer takes a spelling that reads back under CommonMark's flanking rules as well before one
+that reads back under that parser's alone (`inlineWithEscapes`), so it keeps the bytes it wrote
+before the marker rule. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
@@ -978,13 +995,24 @@ is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content ru
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
 (`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block. A new
 document is held to it for every ask, a new version only for each ask it writes or changes
-(`refuseChangedAsks`), comparing the ask's rendering with the current one (`askMarkdown`), since a
+(`refuseChangedAsks`), comparing the ask's rendering with the current one (`newAskMarkdown`, the
+asks of one check sharing one budget of span cells, spent in document order as the document's own
+render spent it, so a live ask over a table with colspans or rowspans matches the cells its stored
+markdown wrote them out as while that budget lasts), since a
 version is markdown and cannot carry a comment's anchor mark or the id a reader's browser derives
 for a heading; what the rule allows is taken, and an option without a label or a question
 that is only an image is left to settlement's `invalid` flag. A document edit is refused for an ask
 it writes or changes that breaks the rule or that settlement cannot read (`validateEditedAskBlocks`).
 Neither refuses an ask a browser edit left unreadable that it carries through unchanged, so such an
-ask does not refuse edits or versions elsewhere in the document.
+ask does not refuse edits or versions elsewhere in the document, except that a new version is
+refused for an unreadable ask in two cases. Where only the asks' tables have spent the budget of
+span cells (100,000) before an ask, it is refused when its table's markdown holds a body row
+shorter than its widest, which the parser pads when it reads the upload (the header is always
+written as wide as the widest row): a span-free table with a short body row, or a span table left
+with one once that budget ran out, such as a body cell spanning columns under a wider header, a
+rowspan, or rows the budget ran out partway through. Where a table outside the asks spent some of
+it first, the check can write span cells the document did not, and the ask is refused unless
+padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown.
 

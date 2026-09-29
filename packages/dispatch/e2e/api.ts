@@ -1,5 +1,4 @@
 import type { EditArtifactInput } from "@legion/contracts";
-
 import type {
   Actor,
   AnswerAskInput,
@@ -40,9 +39,9 @@ import type {
   UserIssueState,
   Version,
 } from "../web/src/api/types";
+import { dispatchPort } from "./harness-ports";
 
-const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${e2ePort}`;
+const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
 // e2e/run-server.sh, so an E2E_AGENT_TOKEN left in the shell from a deployed run would only
 // make every bearer-seeded call 401 against it.
