@@ -132,9 +132,11 @@ func RefuseMisreadDocument(doc *Node) error {
 // documents back as renderSpanless writes them. An insert checks its write with it once for each
 // operation of a batch, and a batch holds as many as a request carries, where a budget of span
 // cells for each read-back would let one batch spend two for every operation. An insert writes
-// markdown, which carries no span, between document-level blocks, so it changes no table and every
-// span reads back the same before and after it either way; spanless, a read-back costs no more
-// than the cells the tables hold.
+// markdown, which carries no span, between document-level blocks, so it changes no table, and every
+// table reads back the same way before and after it under the same block ids: a table that reads
+// back otherwise does so in both, and NewMisread's filter of misreads before already held, which
+// keys on the block id, sets it aside either way. Spanless, a read-back costs no more than the
+// cells the tables hold.
 func RefuseMisreadWrite(before, after *Node) error {
 	return refuseMisread(newMisread(before, after, 0))
 }

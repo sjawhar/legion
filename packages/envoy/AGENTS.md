@@ -998,13 +998,18 @@ document is held to it for every ask, a new version only for each ask it writes 
 (`refuseChangedAsks`), comparing the ask's rendering with the current one (`newAskMarkdown`, the
 asks of one check sharing one budget of span cells, spent in document order as the document's own
 render spent it, so a live ask over a table with colspans or rowspans matches the cells its stored
-markdown wrote them out as), since a
+markdown wrote them out as while that budget lasts), since a
 version is markdown and cannot carry a comment's anchor mark or the id a reader's browser derives
 for a heading; what the rule allows is taken, and an option without a label or a question
 that is only an image is left to settlement's `invalid` flag. A document edit is refused for an ask
 it writes or changes that breaks the rule or that settlement cannot read (`validateEditedAskBlocks`).
 Neither refuses an ask a browser edit left unreadable that it carries through unchanged, so such an
-ask does not refuse edits or versions elsewhere in the document.
+ask does not refuse edits or versions elsewhere in the document, except that a new version is
+refused for an unreadable ask over a table whose rows its markdown writes short, which the parser
+pads when it reads the upload: a span-free table with a short row, or a span table written past the
+point the document's render ran out of its budget of span cells (100,000) - the ask it runs out in
+and every span-bearing ask after it, and, where a table before the asks ran it out, each whose
+padded rows differ from its spans.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown.
 

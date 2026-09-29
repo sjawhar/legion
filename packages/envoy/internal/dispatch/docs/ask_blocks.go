@@ -331,10 +331,16 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 // An ask can hold a table. A document's render writes its tables' spans out under one budget for
 // the whole document (pmdoc.Render), and a version uploaded from that markdown holds them as the
 // cells they were written as. So the asks one call renders share one budget (pmdoc.SpanBudget),
-// spent in document order as the document's render spent it, which writes each ask as that render
-// did unless a table outside the asks ran the budget out first. A budget for each ask would write
-// an ask past the first budget's end with cells the document never wrote, refusing an upload of the
-// document's own markdown, and would spend a budget for every ask the document holds.
+// spent in document order as the document's render spent it, which writes each ask as the stored
+// markdown holds it while the budget lasts. A budget for each ask would write every ask past the
+// first budget's end with cells the document never wrote, and spend a budget for every ask the
+// document holds. Past the point the budget runs out, a span table's rows are written short: the
+// stored markdown's are padded when the parser reads the upload, and the fingerprint's are written
+// with whatever budget it has left. So an ask whose table holds a span and is written past that
+// point reads as changed, refusing an upload of the document's own markdown: the ask the budget
+// runs out in and every one after it, and, where a table before the asks ran it out, each whose
+// padded rows differ from its spans. An ask over a span-free table with a short row reads as
+// changed the same way.
 func newAskMarkdown() func(ask *pmdoc.Node) (string, error) {
 	budget := pmdoc.NewSpanBudget()
 	return func(ask *pmdoc.Node) (string, error) {
