@@ -46,7 +46,12 @@ env:
   ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
 steps:
   - name: Build the listener image the smoke test runs against
-    run: docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" --file packages/envoy/docker/Dockerfile .
+    uses: docker/build-push-action@v6
+    with:
+      context: .
+      file: packages/envoy/docker/Dockerfile
+      load: true
+      tags: ${{ env.ENVOY_SMOKE_IMAGE }}
   - name: Container smoke test (testcontainers)
     run: go test -tags smoke -v -timeout 5m ./internal/smoke/
     working-directory: packages/envoy
@@ -65,10 +70,11 @@ deadline, and CI stays green until the build is slow enough to cross it — whic
 this learning is about. The refusal turns all three into an immediate red that names the
 variable and prints the build command. The assertions are untouched.
 
-`docker buildx build --load` is the portable form: it loads into the daemon's image store both
-on a runner where `docker/setup-buildx-action` has made a `docker-container` builder the default
-(Release Envoy Listener) and on one still using the `docker` driver (Legion Envoy and Contracts),
-where the build also reads base images the job pre-pulled.
+`load: true` is Docker's documented test-before-push shape, and the reason to prefer the action
+over a `run:` step is not style: `.github/scripts/check-image-trigger-paths.sh` can read a
+`docker/build-push-action` step's `context` and `file`, and cannot reliably read a shell
+command. Three rounds of review each found another invocation the shell parser missed, so the
+parser was deleted and a run step that looks like an image build is now refused outright.
 
 **Name the image by content, not by a fixed tag.** The message the refusal prints is
 `img=$(docker buildx build --load -q -f packages/envoy/docker/Dockerfile .)` and then

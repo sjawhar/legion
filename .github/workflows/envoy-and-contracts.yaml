@@ -25,10 +25,9 @@ on:
       - "deploy/kubernetes/operator-route/**"
       - "packages/daemon/src/daemon/omp-pin.ts"
       - ".github/actions/install-omp/**"
-      # The envoy-go job builds packages/envoy/docker/Dockerfile for the smoke test, so this
-      # list owes every file that build reads: the four below are the ones the entries above do
-      # not already cover. .github/scripts/check-image-trigger-paths.sh fails the build when one
-      # is missing.
+      # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
+      # file that build reads: the four below are the ones the entries above do not already
+      # cover. .github/scripts/check-image-trigger-paths.sh fails the build when one is missing.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
       - "packages/daemon/package.json"
@@ -508,14 +507,9 @@ jobs:
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
       - uses: actions/setup-go@v5
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Generate Go contracts
-        run: bun run gen:go
-        working-directory: packages/contracts
       # Testcontainers pulls a missing image when a test first asks for it, and the Docker daemon
       # reports a registry connection reset as an internal error that testcontainers does not
       # retry, so one reset failed every test sharing that container. Pull every image the build
@@ -546,13 +540,21 @@ jobs:
       # docs/solutions/testing/a-container-build-inside-go-test-spends-the-tests-deadline.md).
       # The test refuses to run without ENVOY_SMOKE_IMAGE rather than building one, so dropping
       # or renaming this step turns the lane red instead of restoring that budget silently.
-      # The pull step above put this Dockerfile's base images in the daemon's store, which the
-      # `docker` driver reads; no LEGION_COMMIT, since this job publishes no image to match.
+      # `load: true` is Docker's documented test-before-push shape, and the only build form
+      # .github/scripts/check-image-trigger-paths.sh can read. No LEGION_COMMIT: this job
+      # publishes no image to match. The pull step above put the base images in the daemon's
+      # store, which the default `docker` driver reads.
       - name: Build the listener image the smoke test runs against
-        run: docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" --file packages/envoy/docker/Dockerfile .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/envoy/docker/Dockerfile
+          load: true
+          tags: ${{ env.ENVOY_SMOKE_IMAGE }}
       # 5m bounds only what the test does: pull NATS, start both containers behind the test's
-      # own 60 s health wait, and assert. Measured at 1.0 s here and 2.2–20.7 s across four runs
-      # on a devbox at load average 80, so the bound is deliberate headroom, not a build budget.
+      # own 60 s health wait, and assert. Measured at 1.0 s in this job and 2.2–20.7 s across
+      # four runs on a devbox at load average 80, so the bound is deliberate headroom, not a
+      # build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy

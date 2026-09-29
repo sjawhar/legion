@@ -258,6 +258,34 @@ run_check "$root"
 check "a gate covering every input passes" "$(is "$status" 0)"
 check "names the caller and its gate" "$(contains "$out" 'release.yaml on.push.paths + jobs.image.if (jobs.changes filter image or jobs.changes filter other)')"
 
+# The calling job is gated by the jobs it needs as well as by its own if:, the shape
+# release.yaml's worker_image has (needs: [changes, cli], cli itself gated). Its always()
+# is what breaks the inheritance there; without one the narrow gate binds.
+root=$(fixture called-transitive-gate)
+callers "$root" "$all_inputs"
+python3 - "$root/.github/workflows/release.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+text = text.replace(
+    "  image:\n    needs: changes\n",
+    "  gatekeeper:\n    needs: changes\n"
+    "    if: needs.changes.outputs.other == 'true'\n"
+    "    runs-on: ubuntu-24.04\n"
+    "    steps:\n      - run: echo gate\n"
+    "  image:\n    needs: [changes, gatekeeper]\n",
+)
+open(path, "w").write(text)
+PYEOF
+run_check "$root"
+check "a gate the calling job inherits through needs: fails" "$(is "$status" 1)"
+check "names the job it came from" "$(contains "$out" 'jobs.gatekeeper.if (jobs.changes filter other)')"
+
+sed -i "s|^    if: needs.changes.outputs.other == 'true'$|    if: always() \&\& needs.changes.outputs.other == 'true'|" \
+  "$root/.github/workflows/release.yaml"
+run_check "$root"
+check "and still fails, since always() on the NEEDED job does not break inheritance" "$(is "$status" 1)"
+
 root=$(fixture called-gate-gap)
 callers "$root" "$(printf '%s\n' "$all_inputs" | grep -v '.dockerignore')"
 run_check "$root"
@@ -321,158 +349,19 @@ callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.
 run_check "$root"
 check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
-# buildx_step <root> <run body> [working-directory]: replaces the build-push-action step with a
-# run step.
-buildx_step() {
-  local root=$1 body=$2 workdir=${3:-}
-  python3 - "$root/.github/workflows/image.yaml" "$body" "$workdir" <<'PY'
+# run_step <root> <run body>: replaces the build-push-action step with a run step, leaving the
+# workflow with no build this check can read.
+run_step() {
+  local root=$1 body=$2
+  python3 - "$root/.github/workflows/image.yaml" "$body" <<'PYEOF'
 import sys
-path, body, workdir = sys.argv[1], sys.argv[2], sys.argv[3]
+path, body = sys.argv[1], sys.argv[2]
 indented = "\n".join("          " + line for line in body.splitlines())
-where = f"        working-directory: {workdir}\n" if workdir else ""
 text = open(path).read()
 head, _, _ = text.partition("      - uses: docker/build-push-action@v6")
-open(path, "w").write(f"{head}      - name: Build\n        run: |\n{indented}\n{where}")
-PY
+open(path, "w").write(f"{head}      - name: Build\n        run: |\n{indented}\n")
+PYEOF
 }
-
-echo "case: a run step invoking docker buildx build is an image build"
-root=$(fixture buildx-run)
-buildx_step "$root" 'docker buildx build --load --tag app:ci --file docker/Dockerfile .'
-run_check "$root"
-check "exits 0" "$(is "$status" 0)"
-check "counts the run step as a build" "$(contains "$out" 'docker/Dockerfile: checked 5 inputs (7 files) against .github/workflows/image.yaml on.push.paths')"
-check "reports one build, not zero" "$(contains "$out" '(1 image build(s))')"
-
-echo "case: a buildx run step's inputs are covered like any other build's"
-root=$(fixture buildx-run-uncovered)
-buildx_step "$root" 'docker buildx build --load --tag app:ci --file docker/Dockerfile .'
-drop_path "$root" "packages/app/**"
-run_check "$root"
-check "fails" "$(is "$status" 1)"
-check "names the source" "$(contains "$out" 'does not cover packages/app (docker/Dockerfile:3)')"
-
-echo "case: a buildx run step across continuations, with an expression and a second command"
-root=$(fixture buildx-run-multiline)
-buildx_step "$root" 'docker pull debian:trixie-slim
-docker buildx build --load --tag "$IMAGE" \
-  --build-arg REVISION=${{ github.sha }} \
-  --file docker/Dockerfile .'
-run_check "$root"
-check "exits 0" "$(is "$status" 0)"
-check "finds exactly the one build" "$(contains "$out" '(1 image build(s))')"
-
-echo "case: a run step this check cannot read fails rather than passing vacuously"
-root=$(fixture buildx-run-unknown-flag)
-buildx_step "$root" 'docker buildx build --load --squash --file docker/Dockerfile .'
-run_check "$root"
-check "fails" "$(is "$status" 1)"
-check "names the flag" "$(contains "$out" 'Build names --squash, a flag this check cannot read')"
-
-root=$(fixture buildx-run-no-context)
-buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile'
-run_check "$root"
-check "a build with no context fails" "$(is "$status" 1)"
-check "says how many it found" "$(contains "$out" 'names 0 build contexts, and this check needs exactly one')"
-
-echo "case: a run step that mentions docker without building is not a build"
-root=$(fixture buildx-run-not-a-build)
-buildx_step "$root" 'docker pull debian:trixie-slim'
-run_check "$root"
-check "fails on zero builds rather than passing" "$(is "$status" 1)"
-check "says it proves nothing" "$(contains "$out" 'this check covered 0 image builds')"
-
-echo "case: a comment never swallows a build, in any of the four shapes it can take"
-root=$(fixture buildx-run-comment-first)
-buildx_step "$root" '# build the image the smoke runs against
-docker buildx build --load --file docker/Dockerfile .'
-run_check "$root"
-check "a leading comment leaves the build visible" "$(is "$status" 0)"
-check "and it is counted" "$(contains "$out" '(1 image build(s))')"
-
-root=$(fixture buildx-run-comment-between)
-buildx_step "$root" 'docker pull debian:trixie-slim
-# now build
-docker buildx build --load --file docker/Dockerfile .'
-run_check "$root"
-check "a comment between commands leaves the build visible" "$(is "$status" 0)"
-check "and it is counted" "$(contains "$out" '(1 image build(s))')"
-
-root=$(fixture buildx-run-comment-trailing)
-cp "$root/docker/Dockerfile" "$root/docker/Other.Dockerfile"
-buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile . # the smoke image
-docker buildx build --load --file docker/Other.Dockerfile .'
-run_check "$root"
-check "a trailing comment does not hide the next command's build" "$(is "$status" 0)"
-check "both builds are counted" "$(contains "$out" '(2 image build(s))')"
-
-root=$(fixture buildx-run-comment-heredoc)
-buildx_step "$root" "cat <<'EOF' > /tmp/note
-# a hash inside a heredoc
-EOF
-docker buildx build --load --file docker/Dockerfile ."
-run_check "$root"
-check "a hash inside a heredoc does not hide the build" "$(is "$status" 0)"
-check "and it is counted" "$(contains "$out" '(1 image build(s))')"
-
-echo "case: working-directory moves the context and the Dockerfile"
-root=$(fixture buildx-run-workdir)
-mkdir -p "$root/nested/docker"
-echo '{}' > "$root/nested/package.json"
-printf 'FROM debian:trixie-slim\nCOPY package.json ./\n' > "$root/nested/docker/Dockerfile"
-sed -i 's|      - "docker/\*\*"|&\n      - "nested/**"|' "$root/.github/workflows/image.yaml"
-buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile .' nested
-run_check "$root"
-check "exits 0" "$(is "$status" 0)"
-check "reads the Dockerfile under working-directory, not the root decoy" "$(contains "$out" 'nested/docker/Dockerfile: checked')"
-check "and only that one" "$(contains "$out" '(1 image build(s))')"
-
-root=$(fixture buildx-run-workdir-uncovered)
-mkdir -p "$root/nested/docker"
-echo '{}' > "$root/nested/package.json"
-printf 'FROM debian:trixie-slim\nCOPY package.json ./\n' > "$root/nested/docker/Dockerfile"
-buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile .' nested
-run_check "$root"
-check "an uncovered input under working-directory fails" "$(is "$status" 1)"
-check "names the nested file" "$(contains "$out" 'nested/package.json')"
-
-root=$(fixture buildx-run-workdir-variable)
-buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile .' '${{ github.workspace }}/sub'
-run_check "$root"
-check "a working-directory this check cannot resolve fails" "$(is "$status" 1)"
-check "says so" "$(contains "$out" 'working-directory')"
-
-echo "case: a leading assignment or sudo is read, not skipped"
-root=$(fixture buildx-run-assignment)
-buildx_step "$root" 'DOCKER_BUILDKIT=1 IMAGE=app:ci docker buildx build --load --file docker/Dockerfile .'
-run_check "$root"
-check "exits 0" "$(is "$status" 0)"
-check "the build is counted" "$(contains "$out" '(1 image build(s))')"
-
-root=$(fixture buildx-run-sudo)
-buildx_step "$root" 'sudo -E docker buildx build --load --file docker/Dockerfile .'
-run_check "$root"
-check "exits 0" "$(is "$status" 0)"
-check "the build is counted" "$(contains "$out" '(1 image build(s))')"
-
-echo "case: a build in a form this check cannot read fails rather than passing unseen"
-root=$(fixture buildx-run-subshell)
-buildx_step "$root" '( cd . && docker buildx build --load --file docker/Dockerfile . )'
-run_check "$root"
-check "fails" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
-
-root=$(fixture buildx-run-wrapper)
-buildx_step "$root" 'retry docker buildx build --load --file docker/Dockerfile .'
-run_check "$root"
-check "a wrapped build fails" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
-
-root=$(fixture buildx-run-compose)
-buildx_step "$root" 'docker compose build listener'
-run_check "$root"
-check "docker compose build fails rather than being ignored" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
 
 echo "case: the building job's own if: gate narrows what the trigger covers"
 # gate_build_job <root> <filter patterns>: adds a changes job to image.yaml and gates the
@@ -650,31 +539,48 @@ gate_probe "$root" "  docker:
 run_check "$root"
 check "always() is read as ungated" "$(is "$status" 0)"
 
-echo "case: a subshell or bash -c does not slip past on spacing"
-root=$(fixture buildx-run-subshell-unspaced)
-buildx_step "$root" '(docker buildx build --load --file docker/Dockerfile .)'
-run_check "$root"
-check "an unspaced subshell fails" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+echo "case: an if: this check does not model is refused, never read as ungated"
+shape_index=0
+for shape in "false" "vars.RUN_IT == 'true'" "needs.changes.outputs.img == 'true' && vars.RUN_IT" "needs.changes.outputs.img == 'true' && false"; do
+  shape_index=$((shape_index + 1))
+  root=$(fixture "gate-unmodelled-$shape_index")
+  gate_probe "$root" "  docker:
+    needs: changes
+    if: $shape
+    runs-on: ubuntu-24.04
+"
+  run_check "$root"
+  check "if: $shape is refused" "$(is "$status" 1)"
+  check "  and quotes the term" "$(contains "$out" 'which this check cannot')"
+done
 
-root=$(fixture buildx-run-bash-c)
-buildx_step "$root" 'bash -c "docker buildx build --load --file docker/Dockerfile ."'
-run_check "$root"
-check "a bash -c build fails" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+echo "case: the terms that do not narrow by path stay accepted"
+shape_index=0
+# `!cancelled()` needs quoting: bare, YAML reads `!cancelled` as a tag.
+for shape in "success()" '"!cancelled()"' "always() && needs.changes.outputs.img == 'true'" "(needs.changes.result == 'success' || needs.changes.result == 'skipped') && needs.changes.outputs.img == 'true'"; do
+  shape_index=$((shape_index + 1))
+  root=$(fixture "gate-neutral-$shape_index")
+  gate_probe "$root" "  docker:
+    needs: changes
+    if: $shape
+    runs-on: ubuntu-24.04
+"
+  run_check "$root"
+  check "if: $shape passes" "$(is "$status" 0)"
+done
 
-echo "case: a build step's own if: is a gate too"
+echo "case: a build step's own if: is a gate too, and is allowlisted the same way"
 # step_if <root> <expression>: names and gates the build-push-action step itself.
 step_if() {
   local root=$1 expression=$2
-  python3 - "$root/.github/workflows/image.yaml" "$expression" <<'PY'
+  python3 - "$root/.github/workflows/image.yaml" "$expression" <<'PYEOF'
 import sys
 path, expression = sys.argv[1], sys.argv[2]
 text = open(path).read()
 marker = "      - uses: docker/build-push-action@v6\n"
 replacement = "      - name: Build image\n        uses: docker/build-push-action@v6\n" + f"        if: {expression}\n"
 open(path, "w").write(text.replace(marker, replacement))
-PY
+PYEOF
 }
 unchanged="  docker:
     runs-on: ubuntu-24.04
@@ -701,25 +607,35 @@ run_check "$root"
 check "a step gate this check cannot evaluate is refused" "$(is "$status" 1)"
 check "quotes the term" "$(contains "$out" "is narrowed by \`github.event_name == 'push'\`")"
 
-echo "case: a build inside a command substitution is not skipped"
-root=$(fixture buildx-run-command-substitution)
-buildx_step "$root" 'img=$(docker buildx build --load -q --file docker/Dockerfile .)'
+root=$(fixture step-gate-vars)
+gate_probe "$root" "$unchanged"
+step_if "$root" "vars.RUN_IT"
 run_check "$root"
-check "img=\$(docker buildx build …) fails" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+check "a step gate on vars is refused too" "$(is "$status" 1)"
 
-root=$(fixture buildx-run-backticks)
-buildx_step "$root" 'img=`docker buildx build --load -q --file docker/Dockerfile .`'
+echo "case: a run step that builds an image is refused, whatever shape it takes"
+while IFS='|' read -r label body; do
+  [ -n "$label" ] || continue
+  root=$(fixture "tripwire-$label")
+  run_step "$root" "$body"
+  run_check "$root"
+  check "$label is refused" "$(is "$status" 1)"
+  check "  and says how to make it readable" "$(contains "$out" 'build images with docker/build-push-action so this check can read the build')"
+done <<'SHAPES'
+plain|docker build -f docker/Dockerfile .
+buildx|docker buildx build --load -f docker/Dockerfile .
+bake|docker buildx bake --load listener
+compose|docker compose up --build -d
+eval|eval "docker build -f docker/Dockerfile ."
+github-env|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
+buildah|buildah bud -f docker/Dockerfile .
+kaniko|/kaniko/executor --dockerfile docker/Dockerfile --context .
+SHAPES
+
+root=$(fixture tripwire-not-a-build)
+run_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"
-check "the backtick form fails" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
-
-root=$(fixture buildx-run-echo-substitution)
-buildx_step "$root" 'echo $(docker build --file docker/Dockerfile .)'
-run_check "$root"
-check "echo \$(docker build …) fails" "$(is "$status" 1)"
-check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
-
+check "a run step that does not build is not flagged" "$(contains "$out" 'this check covered 0 image builds')"
 
 
 summary "check-image-trigger-paths.sh"
