@@ -82,122 +82,6 @@
 
 ### Fixed
 
-- The pane guard (LEGION-121) models a subshell as bash runs one, everywhere it sees one: a command
-  or process substitution, `( … )`, `( … ) &`, each part of a pipeline, and a coprocess. A subshell
-  starts with none of the parent's traps and runs the handlers it sets itself at its own end; the
-  parent's run once, at the parent's end. Before, a substitution ran every handler set before it
-  against the state at that line, and the other four walked a handler they set into a state that
-  was then discarded. So `( trap 'rm -rf "$HOME/y"' EXIT; echo hi )`, its background and piped
-  forms, and the coprocess form were allowed, and bash deletes the target in each. `! command`, a
-  pipeline of one, is walked in this shell, as bash runs it, so `! cd "$HOME"; rm -rf x` is refused.
-- `trap - <condition>` removes only the conditions it names: `trap - INT` leaves the EXIT handler,
-  which bash still runs, and `trap -` naming none resets nothing. Before, any `trap -` dropped every
-  handler, so `trap 'rm -rf "$HOME/y"' EXIT; trap - INT` was allowed. A condition the guard cannot
-  read (`"$(…)"`, a variable read from input, a positional parameter) could be any: a removal naming
-  one resets nothing, and a handler set for one stays and is walked. A handler whose text the guard
-  cannot read (`trap "$c" EXIT` with `c` from input) is refused, since it cannot check what runs at
-  exit; a double-quoted handler that expanded only pids from `$!` (`trap "kill $pid" EXIT`) reads
-  them back and is judged. A handler the guard can read that runs a command it cannot
-  (`trap 'eval "$c"' EXIT`) is judged as any such command is.
-- A handler set inside an `if`, `case` or loop body stays set after it, as bash keeps it, judged
-  with the variables that body gave it: `if true; then trap 'rm -rf "$HOME/y"' EXIT; fi` was
-  allowed, and `if true; then t=$(mktemp); trap 'rm -f "$t"' EXIT; fi` still is. A name assigned
-  after the construct takes its new value, which is what a single-quoted handler reads at exit, so
-  `…; fi; t="$HOME/y"` is refused; a double-quoted handler keeps the values it expanded when it was
-  set. A function an `if`, `case` or loop body defines is every definition a path may have left: a
-  call runs each, and the command itself where a path defined none. Before, a definition inside a
-  branch was dropped, so `if true; then f() { rm -rf "$HOME/y"; }; fi; f` was allowed, and one that
-  replaced an earlier definition was judged by the earlier one. The positional parameters merge as a
-  variable does: a `shift` or `set --` inside a branch makes them unknown after it, where before the
-  guard kept the arguments from before the branch, so `set -- "$LEGION_WORKSPACE/a" "$HOME/y"; if
-  true; then shift; fi; rm -rf "$1"` was allowed. A sourced file's `set --` or `shift` changes the
-  caller's arguments, as bash does; before, the guard kept the caller's, so `set --
-  "$LEGION_WORKSPACE/a"; . lib.sh; rm -rf "$1"` with `lib.sh` running `set -- "$HOME/y"` was
-  allowed. With operands, bash restores the caller's arguments afterwards, undoing a `shift` and
-  keeping a `set --`; the guard does not tell those apart, so a list the file touched is unknown,
-  even one set to the same values (`set -- "$@"`), which bash keeps. `. file` with no operands runs
-  the file with the caller's arguments, not none, so `set -- "$HOME/y"; . lib.sh` with `lib.sh`
-  running `rm -rf "$@"` is refused. A backgrounded command (`f &`) is walked in a subshell, so its
-  `trap - EXIT` no longer clears the parent's handler, and nothing else it changes reaches the
-  parent.
-- The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
-  from 10,000. The repository's largest tracked script, Stage 4b's driver, needs about 20,700 to
-  reach its first refusal, and 10,000 refused it for size alone. The limit still refuses and never
-  allows unread.
-- Tracked scripts the guard now judges on their real first refusal:
-  `packages/envoy/scripts/e2e-api.sh`, whose cleanup kills only the child whose pid it wrote, runs.
-  Stage 2, Stage 3 and the 4b.13b
-  acceptance are refused at their gateway key command's write, and Stage 4b and the controller
-  proof at the plugin unpack. The allow-list test records each refused script's `file:line`, derived
-  by `src/legion/pane-guard-scripts.ts`, where it had recorded a phrase several refusals share.
-- The pane guard resolves more of what a script computes before it refuses a target it cannot
-  (LEGION-300). A script or function run with arguments the guard knows has them as `$1`, `$#` and
-  `${1:-…}`, so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
-  is walked pass by pass, a `case` on a known word takes its one matching item, and a `shift` past
-  the last argument shifts nothing, as in bash. A word that may be several arguments or none (an
-  unquoted `$v` holding a space, `$*`, a glob) leaves the arguments unknown, `"$@"` of no arguments
-  is none (and assigned, `x="$@"`, the empty string, one argument when quoted), `unset` leaves a
-  name unset rather than empty, and in a shell whose arguments the guard does not know `${1-…}` and
-  `${1+…}` stay unknown. It also evaluates pattern replacement and removal of a known ASCII value
-  (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose output passes through
-  `(umask 077 && …)`, and a script a brace group writes from here-documents and `printf` before
-  running it. A target it cannot resolve is still refused, and some stay
-  unknown on purpose: `$(git rev-parse --show-toplevel)`, whose answer the repository's config
-  decides and an earlier command in the same line can rewrite; an operand the parser splits
-  differently from bash (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a
-  `case` whose word matches no item, which walks every branch. A pattern is matched in time its
-  value and itself bound, never by a backtracking regular expression (`*a*a*a*b` over a run of
-  `a`s held a regex for hours), and the work is charged to the walk budget. No value the guard
-  builds is longer than 65,536 characters: a replacement of a replacement reached 134 million in a
-  tenth of a second and held the pane for seconds on each read, so past the bound a value is
-  unknown. A script a command writes is read whole up to the 1 MiB the guard reads of one on disk,
-  and past it is refused as one it cannot read: a 176 KB brace group rendering 655 MB held the pane
-  for 30 s. So is a script whose code holds a value the guard cannot know: `printf %s`, `printf %q`
-  and `echo` write the value into it, and bash parses what the value holds, where a `;`, a quote or
-  a newline reaches out of any position (an operand of `echo`, a quoted string, a comment), and a
-  value containing a newline makes `%q` select `$'…'`, which closes a single- or double-quoted
-  position. So is one `echo` writes with an option first, since the option changes what it prints:
-  a harmless `echo -e 'ls' > f; bash f` is refused as well, and writing the file stays allowed.
-  `printf %d` writes only digits and a sign, so there its value stays one unknown word. The Stage
-  2, 3, 4b.13b, 4b and controller drivers are refused for killing the processes a query selects
-  (`$(run_processes)`, `first_child`), all but the controller's first for running the gateway key
-  command `install-model-gateway.sh` writes, whose `command=(…)` line takes a value built from
-  `$(command -v hawk-token)`, and the five manual smokes (`smoke-delivery.sh`, `smoke-btw.sh`,
-  `smoke-channel.sh`, `smoke-clear-rebind.sh`, `omp-roundtrip.sh`) run their sessions on their own
-  tmux server, where a `kill-session` can end only the session each started.
-  `src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first.
-- A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
-  below `/tmp` except the socket families as the pane's scratch, so with `HOME` at
-  `/tmp/<run>/omp-home` and no `TMUX_TMPDIR` in the same directory, `rm -rf ~`,
-  `rm -rf "$HOME/.ssh"`, `find /tmp/<run> -delete` and `rm -rf "$LEGION_STATE_DIR"` were allowed.
-  The e2e rigs that run guarded panes set `TMUX_TMPDIR` beside their Oh My Pi home, so the
-  protection of its directory covered them by that coincidence, which nothing enforced. The
-  directory holding `HOME` is now protected as the one holding `TMUX_TMPDIR` is, by exact name; the
-  workspace inside it stays writable.
-- The pane guard follows the writes to a variable it sees (LEGION-300). It kept values bash had
-  changed, so a target built from one afterwards was judged on the stale value: `unset d;
-  : "${d:=$HOME/.ssh}"; rm -rf "$d"`, a function's `local d=…` still in force after it returned,
-  `printf -v 'd[0]'`, `read -ra d`, `declare "d=$HOME/.ssh"`, a plain `d=x` over an array's other
-  elements, arithmetic, `wait -p`, `unset -f` of a function that shadowed a command, and a write
-  bash refuses or rewrites for a `readonly`, `-i`, `-l` or `-u` name were all allowed where bash
-  deletes outside the roots. Each now assigns as bash does, and a write the guard cannot model (a
-  variable named at run time, `eval "$(tool)"`) leaves every variable unknown, so a target built
-  from one afterwards is refused. A nameref (`declare -n`) is refused. Still not followed: a
-  `source` of a path the guard cannot read at check time, such as a process substitution, which it
-  takes as sourcing nothing (LEGION-332), and an assignment to `IFS`, since it splits an unquoted
-  value on whitespace alone.
-- The pane guard reads no unquoted here-document that bash expands (LEGION-300). `cat > f <<EOF`
-  and `tee f <<EOF` stored the text as written, so `x='rm -rf ~'; cat > f <<EOF` with `$x` in the
-  body, then `bash f`, was allowed while bash wrote and ran the expanded line; a shell or
-  interpreter reading one as its program (`bash <<EOF`, `python3 - <<PY`) was judged on the same
-  unexpanded text. A here-document whose unquoted text holds `$`, a backquote, or a backslash
-  before one of them or a newline is now a script the guard cannot read, and a shell or
-  interpreter reading it is refused, as a rendered brace group already treated one.
-- The pane guard gives an array's literal the elements bash gives it (LEGION-300). It took one
-  element per word, where bash makes `("$@")` one per argument, `("${arr[@]}")` none for an empty
-  array, and a word that may split several, so `Y=("$@"); rm -rf "${Y[1]}"` with a second argument
-  outside the roots was allowed. A word that may be several elements now leaves every element
-  unknown.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
@@ -207,22 +91,6 @@
   filename, on an issue or a project, naming both ids, where they took the slug's document; on a
   project an id also outranks another document's slug. A `dispatch://` document reference, or a
   dashboard document URL, still resolves by its slug.
-- A phase worker's or root architect's pane, and any `task` subagent it spawns, no longer runs a
-  command that would delete, move, truncate, overwrite an existing file, or recursively `chmod`
-  or `chown` a path outside its issue workspace or a permitted directory below `/tmp`. `/tmp`
-  itself, a glob over it, and its tmux and ssh socket directories remain out of bounds; the guard
-  cannot identify which other `/tmp` directory belongs to the pane. It also refuses a signal to a
-  process the pane did not start (LEGION-121). On 2026-09-13 a worker pane's probe script ended in
-  `rm -rf "$work" "$HOME"` and deleted the operator's SSH and commit-signing keys, stopping every
-  agent on the machine; the same day a subagent's `pkill -x sleep` killed other agents' processes.
-  The `tool_call` hook parses each `bash` command, `eval` code, and `hub` process start
-  (`src/legion/pane-guard.ts`, with the bundled `unbash` parser), resolves every target through
-  `$HOME`, `~`, earlier variables, `cd`, and the scripts the command runs (`bash <file>`, `sh -c`,
-  `source`, heredocs, python/node/bun scripts), refuses a target it cannot resolve and a command
-  it cannot parse, refuses `pkill`, `killall`, and `fuser -k`, resolves `tmux kill-*` to its actual
-  socket path and requires that path to stay inside the pane roots, and lets `kill` reach only
-  descendants of the pane's Oh My Pi process. Each refusal names the target, where it resolved,
-  and the rule.
 - A `task` subagent's `envoy_whoami`, `/whoami`, `envoy_send`, and `envoy_publish` now name the session that spawned it as the reply address, instead of reporting an empty id and sending an empty `source_session` the listener erased — which reached the recipient as `from: agent` with no reply address, and a reply attempt as `no live session`. A subagent still registers nothing (no listener registration, no agent-subject subscription, no heartbeat); every top-level instance publishes its own session on a process-wide record keyed by its transcript path (`src/envoy-session.ts`), dropping its previous key whenever its id or transcript changes, and a subagent resolves its own by walking OMP's transcript layout up, a nested subagent included. An ACP host running several top-level sessions in one process therefore answers each subagent with the session that actually spawned it. A session is recorded from its `session_start` even before the host mints its id, and dropped at `session_shutdown`, so a subagent never names a session that has no id yet or has already deregistered. `envoy_whoami` reports that address as `session_id` and the subagent's own host session id under `subagent`. Where the walk matches nothing and more than one top-level session is recorded, there is no reply address: `session_id` is empty, the `subagent` note says why, and `@legion/envoy-client`'s transport now omits `source_session` rather than sending an empty one. The `envoy_publish` result also names the delivery a subagent cannot get: the listener drops a message whose source session is its recipient, so a publish to a role the parent holds reaches nobody, and hub is that hop.
 - The TypeScript daemon keeps a reviewer's `changes_requested` decision across the reviewer's own handoff-only push (`.legion/review.json`), so its completion returns the issue to `in_progress` rather than `retro`, and the corrective implementer's completion writes `testing` (LEGION-285). A new head that changes anything outside `.legion/`, or whose push cannot be classified, still ends the round unless the review App pushed it (none of its commits answers a request made of the implementer; resync keeps a range whose every commit GitHub attributes to the review App), and a head whose push webhook never arrives, or that resync's read finds first, is settled by the reviewer's next review of that head or by resync from GitHub's compare of the round's head against it (a compare it cannot read drops the decision); an approval is still dropped on every new head. The reviewer's clean COMMENT round at a later head ends its own request, and a late changes-requested review of an earlier commit is settled from that commit. A push by the review App, a tester's red tests included, is never a fix attempt, and neither is the implementer's fix after the red those red tests earned, so tester rounds consume no `max_fix_attempts`; after the tester's handoff-only push onto the implementer's red, the implementer's next push still counts. The Go daemon counts the same way (it reads the pusher and stores `planned_red`), and both daemons refuse to boot when one GitHub App is configured for both roles. Daemon state is v34 (`PrState.reviewDecisionUnsettledFrom`, `changesRequest`, `plannedRed`, `pendingPush.before` and `byReviewApp`); a v33 file migrates on load and is kept as `<state>.v33.bak`.
 - The refusal on a pane without `LEGION_GRANT_FILE` now names its remedy: relaunch the pane from a daemon on the matching release, since a daemon restart keeps a live pane as it was launched.
@@ -236,6 +104,14 @@
 
 ### Removed
 
+- The filesystem and signal boundary (LEGION-121) is removed. The `tool_call` hook no longer
+  parses a phase worker's or root architect's `bash` commands, `eval` code, or `hub` process
+  starts (or a `task` subagent's) to refuse deleting, moving, truncating, overwriting, or
+  recursively `chmod`/`chown`ing a path outside the issue workspace and `/tmp`, or signalling a
+  process the pane did not start (`kill`, `pkill`, `killall`, `fuser -k`, `tmux kill-*`), and the
+  bundled `unbash` parser is gone. The pane rules stay: a phase-worker pane still refuses the jj
+  operation-log rewrites, and a phase-worker or root-architect pane still refuses
+  `legion handoff complete` from the shell.
 - `before_agent_start` no longer injects the authored-ask summary (`dispatch-open-asks`) into
   every turn. It reads open asks only to arm the run-end self-check, while an agent reads its own
   open asks with `dispatch_open_asks`.
