@@ -221,6 +221,9 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     "void target;",
   ],
   ["retain loop glob prefix", 'words[0]?.exp.some((piece) => piece.kind === "glob")', "false"],
+  ["loop prefix must be literal", 'words[0]?.exp[0]?.kind === "literal" &&', "true &&"],
+  ["loop prefix must be nonempty", 'words[0].exp[0].text !== "" &&', "true &&"],
+  ["loop prefix must not start with dash", '!words[0].exp[0].text.startsWith("-") &&', "true &&"],
   ["cp sparse value", '"--sparse",', '"--unused-sparse",', 'case "cp": {'],
   ["cp no-preserve value", '"--no-preserve",', '"--unused-no-preserve",', 'case "cp": {'],
   [

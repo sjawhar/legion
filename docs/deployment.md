@@ -72,8 +72,11 @@ written under the destination; `src/.` and `-T` write the directory's contents, 
 retains the source path. It inspects only existing destination entries, recursively for a recursive
 copy and under the same walk limit as shell syntax, without traversing the source tree. After `--`,
 an unreadable basename is allowed when the possible destination entries stay inside the roots.
-A single glob in a `for` loop retains its literal prefix: `./*.txt` is not an option, while `*.txt`
-may yield one and still requires `--`. `dd` writes the path inside its `of=` word, wherever that
+A single glob in a `for` loop retains its expansion only when its first piece is a nonempty
+literal starting with a character other than `-`, such as `./*.txt` or `src/*.go`. Wildcard-led
+and dash-led loop values stay unknown for every command, including `truncate` and redirections,
+not only copy commands. `cp` can still read an unknown source after `--` when its destination is
+safe. `dd` writes the path inside its `of=` word, wherever that
 word stands. `ln` writes its last
 operand, or the working directory when given one readable operand, and a hard link (no `-s`)
 also makes its source writable under the new name, which no later command can resolve as it can

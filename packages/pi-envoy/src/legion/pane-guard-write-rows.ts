@@ -780,6 +780,32 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     plant: `echo 's/CANARY/PWNED/' > ./--help`,
     command: 'sed -i -f --help "$HOME/.bashrc"',
   },
+  ...[
+    'for f in *.txt; do truncate -s 0 "$f"; done',
+    'for f in *.txt; do : > "$f"; done',
+    'for f in ""*.txt; do truncate -s 0 "$f"; done',
+  ].map(
+    (command): WriteRow => ({
+      name: `non-copy wildcard loop: ${command}`,
+      family: "loop",
+      role: "probe",
+      plant: 'ln -s "$HOME/.bashrc" victim.txt',
+      command,
+    })
+  ),
+  {
+    name: "non-copy dash-led glob loop remains unreadable",
+    family: "loop",
+    role: "probe",
+    plant: 'ln -s "$HOME/.bashrc" ./-victim.txt',
+    command: 'for f in -*.txt; do truncate -s 0 -- "$f"; done',
+  },
+  {
+    name: "non-copy literal-prefix loop keeps workspace writes",
+    family: "loop",
+    role: "must-allow",
+    command: 'for f in ./*.txt; do truncate -s 0 "$f"; done',
+  },
 
   // --- The documented boundary, which these verbs do not change -----------------------------
   // A path that does not exist yet overwrites nothing: the rule `>` and `tee` are judged by

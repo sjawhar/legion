@@ -2141,6 +2141,9 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
             ? [unknown(`\`$${name}\`, a loop variable`, true)]
             : node.type === "For" &&
                 words.length === 1 &&
+                words[0]?.exp[0]?.kind === "literal" &&
+                words[0].exp[0].text !== "" &&
+                !words[0].exp[0].text.startsWith("-") &&
                 words[0]?.exp.some((piece) => piece.kind === "glob")
               ? words[0].exp
               : [unknown(`\`$${name}\`, a loop variable`)]
