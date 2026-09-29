@@ -25,6 +25,9 @@ on:
       - "deploy/kubernetes/operator-route/**"
       - "packages/daemon/src/daemon/omp-pin.ts"
       - ".github/actions/install-omp/**"
+      # pi-envoy's pane-guard.test.ts judges every tracked shell script in the repository, not
+      # only the ones under the paths above (the pi_envoy filter below names what it reads).
+      - "**/*.sh"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
       # file that build reads: the four below are the ones the entries above do not already
       # cover. .github/scripts/check-image-trigger-paths.sh fails the build when one is missing.
@@ -55,6 +58,8 @@ on:
       - "deploy/kubernetes/operator-route/**"
       - "packages/daemon/src/daemon/omp-pin.ts"
       - ".github/actions/install-omp/**"
+      # Every tracked shell script, for pi-envoy's pane-guard sweep, as the push list says.
+      - "**/*.sh"
       # Same four the push list owes, for the same build.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
@@ -170,6 +175,12 @@ jobs:
               # The jj its tests drive is the worker image's.
               - 'packages/daemon/docker/worker.Dockerfile'
               - '.github/actions/install-jj/**'
+              # pane-guard.test.ts judges every tracked shell script as `bash <file>` (the `**/*.sh`
+              # pane-guard-scripts.ts lists), reads each file a script runs, and pins the line of
+              # each refusal, so a line moved in any of them fails it. The scripts run two files
+              # outside these globs: omp-pin.ts, listed above, and differential.ts.
+              - '**/*.sh'
+              - 'packages/envoy/internal/dispatch/pmdoc/gen/differential.ts'
             dispatch:
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
