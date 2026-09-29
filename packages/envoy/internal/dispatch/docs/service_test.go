@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -658,6 +659,49 @@ func TestReplaceCarriesAnAskTheBrowserLeftUnreadable(t *testing.T) {
 	changed := strings.Replace(current, "Should we ship?", "Ship now?", 1)
 	if _, err := service.ReplaceText(context.Background(), artifactID, changed, actor); !errors.As(err, &invalid) {
 		t.Fatalf("ReplaceText changing the unreadable ask = %v, want ErrInvalidAskBlock", err)
+	}
+}
+
+// An upload is checked against the asks the document holds by each ask's markdown
+// (newAskMarkdown), and an ask a browser edit left holding a table the upload carries unchanged is
+// taken. The document's render wrote its tables' spans out under one budget, so the asks of one
+// check share one: the upload of the document's own markdown, holding twenty asks each over a table
+// whose spans take the whole budget, is taken. With a budget for each ask, the check refused it at
+// the second ask, whose table the document wrote with no span cells, and allocated some 1,300 MiB;
+// writing no span cells, it refused it at the first.
+func TestAnUploadOfTheDocumentsOwnMarkdownKeepsAsksOverSpannedTables(t *testing.T) {
+	var source strings.Builder
+	for index := range 20 {
+		fmt.Fprintf(&source, ":::ask{#ask-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich %d?\n\n- A\n- B\n:::\n\n", index, index)
+	}
+	current, err := pmdoc.Parse(source.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmdoc.Walk(current, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			node.Children = append(node.Children, wholeBudgetTable())
+		}
+		return true
+	})
+	pmdoc.EnsureBlockIDs(current)
+	markdown, err := pmdoc.Render(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := parseReplacing(current, markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err = refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown())
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Errorf("the upload of the document's own markdown was refused: %v", err)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 512<<20 {
+		t.Errorf("checking the asks allocated %d MiB, want at most 512", allocated>>20)
 	}
 }
 

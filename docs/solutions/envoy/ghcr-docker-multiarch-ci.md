@@ -42,16 +42,28 @@ Without it, login succeeds but push fails. Set this at the workflow level so all
 
 ### 2. Docker Build Context vs Dockerfile Path
 
-In a monorepo, the Dockerfile lives at `packages/envoy/docker/Dockerfile` but the build context must be the package root (`packages/envoy/`) so that `COPY` commands resolve correctly:
+In a monorepo the two paths follow different conventions, and both are relative to the repo
+root: `context` is the tree the daemon receives and `COPY` resolves against, `file` is where the
+Dockerfile itself lives. They are not the same directory here. Every call site builds
+`packages/envoy/docker/Dockerfile` from the **repository root**, because the Dockerfile's web
+stage copies the whole Bun workspace — the root `package.json`, `bun.lock`, `patches/`, and each
+workspace package's manifest — none of which is under `packages/envoy/`:
 
 ```yaml
 - uses: docker/build-push-action@v6
   with:
-    context: packages/envoy          # where COPY commands resolve from
-    file: packages/envoy/docker/Dockerfile  # path relative to repo root, not context
+    context: .                              # the repo root, where COPY resolves from
+    file: packages/envoy/docker/Dockerfile  # also relative to the repo root
 ```
 
-The `context` and `file` paths follow different conventions — `context` is the Docker daemon's working directory, `file` is relative to the repo root.
+The same holds for the steps that build the smoke image in `envoy-and-contracts.yaml` and
+`release-envoy-listener.yaml`, and for a local build by hand. Narrowing the context to
+`packages/envoy` fails the build at the first workspace `COPY`.
+
+Those two smoke steps are `docker/build-push-action@v6` with `load: true`, not a `run:` step:
+`.github/scripts/check-image-trigger-paths.sh` reads the action's `context` and `file` to check
+that the workflow's path triggers cover every file the build reads, and refuses a build written
+as a shell command, which it cannot read reliably.
 
 ### 3. Multi-Arch Requires QEMU + Buildx
 

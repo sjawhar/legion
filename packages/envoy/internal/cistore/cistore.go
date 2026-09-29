@@ -325,7 +325,7 @@ func WithTTL(d time.Duration) Option {
 
 // Open connects (or creates) the CI-state KV bucket and starts the WatchAll
 // cache. Mirrors store.Open: the cache is populated asynchronously by watch()
-// so Open never blocks on per-key Gets. The store logs through logger.
+// so Open never blocks on per-key Gets. The store and its cache watcher log through logger.
 func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error) {
 	o := openOpts{replicas: 1, ttl: 7 * 24 * time.Hour, bucket: Bucket}
 	for _, f := range opts {
@@ -351,7 +351,7 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 		rewatched:      make(chan struct{}),
 		logger:         logger,
 	}
-	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
+	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache, kvwatch.WithLogger(logger.Slog()))
 	s.watcher.Start()
 	return s, nil
 }

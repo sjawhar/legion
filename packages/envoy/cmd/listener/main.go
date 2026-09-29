@@ -678,9 +678,9 @@ func main() {
 	openWebhooks(&webhookGate, hooks, client, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
-	// The registry logs through the listener's own handler, so its role-restore count and its
-	// reaper cycles are JSON records with this machine's id. Never slog.SetDefault instead: see
-	// store.WithLogger for the CloudWatch filters that breaks.
+	// The registry and its cache watcher log through the listener's own handler, so its role-restore
+	// count, its warm-up and its reaper cycles are JSON records with this machine's id. Never
+	// slog.SetDefault instead: see store.WithLogger for the CloudWatch filters that breaks.
 	registry, err := store.Open(client.Conn, store.WithReplicas(cfg.NATSReplicas), store.WithLogger(logger.Slog()))
 	if err != nil {
 		log.Fatal(err)
@@ -705,6 +705,7 @@ func main() {
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
+		session.WithSessionLogger(logger.Slog()),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -845,6 +846,15 @@ func main() {
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 	registry.StartRoleClaimReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, sessions.TTL())
+
+	// Phase 6b1: Collect the interest bucket's delete markers, which the reaper above leaves one of
+	// per dead session on a key that is never reused and which nothing has ever removed: 41,833 of
+	// them behind 40 live keys in production, replayed by every restart's cache warm-up before it
+	// serves (LEGION-374). The first pass runs now, after the warm-up gate above, so it is off the
+	// readiness path; then on the reapers' cadence. Every listener runs it and the purge is
+	// idempotent, so it needs no leader. The JetStream context comes from the client at each pass,
+	// since a replaced connection reassigns it.
+	registry.StartInterestMarkerCollector(client.JS, 5*time.Minute)
 
 	// Phase 6b2: Start the CI summary loop, on a listener that opened the CI store. It emits one
 	// pr.<n>.checks event once a commit's checks settle, for every commit of a pull request, its
