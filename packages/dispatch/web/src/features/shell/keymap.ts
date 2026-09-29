@@ -28,7 +28,8 @@ export interface KeyBinding {
   run: (event: KeyboardEvent) => void;
   /** Whether the binding applies right now; `false` neither fires nor shadows lower scopes. */
   when?: () => boolean;
-  /** Fires while an `INPUT`, `TEXTAREA`, `SELECT`, or contentEditable element has focus. */
+  /** Fires while a control that takes typed text has focus: a `TEXTAREA`, a `SELECT`, a
+   *  contentEditable element, or a text-entry `INPUT`. */
   inEditable?: boolean;
 }
 
