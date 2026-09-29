@@ -769,18 +769,34 @@ open(path, "w").write(text + f"      - name: Extra\n        run: |\n{indented}\n
 PYEOF
 }
 
-# allowlist <root> <step name> <reason>: replaces the symlinked checker with a copy whose
-# NOT_A_BUILD_STEPS names one step of the fixture's docker job - the reviewed edit a refusal
-# asks for. Editing the script is the point: the hatch is data in a file, not a step's own say.
+# step_id <root> <step name> <id>: gives a named step an `id:`, which is how an entry addresses
+# it - a name is neither required nor unique, so it is not a key.
+step_id() {
+  python3 - "$1/.github/workflows/image.yaml" "$2" "$3" <<'PYEOF'
+import sys
+path, name, identifier = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path).read()
+marker = f"      - name: {name}\n"
+assert marker in text
+open(path, "w").write(text.replace(marker, marker + f"        id: {identifier}\n", 1))
+PYEOF
+}
+
+# allowlist <root> <step id> <hits> <reason>: replaces the symlinked checker with a copy whose
+# NOT_A_BUILD_STEPS names one step of the fixture's docker job, pinned to <hits> - the reviewed
+# edit a refusal asks for. Editing the script is the point: the hatch is data in a reviewed
+# file, not something a step can claim for itself.
 allowlist() {
   local root=$1
   rm -f "$root/.github/scripts/check-image-trigger-paths.sh"
-  python3 - "$check_script" "$root/.github/scripts/check-image-trigger-paths.sh" "$2" "$3" <<'PYEOF'
+  python3 - "$check_script" "$root/.github/scripts/check-image-trigger-paths.sh" "$2" "$3" "$4" <<'PYEOF'
 import sys
-source, destination, step, reason = sys.argv[1:5]
+source, destination, identifier, hits, reason = sys.argv[1:6]
 text = open(source).read()
-anchor = "NOT_A_BUILD_STEPS: list[tuple[str, str, str, str]] = [\n"
-entry = f"    ('.github/workflows/image.yaml', 'docker', {step!r}, {reason!r}),\n"
+anchor = "NOT_A_BUILD_STEPS: list[tuple[str, str, str, tuple[str, ...], str]] = [\n"
+entry = (
+    f"    ('.github/workflows/image.yaml', 'docker', {identifier!r}, ({hits},), {reason!r}),\n"
+)
 assert anchor in text
 open(destination, "w").write(text.replace(anchor, anchor + entry, 1))
 PYEOF
@@ -800,7 +816,7 @@ while IFS='|' read -r label body; do
   check "build shape $label is refused" "$(is "$status" 1)"
   check "  and names the step" "$(contains "$out" "Build builds an image in a run step")"
   check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ('")"
-  check "  and names the list as the last remedy" "$(contains "$out" "add this exact step to NOT_A_BUILD_STEPS")"
+  check "  and the last remedy asks for an id and an entry" "$(contains "$out" "give the step an \`id:\` and add")"
 done <<'BUILDS'
 docker-build-f-docker|docker build -f docker/Dockerfile .
 docker-buildx-build-load|docker buildx build --load -f docker/Dockerfile .
@@ -914,6 +930,11 @@ docker-build-build-arg-2|docker build --build-arg BUN_VERSION="$(bun --version |
 docker-buildx-build-f-2|docker "buildx" build -f docker/Dockerfile .
 docker-image-build-f-2|docker "image" build -f docker/Dockerfile .
 podman-url-build-example|podman --url build.example:8888 build -f docker/Dockerfile .
+docker-compose-f-build|docker compose -f build-compose.yml up -d
+docker-compose-p-run|docker compose -p run-tests up -d
+docker-compose-profile-up|docker compose --profile up-stack up -d
+docker-compose-project-directory|docker compose --project-directory=${{ env.COMPOSE_DIR }} -f x.yml up -d
+docker-build-f-docker-7|docker build -f docker/Dockerfile .\ndocker buildx bake --load listener
 BUILDS
 
 # The continuation form cannot go in the table: its body spans two lines.
@@ -928,37 +949,37 @@ echo "case: a step that runs a build word without building is refused until it i
 # The detector is broad on purpose, so a step that runs a build word without building an image
 # is refused too - and the only way out is its own entry in NOT_A_BUILD_STEPS, which is data a
 # reviewer reads, not a pattern anyone can spell their way into.
-while IFS='|' read -r label body; do
+while IFS='|' read -r label hits body; do
   [ -n "$label" ] || continue
   root=$(fixture "fp-$label")
   extra_step "$root" "$body"
   run_check "$root"
   check "non-build $label is refused unlisted" "$(is "$status" 1)"
-  check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ('")"
+  check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ($hits)")"
   root=$(fixture "fp-listed-$label")
   extra_step "$root" "$body"
-  allowlist "$root" "Extra" "runs a build word without building an image"
+  step_id "$root" "Extra" "not-a-build"
+  allowlist "$root" "not-a-build" "$hits" "runs a build word without building an image"
   run_check "$root"
   check "  and goes green once listed" "$(is "$status" 0)"
-  check "  and the excusal is printed with its reason" "$(contains "$out" "listed in NOT_A_BUILD_STEPS: .github/workflows/image.yaml: job docker: Extra: ")"
-  check "  and the reason is shown" "$(contains "$out" "runs a build word without building an image")"
+  check "  and the excusal names the id, hits and reason" "$(contains "$out" "job docker: step not-a-build: $hits - runs a build word without building an image")"
 done <<'FALSEPOSITIVES'
-docker-h-build-example|docker -H build.example.com:2375 pull alpine
-docker-config-build-docker|docker --config build/.docker pull alpine
-docker-buildx-bake-print-2|docker buildx bake --print
-docker-buildx-build-check|docker buildx build --check .
-docker-buildx-build-help|docker buildx build --help
-docker-buildx-build-call-2|docker buildx build --call=check .
-docker-buildx-bake-list|docker buildx bake --list=targets
-docker-compose-build-dry|docker compose build --dry-run
-docker-context-build-pull|docker --context build pull alpine
-docker-h-build-corp|docker -H build.corp pull alpine
-docker-run-rm-golang|docker run --rm golang go build ./...
-docker-exec-app-make|docker exec app make build
-docker-run-alpine-echo|docker run alpine echo a b
-docker-run-v-pwd|docker run -v "$PWD":/w -w /w golang go build ./...
-docker-compose-run-no|docker compose run --no-build app ./test.sh --build
-earthly-test|earthly +test
+docker-h-build-example|'docker -H build'|docker -H build.example.com:2375 pull alpine
+docker-config-build-docker|'docker --config build'|docker --config build/.docker pull alpine
+docker-buildx-bake-print-2|'docker buildx bake'|docker buildx bake --print
+docker-buildx-build-check|'docker buildx build'|docker buildx build --check .
+docker-buildx-build-help|'docker buildx build'|docker buildx build --help
+docker-buildx-build-call-2|'docker buildx build'|docker buildx build --call=check .
+docker-buildx-bake-list|'docker buildx bake'|docker buildx bake --list=targets
+docker-compose-build-dry|'docker compose build'|docker compose build --dry-run
+docker-context-build-pull|'docker --context build'|docker --context build pull alpine
+docker-h-build-corp|'docker -H build'|docker -H build.corp pull alpine
+docker-run-rm-golang|'docker run --rm golang go build'|docker run --rm golang go build ./...
+docker-exec-app-make|'docker exec app make build'|docker exec app make build
+docker-run-alpine-echo|'docker run alpine echo a b'|docker run alpine echo a b
+docker-run-v-pwd|'docker run -v $PWD:/w -w /w golang go build'|docker run -v "$PWD":/w -w /w golang go build ./...
+docker-compose-run-no|'docker compose run --no-build app ./test.sh --build'|docker compose run --no-build app ./test.sh --build
+earthly-test|'earthly +t'|earthly +test
 FALSEPOSITIVES
 
 echo "case: a command the detector does not see needs no entry"
@@ -980,34 +1001,150 @@ docker-buildx-create-use|docker buildx create --use
 docker-pull-x-make|docker pull x; make build
 echo-run-docker-build-2|echo "run docker build to make the image"
 df-h|df -h
-docker-build-f-docker-7|# docker build -f docker/Dockerfile .
+docker-build-f-docker-8|# docker build -f docker/Dockerfile .
 docker-compose-exec-t|docker compose exec -T app npm run test
 docker-compose-logs-run|docker compose logs run-worker
 docker-compose-exec-app|docker compose exec app ./bin/up.sh up
 UNSEEN
 
+echo "case: an entry names a step by its id, pinned to the hits a reviewer saw"
+root=$(fixture listed-by-id)
+extra_step "$root" "docker buildx bake --print"
+step_id "$root" "Extra" "inspect-only"
+allowlist "$root" "inspect-only" "'docker buildx bake'" "prints the bake plan, builds nothing"
+run_check "$root"
+check "a listed step is excused" "$(is "$status" 0)"
+check "  and the excusal names the id, the hits and the reason" \
+  "$(contains "$out" "listed in NOT_A_BUILD_STEPS: .github/workflows/image.yaml: job docker: step inspect-only: 'docker buildx bake' - prints the bake plan, builds nothing")"
+
+echo "case: a step with no id cannot be listed, and its refusal says to give it one"
+root=$(fixture listed-needs-an-id)
+extra_step "$root" "docker buildx bake --print"
+allowlist "$root" "inspect-only" "'docker buildx bake'" "would excuse it if ids did not matter"
+run_check "$root"
+check "an unnamed, unidentified step is still refused" "$(is "$status" 1)"
+check "  and the remedy asks for an id" "$(contains "$out" "give the step an \`id:\` and add")"
+check "  and the entry matching nothing fails too" "$(contains "$out" "which matches 0 steps that build")"
+
+echo "case: T1 - two unnamed steps are two steps, not one"
+# Both collapse to "an unnamed step", so a name-keyed entry excused whichever came first and
+# the other's build with it. Neither has an id, so neither can be listed at all.
+root=$(fixture listed-two-unnamed)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(
+    text
+    + "      - run: docker buildx bake --print\n"
+    + "      - run: docker build -f docker/Dockerfile .\n"
+)
+PYEOF
+run_check "$root"
+check "both unnamed steps are refused" "$(is "$status" 1)"
+check "  the inspecting one" "$(contains "$out" "'docker buildx bake'")"
+check "  and the real build" "$(contains "$out" "'docker build'")"
+
+echo "case: T2 - two steps sharing a name are told apart by id"
+root=$(fixture listed-duplicate-names)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(
+    text
+    + "      - name: Extra\n        id: inspect-only\n        run: docker buildx bake --print\n"
+    + "      - name: Extra\n        id: really-builds\n        run: docker build -f docker/Dockerfile .\n"
+)
+PYEOF
+allowlist "$root" "inspect-only" "'docker buildx bake'" "prints the bake plan, builds nothing"
+run_check "$root"
+check "the twin that builds is still refused" "$(is "$status" 1)"
+check "  and it is the build that is named" "$(contains "$out" "'docker build'")"
+check "  while its namesake is excused" "$(contains "$out" "step inspect-only: 'docker buildx bake'")"
+
+echo "case: T3 - a listed step that grows a build is refused, not carried by its entry"
+root=$(fixture listed-drifted)
+extra_step "$root" 'docker buildx bake --print\ndocker buildx build --load -f docker/Dockerfile .'
+step_id "$root" "Extra" "inspect-only"
+allowlist "$root" "inspect-only" "'docker buildx bake'" "prints the bake plan, builds nothing"
+run_check "$root"
+check "a drifted step is refused" "$(is "$status" 1)"
+check "  and the message says the entry no longer describes it" "$(contains "$out" "the entry no longer describes it")"
+check "  and names what was reviewed" "$(contains "$out" "reviewed as building 'docker buildx bake'")"
+check "  and names what it builds now" "$(contains "$out" "now builds 'docker buildx bake', 'docker buildx build'")"
+
+echo "case: a deleted step's entry fails even when another step takes its name"
+root=$(fixture listed-stale-by-deletion)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(
+    text + "      - name: Extra\n        id: successor\n        run: docker buildx bake --print\n"
+)
+PYEOF
+allowlist "$root" "inspect-only" "'docker buildx bake'" "the step this described was deleted"
+run_check "$root"
+check "the stale entry fails" "$(is "$status" 1)"
+check "  and names the id it cannot find" "$(contains "$out" "step id 'inspect-only', which matches 0 steps that build")"
+check "  and the successor is refused on its own" "$(contains "$out" "Extra builds an image in a run step")"
+
+echo "case: a listed step that stops reading as a build fails its entry"
+root=$(fixture listed-no-longer-a-build)
+extra_step "$root" "docker pull debian:trixie-slim"
+step_id "$root" "Extra" "inspect-only"
+allowlist "$root" "inspect-only" "'docker buildx bake'" "no longer runs any build word"
+run_check "$root"
+check "the entry with nothing left to excuse fails" "$(is "$status" 1)"
+check "  and says to remove it or correct the id" "$(contains "$out" "remove it or correct the id")"
+
+echo "case: an inner step of a local composite is keyed under the calling step's id"
+root=$(fixture listed-composite-inner)
+mkdir -p "$root/.github/actions/helper"
+cat > "$root/.github/actions/helper/action.yml" <<'YAML'
+name: Helper
+runs:
+  using: composite
+  steps:
+    - id: inspect
+      shell: bash
+      run: docker buildx bake --print
+YAML
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text + "      - name: Helper\n        id: helper\n        uses: ./.github/actions/helper\n")
+PYEOF
+run_check "$root"
+check "the inner step is refused before it is listed" "$(is "$status" 1)"
+allowlist "$root" "helper/inspect" "'docker buildx bake'" "prints the bake plan, builds nothing"
+run_check "$root"
+check "  and excused once listed under caller/inner" "$(is "$status" 0)"
+check "  with the joined id in the log" "$(contains "$out" "step helper/inspect:")"
+
+echo "case: every hit in a step is reported, not just the first"
+root=$(fixture listed-every-hit)
+extra_step "$root" 'docker buildx bake --print\ndocker buildx build --load -f docker/Dockerfile .'
+run_check "$root"
+check "the refusal lists both hits" "$(contains "$out" "('docker buildx bake', 'docker buildx build')")"
+
 echo "case: an entry names one step, and only that step"
 root=$(fixture listed-one-step-only)
 extra_step "$root" "docker build -f docker/Dockerfile ."
+step_id "$root" "Extra" "listed"
 python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
 import sys
 path = sys.argv[1]
 text = open(path).read()
 open(path, "w").write(text + "      - name: Another\n        run: |\n          docker build -f docker/Dockerfile .\n")
 PYEOF
-allowlist "$root" "Extra" "a listed step"
+allowlist "$root" "listed" "'docker build'" "a listed step"
 run_check "$root"
 check "the same command in an unlisted step is still refused" "$(is "$status" 1)"
 check "  and it is the unlisted step that is named" "$(contains "$out" "Another builds an image in a run step")"
-check "  and the listed step is excused" "$(contains "$out" "job docker: Extra")"
-
-echo "case: an entry that matches no build fails loudly rather than rotting"
-root=$(fixture listed-stale-entry)
-allowlist "$root" "A step that does not exist" "stale"
-run_check "$root"
-check "a stale entry fails the check" "$(is "$status" 1)"
-check "  and names the entry" "$(contains "$out" "NOT_A_BUILD_STEPS names .github/workflows/image.yaml job docker step 'A step that does not exist'")"
-check "  and says to remove it" "$(contains "$out" "remove the entry")"
+check "  and the listed step is excused" "$(contains "$out" "job docker: step listed:")"
 
 echo "case: an implicit compose build names --no-build as its remedy"
 root=$(fixture compose-remedy)

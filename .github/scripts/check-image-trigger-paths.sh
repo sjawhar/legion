@@ -29,14 +29,16 @@
 #     broad: a container-CLI word followed later on the command by `build`, `bake` or `b`, the
 #     other builders, and `compose up|run|create|watch` without `--no-build`. A broad detector
 #     needs an escape hatch for its false positives, and that hatch is DATA, not a shape:
-#     NOT_A_BUILD_STEPS lists steps by (workflow, job, step name) with the reason each builds
-#     no image. A hit on a listed step is excused and printed; a hit anywhere else is refused,
-#     always. An entry that stops matching a build fails the check rather than rotting. So a
-#     build is admitted only when the detector misses it (e.g. a builder it does not name, a
-#     variable-named engine, a script file, text piped to a shell, a non-shell `shell:` - the
-#     paragraph above RUN_STEP_BUILD is the list), or when its step is listed in
-#     NOT_A_BUILD_STEPS. Measured over 112 build shapes: all 112 detected, 0 of this
-#     repository's 122 run steps matched, and the list is empty - nothing is excused today.
+#     NOT_A_BUILD_STEPS lists steps by (workflow, job, step `id:`) - ids, because a step's name
+#     is neither required nor unique - pinning the exact hits a reviewer saw and why they build
+#     no image. A hit on a listed step is excused and printed while its hits still match; a hit
+#     anywhere else, or one the entry did not describe, is refused. An entry matching no step
+#     or several fails the check rather than rotting. So a build is admitted only when the
+#     detector misses it (e.g. a builder it does not name, a variable-named engine, a script
+#     file, text piped to a shell, a non-shell `shell:` - the paragraph above RUN_STEP_BUILD
+#     is the list), or when its step is listed in NOT_A_BUILD_STEPS. Measured over 117 build
+#     shapes: all 117 detected, 0 of this repository's 122 run steps matched, and the list is
+#     empty - nothing is excused today.
 #
 # A trigger that builds an image is, in its workflow and in every workflow that calls that one
 # through `workflow_call`, a `push`, `pull_request`, `pull_request_target` or `merge_group`
@@ -331,8 +333,9 @@ def mount_sources(instruction: str) -> list[str]:
 # What the detector cannot see, so what it admits: a build inside a SCRIPT FILE a step calls;
 # TEXT PIPED TO A SHELL (`echo "docker build ." | sh`, `printf … | bash`), since an echo's
 # quoted argument is blanked as text; a build ASSEMBLED FROM A VARIABLE or reached through
-# `eval` where the words never appear literally; a SUFFIXED OR RENAMED BINARY (`docker.exe`,
-# `podman-remote`, `nerdctl.lima`); a NESTED substitution inside a quoted echo; a build behind a
+# `eval` where the words never appear literally; a RENAMED BINARY, an alias or a symlink whose name
+# says nothing (`ctr build`, `alias d=docker`); a NESTED substitution inside a quoted echo; a
+# build behind a
 # TASK RUNNER (`make image`, `npm run build:docker`, `just build`, `bazel run //:push`, `nix
 # build .#dockerImage`), which is not netted because that would refuse most steps in most
 # repositories; a BUILDER THIS DOES NOT NAME (`packer build`, `s2i build`, `nixpacks build`,
@@ -343,12 +346,21 @@ def mount_sources(instruction: str) -> list[str]:
 # So, exactly: a build is admitted only when the detector misses it (e.g. the list above), or
 # when its step is listed in NOT_A_BUILD_STEPS.
 
-# Steps this check flags that build no image, each named exactly and each explaining why. A
-# detector hit on a listed step is excused and printed; a hit on any other step is refused. An
-# entry that stops matching a build fails the check rather than rotting silently, so the list
-# cannot outlive its reason. Adding one is a reviewed edit to this file.
-NOT_A_BUILD_STEPS: list[tuple[str, str, str, str]] = [
-    # (workflow file, job id, step name, why this step builds no image)
+# Steps this check flags that build no image. A step is named by its `id:`, which GitHub
+# requires to be unique within a job, because a step's NAME is neither required nor unique: two
+# steps can share one, and an unnamed step has none at all, so a name-keyed entry could excuse
+# a build it was never written for. An inner step of a local composite action is keyed by the
+# CALLING step's id and its own, joined with `/`, which is unique in the calling job even when
+# the action is used twice.
+#
+# Each entry also pins HITS, the exact detector matches the reviewer saw. The step is excused
+# only while its current matches equal that list, so a step that later grows a real build is
+# refused rather than riding its entry. An entry matching no step, or more than one, fails, as
+# does one whose hits have drifted: the list cannot outlive what it described.
+#
+# Empty: this repository has no false positive today. Adding an entry is a reviewed edit here.
+NOT_A_BUILD_STEPS: list[tuple[str, str, str, tuple[str, ...], str]] = [
+    # (workflow file, job id, step id, the step's exact detector hits, why it builds no image)
 ]
 
 # Before the subcommand, an option may take a value. Only a flag whose value can itself read
@@ -357,13 +369,16 @@ NOT_A_BUILD_STEPS: list[tuple[str, str, str, str]] = [
 # flag may take a value too, but never one of the subcommand words, so `docker --debug build .`
 # and `pack --quiet build` are seen as the builds they are while `buildctl --addr tcp://h build`
 # still reads its address. Options are atomic and never cross a line.
-VERB = r"(build|bake|bud|b|commit|import|publish|resolve|apply|up|run|create|watch)\b"
+# A value is refused only when it IS a subcommand word, not when it merely starts with one:
+# `-f build-compose.yml`, `-p run-tests` and `--profile up-stack` are values, and reading them
+# as the subcommand made their commands vanish from the detector.
+VERB = r"(build|bake|bud|b|commit|import|publish|resolve|apply|up|run|create|watch)(?![\w.:/-])"
 VALUED = r"(--config|--context|-c|--host|-H|--log-level|-l|--tlscacert|--tlscert|--tlskey|--builder)"
 QUOTED_VALUE = r"""("[^"\n]*"|'[^'\n]*'|\$\{\{[^}\n]*\}\})"""
 OPT = (
-    r"(?>([ \t]+(%s([ \t]+(%s|\S+)|=\S+)?"
-    r"|-{1,2}[\w-]+(=\S+)?([ \t]+(%s|(?!%s)[^\s-]\S*))?))*)"
-) % (VALUED, QUOTED_VALUE, QUOTED_VALUE, VERB)
+    r"(?>([ \t]+(%s([ \t]+(%s|\S+)|=(%s|\S+))?"
+    r"|-{1,2}[\w-]+(=(%s|\S+))?([ \t]+(%s|(?!%s)[^\s-]\S*))?))*)"
+) % (VALUED, QUOTED_VALUE, QUOTED_VALUE, QUOTED_VALUE, QUOTED_VALUE, VERB)
 NAME = r"(docker(-buildx)?|podman|nerdctl|depot|finch)"
 CLI = (
     r"""["']?(\b""" + NAME + r"\b"
@@ -405,7 +420,7 @@ RUN_STEP_BUILD = re.compile(
 # A compose hit has a remedy of its own: `--no-build` says the step starts services only.
 COMPOSE_REMEDY = re.compile(r"compose\b.*[ \t](up|run|create|watch)$")
 excused: list[str] = []
-listed: set[tuple[str, str, str, str]] = set()
+matches: dict[tuple, list[str]] = {}
 
 SUBSTITUTION = re.compile(r"\$\(([^()\n]*)\)|`([^`\n]*)`")
 QUOTED = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
@@ -469,17 +484,17 @@ def commands(script: str) -> list[str]:
     return found
 
 
-def classify_run_step(step: dict) -> str | None:
-    """The text this step builds an image with, or None when the detector sees no build."""
+def classify_run_step(step: dict) -> list[str]:
+    """Every command in this step that reads as building an image, in order."""
     script = step.get("run")
     if not isinstance(script, str):
-        return None
+        return []
+    found = []
     for command in commands(script):
         hit = RUN_STEP_BUILD.search(command) or ANCHORED_BUILD.search(command)
         if hit:
-            return hit.group(0).strip()
-    return None
-
+            found.append(hit.group(0).strip())
+    return list(dict.fromkeys(found))
 
 NON_BUILDING_ACTIONS = {
     "actions/checkout",
@@ -816,7 +831,7 @@ def triggers_for(workflow: Path) -> list[tuple[str, list]]:
 builds = []
 
 
-def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, depth: int) -> None:
+def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, depth: int, prefix: str = "") -> None:
     """Classify one step: a build this check reads, an action it trusts, or a refusal.
 
     `gate_step` is the step whose `if:` gates the build — the step itself at job level, and the
@@ -825,6 +840,10 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
     uses = str(step.get("uses", ""))
     action = uses.split("@", 1)[0]
     where = step.get("name") or "an unnamed step"
+    # A step is addressed by its `id:`, joined under the calling step's id when it came out of
+    # a local composite action. A step without one cannot be listed, and its refusal says so.
+    own = str(step.get("id", "")).strip()
+    step_id = f"{prefix}/{own}" if prefix and own else (own if not prefix else "")
     place = f"{workflow}: {where}" if origin == str(workflow) else f"{workflow}: {where} (in {origin})"
     if action == "docker/build-push-action":
         options = step.get("with") or {}
@@ -862,7 +881,7 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
         if action in NON_BUILDING_ACTIONS:
             return
         if action.startswith("./"):
-            scan_local_action(workflow, job_name, action, gate_step, place, depth)
+            scan_local_action(workflow, job_name, action, gate_step, place, depth, step_id)
             return
         problems.append(
             f"::error file={workflow}::{place} uses {uses}, which this check cannot tell apart "
@@ -870,30 +889,40 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
             f"action to NON_BUILDING_ACTIONS in this script if it builds none"
         )
         return
-    matched = classify_run_step(step)
-    if matched is None:
+    hits = classify_run_step(step)
+    if not hits:
         return
+    shown = ", ".join(repr(hit) for hit in hits)
     entry = next(
-        (e for e in NOT_A_BUILD_STEPS if (e[0], e[1], e[2]) == (str(workflow), job_name, where)),
+        (e for e in NOT_A_BUILD_STEPS if (e[0], e[1], e[2]) == (str(workflow), job_name, step_id)),
         None,
-    )
+    ) if step_id else None
     if entry is not None:
-        listed.add(entry)
-        excused.append(f"{workflow}: job {job_name}: {where}: {matched} - {entry[3]}")
+        matches.setdefault(entry, []).append(place)
+        if tuple(hits) == tuple(entry[3]):
+            excused.append(f"{workflow}: job {job_name}: step {step_id}: {shown} - {entry[4]}")
+            return
+        was = ", ".join(repr(hit) for hit in entry[3])
+        problems.append(
+            f"::error file={workflow}::{place} is listed in NOT_A_BUILD_STEPS, but the entry no "
+            f"longer describes it: it was reviewed as building {was or 'nothing'} and now "
+            f"builds {shown}. Re-review the step and update its entry"
+        )
         return
     remedy = (
         "add --no-build if the step should not build"
-        if COMPOSE_REMEDY.search(matched)
+        if any(COMPOSE_REMEDY.search(hit) for hit in hits)
         else "reword the command so it does not read as a build (`--flag=value`)"
     )
     problems.append(
-        f"::error file={workflow}::{place} builds an image in a run step ({matched!r}); build "
-        f"it with docker/build-push-action so this check can read it, {remedy}, or add this "
-        f"exact step to NOT_A_BUILD_STEPS in this script in a reviewed PR"
+        f"::error file={workflow}::{place} builds an image in a run step ({shown}); build it "
+        f"with docker/build-push-action so this check can read it, {remedy}, or give the step "
+        f"an `id:` and add ({str(workflow)!r}, {job_name!r}, its id, its hits, why it builds "
+        f"nothing) to NOT_A_BUILD_STEPS in this script in a reviewed PR"
     )
 
 
-def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: str, depth: int) -> None:
+def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: str, depth: int, prefix: str) -> None:
     """A `./` action is read, not trusted: a composite's steps get the same rules recursively.
 
     Anything else is refused. A container action's image comes from a Dockerfile this check
@@ -919,7 +948,7 @@ def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: s
     if using == "composite":
         for inner in (runs or {}).get("steps") or []:
             if isinstance(inner, dict):
-                scan_step(workflow, job_name, inner, gate_step, str(definition), depth + 1)
+                scan_step(workflow, job_name, inner, gate_step, str(definition), depth + 1, prefix)
         return
     problems.append(
         f"::error file={workflow}::{place} uses {action}, a local `using: {using or 'unset'}` "
@@ -1017,14 +1046,18 @@ for workflow, job_name, step, context, dockerfile in builds:
 for excusal in dict.fromkeys(excused):
     print(f"listed in NOT_A_BUILD_STEPS: {excusal}")
 
-# An entry whose step no longer exists, or no longer reads as a build, fails rather than
-# rotting into a standing exemption nobody reviews again.
+# An entry must name exactly one step that reads as a build. Zero means the step was deleted,
+# renamed or no longer builds; more than one means the key does not identify a step. Either
+# fails, rather than rotting into a standing exemption nobody reviews again.
 for entry in NOT_A_BUILD_STEPS:
-    if entry not in listed:
-        problems.append(
-            f"::error file={entry[0]}::NOT_A_BUILD_STEPS names {entry[0]} job {entry[1]} step "
-            f"{entry[2]!r}, where this check finds no build; remove the entry"
-        )
+    found = matches.get(entry, [])
+    if len(found) == 1:
+        continue
+    problems.append(
+        f"::error file={entry[0]}::NOT_A_BUILD_STEPS names {entry[0]} job {entry[1]} step id "
+        f"{entry[2]!r}, which matches {len(found)} steps that build; an entry must name exactly "
+        f"one, so remove it or correct the id"
+    )
 
 problems = list(dict.fromkeys(problems))
 for problem in problems:
