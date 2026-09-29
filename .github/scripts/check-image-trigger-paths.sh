@@ -35,7 +35,7 @@
 #     the detector misses it (a builder it does not name, a variable-named engine, a script
 #     file, a non-shell `shell:`), or when the step carries the marker and the anchored layer
 #     misses it. Every excusal is printed, with its workflow, job, step and matched text.
-#     Measured over 98 build shapes and 27 non-builds: 98/98 detected, 94 of them anchored
+#     Measured over 106 build shapes and 27 non-builds: 106/106 detected, 102 of them anchored
 #     beyond the marker's reach, every non-build either unseen or reachable by the marker, and
 #     0 of this repository's 122 run steps matched - nothing is excused today.
 #
@@ -326,23 +326,25 @@ def mount_sources(instruction: str) -> list[str]:
 # command EXCEPT inside the quoted argument of `echo` or `printf`, whose text is not a command;
 # an `echo` whose unquoted words read as a build is refused, and rewording is the remedy.
 #
-# Measured over 98 build shapes and 27 non-builds: 98 detected, 94 of those anchored, every
+# Measured over 106 build shapes and 27 non-builds: 106 detected, 102 of those anchored, every
 # non-build either unseen by the detector or reachable by the marker, and 0 of this repository's
 # 122 real run steps matched. The four builds the anchored layer leaves excusable are the
 # genuinely ambiguous ones: `earthly +target`, `docker commit`, `docker import` and `buildah
 # commit`, where refusing outright would leave a step no remedy it could take.
 #
-# What neither layer can see: a build inside a SCRIPT FILE a step calls, or behind a TASK RUNNER
-# (`make image`, `npm run build:docker`, `just build`, `bazel run //:push`, `nix build
-# .#dockerImage`) - netting those would refuse most steps in most repositories, so a build
-# behind one is invisible here. Likewise a BUILDER THIS DOES NOT NAME (`packer build`,
+# What neither layer can see: a build inside a SCRIPT FILE a step calls, or in TEXT PIPED TO A
+# SHELL (`echo "docker build ." | sh`, `printf … | bash`) - an `echo`'s quoted argument is
+# blanked as text rather than read as a command, so what a shell then runs is unseen. Nor one
+# behind a TASK RUNNER (`make image`, `npm run build:docker`, `just build`, `bazel run //:push`,
+# `nix build .#dockerImage`) - netting those would refuse most steps in most repositories, so a
+# build behind one is invisible here. Likewise a BUILDER THIS DOES NOT NAME (`packer build`,
 # `s2i build`, `nixpacks build`, `werf build`, `apko build`), an ENGINE NAMED BY A VARIABLE that
 # is not DOCKER-ish (`$CONTAINER_ENGINE build`), and a step whose `shell:` IS NOT ONE THIS READS
 # AS A SHELL (`shell: python` runs a program whose text this check does not interpret).
 #
-# So, exactly: a build is admitted when the detector misses it (a builder it does not name, a
-# variable-named engine, a script file, a non-shell `shell:`), or when the step carries the
-# marker and the anchored layer misses it.
+# So, exactly: a build is admitted when the detector misses it (e.g. a builder it does not name,
+# a variable-named engine, a script file, a non-shell `shell:`; the paragraph above is the list),
+# or when the step carries the marker and the anchored layer misses it.
 
 # Options: at most one value each, never crossing a line, and atomic, so an option's value is
 # never re-read as the subcommand (`docker --context build pull`). A flag that takes no value
@@ -374,24 +376,28 @@ Q = r"""["']?"""  # a subcommand may be quoted: `docker "build" .`
 # `up|run|create|watch` without `--no-build`: a service carrying `build:` builds implicitly, so
 # this is anchored and its remedy is `--no-build`, which is one clear action and reads no
 # compose file. In `run`, a `--build` after the service name belongs to the service's command.
-COMPOSE = (
-    r"(\b(docker|podman|nerdctl)[ \t]+compose|\b(docker|podman|nerdctl)-compose)\b"
-    r"(?![^\n]*--no-build)[^\n]*[ \t](up|run|create|watch)\b"
-)
+# A global option may sit between the CLI and `compose` - `docker --context ci compose build` -
+# so the CLI word and `compose` are not adjacent.
+COMPOSE_CLI = r"(\b(docker|podman|nerdctl)\b%s[ \t]+compose|\b(docker|podman|nerdctl)-compose)" % OPT
+COMPOSE = COMPOSE_CLI + r"\b(?![^\n]*--no-build)[^\n]*[ \t](up|run|create|watch)\b"
 ANCHORED_BUILD = re.compile(
     rf"{CLI}{OPT}[ \t]+((image|builder)[ \t]+)?{Q}(build|bake){Q}{SUB}"
     rf"|({CLI}{OPT}[ \t]+)?buildx{OPT}[ \t]+b[a-z]*{SUB}"
-    rf"|(\b(docker|podman|nerdctl)[ \t]+compose|\b(docker|podman|nerdctl)-compose){OPT}"
-    rf"[ \t]+build{SUB}"
+    rf"|{COMPOSE_CLI}{OPT}[ \t]+build{SUB}"
     rf"|{COMPOSE}"
     rf"|\b(buildah|buildctl[\w.-]*|pack|skaffold|img){OPT}[ \t]+(build|bud){SUB}"
     rf"|\bko{OPT}[ \t]+(build|publish|resolve|apply)\b|\bskaffold{OPT}[ \t]+run\b"
     rf"|\bcrane[ \t]+append\b|\bjib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
 # Inspecting or explaining, on THIS command: `buildx bake --print`, `buildx build --call=check`,
-# `bake --list=targets`, `compose build --dry-run`. `-h` is left out: it is a host flag as often
-# as a help flag, and reading it as help is how `df -h` once disarmed a build.
-INSPECT_ONLY = re.compile(r"(^|\s)(--print|--help|--version|--check|--call|--list|--dry-run)(=|\s|$)")
+# `bake --list=targets`, `compose build --dry-run`. `--call` is named with the frontend methods
+# that only report (`check`, `outline`, `targets`), since `--call build` is a build. `-h` is
+# left out: it is a host flag as often as a help flag, and reading it as help is how `df -h`
+# once disarmed a build.
+INSPECT_ONLY = re.compile(
+    r"(^|\s)(--print|--help|--version|--check|--list|--dry-run)(=|\s|$)"
+    r"|(^|\s)--call(=|[ \t]+)(check|outline|targets)\b"
+)
 
 # Layer 1, the BROAD detector: anything that might build.
 RUN_STEP_BUILD = re.compile(

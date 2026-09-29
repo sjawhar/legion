@@ -893,6 +893,14 @@ podman-compose-up|yes|podman-compose up
 docker-debug-build-f|yes|docker --debug build -f docker/Dockerfile .
 docker-d-buildx-build|yes|docker -D buildx build --load -f docker/Dockerfile .
 buildctl-addr-tcp-h|yes|buildctl --addr tcp://h:1234 --debug build --frontend dockerfile.v0
+docker-context-ci-compose|yes|docker --context ci compose build
+docker-h-ssh-builder|yes|docker -H ssh://builder compose build
+podman-log-level-debug|yes|podman --log-level debug compose build
+nerdctl-namespace-k8s-io|yes|nerdctl --namespace k8s.io compose build
+docker-context-ci-compose-2|yes|docker --context ci compose run --build app true
+docker-context-ci-compose-3|yes|docker --context ci compose up -d --build
+docker-buildx-build-call|yes|docker buildx build --call build --load -f docker/Dockerfile .
+docker-context-ci-compose-4|yes|docker --context ci compose up -d
 BUILDS
 
 # Every build shape the detector knows must also be ANCHORED, or the marker is a way to admit
@@ -934,7 +942,7 @@ docker-config-build-docker|yes|docker --config build/.docker pull alpine
 docker-buildx-bake-print-2|yes|docker buildx bake --print
 docker-buildx-build-check|yes|docker buildx build --check .
 docker-buildx-build-help|yes|docker buildx build --help
-docker-buildx-build-call|yes|docker buildx build --call=check .
+docker-buildx-build-call-2|yes|docker buildx build --call=check .
 docker-buildx-bake-list|yes|docker buildx bake --list=targets
 docker-compose-build-dry|yes|docker compose build --dry-run
 earthly-version|no|earthly --version
