@@ -14,13 +14,19 @@ import {
 
 // [name, old line fragment, replacement on that line, optional preceding scope anchor].
 const mutants: readonly (readonly [string, string, string, string?])[] = [
-  ["option terminator", 'if (!rest && text !== "--") inspect?.(arg);', "inspect?.(arg);"],
-  ["GNU separate value", "inspect === undefined ? text : longOption(text, longValued)", "text"],
   [
-    "consumed separate value",
-    "if (valueAt !== -1 && valueAt === text.length - 2 && valued.includes(last)) i += 1;",
-    "if (false) i += 1;",
+    "option terminator",
+    'if (whole && text === "--") {',
+    "if (false) {",
+    "function writeArguments(",
   ],
+  [
+    "GNU separate value",
+    'takesValue = long[option] === true && !text.includes("=");',
+    "takesValue = false;",
+  ],
+  ["consumed separate value", "takesValue = index === text.length - 1;", "takesValue = false;"],
+  ["install strip flag", '"--strip": false,', '"--unused": false,', "const INSTALL_OPTIONS"],
   [
     "mv target directory",
     "const targets = [...found.operands, ...writeDestinations(found, site)];",
@@ -31,8 +37,16 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     "checkCopyContents(found, destinations, st, ctx, site);",
     "void destinations;",
   ],
-  ["install value grammar", 'writeArguments(rest, "mogtS", [', 'writeArguments(rest, "tS", ['],
-  ["ln value grammar", 'writeArguments(rest, "St", [', 'writeArguments(rest, "t", ['],
+  [
+    "install value grammar",
+    'writeArguments(rest, "mogtS", INSTALL_OPTIONS)',
+    'writeArguments(rest, "tS", INSTALL_OPTIONS)',
+  ],
+  [
+    "ln value grammar",
+    'writeArguments(rest, "St", LN_OPTIONS)',
+    'writeArguments(rest, "t", LN_OPTIONS)',
+  ],
   ["install directory flag", 'found.flags.has("d") || found.flags.has("--directory")', "false"],
   [
     "ln one operand",
@@ -58,10 +72,11 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ],
   [
     "operand is not a flag",
-    'if (!text.startsWith("-") || text === "-") return;',
-    'if (text === "-") return;',
+    'if (!whole || !text.startsWith("-") || text === "-") {',
+    'if (!whole || text === "-") {',
+    "function writeArguments(",
   ],
-  ["long flag record", "if (option !== undefined) flags.add(option);", "void option;"],
+  ["long flag record", "flags.add(option);", "void option;", "function writeArguments("],
   [
     "long target offset",
     'if (option === "--target-directory") offset = text.indexOf("=") + 1 || text.length;',
@@ -79,15 +94,11 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     'if (letter === "t") offset = index + 2;',
   ],
   ["stop cluster at value", "        break;", "        continue;", "function writeArguments("],
-  [
-    "ignore nontarget option",
-    "if (offset === undefined) return;",
-    "if (offset === undefined) offset = text.length;",
-  ],
+  ["ignore nontarget option", "if (offset === undefined) continue;", "if (false) continue;"],
   ["attached target value", "const value = valueInWord(arg, offset);", "const value = undefined;"],
   [
     "separate target value",
-    "directory = value === undefined ? rest[rest.indexOf(arg) + 1] : { text: arg.text, exp: value };",
+    "directory = value === undefined ? next : { text: arg.text, exp: value };",
     "directory = value === undefined ? undefined : { text: arg.text, exp: value };",
   ],
   [
@@ -164,15 +175,15 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ],
   [
     "sed expression abbreviation",
-    'if (option === "--expression" || option === "--file") {',
-    'if (text === "--expression" || text === "--file") {',
+    'if (option === "--expression" || option === "--file") expression = true;',
+    'if (text === "--expression" || text === "--file") expression = true;',
   ],
-  ["sed joined expression", 'if (!text.includes("=")) index += 1;', "index += 1;"],
   [
-    "sed line length",
-    'if (option === "--line-length" && !text.includes("=")) index += 1;',
-    "void option;",
+    "sed joined expression",
+    'if ((option === undefined ? !whole : SED_OPTIONS[option]) && !text.includes("=")) {',
+    "if (option === undefined ? !whole : SED_OPTIONS[option]) {",
   ],
+  ["sed line length", '"--line-length": true,', '"--line-length": false,', "const SED_OPTIONS"],
   [
     "minimum operands",
     "found.operands.length < 2 || found.uncertain",
@@ -184,9 +195,8 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["cp unknown replacement", "found.uncertain;", "false;", 'case "cp": {'],
   [
     "cp value grammar",
-    'writeArguments(rest, "tS", [',
-    'writeArguments(rest, "t", [',
-    'case "cp": {',
+    'writeArguments(rest, "tS", CP_OPTIONS)',
+    'writeArguments(rest, "t", CP_OPTIONS)',
   ],
   [
     "resolved destination directory",
@@ -224,8 +234,8 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["loop prefix must be literal", 'words[0]?.exp[0]?.kind === "literal" &&', "true &&"],
   ["loop prefix must be nonempty", 'words[0].exp[0].text !== "" &&', "true &&"],
   ["loop prefix must not start with dash", '!words[0].exp[0].text.startsWith("-") &&', "true &&"],
-  ["cp sparse value", '"--sparse",', '"--unused-sparse",', 'case "cp": {'],
-  ["cp no-preserve value", '"--no-preserve",', '"--unused-no-preserve",', 'case "cp": {'],
+  ["cp sparse value", '"--sparse": true,', '"--sparse": false,', "const CP_OPTIONS"],
+  ["cp no-preserve value", '"--no-preserve": true,', '"--no-preserve": false,', "const CP_OPTIONS"],
   [
     "cp help",
     'if (found.flags.has("--help") || found.flags.has("--version")) return;',
@@ -273,9 +283,55 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ],
   [
     "sed informational options",
-    "return { inPlace: false, inferred: false, follow: false, files: [] };",
+    "return { replaced: [], followed: [], inPlace: false, inferred: false };",
     "continue;",
   ],
+  [
+    "sed one part per unread word",
+    "const others = unread.length - (maybe ? 1 : 0);",
+    "const others = unread.length;",
+  ],
+  ["sed unread operand stands before nothing", "if (!maybe) before = true;", "before = true;"],
+  ["sed split word", "splitOption = true;", "splitOption = false;"],
+  [
+    "sed script led by text is no option",
+    'const option = !whole && text === "";',
+    "const option = !whole;",
+  ],
+  [
+    "sed unread value keeps a later --",
+    "if (afterUnread) reopened = true;",
+    "if (false) reopened = true;",
+  ],
+  [
+    "sed named long word",
+    "if (option === undefined && !whole) unread.push(arg);",
+    "if (!whole) unread.push(arg);",
+  ],
+  [
+    "sed unnamed long word",
+    "if (option === undefined && !whole) unread.push(arg);",
+    "if (false) unread.push(arg);",
+  ],
+  [
+    "sed unread long value",
+    "if (whole && !reopened) i += 1;",
+    "if (true) i += 1;",
+    'if (whole && !reopened && (option === "--help"',
+  ],
+  [
+    "sed unread cluster value",
+    "if (whole && !reopened) i += 1;",
+    "if (true) i += 1;",
+    'if ("efl".includes(letter)) {',
+  ],
+  ["sed unread cluster", "if (!settled && !whole) {", "if (false) {"],
+  [
+    "sed follow reading",
+    "if (others >= needed + unsettled(follow || splitOption)) followed.push(operand.arg);",
+    "if (false) followed.push(operand.arg);",
+  ],
+  ["shred through its link", "ACTS_ON_BOTH,", "ACTS_ON_LINK,", 'case "shred":'],
 ];
 
 const sourcePath = process.argv[2];
