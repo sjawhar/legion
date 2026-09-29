@@ -29,7 +29,7 @@ events to the right session.
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
-| KV cache watchers      | `internal/kvwatch/kvwatch.go`             | the interest, session and CI caches' one watch lifecycle: first start, readiness, rewatch, recreated buckets, stop |
+| KV cache watchers      | `internal/kvwatch/kvwatch.go`, `internal/kvwatch/scan.go` | the interest, session and CI caches' one watch lifecycle: first start, readiness, rewatch, recreated buckets, stop; and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`); `kvwatchtest` fakes nats.go's scan idle timeout |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
@@ -58,6 +58,27 @@ accept. An `insert` is `400 INVALID_OP` on `markdown`, every other write `400 IN
 A block rewritten in place under its own id is one block, and neither the halves of a block a
 splice splits nor a repeat the live document already carries (a browser write can leave one until
 settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
+
+Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
+another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
+document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
+`ParseForWrite` reads back the whole document a spec, an upload or a version writes
+(`400 INVALID_MARKDOWN`). An `insert` takes one of two paths. A fragment of only table rows
+anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:865`), which returns
+before any read-back, so a table-row insert is not read back, and it can leave a live document
+its own markdown reads back otherwise: a row inserted under an aligned column is stored without
+alignment and reads back with the column's, and a row whose cells the upload path refuses for
+reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
+Every other insert is spliced and read back on the document it leaves against the one it started
+from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans
+unwritten: it runs once for each insert of a batch, and an insert, written between document-level
+blocks, changes no table, so each span reads back the same on both. The reading rules refuse every shape they
+know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
+write whose markdown reads back otherwise`). Wherever a check reads a write back - here, and in an
+accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;
+any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and answers `500`. A tree
+a browser edit makes is not checked, so its rendering can still fail to read back when it is
+uploaded again.
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
@@ -158,24 +179,24 @@ fills legacy anchors only when their cached quote has one current match.
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
-(`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
-breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them, and an accepted suggestion writes its code as it reads back (`acceptedCode`):
-in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
-written empty, the spaces and tabs that line keeps around it included, while any other character,
-a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
-line breaks follow it, its text loses the line breaks that end it. A suggestion can run past the
-code into the blocks after it. One that takes all of the text of the textblock it ends in leaves
-nothing after its own text, as at the code's end, so both rules apply. One that ends inside that
-text is written as sent, and the rest of that text joins the code after it, so a line of spaces
-and tabs it leaves in a list item's code reads back empty and the accept is refused. Code on other
-lines stays as it was. An accept whose code changes how a block around it reads back is refused,
-advising rejecting the suggestion (`refuseAcceptedCodeThatReshapes`). It names the typed block
-holding the code when the document-level block that reads back otherwise is the one holding the
-code, and otherwise names that block, such as the list of a task item the suggestion empties ahead
-of its nested list. The edit route's
-refusal of the same shape advises moving the code out of the typed block instead, and a reject in
-code, like any reject, is not read back. A line of colons in code inside a typed block is kept: the browser editor's
+(`codeReplacement`), and none of the rules below apply. Markdown cannot carry line breaks at the
+end of the code's text, which read back without them, and an accepted suggestion writes its code
+as it reads back (`acceptedCode`): where only line breaks follow it, its text loses the line breaks
+that end it. A line holding only spaces and tabs is written as sent: a list item takes no more
+than its own columns from a blank line, as the browser editor's parser does (`listItemColumns`),
+so both readers keep what the line holds past them. A footnote definition takes none, and a blank
+code line inside one is written without the definition's indentation (`writeCodeLinePrefix`). A
+suggestion can run past the code into the blocks after it. One that takes all of the text of the
+textblock it ends in leaves nothing after its own text, as at the code's end, so the same rule
+applies. One that ends inside that text is written as sent, and the rest of that text joins the
+code after it. Code on other lines stays as it was. An accept whose code changes how a block
+around it reads back is refused, advising rejecting the suggestion
+(`refuseAcceptedCodeThatReshapes`). It names the typed block holding the code when the
+document-level block that reads back otherwise is the one holding the code, and otherwise names
+that block, such as the list of a task item the suggestion empties ahead of its nested list. The
+edit route's refusal of the same shape advises moving the code out of the typed block instead,
+and a reject in code, like any reject, is not read back. A line of colons in code inside a typed
+block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
@@ -220,11 +241,14 @@ accept left unchanged whose spread already read back otherwise before it, such a
 markdown never carried, keeps that spread. Every other block, mark and node stays as it was. An empty replacement keeps the paragraph it empties, which is not written beside other
 blocks. Outside an ask it then runs, over every document-level block it changed,
 `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
-(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
+(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). Both write a table without the empty cells its
+colspans and rowspans add, which the read-back of the whole document below writes, so an accept
+across many tables costs no more there than the cells those tables hold. A non-empty replacement
+inside a typed block is
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
-and text, a column without alignment expected back left as the renderer writes it: an accept is
+and text, a column without alignment expected back unaligned as the renderer writes it: an accept is
 refused where a block now reads back otherwise that did not before, such as a task item emptied to
 `- [ ]`, which reads back as a plain item. Each block that reads back otherwise is found as far
 down as its markdown still pairs, and one that already read back otherwise the same way before,
@@ -273,9 +297,8 @@ break is itself `INVALID_OP` when the matched textblock is a heading or a table 
 line break inside a code span or inline HTML there ends it too, and the replace is refused because
 the block would read back as blocks of another shape (`refuseReshapedReplacement`). A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
-whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
-number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
-nine digits a start number may have (`0000000001.`) are not; and marked text opens with its
+interrupts a paragraph only numbered a lone `1`, as the browser editor's parser reads it, so `1.`
+and `1)` are refused, while `01.`, `001)`, `02.` and `10.` are not; and marked text opens with its
 mark's delimiter, not the marker — none of the three is refused. A batch that leaves the document's
 semantic identity unchanged — `nodeToken` over the whole tree, inline marks included — mints no
 version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each
@@ -401,8 +424,12 @@ since the same accept is refused every time.
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
 index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
-partially mutates a table. Parsing canonicalizes a short ragged Markdown row by padding its missing
-cells, so column deletion operates on that complete canonical representation and leaves every
+partially mutates a table. Parsing pads a short row to the header's width, as the browser editor's
+table plugin does on load: Milkdown's gfm preset installs prosemirror-tables' `tableEditing`, whose
+`fixTables` pads a table a transaction brings in (verified on an `EditorState`; that the browser
+loads by a transaction is y-prosemirror's sync, not checked in a browser). The headless engine runs
+no plugins and keeps the short row. Each padded cell takes its column's alignment, as its rendering
+reads back, so column deletion operates on that complete representation and leaves every
 non-selected cell intact. Deleting the last remaining body row or any row's last remaining column
 is refused, retaining the table block. Table `references` from `GET /api/v1/artifacts/{id}/blocks`
 aggregate anchors pinned to descendant cells. A row or column deletion that would remove an open
@@ -680,20 +707,49 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.
 
+The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
+That editor builds each node it loads with its schema, so an attribute the live document lacks
+takes the schema's default, and it writes a node's attributes back when the node is edited. Where
+the tree's null is not that default, the live document holds a value the editor keeps instead
+(`liveNulls`): `"none"` for a table cell with no alignment, whose default, left, would left-align
+the column at its first edit, and `""` for a code block with no language and an image with no
+title. A read gives each back as null. `pmdoc/gen/decode.ts` decodes Go-written bytes into the node
+the browser holds, schema defaults applied, so `TestUpdateFromEmptyEqualsAuthoredByBrowser` fails
+for an attribute of this kind `liveNulls` lacks. It cannot tell an absent attribute from the
+editor's value, since the editor shows its default for both; `TestNullAttributesSurviveABrowserEdit`
+edits a node of each kind through the editor's sync plugin (`pmdoc/gen/edit-blocks.ts`), which
+writes the editor's values back, and requires the read to give each back as null.
+
+A document `pmdoc` refuses names the first refused block it writes. One walk of the tree goldmark
+reads decides every block refusal in document order before conversion (`refuseBlocks`), and it
+refuses every block kind conversion does not convert (`convertedBlocks`), a link reference
+definition among them, so conversion refuses no block; `TestParseNamesTheFirstRefusedBlock` holds
+that order for every pair of block refusals. Spacing refusals (`browserListSpacing`) come before
+the walk, and inline ones, such as a footnote reference, in conversion after it.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
-syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of exactly as
-many colons as the opener. The browser editor's parser closes it at a line of at least as many
-colons indented less than four columns, even inside a fenced code block it holds, so the renderer
-writes three colons, or one more than the longest such line inside the typed block
-(`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
+syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of colons.
+Both parsers close it at a line of at least as many colons as the opener, indented less than four
+columns past where its lines start, whatever block inside it the line would otherwise continue - a
+paragraph, a list item or a fenced code block - so the renderer escapes a lone `:::` in text
+written within that reach of a typed block fenced with three colons, and at a typed block's own
+prefix whatever its fence, and writes three colons, or one more than the longest such line inside
+the typed block (`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
 columns - the width of the list markers and `> ` around it, and a tab advancing to the next
 multiple of four from the column it stands at. A callout nested directly in a callout is written `::::callout{…}` …
 `::::`, as the browser editor writes it. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
-invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
-inside another block runs to that parent’s end.
+invalid outside code blocks: a line opening with one is refused where it could open a block, and in
+a paragraph wherever it stands, since the browser editor's parser checks each line of a
+paragraph's source with the whitespace it opens with trimmed (`paragraphDirectiveReason`), so only
+a quote's marker opening the line keeps it text, and there passes only `:::` alone or a three-colon
+opening, a four-colon one included in what it refuses. An unclosed typed block at document level is rejected, while one nested
+inside another block runs to that parent’s end. A typed block's lines start where its opening line's
+text does: both parsers take up to that many columns of indentation off each of its lines, as off a
+fenced code block's (`typedDirective.indent`), so a typed block nested in an indented one closes,
+and every block inside is read, from there.
 
 Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
 and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
@@ -704,14 +760,66 @@ markdown whether it becomes blocks or table rows, a retype's attributes); in a s
 typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
 ask block carries; and in a block ask's edited question and options. The browser editor's own
 updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
-feeds alone. A code span keeps the whitespace that
+feeds alone. Marks are read as that parser reads them, as a set, where goldmark nests them: a mark
+opened where the same mark is already open adds nothing, and its close ends the mark for the rest
+of the text around it, up to the node that opened it (`parseInlineMarks`), so `*x *y* z*` is
+`x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
+marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
+mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
+refused. Delimiter runs pair as that parser pairs them: CommonMark's rule of three is judged on the
+lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
+goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`
+is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one
+precedes it, as that parser's attention markers let it (`emphasisParser`), where goldmark's
+flanking rules alone decide, so in `b_*a**` the `*` can both open and close, the rule of three
+keeps it from the `**`, and the line is text. That parser counts `~` as such a marker too, and Go
+does not: beside a `~` its strikethrough resolver pairs runs apart from and sometimes before the
+`*` and `_` runs, which goldmark's one delimiter stack does not model, so the `~` half alone would
+misread `[**~~**d**~~**](u)`, which both parsers read as strong struck `d` under the flanking rules.
+The writer takes a spelling that reads back under CommonMark's flanking rules as well before one
+that reads back under that parser's alone (`inlineWithEscapes`), so it keeps the bytes it wrote
+before the marker rule. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
-such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
-ends with one. A lazy continuation line - one that
+such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the
+writer pads a span whose text starts and ends with one. The columns left of a tab a container's
+marker took part of are text to that parser, not spaces, so they stand between, and a span ending
+in them sheds nothing. The writer writes a span's later line as it is, without the containers'
+prefix, except where a list item or footnote definition would take columns off the whitespace it
+opens with, and there behind the prefix (`takesCodeLineIndent`). The spaces and tabs a line of text
+ends with are dropped, as that parser drops them, and are a hard break only where they are two
+spaces or more and no tab (`trimLineSuffixes`); goldmark kept all but the last and broke at any two
+spaces. A backslash ending the line keeps what stands before it. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
-prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM, and a table one
+would be a body row of is refused (`markLazyRows`): goldmark continues the paragraph the table is
+made of with the line, where the browser editor's parser ends the table, and every container the
+line does not continue, before it. So is a table a line opening another block would be a row of - a
+list item that cannot interrupt a paragraph, whatever its marker, or indented code
+(`markBlockRows`): goldmark's table is a paragraph, which such a line continues, where that parser's
+table is no paragraph and ends there, reading the line as that block. A setext underline under a
+table is the table's row, as that parser reads it (`underlineAfterTable`), all but a lone `-`, an
+empty list item there: goldmark's setext heading took the table's paragraph, then wrote the
+underline as a paragraph after the table, or made the lines before the table a heading after it.
+Under a lone `-` goldmark's own handling still does that where text stands before the table in its
+paragraph, making the text a heading after the table where that parser reads the paragraph, the
+table and an empty item, so such a document is refused (`underlinedTextAttr`).
+A tab in a line's indentation spans the columns to the next multiple of four from where it stands,
+as CommonMark and the browser editor's parser read it, so after a quote's `> ` it spans two: `> \t- a`
+opens a list, `> \t| a |` over `> \t| - |` is a table, and `> a` over `> \t===` a setext heading
+(`tabIndented`, `tabExpandedLines`). Goldmark measured such indentation as if it began the line, or
+took a list marker or an underline only after spaces, and read each as paragraph text.
+An indented code block right after a list, outside it - which only a last item holding its content
+five or more columns in allows, by a wide ordered marker, spaces or tabs - or right after a quote,
+on the line after the quote's last, is refused when it holds more than one line: the browser
+editor's parser keeps the list or quote open across the code's first line, which it does not
+continue, and reads the code's later lines as a second code block. A blank line before the code
+ends a quote, so there the code is read whole.
+A fenced code block whose language - the info string's first word - holds a backslash escape or a
+character reference is refused: that parser decodes both, and goldmark keeps them as written. What
+it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which
+both drop.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -723,10 +831,12 @@ first line that is `---`, with any spaces or tabs after it, opens it, the first 
 the same closes it, and its text is stored between plain `---` fences with line feeds between its
 lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
 as front matter to the document's end, reads no list, quote or footnote definition at the
-document's level in the rest. So the renderer writes a rule that opens a document as `***` where
-`---` would be misread - a later `---` line would close front matter, or the document holds a
-list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
-everywhere else.
+document's level in the rest, since no container opens inside front matter; the lines read as the
+other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines. Parse
+reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them as anywhere.
+So the renderer writes a rule that opens a document as `***` where `---` would be misread - a
+later `---` line would close front matter, or the document holds a list, quote or footnote
+definition at its level (`holdsAContainerTheBrowserDrops`) - and `---` everywhere else.
 
 Two lists of one kind side by side read back as one when written with one marker, so the
 renderer writes a list whose kind matches the block before it - past an empty paragraph, which
@@ -735,6 +845,21 @@ as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` 
 that leaves two lists side by side (deleting or emptying what stood between them, inserting or
 accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that
 names a list item's marker names the one it is written with (`BlockMarker.Other`).
+
+The renderer writes a run of inline text so that it reads back as written. A bare URL ends where
+linkify stops, so where a run does not read back because linkify would continue a URL into the
+character after it, that character is written behind a backslash (`endsBareURL`) - a backslash even
+for `&` and `~`, whose other escapes are character references, which linkify runs through. Marks are
+written in one order - link, strong, emphasis - so where a text still carries a mark the text
+before it opened, and the order puts that mark after the text's other marks, the mark is closed and
+opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
+`*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
+then splits it as written, and one that does not is written again in the plain respellings, as main
+writes it again. Only where none of those reads back is it written with the marks still open kept
+open, then the marks the next text still carries, and the text's others opened inside them
+(`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
+`***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
+its bytes.
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
@@ -747,22 +872,90 @@ item cannot be written so, since its marker's line would carry the next block as
 and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
 another block after it does not render, and an edit that would leave one is refused.
 An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
-whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`. Nor is
+an ordered item numbered anything but a lone `1` (`orderedCannotInterrupt`): goldmark takes the
+number's value and so lets `01.` interrupt a paragraph, where that parser reads `a` over `01. b` as one
+paragraph. Neither is opened on a line after indented code, blank lines between or not, whatever
+containers the line opens first, since that parser holds the code open to that line and decides
+once per line whether it interrupts - except code right after a list, which that parser ends on its
+own line (`interruptsOpenBlock`): `    code\n> 2. b` is a quote holding the paragraph `2. b`, and
+`1.\n\n    code\n2. b` is two lists with the code between. A table is no paragraph to that parser,
+so after one such an item opens in a container the line opens first (`| a |\n| - |\n* -` is a list
+item holding an empty one). An item whose marker line holds nothing
+takes its content from the next line when that line reaches its content column with no blank line
+between, a list marker there included (`emptyItemGuard.Continue`): goldmark closed the list for a
+marker that cannot continue it, so `-\n  1.` read as two lists.
 
-A document holding one of those shapes, or a footnote definition that ends in a block other than
-a paragraph, has its lists' spacing read as that parser reads it (`browserListSpacing`): outside
+Every document's lists are spaced as that parser reads them (`browserListSpacing`): outside
 quotes and footnote definitions a blank line between two items spreads the list, and one between
-an item's blocks spreads the item; in a footnote definition a list is never spread and only an
-item's own blank lines spread it; in a quote a list is read only when no blank line lies at or
-after it but the one before flow content the quote goes on with, and then nothing is spread. Where
-that parser's spread depends on more - a blank line after an item in a footnote definition, any
-other blank line in a quote, a typed block holding one in a list item - the document is refused,
-and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
-a block its outer item holds, and a footnote definition inside another block, ahead of another
-block, out of the order of its first references, or referred to by nothing, which goldmark moves
-or drops. Every other document keeps goldmark's looseness - a loose list's items holding more
-than one block are spread, the list when none is - which is how the documents Dispatch stores were
-read.
+an item's blocks spreads the item; in a footnote definition a list is never spread, and an item is
+spread by a blank line between its blocks or after it, before the next item or a quote or list the
+definition goes on with; in a quote a blank line after an item spreads the list, and so do blank
+lines after its last item, one before a quote or a list (or anything, in a typed block inside the
+quote) and two before anything else, or at a typed block's fence - where no fence of its own closes
+a typed block, the fence of the typed block it stands in (`fenceEnding`) - three at the quote's end
+where no fence ends the typed block, but for a container opening on the line right after them, and
+one more of each after an item ending in a quote in the typed block (`quotedListSpread`,
+`blanksEndingQuotedList`), and where a typed block inside the list's quote stands in a quote that
+goes on past them, the blank lines of the quotes around the list's after one of its own count among
+them (`blanksThroughOuterQuotes`). A typed block's content is a document of its own to that parser,
+ending where its fence or the block around it ends it, so where quotes and typed blocks nest around
+a list more than once a blank line in its quote at or after it, outside the code it holds, is
+refused (`quoteTypedAlternations`); blank lines after an item that ends in a quote or a list are
+that block's, and in a quote those after a footnote definition an item holds are the definition's -
+one spreads the item only before a quote, a list or a definition, and two before anything
+(`definitionBlanksInQuote`), the same after an item ending in one, where the next item and the
+quote's end count as anything, and none spreads the list (`definitionEndSpreadsItem`,
+`blanksAfterDefinitionItem`), an empty definition's own line being one of them (`emptyDefinition`,
+so `> - [^m]:\n>` is a spread item); and a quote and a footnote definition together mix the two
+(`footnotedQuoteListSpread`). A blank line after a fenced code block no fence closed is the code's
+and spreads nothing, even where the code's text drops it, unless a quote between ends at it
+(`keepsBlankLinesAfter`). The code's text drops that line where it ends a list item or a footnote
+definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a
+table), or a quote no container opens right after, and keeps it before a quote, a list item or a
+definition, as that parser reads it (`blankTaker`). A list item decides by what follows its list only
+inside its own quote or typed block; past one, that container's rule decides, so a typed block's
+fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
+(`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
+a list where one would spread what it follows, none inside a list item after a list ending in
+an empty item, where goldmark ends the item at a blank line, and none in a quote after a footnote
+definition ending in a list no line continues, where the reader refuses one (`endsInClosedList`); a footnote definition a tight list item
+holds writes its blocks with the item's tight lines, since that parser reads them as the item's
+(`itemBlocks`). Where the lines alone do not decide
+the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote
+after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or
+typed blocks stand between - a document holding
+one of those shapes, or a footnote definition that ends in a block other than a paragraph, is
+refused, and so it is where goldmark reads its blocks otherwise: an empty list item and a blank
+line before a block an item around it holds, however far out, since goldmark ends every item around
+the empty one there (`emptyItemEndsOuterItem`), an item's content starting one column past its
+marker where its marker line holds nothing more or indented code (`itemContentColumn`). Every other document keeps goldmark's looseness there -
+a loose list's items holding more than one block are spread, the list when none is - which is how
+the documents Dispatch stores were read; but a blank line at or after a list in a typed block in a
+footnote definition is refused there too, unless goldmark spreads every item a blank line follows
+(`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list.
+
+A footnote definition is read where it is written, as that parser keeps it: inside another block,
+ahead of other blocks, in any order, and whether or not anything refers to it. One inside another
+footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
+one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
+is one inside a typed block, which that parser's references reach only from inside a typed block or
+after it. A definition whose label holds whitespace is refused, which that parser reads as a
+paragraph. A label is stored as that parser reads it, its escapes and character references decoded
+(`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
+label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
+end, an ampersand opening a character reference, and white space as a numeric one, so each label
+reads back and one that needs none is written as it is (`escapeFootnoteLabel`). A reference whose
+label matches its definition's only as written, not once both are decoded (`[^&AUML;]` beside
+`[^&auml;]: `, whose written forms fold to one key while `&AUML;` names no character), is refused,
+since written from the decoded labels it would no longer find the definition. A definition's later
+lines start four columns past where its container's content starts, whatever indentation stands
+before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers each definition, as
+it closes, into a list the parser keeps ahead of every block written while the document parses, so
+a check of the block before another meets the block written there (`footnoteDefinitionParser.Close`),
+and the parser puts each definition back where it was written and removes the list once the
+document is read (`definitionsInPlace`). Goldmark's footnote transformer, which would order the
+definitions by first reference, drop the rest and append backlinks, is not used.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
@@ -802,13 +995,24 @@ is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content ru
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
 (`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block. A new
 document is held to it for every ask, a new version only for each ask it writes or changes
-(`refuseChangedAsks`), comparing the ask's rendering with the current one (`askMarkdown`), since a
+(`refuseChangedAsks`), comparing the ask's rendering with the current one (`newAskMarkdown`, the
+asks of one check sharing one budget of span cells, spent in document order as the document's own
+render spent it, so a live ask over a table with colspans or rowspans matches the cells its stored
+markdown wrote them out as while that budget lasts), since a
 version is markdown and cannot carry a comment's anchor mark or the id a reader's browser derives
 for a heading; what the rule allows is taken, and an option without a label or a question
 that is only an image is left to settlement's `invalid` flag. A document edit is refused for an ask
 it writes or changes that breaks the rule or that settlement cannot read (`validateEditedAskBlocks`).
 Neither refuses an ask a browser edit left unreadable that it carries through unchanged, so such an
-ask does not refuse edits or versions elsewhere in the document.
+ask does not refuse edits or versions elsewhere in the document, except that a new version is
+refused for an unreadable ask in two cases. Where only the asks' tables have spent the budget of
+span cells (100,000) before an ask, it is refused when its table's markdown holds a body row
+shorter than its widest, which the parser pads when it reads the upload (the header is always
+written as wide as the widest row): a span-free table with a short body row, or a span table left
+with one once that budget ran out, such as a body cell spanning columns under a wider header, a
+rowspan, or rows the budget ran out partway through. Where a table outside the asks spent some of
+it first, the check can write span cells the document did not, and the ask is refused unless
+padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown.
 
@@ -840,8 +1044,8 @@ canonical markdown.
 - Project creation, repository mappings, and architecture sources own project-scoped events (`project.created`, `project.updated`, `settings.repo_project.updated`, `settings.architecture_source.updated`, and the importer's `architecture.synced`/`architecture.sync_failed`, authored by the system actor `{kind: "system", id: "architecture-importer"}` and emitted only on state change: a new commit, a recovery, or an error whose text first appears or changes); per-user issue-state writes emit project-owned `user_state.updated` and do not advance an issue unread sequence. These events are retained on `notifications.dispatch.project.<PROJECT>.<type>` but never wake agents or take a direct agent/role route.
 - The architecture importer (`internal/dispatch/architecture`, migration `0037`) reads every regular `*.md` (mode 100644/100755; symlinks and nested directories skipped) directly inside `.dispatch/architecture/` at the source branch's head commit with one subtree read (`GET /git/trees/{commit}:.dispatch/architecture`, never the recursive repository tree; GitHub's 404 is an empty model) and one blob read per file (an entry listed over 1 MiB is a typed `file too large` failure before any blob is fetched), validates the set whole (`Parse`: slug file names, valid UTF-8 without NUL, front matter via yaml.v3 with unknown keys rejected — the closer is a line that is exactly `---`, and an empty block is defaults — duplicate ids, unknown parent/depends_on, containment cycles, path hygiene), and projects it in one transaction: an immutable `architecture_snapshots` row per `(project, commit)`, delete+reinsert `components`/`component_depends`, and the source row's `last_sync_at`/`last_commit`/`last_tree_sha`/`last_error`. An invalid set only records `last_error` (capped at 4 KiB: the first problems and a count of the rest, the same text the `sync_failed` payload carries); the previous projection stays up. `graph_edges` gains the `part_of`/`depends_on` arms over node kind `component` (`<project>/<id>`), never rows in `refs`. Every sync runs under a two-minute deadline and, in-process, a per-project mutex; `project()` and `recordFailure()` open with `select … for update` on the source row, so two server processes never deadlock inside delete+reinsert, and a sync whose repo/branch changed while it was fetching writes nothing. A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event); a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting — so a caller looping the sync route is bounded to the head lookup. Triggers: a five-minute jittered ticker in `cmd/dispatch/main.go` (idle without App credentials), `POST /api/v1/projects/{key}/architecture-source/sync` (authAny; 200 with `last_error` on a recorded failure, 409 `SOURCE_ACCESS` for credential/branch problems, 404 without a source), and the `dispatch_architecture_sync` tool riding that route. `DELETE /api/v1/projects/{key}/architecture-source` also deletes the project's `components` and `component_depends` in the same transaction (the graph loses its component arms); snapshots remain as history. A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context); a caller that has gone away records nothing. The state-change decision behind both events is made from the row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent. A `PUT` that re-points a source resets `last_tree_sha` with the other sync columns, so a byte-identical architecture directory under the new repository still re-projects once.
 - Issue component attachment (`api/issue_components.go`, migration `0038`): `issue_components(issue_key pk, mode in (explicit, none), reason)` is an issue's own attachment and `issue_component_members(issue_key, project_key, component_id)` its explicit set; no row means inherit. Members reference `components` softly (no FK), so a re-import that retires a component leaves the link in place and every read reports the id under `unknown` instead of dropping it. `POST`/`PATCH /api/v1/issues[/{key}]` take `components` as a tri-state raw field like `parent`: `null`/`{mode: inherit}` deletes the row, `explicit` needs one to fifty slug ids that are components of the issue's project and not `external` (`400 COMPONENTS_INPUT` names each unknown, retired, external, or other-project id), `none` needs a non-blank `reason`; the closed-issue gate exempts `components` like `rank`, and a write bumps `issues.updated_at` and rides the ordinary `issue.updated` event with the whole issue. Resolution is on read, never stored: `issueComponentsLateral` is one `left join lateral` (a depth-capped `union` walk up `parent_key` to the nearest row of either mode — `none` is inherited exactly like `explicit` — splitting members into live and retired ids) that `loadIssue`, both list queries, and the tree route share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from the same query. `GET /api/v1/projects/{key}/architecture` (`api/architecture_tree.go`, authAny, `404 SOURCE_NOT_FOUND`) computes the counting rule once: every project issue's effective set joined to the component containment closure (recursive over `components.parent`, depth-capped), one row per (issue, component) with the strongest way it qualified (`direct` > `inherited` > `contained` with `via`), aggregated in Go into `done`/`total` (distinct issues, icebox and closed included) and `own_*` (those naming the component itself), plus the `unassigned` (no row anywhere), `not_architectural` (a `none` row, own or inherited), and `retired_links` (non-empty `unknown`) lists and `totals` (`components_without_work` counts non-external components with `total == 0`). `graph_edges` gains the `affects` arm (`issue` → `component` per explicit member, `created_at` the row's `updated_at`; inherited attachments are not edges), `refs.Kinds` learns `part_of`/`depends_on`/`affects`, `refs.resolveNodes` loads `component` nodes from the current model (a retired id resolves to nothing and its edges are omitted), and `text.Extract` parses `dispatch://<PROJECT>/component/<id>` so a mention of a component is an ordinary `mentions` edge.
-- Per-user agent state is its own table and route pair, not a key in `GET /api/v1/me/state` (that map is keyed by issue). `PUT /api/v1/me/agents/{session_id}/state` (human-only) takes `{cleared_before: <RFC3339>}` and upserts `user_agent_state(login, session_id, cleared_before)` (`store/migrations/0033_user_agent_state.up.sql`); a malformed value, a missing one, or one more than a minute ahead of the server clock (`clearedBeforeSkew`, the allowance for a fast browser clock) is `400 INVALID_STATE`. `GET /api/v1/me/agents/state` returns `{[session_id]: {cleared_before}}` for the caller. Neither write touches `messages` nor appends an event: the cutoff is a view preference the Agents page applies client-side (an exchange is hidden when its newest message is at or before the cutoff), so a reply that lands after the Clear still surfaces; other devices pick it up on their next state read.
-- A human's snooze on one inbox row is its own table and route pair, like per-user agent state. `PUT /api/v1/me/asks/{id}/snooze` (human-only, because the inbox is) takes `{snoozed_until: <RFC3339>}` and upserts `user_ask_snooze(login, ask_id, snoozed_until)`, keyed on `canonicalLogin(actor.ID)` rather than the actor id — a human's actor id is the login as their identity source spells it (`CookieIdentity` returns GitHub's display casing, `HeaderIdentity` the header verbatim; both lowercase only to check the allowlist), so the raw id gives one person two snooze sets and orphans their rows when GitHub's casing changes. That makes the `me/*` family inconsistent, deliberately and visibly: `user_ask_snooze` keys on the canonical login, while `user_issue_state` (migration `0001`) and `user_agent_state` (`0033`) key on the raw `actor.ID`, and `inbox.go` now binds one form twice — `canonicalLogin` for the assignee filter's `$3` and for the snooze join's `$4` — while those two tables are read elsewhere under the raw id. The two older tables carry the same latent split; it is not introduced here and is not fixed here, because normalising them needs a backfill of rows that already exist. `user_ask_snooze` has none to back-fill: the table is created by `0048` and its only writers ship in the same change, so no deployed schema ever carried a version of it written under a raw login — (`store/migrations/0048_user_ask_snooze.up.sql`); a non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`; the bound allows no skew, and the SPA's presets keep clear of it (the one that can land near midnight falls through to the next morning rather than naming a moment inside the request's own latency). `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there. Neither write touches the ask, appends an event, or reaches any other login: a snooze is one viewer's view state. Keyed on the ask, not its issue, so a document ask snoozes exactly like an issue ask. `GET /api/v1/inbox` carries the caller's own `snoozed_until` (null when they have not snoozed the row) through a left join on that table and **never filters on it** — the row is listed either way and nothing sweeps the table, so a snooze whose moment has passed reads back as the ordinary row it is. The SPA folds a row whose moment is still ahead into a collapsed `Later` band, ahead of whose turn it is: an agent replying to a deferred ask hands the turn back without bringing the row back (`sectionOf` and `waitingOnYou`, `packages/dispatch/web/src/features/inbox/`).
+- Per-user agent state is its own tables and route pair, not a key in `GET /api/v1/me/state` (that map is keyed by issue). `PUT /api/v1/me/agents/{session_id}/state` (human-only) takes `{cleared_before?, read_through?}` (RFC3339, at least one): `cleared_before` upserts the viewer's Clear into `user_agent_state(login, session_id, cleared_before)` (`store/migrations/0033_user_agent_state.up.sql`), replacing the previous one, and `read_through` upserts their read mark into `user_agent_read(login, session_id, read_through)` (`0051_user_agent_read.up.sql`), which only moves forward so a tab that read less a moment ago cannot make a reply unread again, keyed on `canonicalLogin(actor.ID)` as `user_ask_snooze` is. `0051` also inserts one read mark, at the migration's own time, for every (human, session) that already had an issue-less direct message, so the deploy does not turn every reply ever stored into an unread one. The read mark is a table of its own because a viewer who has only read a conversation has no Clear, and `user_agent_state.cleared_before` stays `not null` for a Dispatch that predates the read mark and scans it as a timestamp. Neither field given, a malformed value, or one more than a minute ahead of the server clock (`agentStateCutoffSkew`, the allowance for a fast browser clock) is `400 INVALID_STATE`; a value the skew admits is stored as `least(value, now())`, so a reply that lands while a fast browser's mark is still ahead of the server counts; the PUT answers the session's whole state. `GET /api/v1/me/agents/state` returns `{[session_id]: {cleared_before?, read_through?, unread_replies}}` for the caller: `unread_replies` counts the rows of `unreadDirectRepliesCTE` (`api/unread_replies.go`, the one definition the conversation window's unread term reads too): the session's replies anywhere under a direct message this viewer sent it (an issue-less message targeted at it, a broadcast's copy included, whose author matches the viewer's canonical login) that are newer than both the read mark and the Clear, and a session with unread replies appears even with no stored row. The PUT touches no message and appends one `user_agent_state.updated` event (`{login, session_id}`, owned by the session like its issue-less messages, so the outbox publishes it nowhere and it never notifies), which the viewer's other open tabs and devices refetch their state on. The Clear is a view preference the Agents page applies client-side (an exchange is hidden when its newest message is at or before the cutoff), so a reply that lands after the Clear still surfaces. The SPA refetches the state on an issue-less `message.answered`, the one event every reply row is written with, and on this event for its own login; how it shows and marks unread replies is `packages/dispatch/AGENTS.md`'s (`features/agents/`).
+- A human's snooze on one inbox row is its own table and route pair, like per-user agent state. `PUT /api/v1/me/asks/{id}/snooze` (human-only, because the inbox is) takes `{snoozed_until: <RFC3339>}` and upserts `user_ask_snooze(login, ask_id, snoozed_until)`, keyed on `canonicalLogin(actor.ID)` rather than the actor id — a human's actor id is the login as their identity source spells it (`CookieIdentity` returns GitHub's display casing, `HeaderIdentity` the header verbatim; both lowercase only to check the allowlist), so the raw id gives one person two snooze sets and orphans their rows when GitHub's casing changes. That makes the `me/*` family inconsistent, deliberately and visibly: `user_ask_snooze` and `user_agent_read` (`0051`) key on the canonical login, while `user_issue_state` (migration `0001`) and `user_agent_state` (`0033`) key on the raw `actor.ID`, and `inbox.go` now binds one form twice — `canonicalLogin` for the assignee filter's `$3` and for the snooze join's `$4` — while those two tables are read elsewhere under the raw id. The two older tables carry the same latent split; it is not introduced here and is not fixed here, because normalising them needs a backfill of rows that already exist. `user_ask_snooze` has none to back-fill: the table is created by `0048` and its only writers ship in the same change, so no deployed schema ever carried a version of it written under a raw login — (`store/migrations/0048_user_ask_snooze.up.sql`); a non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`; the bound allows no skew, and the SPA's presets keep clear of it (the one that can land near midnight falls through to the next morning rather than naming a moment inside the request's own latency). `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there. Neither write touches the ask, appends an event, or reaches any other login: a snooze is one viewer's view state. Keyed on the ask, not its issue, so a document ask snoozes exactly like an issue ask. `GET /api/v1/inbox` carries the caller's own `snoozed_until` (null when they have not snoozed the row) through a left join on that table and **never filters on it** — the row is listed either way and nothing sweeps the table, so a snooze whose moment has passed reads back as the ordinary row it is. The SPA folds a row whose moment is still ahead into a collapsed `Later` band, ahead of whose turn it is: an agent replying to a deferred ask hands the turn back without bringing the row back (`sectionOf` and `waitingOnYou`, `packages/dispatch/web/src/features/inbox/`).
 - `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (human-only) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title. `DELETE .../subscribers/{session_id}` removes matching topics with `POST /v1/interests/unsubscribe`; it first commits `subscription.remove_requested` with `pending: true`, which the outbox does not publish. After idempotent listener removal succeeds, Dispatch appends `subscription.removed` with the `request_event_id` it settles and routes that notice directly to the unsubscribed session's `notifications.agent.<session_id>` topic in addition to the owner topic.
 - The Dispatch API describes itself. `internal/dispatch/api/routes_table.go` is the one list of `/api/v1` routes (`apiRoute{Method, Pattern, Auth, Description, Handler}`, `Auth` one of `public`, `any`, `human`, `bearer`); `Register` mounts that table and public `GET /api/v1` serves it as `{routes: [{method, path, auth, description}], docs: "skills/dispatch/SKILL.md"}` sorted by path then method. A new route is a new row (and a bumped pin in `routes_table_test.go`), never a `mux.HandleFunc` line. An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is `404 {"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every route"}` from `routes/router.go`, decided before any dashboard lookup, so an API caller never receives the SPA shell. `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises); the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
 - Every session that writes to an ask follows it: `asks.FollowAuthor` runs at all three ask insert sites (`POST .../asks`, approval requests, ask blocks indexed from documents) and on every ask reply, whether it arrives through `POST .../comments` or through the delivery callback `POST /api/v1/comments/{id}/reply`, so no insert path can miss it; `store/migrations/0029_ask_followers.up.sql` backfills existing asks and replies. `GET /api/v1/asks/{id}` returns `followers` (`{session_id, since}`, oldest first); `GET /api/v1/asks/{id}/followers` (any authenticated actor) returns the same list. `PUT` / `DELETE /api/v1/asks/{id}/followers/{session_id}` add or remove one follower and append `ask.follower_added` / `ask.follower_removed` (`{ask_id, session_id, by}`): a bearer sends `{ "actor": { "kind": "session", "id": "<own id>" } }` in the body on both verbs and may act only when the path session equals it (`403 FOLLOWER_FORBIDDEN`); a human (cookie identity) sends no body and may add or remove any session. A non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
@@ -854,20 +1058,24 @@ canonical markdown.
 - GitHub mention routing is additive: matching comments publish to both `.comment` and `.mention` topics.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
-- Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`). The agent pump returns an empty receipt after accepting the envelope. No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged; the Legion daemon treats it as delivered to a live process) — keyed on `bus.ErrReceiptTimeout`, which `RequestCoreTo` returns only after the publish and the flush both succeeded and the receipt wait ran out; the flush is bounded by the same two-second window, and a forward whose window ends while NATS is reconnecting, or a flush that fails or times out (a stalled connection still buffering the forward), is the client's own error, so it is `delivery_failed`, never `receipt_timeout`. `delivery_failed` is a claim whose message is not known to have reached the holder (holder lookup failed, holder stale, the publish or flush failed); `no_holder` is no claim at all. Every reason emits an exception; the attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache records a forward only when its receipt arrived — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped. Do not add durable role consumers or retry transit for role messages.
+- Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`). The agent pump returns an empty receipt after accepting the envelope. No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged; the Legion daemon treats it as delivered to a live process) — keyed on `bus.ErrReceiptTimeout`, which `RequestCoreTo` returns only after the publish and the flush both succeeded, the server was shown to have accepted the forward, and the receipt wait ran out; the flush is bounded by the same two-second window, and a forward whose window ends while NATS is reconnecting, or a flush that fails or times out (a stalled connection still buffering the forward), is the client's own error, so it is `delivery_failed`, never `receipt_timeout`. So is a forward the server denies under the listener's grant (`bus.ErrPublishDenied`, returned as soon as the flush answers), and one the server cannot be shown to have accepted when no receipt came; `bus.confirmPublished` holds how either is told apart from an accepted forward. `delivery_failed` is a claim whose message is not known to have reached the holder (holder lookup failed, holder stale, the publish or flush failed or was denied); `no_holder` is no claim at all. Every reason emits an exception; the attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache records a forward only when its receipt arrived — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped. Do not add durable role consumers or retry transit for role messages.
 - Role ownership is durable in the `envoy_roles` JetStream KV bucket. Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`; listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry. Reaping stale interests never releases a role; a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first core role delivery still emits its normal delivery exception.
+- `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/kv.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read. It takes that snapshot from one watch over the bucket's existing keys, as the interest, session and CI caches read theirs (`internal/kvwatch`), so listener readiness costs one pass over the bucket rather than a round trip per claim: with 766 claims over a link relayed at about 40 ms round trip, readiness was 35.6 s from one `Get` per key and is 1.2 s from the watch (LEGION-360). A scan that does not reach the end of the bucket fails the start rather than restoring part of it: nats.go ends one early both by closing the updates channel and, on its own idle timeout, by sending the same nil marker a complete scan ends with, so the snapshot reads `Error()` at the marker. The timer belongs to the watch, not to this reader — `nats.KeyValue.Keys()` has it as well — so a build that lists the keys and reads each one back restores a partial snapshot just the same over a link that goes quiet for the JetStream `MaxWait` and then recovers. Unlike those three, this one is a snapshot and not a live cache — the grace window is anchored to the moment `Open` returns — so nothing rewatches it. The snapshot names no key, so it also carries a claim stored under a key this build cannot read (`bus.ErrRefused`); that claim still gets no grace, because `ReleaseExpiredRoleClaim` reads the claim itself first and cannot, and the role reaper deletes it. A start logs the snapshot it restored as one INFO line, `restored role claims`, with `restored` (claims that kept their grace) and `delete_markers` (tombstones streamed past) as disjoint fields; a single total of the two reads as claims the restart failed to restore. `internal/store` writes it, and both reaper cycles, through the logger the listener passes to `store.Open` (`store.WithLogger`), so they are JSON records with `machine_id`. The listener must not reach that by `slog.SetDefault`: that also routes `internal/bus` and the stdlib `log` package into the JSON handler, and the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream subjects are space-delimited text patterns anchored on that package's date and time prefix, so three alarms would stop matching without anything failing.
+- The bucket's subject count is not its claim count, and sizing a restart from `nats stream info KV_envoy_roles` overstates it. A limits-retention KV keeps a delete marker on the subject of every key ever deleted, and both `nats kv ls` and `nats.KeyValue.Keys()` hide them. On 2026-09-28 production held 767 subjects: 9 claims, all with a live holder in `envoy_sessions`, and 758 markers going back to 2026-09-09 — claim retention is working, and the markers are what remains. A marker is not a claim and gets no grace; it costs one header-only message in the snapshot above, so readiness grows with the subject count at the link's bandwidth rather than by a round trip each (timed on loopback against `roleRevisions`, best of five: 9 claims 0.87 ms, 9 claims and 5,000 markers 17.2 ms). Nothing expires markers, and a KV `MaxAge` would expire claims with them; `nats kv compact envoy_roles` (`KeyValue.PurgeDeletes`) purges marker subjects alone and leaves live claims at their revisions, keeping markers under 30 minutes old.
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`. Control exceptions keep their ordinary transport; a generic fanout refusal uses core NATS because the fanout API accepts arbitrary non-control topics, so retaining every possible exception subject would also retain role exception lanes. The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`; omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope. An API publish to an unheld role is rejected synchronously with 404 instead.
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 ## Security
 
-Dispatch treats an agent endpoint and bearer token as one trust-bound configuration: a repository `dispatch.serverUrl` can use only the token in that same repository file, while explicit environment configuration supplies both. The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact GitHub OAuth callback origin. `NATS_URLS` likewise overrides merged `natsUrls` for the server. A GitHub login the OAuth callback exchanges but `DISPATCH_ALLOWED_LOGINS` does not list is logged (`dispatch: login not allowed login=<login>`) and answered with a 403 HTML page naming that login and linking back to `/auth/start`, so an operator can find who to add; the JSON `LOGIN_NOT_ALLOWED` stays on the API paths. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy has the same bounded request buffer. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. A destination NATS refuses (`bus.ErrRefused`: an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
+Dispatch treats an agent endpoint and bearer token as one trust-bound configuration: a repository `dispatch.serverUrl` can use only the token in that same repository file, while explicit environment configuration supplies both. The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact GitHub OAuth callback origin. `NATS_URLS` likewise overrides merged `natsUrls` for the server. A GitHub login the OAuth callback exchanges but `DISPATCH_ALLOWED_LOGINS` does not list is logged (`dispatch: login not allowed login=<login>`) and answered with a 403 HTML page naming that login and linking back to `/auth/start`, so an operator can find who to add; the JSON `LOGIN_NOT_ALLOWED` stays on the API paths. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy has the same bounded request buffer. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. A destination NATS denies holds back none of the event's others; a connection or store failure ends the attempt at that destination, and the event is retried (`publish`). A core-NATS destination (a role lane) counts as published only once `bus.Client.PublishCoreTo` has shown the server accepted it, at the cost of one flush round trip (`bus.confirmPublished` holds how): one the server denies under Dispatch's grant (`bus.ErrPublishDenied`, naming the subject) or cannot be shown to have accepted is left unrecorded and retried, rather than recorded in `published_destinations` for a message nobody received. Each retry line (`dispatch outbox: publish event`) names the destination by label and target (`publish owner topic "<subject>"` for the event's own topic, `publish route "role:reviewer"` or `publish route "session:<id>"` for the issue's route, `publish author route to "<session>"`, `publish follower route to "<session>"`, `publish claim change to "<session>"`); a core denial, which only a `role:` route can be since the role lanes alone take core transport (`usesCoreTransport`), adds the subject and the server's violation. The listener's own core publishes (a role topic through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 500 with the violation. A destination NATS refuses (`bus.ErrRefused`: an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
 
 ## Operational notes
 
-- Health endpoints reflect dependency health, not just process liveness. `/healthz` returns `degraded` for transient JetStream/KV probe failures and `unhealthy` for NATS loss, a stopped interest, session or CI KV watcher, or a missing durable consumer.
-- NATS reconnects indefinitely, in place: the bus starts from `nats.GetDefaultOptions` (reconnect, client pings, drain and flusher timeouts), so the connection object and every JetStream or KV handle taken from it survive a server restart. A publish while reconnecting waits for the reconnect within its own deadline (5 s for a publish, 2 s for a role-lane forward), and reconnect attempts run every second. The reconnect buffer is off, so a publish that fails was not sent. A subscription nats.go re-sent on the reconnected connection is kept as it is; one on a replaced connection is bound again. Every reconnect recreates the interest, session and CI KV watchers on the reconnected connection, because a server restart loses their ordered consumers and nats.go would replace them only after missed heartbeats; while NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle or a lost consumer. All three watchers share one lifecycle (`internal/kvwatch`), and the listener keeps the three caches as one list (`listenerCaches`), which rewatch, self-health, `/healthz` and shutdown each loop over. The first start runs in the background. When it fails with no watcher current, it records the failure and releases the cache's readiness; when a Rewatch's watcher is current, it does neither, and that watcher releases readiness once it has delivered every existing key. A rewatch opens the bucket on the connection it is given, so a store bound to a replaced connection moves to the new one. A rewatch onto a bucket whose stream was deleted and created again empties the cache and its revision fence before the new watcher fills them. A bucket recreated under a watcher that did not end (nats.go's ordered consumer can reset onto the new stream without delivering its first revisions) is caught by each store's `Ping`, which the self-health probe runs: it records a terminal watcher error, so the next tick rebuilds the watcher. A watch whose stream is older than a running, healthy watcher's (it read the bucket before a newer watch switched to a recreated one) is discarded, and read and dropped until it ends; against an ended or flagged watcher it installs as usual, since a restored or clock-stepped bucket can have an older creation time. Only the current watcher releases readiness, at the end of its scan or when it ends on its own; a replaced watcher's end-of-scan releases nothing. An entry from a watcher already replaced is dropped. A watcher that ends on its own records the terminal error `/healthz` and self-health read. A stopped watcher arms nothing, and one armed while the stop ran is read and dropped until the drain ends it. A watcher reporting `consumer not active` during the gap is logged at WARN, and so is a shutdown drain that finds a watcher's consumer already gone (`consumer not found`): the drain deletes each consumer nats.go created as it ends that subscription, and the ordered consumer of a watcher the last reconnect had not yet replaced can already be gone (a restart loses it outright, since it is kept in memory; a disconnect longer than its inactive threshold lets the server delete it). At the pinned nats.go that delete is the only report of the bare error, so the bus warns on the bare error alone; a nats.go bump re-checks that. The one other report of `consumer not found`, an ordered consumer nats.go failed to recreate, wraps the error and stays an ERROR. Every other async error is an ERROR.
-- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. A rebuild that reports success is probed at once, and a healthy probe resets the count, so separate faults that each rebuild repairs (a bucket deleted and recreated, then another, then the durable) never add up to a restart, unless the probe right after a rebuild also fails: that failure, transient or terminal, keeps the count, and the terminal line names its error. A listener bucket deleted and not recreated (the interest, session, CI or role bucket) fails every rebuild, because a rebuild opens a bucket and never creates one, so it ends in a restart, and the next start creates the bucket again; a missing bucket counts as terminal, so this holds for the role bucket too, which no watcher reads. Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running, retires the interest, session and CI KV watchers (`StopWatch`, final and without a server request, so a reconnect hook still running cannot arm one), and drains NATS through `bus.Client.Drain`. The drain stops the client first, so it never reconnects or re-subscribes, and lets deliveries already in their handlers finish, role-lane forwards included. It is bounded to ten seconds, and a connection that is reconnecting is closed at once. It logs completion and exits non-zero so Docker's restart policy can restore it. A runtime must therefore allow about twenty seconds after SIGTERM: the compose file sets `stop_grace_period: 30s`, and ECS's default `stopTimeout` is 30 seconds.
+- Health endpoints reflect dependency health, not just process liveness. `/healthz` returns `degraded` for transient JetStream/KV probe failures and `unhealthy` for NATS loss, a stopped interest, session or CI KV watcher, or a missing durable consumer. A listener that mounts no GitHub webhook route keeps no CI cache, and its healthy answer carries `"ci_cache": "not_applicable"`.
+- NATS reconnects indefinitely, in place: the bus starts from `nats.GetDefaultOptions` (reconnect, client pings, drain and flusher timeouts), so the connection object and every JetStream or KV handle taken from it survive a server restart. A publish while reconnecting waits for the reconnect within its own deadline (5 s for a publish, 2 s for a role-lane forward), and reconnect attempts run every second. The reconnect buffer is off, so a publish that fails was not sent. A subscription nats.go re-sent on the reconnected connection is kept as it is; one on a replaced connection is bound again. Every reconnect recreates the interest, session and CI KV watchers on the reconnected connection, because a server restart loses their ordered consumers and nats.go would replace them only after missed heartbeats; while NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle or a lost consumer. All three watchers share one lifecycle (`internal/kvwatch`), and the listener keeps its caches as one list (`listenerCaches`, which holds the CI cache only on a listener that mounts the GitHub webhook route), which rewatch, self-health, `/healthz` and shutdown each loop over. The first start runs in the background. When it fails with no watcher current, it records the failure and releases the cache's readiness; when a Rewatch's watcher is current, it does neither, and that watcher releases readiness once it has delivered every existing key. A rewatch opens the bucket on the connection it is given, so a store bound to a replaced connection moves to the new one. A rewatch onto a bucket whose stream was deleted and created again empties the cache and its revision fence before the new watcher fills them. A bucket recreated under a watcher that did not end (nats.go's ordered consumer can reset onto the new stream without delivering its first revisions) is caught by each store's `Ping`, which the self-health probe runs: it records a terminal watcher error, so the next tick rebuilds the watcher. A watch whose stream is older than a running, healthy watcher's (it read the bucket before a newer watch switched to a recreated one) is discarded, and read and dropped until it ends; against an ended or flagged watcher it installs as usual, since a restored or clock-stepped bucket can have an older creation time. Only the current watcher releases readiness, at the end of its scan or when it ends on its own; a replaced watcher's end-of-scan releases nothing. An entry from a watcher already replaced is dropped. A watcher that ends on its own records the terminal error `/healthz` and self-health read. A stopped watcher arms nothing, and one armed while the stop ran is read and dropped until the drain ends it. A watcher reporting `consumer not active` during the gap is logged at WARN, and so is a shutdown drain that finds a watcher's consumer already gone (`consumer not found`): the drain deletes each consumer nats.go created as it ends that subscription, and the ordered consumer of a watcher the last reconnect had not yet replaced can already be gone (a restart loses it outright, since it is kept in memory; a disconnect longer than its inactive threshold lets the server delete it). At the pinned nats.go that delete is the only report of the bare error, so the bus warns on the bare error alone; a nats.go bump re-checks that. The one other report of `consumer not found`, an ordered consumer nats.go failed to recreate, wraps the error and stays an ERROR. Every other async error is an ERROR.
+- Every cache warm-up logs one line when its initial scan ends — `<cache> cache warm-up` with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` — at INFO when the scan delivered every existing key and at WARN when nats.go's idle timer gave up on it (`outcome: "timed out"`, `internal/kvwatch`). The two counts are disjoint: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them; a cache can hold fewer keys than `entries`, since it evicts a value it cannot decode. The line, like every line a cache watcher writes (a failed first start, a recreated bucket, its own end), goes through the logger its store hands it (`store.WithLogger`, `session.WithSessionLogger`, and the CI store's own), so in the listener it is a JSON record with `machine_id`, as `internal/store`'s lines are. A timed-out scan is logged and never recorded as the watcher's error, because the watcher is still running and its cache still follows the bucket: `Err`, `Ping`, `/healthz` and the self-health rebuild must keep meaning "this watcher is dead". Reading the timeout consumes nats.go's single buffered error, so a watcher that later ends after a timed-out scan records `<cache> watcher stopped` rather than the timeout; `internal/kvwatch` reads that error in one place (`idleTimeout`), for the warm-up, a watcher's terminal error and the one-shot `ScanExistingKeys`, which refuses a scan the timer ended.
+- Each listener collects the interest bucket's delete markers, because nothing else ever has: every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves — 41,873 subjects for 40 live keys in production, and 17-25 s of a restart with no deliveries on the on-prem machines (LEGION-374). A pass reads the stream (read 1), runs one MetaOnly scan of the bucket, takes the **floor** = the lowest revision that scan delivered as a PUT, reads the stream again (read 2), and sends one unfiltered `STREAM.PURGE` of everything below the floor. The floor comes from the stream, never from the cache: it is a sequence that scan saw, every live key's latest message is that PUT or a later write with a higher sequence, no value is decoded on the way (so a live key this build cannot decode, which the cache evicts while its message stays in the stream, is protected), and a write after the scan is given a higher sequence and survives. It refuses to purge at DEBUG when there is nothing below the floor or no live key at all, and at WARN when a read of the stream failed, the scan did not complete, the stream was replaced, the sequence space moved backward, or the floor is above the stream's last sequence. Every pass logs one line, `interest markers collected` or `interest marker collection refused` with its `reason`, carrying every stream value the decision used — `read1_*` and `read2_*` (both reads come before the purge), `floor`, `live`, `delete_markers` — plus, when it purged, `purged`, `purged_first_seq` and `purged_msgs` from a read after the purge; a read the pass never took is absent from the line, so an unexpected purge or refusal is diagnosable from the line alone. `purged` is the drop in the stream's message count between read 2 and that read, so it is approximate both ways: a put in between under-reports it, and a peer listener's purge in between is counted by both passes, so a sum of `purged` across the fleet overstates what was removed. A purge whose count read fails still logs `interest markers collected`, at WARN and without the `purged` fields. A bucket with no live PUT is never collected, on purpose: a fleet-wide outage leaves every marker in place, which is safe. The creation time bounds the stream's identity and the sequences bound its space, and neither alone bounds both: a bucket deleted and created again has a new creation time but, when the original's first sequence was still 1, need not lower any sequence, and a JetStream restore keeps the snapshot's creation time and shows only as a sequence space that moved backward. A creation time re-stamped with no replacement (an in-place config update plus a restart, at 2.10) refuses one pass, which costs five minutes. A floor above `LastSeq` is the one value that makes the server's unfiltered purge compact the whole stream. One window cannot be guarded: `STREAM.PURGE` at 2.10 takes no expected-stream precondition, so a bucket deleted and created again between read 2 and the purge cannot be refused — that window is one round trip, which is why read 2 is taken immediately before the purge. Every listener runs a pass after its interest cache's first warm-up and then on the reapers' five-minute cadence; the purge is idempotent (a repeat purges 0), so there is no lock and no leader. The one capability it adds is publish on `$JS.API.STREAM.PURGE.KV_envoy_interests`: a NATS user without it leaves every marker where it was, logs `interest marker collection could not purge the bucket` once per process (the connection's own `envoy nats async error` names the permissions violation), and keeps serving.
+- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. A rebuild that reports success is probed at once, and a healthy probe resets the count, so separate faults that each rebuild repairs (a bucket deleted and recreated, then another, then the durable) never add up to a restart, unless the probe right after a rebuild also fails: that failure, transient or terminal, keeps the count, and the terminal line names its error. A listener bucket deleted and not recreated (the interest, session, CI or role bucket) fails every rebuild, because a rebuild opens a bucket and never creates one, so it ends in a restart, and the next start creates the bucket again; a missing bucket counts as terminal, so this holds for the role bucket too, which keeps no cache watcher: `Rewatch` reopens its handle all the same, and its only watch is the one-shot revision snapshot `store.Open` takes. Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running, retires the interest, session and CI KV watchers (`StopWatch`, final and without a server request, so a reconnect hook still running cannot arm one), and drains NATS through `bus.Client.Drain`. The drain stops the client first, so it never reconnects or re-subscribes, and lets deliveries already in their handlers finish, role-lane forwards included. It is bounded to ten seconds, and a connection that is reconnecting is closed at once. It logs completion and exits non-zero so Docker's restart policy can restore it. A runtime must therefore allow about twenty seconds after SIGTERM: the compose file sets `stop_grace_period: 30s`, and ECS's default `stopTimeout` is 30 seconds.
 - The listener refuses to bind its durable (`listener-<machine id>`) when the durable's idle heartbeat or ack policy differs from the listener's consumer policy (no heartbeat, explicit acks), because NATS cannot change either in place. It checks the durable right after the NATS connect, before the cache warm-ups, logs `subscribe refused, shutting down`, naming the durable and every such setting it carries, and exits 1 at once rather than retrying a bind that cannot succeed. Deleting the durable lets the next start recreate it at deliver policy `all`, which replays every message the stream retains (72 hours). To keep its cursor instead, recreate it from its own config at one past its ack floor, while no listener runs for that machine:
 
   ```bash
@@ -880,10 +1088,12 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
   The listener's next start stamps the rest of its policy onto the recreated durable and binds it. A message past the ack floor that was already acknowledged out of order is delivered again.
 - If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
+- CI settlements are published by the listeners that receive GitHub webhooks, which in production is the Fargate listener behind the webhook load balancer (its deployment sets `ENVOY_WEBHOOKS=github,slack`). Only the GitHub route records checks, so a listener whose `ENVOY_WEBHOOKS` does not name `github` - the on-prem fleet's, which sets no webhook variable - opens no CI store: no `envoy_ci_state` bucket, watch or consumer, no summary loop and no `envoy_ci_legacy_records_held` gauge, and it logs `CI store not opened` at start. It must not scan that bucket. The watch delivers every record as it starts (8,410 records, 62 MB, on 2026-09-28), and an on-prem listener reaches production NATS only through a Tailscale DERP relay: there the burst tripped the server's 10 s write deadline (`Slow Consumer Detected`) and held up the replies `store.Open` waits on past their 10 s deadline, so every restart failed its start.
 - A check_run or check_suite webhook writes the CI record of its commit in each pull request it names, so every check of a head writes one record, and the CI store combines concurrent observations of a record into one compare-and-swap write (`update`), and a burst of a pull request's checks costs far fewer writes than it has observations. A write retries a lost compare-and-swap, or a transient KV error, from a fresh read for up to two seconds (`recordBudget`). One that runs out answers every delivery in its batch 503, which Dispatch's redelivery sweep resends, and logs one JSON line at ERROR, `ci record exceeded its retry budget`, carrying `owner`, `repo`, `number`, `sha`, `checks` (the record's checks with the batch applied, or 0 when no attempt could read the record), `attempts`, `observations` (the deliveries it answered 503) and `error` (`cistore: record exceeded CAS budget` when the last attempt lost its compare-and-swap). It is an ERROR because each one means GitHub was answered 503, and it is meant for an alarm on the CI-record budget to count. The CI store's other lines go through the same JSON logger, so they carry the listener's `machine_id`.
+- Every write of a CI record stamps it `schema: 1` (`encodeRecord`), so a record without the field was last written by a listener that settled only its pull request's head and left every other terminal commit unsettled. Such a record settles only in `[debounce, debounce + 5 min)` after its `last_event_at` (`handoverGrace`), which covers the time between the old listener's last tick and this one's first: a compose deploy of a listener that receives GitHub webhooks is stop-then-start, and its slow path to the first tick takes at least the startup floor in the table in `docs/solutions/architecture-patterns/envoy-ci-summary.md`, which lists the terms and their bounds. So a head that finished just before the old listener was replaced still settles, and the commits that listener declined to settle hours or days earlier never do. Every admitted record is at most debounce plus grace old (5 min 5 s at the 5 s debounce), by construction. Five minutes is the smallest round figure above that startup floor, and a wider grace would only make admitted settlements later: any width admits the non-head records the head-gated listener left in its last debounce plus grace, which this listener settles as it settles every commit, so the width bounds how late such a settlement arrives, not whether one does, while the aged backlog is held back by its age at any width shorter than its records' ages (5 minutes against the 7-day TTL, about 1 in 2,000). One predicate, `due`, decides it for the summary tick (before it reclaims a claim) and for `ClaimSettlement`, and the gauge `envoy_ci_legacy_records_held` on `/metrics` carries how many records the last tick held back, with one INFO line, `checks held back a head-gated listener's unsettled records, at least`, the first time a process holds any (a floor, since the loop does not wait for the CI cache to load). That is a decision, not an accident: an operator who finds a terminal record with `settled_emitted: false` and no `schema` is looking at that history, which the bucket's seven-day TTL expires. An observation that changes the record (a new check run, a re-run, a suite) stamps it and the commit settles as any other, and a stamped record of any schema is never held back, so a settlement pending across a restart of this listener still publishes. A record without a schema whose `last_event_at` is ahead of the listener's clock publishes once wall time reaches its band, and raising `ENVOY_CI_DEBOUNCE` moves the band's far edge, so a restart with a larger debounce admits the records in the added slice. A head-gated listener run after a rollback decodes a stamped record, ignoring the field, and its own writes drop it. Seven days after the last head-gated listener stops, no record without a schema remains.
 - The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime. Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
 - An envelope publishes under a JetStream MsgId of its dedupe key and topic when that key names the upstream event itself: `contracts.DedupeKeyNamesTheUpstreamEvent`, which asks the envelope rather than its source name, and holds for a `github`, `slack` or `ghostwispr` key that is the source plus the envelope's own `SourceEventID` (the webhook normalizers' shape) and for every `dispatch` envelope (LEGION-271). A webhook redelivery of an event the stream already holds (GitHub's and Ghost Wispr's resend under the original delivery id, Slack's retry under the original `event_id`) is dropped at publish and still answered 200, and each topic of one delivery's fan-out lands once. The case this covers is a first attempt that reached the stream but that the sender recorded as failed: a reply slower than GitHub's 10-second limit, or a 503 after part of a fan-out published. GitHub redelivers only the past three days, which lies inside the window. The rule reads the key because a source name proves nothing: the MCP bridge publishes under the source its configuration names, `github` included, with a key that is a hash of the resource URI and the summary, which two distinct events on one URI share whenever the read returns no text; and a CI settlement carries a key of the head and the record's generation, which a record recreated under that head can reuse with a different snapshot. Neither is a redelivery, and neither is deduped. Agent-sourced envelopes carry no MsgId.
-- A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list. Only the deployed services call it: the listener (including the on-prem fleet's) and Dispatch's server. A caller that only publishes or only tails - `natstail`, the MCP server, `envoy-dispatch`'s operator commands - uses `bus.Connect`, which neither creates the stream nor updates it. **Either connect refuses a NATS server that is not this machine's unless the run sets `ENVOY_ALLOW_REMOTE_NATS=1`**, decided from the URL before anything dials, because nothing distinguishes the deployed Dispatch from the same binary run out of a checkout: both read `natsUrls` from `~/.config/opencode/envoy.json`, which on an agent machine names production. Each deployment states its reach instead (`deploy/compose/*.compose.yml`, agent-c's listener and Dispatch task definitions, the on-prem fleet's Pulumi), and each must carry it **before** an image whose binaries read it runs there, or that start refuses the shared NATS its deployment names and exits; setting it early is free, because a binary built before the variable ignores it (LEGION-249). Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap). A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it). In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it. Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
+- A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list. Only the deployed services call it: the listener (including the on-prem fleet's) and Dispatch's server. A caller that only publishes or only tails - `natstail`, the MCP server, `envoy-dispatch`'s operator commands - uses `bus.Connect`, which neither creates the stream nor updates it. **Either connect refuses a NATS server that is not this machine's unless the run sets `ENVOY_ALLOW_REMOTE_NATS=1`**, decided from the URL before anything dials, because nothing distinguishes the deployed Dispatch from the same binary run out of a checkout: both read `natsUrls` from `~/.config/opencode/envoy.json`, which on an agent machine names production. Each deployment states its reach instead (`deploy/compose/*.compose.yml`, the production deployment's listener and Dispatch service definitions, the on-prem fleet's Pulumi), and each must carry it **before** an image whose binaries read it runs there, or that start refuses the shared NATS its deployment names and exits; setting it early is free, because a binary built before the variable ignores it (LEGION-249). Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap). A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it). In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it. Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
 ## Listener API
@@ -919,8 +1129,26 @@ create an issue message with `target: "session:<id>"` or `target: "role:<name>"`
 session, never by a human. A human may also create an issue-less, session-targeted message with
 `POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?}`, and
 `GET /api/v1/agents/{session_id}/messages` returns that session's issue-less and issue-anchored
-targeted roots newest first with their deliveries and reply chains (a reply in the chain carries
-its own deliveries). Dispatch resolves a role holder
+targeted roots: the 50 whose thread moved last, plus every conversation holding a reply the caller
+has not read, in one activity order (`greatest(root.created_at, newest reply)`), so the window
+always covers what `unread_replies` counts. `unread_replies` and the window's unread term share one
+definition, `unreadDirectRepliesCTE` (`api/unread_replies.go`), which both queries build on: the
+count is its rows per session and the window is the 50 most active union its roots. Two predicates
+that only happened to agree is what let a reply outside the window be counted, never shown, and
+then marked read by a watermark that only moves forward (LEGION-301). The unread term has no
+ceiling, deliberately: a cap would reopen that defect at a higher threshold. It grows only while
+the badge is ignored, since opening the view clears it - a practical bound, not a structural one,
+and the same bound the root scan's cost has, both indexed by `messages_direct_roots` (`0051`).
+Each root comes back with its deliveries, its reply chains (a reply in the chain carries its own
+deliveries), and `unread`, that conversation's own verdict from the same fragment - the server's
+answer to "does this hold a reply the caller has not read", so no client derives it from
+timestamps. The scope is a root this viewer targeted at this session: a root the session only
+received a delivery of (targeted at a role, or at another session) is listed by activity like any
+other conversation and is never unread. The candidate roots are read as two indexed branches
+unioned (`messages_session_roots`, `message_deliveries_session`), and their activity as one
+recursive walk over every candidate's replies: an OR across `messages` and `message_deliveries`
+can use no index, and a lateral walk per candidate estimates high enough to put the plan past
+`jit_above_cost`, which cost 780 ms of compilation per read on production's own data. Dispatch resolves a role holder
 and checks the selected session's capabilities for every attempt, then makes the synchronous
 listener send; `POST /api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same
 callers, same `actor` rule for bearers) in the `delivery` mode it names - the attempt's own mode
@@ -934,9 +1162,27 @@ and the executor decides the route from what the caller named rather than from t
 owner, so `LEGION_ISSUE` never files a direct-message answer on an unrelated issue
 (`packages/envoy-client/src/dispatch-execute.ts`). A `dispatch://KEY/message/<id>` names the
 issue its message lives on, so that form and any call naming an `issue` still post through
-`POST /api/v1/issues/{key}/messages`. Because a second reply on an answered attempt returns the
-stored reply at 200 without posting, the tool compares that reply's body with the one it sent
-and reports the message as already answered rather than as a send.
+`POST /api/v1/issues/{key}/messages`. The tool always sends `?follow_up=true`, so once an attempt
+is answered its next `dispatch_message({ in_reply_to })` with other text is the session's follow-up
+(201, threaded under its first reply) and its result names that first reply in `details.follows`;
+the result also says `dispatch_read({message})` reads the conversation back. Text the session
+already posted in the conversation comes back marked `duplicate`, and the tool reports that nothing
+new was posted. A Dispatch that predates follow-ups ignores the parameter (it would have refused a
+body field, since the route decodes strictly) and answers a second reply with the stored one at
+200 without posting, so the tool compares that reply's body with the one it sent and reports the
+message as already answered rather than as a send. The host's automatic BTW answer
+(`postDeliveryReply`) never sends the parameter.
+
+`GET /api/v1/messages/{id}` reads the conversation any message belongs to, issue-less or not, by
+the id of any message in it: `{message: <thread root with its deliveries>, replies: [...]}`, oldest
+first. It is how `dispatch_read({ message })` reads a direct-message conversation back, since a
+human's direct message belongs to no issue. A thread on an issue follows the issue's rule, exactly
+as `GET /api/v1/issues/{key}/messages/{id}` does. An issue-less thread is a direct conversation: a
+human reads any of them, and a bearer names its session in `?session=` (400 `SESSION_REQUIRED`
+without it) and reads only one that session is in, whose root targets `session:<id>` or where it
+authored a reply; any other is 403 `THREAD_FORBIDDEN`. The session is the caller's own claim, like
+`actor` on a write, so this keeps a session from reading another session's direct conversation by
+mistake and is not an authorization boundary. Direct-conversation text also reaches every authenticated caller through `GET /api/v1/events`; nothing in Dispatch restricts it by session. The tool sends the host's session id.
 
 Messages thread: `in_reply_to` names a message in the same conversation - a message of the same
 issue, or, for `POST /api/v1/agents/{session_id}/messages`, an issue-less message whose thread
@@ -959,8 +1205,15 @@ never see it.
 `sent` one — the session answering is proof the message reached it, whatever the receipt said
 (a stale plugin, `nats: invalid jetstream publish response`, an error the session itself reported
 earlier) — and records the attempt as `sent` with no error and the reply's id; an `error` on an
-already-failed attempt returns the stored attempt unchanged, and a second `body` on an answered
-attempt returns the stored reply (200).
+already-failed attempt returns the stored attempt unchanged. On an answered attempt an `error`, or a
+`body` sent without `?follow_up=true`, is a retry: it returns the stored reply (200) without
+posting, so a frame handed to the session twice never posts a second automatic answer. With
+`?follow_up=true` a `body` equal to the stored reply's or to an earlier follow-up returns that
+message (200) without posting, and any other `body` is the session's follow-up, stored under its
+first reply with its own `message.answered` event (201). Every answer that posted nothing carries
+`duplicate: true` beside the message (`replyRead`). The attempt keeps naming the first reply.
+`follow_up` is `true`, `false` or absent; any other value is `400 MESSAGE_INPUT`, so a caller's
+typo is refused rather than answered as a retry.
 
 A human reaches many sessions at once with `POST /api/v1/broadcasts`
 `{body, delivery, session_ids}`. A broadcast is a grouping over the targeted messages above,
@@ -978,8 +1231,9 @@ worker on its own `store.WithTransactionTracking` context derived from the serve
 recipient after the one in flight when a tab closes or a deploy shuts the server down). A
 recipient therefore starts with no attempt, and one still carrying none was not sent to.
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
-`GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies; all
-three routes are human-only, like the one-session route they are built from.
+`GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the
+order the send named them; all three routes are human-only, like the one-session route they are
+from.
 
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no

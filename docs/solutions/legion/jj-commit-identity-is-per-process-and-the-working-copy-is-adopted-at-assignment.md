@@ -159,3 +159,8 @@ earlier phases' commits are legitimately authored by their own App, and a confli
 legitimately sets the committer of every rebased commit, other roles' included, to the rebaser.
 Once LEGION-42 lands, one PR carries commits by different Apps by design; a tester or reviewer
 reading the whole list as one identity reports a non-problem.
+
+**Superseded 2026-09-28 (LEGION-118):** the committer half no longer holds. A conflict resolves
+by forward merge, which rewrites nothing and changes no committer, so another role's commit
+carrying you as committer is evidence a rewrite moved commits that were not yours — report it
+rather than accept it. `skills/legion-worker/SKILL.md` carries the current rule.

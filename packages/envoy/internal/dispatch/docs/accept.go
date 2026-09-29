@@ -32,22 +32,18 @@ func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (
 	return pmdoc.AgreeWithReadBack(before, after, first, lastAfter, with != ""), nil
 }
 
-// acceptedCode is the code text an accepted suggestion writes in the code block at, and the range
-// it writes it over, match or the lines around it, as that code reads back, so the accept stores
-// what reads back and changes nothing but the lines it writes: in a list item's code, the lines it
-// leaves blank (blankListItemLines); then, markdown dropping the line breaks that end code, where
-// only line breaks follow the match, the text's own ending breaks, a blank line it ends with
-// included. A match can run past the code into later blocks of tree, to the textblock it ends in.
-// One that takes all of that textblock's text leaves nothing after the text, as at the code's end,
-// so the same rules apply. One that ends inside that text is written as sent: the rest of it,
-// which the splice joins to the code, follows the text, and neither rule can judge it, so a line
-// of spaces and tabs that text leaves in a list item's code reads back empty and the accept is
-// refused.
-func acceptedCode(tree *pmdoc.Node, with string, at pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
-	past := match.To > at.Content.To
-	if past {
+// acceptedCode is the code text an accepted suggestion writes over match in the code block at, as
+// that code reads back, so the accept stores what reads back: markdown drops the line breaks that
+// end code, so where only line breaks follow the match, the text loses its own ending breaks, a
+// blank line it ends with included. A match can run past the code into later blocks of tree, to
+// the textblock it ends in. One that takes all of that textblock's text leaves nothing after the
+// text, as at the code's end, so the same rule applies. One that ends inside that text is written
+// as sent: the rest of it, which the splice joins to the code, follows the text, and the rule
+// cannot judge it.
+func acceptedCode(tree *pmdoc.Node, with string, at pmdoc.TextblockAt, match pmdoc.Range) string {
+	if match.To > at.Content.To {
 		if end, _ := pmdoc.ContainingTextblock(tree, match.To); match.To != end.Content.To {
-			return with, match
+			return with
 		}
 	}
 	var text strings.Builder
@@ -55,64 +51,11 @@ func acceptedCode(tree *pmdoc.Node, with string, at pmdoc.TextblockAt, match pmd
 		text.WriteString(child.Text)
 	}
 	code := utf16.Encode([]rune(text.String()))
-	from, to := match.From-at.Content.From, min(match.To, at.Content.To)-at.Content.From
-	if insideListItem(at) {
-		with, from, to = blankListItemLines(code, with, from, to)
-	}
+	to := min(match.To, at.Content.To) - at.Content.From
 	if !slices.ContainsFunc(code[to:], func(unit uint16) bool { return unit != '\n' }) {
 		with = strings.TrimRight(with, "\n")
 	}
-	written := pmdoc.Range{From: at.Content.From + from, To: at.Content.From + to}
-	if past {
-		written.To = match.To
-	}
-	return with, written
-}
-
-// blankListItemLines writes empty each line that with, written over code from to to, leaves
-// holding only spaces and tabs, the spaces and tabs the line keeps around the match included, and
-// widens from and to over those. A list item's code reads such a line, CommonMark's blank line,
-// back empty; any other character, a no-break space or a form feed among them, is kept, as both
-// readers keep it.
-func blankListItemLines(code []uint16, with string, from, to int) (string, int, int) {
-	lineStart, lineEnd := from, to
-	for lineStart > 0 && code[lineStart-1] != '\n' {
-		lineStart--
-	}
-	for lineEnd < len(code) && code[lineEnd] != '\n' {
-		lineEnd++
-	}
-	lines := strings.Split(with, "\n")
-	last := len(lines) - 1
-	for index := range lines {
-		line := lines[index]
-		if index == 0 {
-			line = string(utf16.Decode(code[lineStart:from])) + line
-		}
-		if index == last {
-			line += string(utf16.Decode(code[to:lineEnd]))
-		}
-		if strings.Trim(line, " \t") != "" {
-			continue
-		}
-		lines[index] = ""
-		if index == 0 {
-			from = lineStart
-		}
-		if index == last {
-			to = lineEnd
-		}
-	}
-	return strings.Join(lines, "\n"), from, to
-}
-
-func insideListItem(at pmdoc.TextblockAt) bool {
-	for _, ancestor := range at.Ancestors {
-		if ancestor.Type == "list_item" {
-			return true
-		}
-	}
-	return false
+	return with
 }
 
 // insideAsk reports whether an accepted suggestion lands in an ask. refuseBrokenAsks is the ask
@@ -152,9 +95,13 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 // emptied to `- [ ]`, which reads back as a plain item. A block that already read back otherwise
 // the same way before the accept, the one it changed included, is not the accept's. The checks
 // before it read one block at a time; this one reads the blocks beside each other. The refusal
-// names what reads back and advises rejecting.
+// names what reads back and advises rejecting. An error reading the document back that is no
+// refusal, a panic (pmdoc.ErrPanic) among them, is pmdoc's bug, and is its error.
 func refuseMisreadAccept(before, after *pmdoc.Node, with string) error {
-	misread := pmdoc.NewMisread(before, after)
+	misread, err := pmdoc.NewMisread(before, after)
+	if err != nil {
+		return err
+	}
 	if misread == "" {
 		return nil
 	}
@@ -333,19 +280,27 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 // replacementBroke is the index in after of the first document-level block the write changed
 // (changedBlocks) that check fails, and what check says of it, when it said nothing of the blocks
 // the match lay in before: a block that already failed the check, or another block that does, is
-// no reason to refuse this write.
+// no reason to refuse this write. Only a refusal (pmdoc.ErrSchema) is check's verdict; any other
+// error from it, a panic (pmdoc.ErrPanic) among them, is no verdict on either side, but pmdoc's
+// bug, and is its error.
 func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (block int, broke, err error) {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
 		return -1, nil, err
 	}
 	for index := first; index <= last; index++ {
-		if check(before.Children[index]) != nil {
+		if err := check(before.Children[index]); err != nil {
+			if !errors.Is(err, pmdoc.ErrSchema) {
+				return -1, nil, err
+			}
 			return -1, nil, nil
 		}
 	}
 	for index := first; index <= lastAfter; index++ {
 		if broke = check(after.Children[index]); broke != nil {
+			if !errors.Is(broke, pmdoc.ErrSchema) {
+				return -1, nil, broke
+			}
 			return index, broke, nil
 		}
 	}

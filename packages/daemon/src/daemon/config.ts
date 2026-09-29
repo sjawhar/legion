@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   DISPATCH_KEY_PATTERN,
   type IssueKey,
+  type LegionDaemonApi,
   type LegionRole,
   legionProjectToken,
 } from "@legion/contracts";
@@ -20,6 +21,16 @@ import {
 
 export const GITHUB_APP_ROLES = ["implement", "review"] as const;
 export type GitHubAppRole = (typeof GITHUB_APP_ROLES)[number];
+
+/** `/legion/v1/gh-token` names each App role's login by key (`legionAppLogins`). The App roles and
+ * those keys must be one set: a role added to GITHUB_APP_ROLES or to the contract alone fails to
+ * compile here, rather than a third App's login being dropped by the schema without a word. */
+type ContractAppRole = keyof NonNullable<
+  ReturnType<typeof LegionDaemonApi.GitHubToken.response.parse>["legionAppLogins"]
+>;
+type SameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type Holds<T extends true> = T;
+export type AppRolesAreTheContracts = Holds<SameKeys<GitHubAppRole, ContractAppRole>>;
 
 export interface GitHubAppRoleConfig {
   appId: string;

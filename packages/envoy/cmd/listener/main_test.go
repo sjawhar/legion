@@ -2013,7 +2013,8 @@ func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 // While a listener starts, /healthz answers 200 "starting", so a rolling deploy that waited out a
 // retry, or the interest and session cache warm-ups (30 s each), would take the replacement for
 // healthy and stop the task it replaces. The refusal therefore comes right after the NATS connect:
-// on a NATS that holds no KV bucket yet, a refused listener exits without having opened one.
+// on a NATS that holds no KV bucket yet, a refused listener exits without having opened one, the CI
+// bucket included, which a listener mounting the GitHub route opens first.
 func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
@@ -2025,7 +2026,7 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 		t.Fatalf("add a durable with a heartbeat: %v", err)
 	}
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "refused-durable-startup")
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "refused-durable-startup", githubWebhookEnv...)
 	listener.waitExit(t, "meeting a refused durable")
 	output := listener.output
 	if code := listener.cmd.ProcessState.ExitCode(); code != 1 {
@@ -2522,7 +2523,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 		logMessage string
 	}{
 		{"raw nats.ErrTimeout from the flush", natsgo.ErrTimeout, "delivery_failed", "listener role forward failed"},
-		{"flush timeout wrapped by the client", fmt.Errorf("bus: flush forward: %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
+		{"flush timeout wrapped by the client", fmt.Errorf("bus: flush publish to \"agent.x\": %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
 		{"bus.ErrReceiptTimeout", bus.ErrReceiptTimeout, "receipt_timeout", "listener role receipt timed out"},
 		{"bus.ErrReceiptTimeout wrapped", fmt.Errorf("forward: %w", bus.ErrReceiptTimeout), "receipt_timeout", "listener role receipt timed out"},
 	}

@@ -335,9 +335,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node
 		if code {
-			var codeText string
-			codeText, range_ = acceptedCode(tree, with, at, range_)
-			replacement = codeReplacement(codeText)
+			replacement = codeReplacement(acceptedCode(tree, with, at, range_))
 		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
 			return err
 		}

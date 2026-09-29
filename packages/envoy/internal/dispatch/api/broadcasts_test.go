@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // broadcastListener is a fake Envoy listener for the broadcast tests: it advertises the given
@@ -307,7 +309,7 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	tooMany := make([]string, maxBroadcastRecipients+1)
+	tooMany := make([]string, contracts.MaxBroadcastRecipients+1)
 	for index := range tooMany {
 		tooMany[index] = "session-" + string(rune('a'+index%26)) + string(rune('a'+index/26))
 	}
@@ -547,5 +549,152 @@ func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want the broadcast's and the human's, and none the worker opened", attempts)
+	}
+}
+
+// TestBroadcastRecipientsReadBackInRequestOrder catches a change that falls back to the random
+// message UUID when every recipient message has the transaction's same created_at timestamp.
+func TestBroadcastRecipientsReadBackInRequestOrder(t *testing.T) {
+	requested := []string{"zeta", "alpha", "mid", "bravo", "echo", "delta", "hotel", "gamma"}
+	for _, scenario := range []struct {
+		name     string
+		excluded string
+	}{
+		{name: "all requested sessions are live"},
+		{name: "an excluded session leaves the remaining order intact", excluded: "bravo"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			live := make([]string, 0, len(requested))
+			want := make([]string, 0, len(requested))
+			for _, sessionID := range requested {
+				if sessionID == scenario.excluded {
+					continue
+				}
+				live = append(live, sessionID)
+				want = append(want, sessionID)
+			}
+			listener, _ := newBroadcastListener(t, broadcastSessionsJSON(t, live))
+			handler, database := newTargetedMessageHandler(t, listener.URL)
+			installReverseBroadcastMessageIDDefault(t, database)
+
+			created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+				"body": "Keep this recipient order.", "delivery": "btw", "session_ids": requested,
+			}, "alice"))
+			var createdAtCount int
+			if err := database.Pool.QueryRow(context.Background(),
+				`select count(distinct created_at) from messages where broadcast_id = $1`, created.ID).Scan(&createdAtCount); err != nil {
+				t.Fatalf("count broadcast message timestamps: %v", err)
+			}
+			if createdAtCount != 1 {
+				t.Fatalf("broadcast message timestamps = %d, want one transaction timestamp", createdAtCount)
+			}
+
+			stored := awaitBroadcastDeliveries(t, handler, created.ID)
+			if got := broadcastRecipientSessionIDs(stored); !equalStrings(got, want) {
+				t.Fatalf("recipient order = %v, want request order %v", got, want)
+			}
+		})
+	}
+}
+
+func broadcastSessionsJSON(t *testing.T, sessionIDs []string) string {
+	t.Helper()
+	sessions := make([]map[string]any, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		sessions = append(sessions, map[string]any{
+			"session_id": sessionID,
+			"title":      sessionID,
+			"capabilities": []string{
+				"btw",
+			},
+			"last_seen": 1,
+		})
+	}
+	encoded, err := json.Marshal(sessions)
+	if err != nil {
+		t.Fatalf("encode broadcast sessions: %v", err)
+	}
+	return string(encoded)
+}
+
+func installReverseBroadcastMessageIDDefault(t *testing.T, database *store.Store) {
+	t.Helper()
+	_, err := database.Pool.Exec(context.Background(), `
+		create sequence broadcast_test_message_ids start with 1;
+		create function broadcast_test_message_id() returns uuid
+		language sql volatile as $$
+			select case nextval('broadcast_test_message_ids')
+				when 1 then '00000000-0000-0000-0000-000000000008'::uuid
+				when 2 then '00000000-0000-0000-0000-000000000007'::uuid
+				when 3 then '00000000-0000-0000-0000-000000000006'::uuid
+				when 4 then '00000000-0000-0000-0000-000000000005'::uuid
+				when 5 then '00000000-0000-0000-0000-000000000004'::uuid
+				when 6 then '00000000-0000-0000-0000-000000000003'::uuid
+				when 7 then '00000000-0000-0000-0000-000000000002'::uuid
+				when 8 then '00000000-0000-0000-0000-000000000001'::uuid
+				else '00000000-0000-0000-0000-000000000009'::uuid
+			end
+		$$;
+		alter table messages alter column id set default broadcast_test_message_id();
+	`)
+	if err != nil {
+		t.Fatalf("install reverse broadcast message id default: %v", err)
+	}
+}
+
+func broadcastRecipientSessionIDs(response broadcastResponse) []string {
+	sessionIDs := make([]string, 0, len(response.Recipients))
+	for _, recipient := range response.Recipients {
+		sessionIDs = append(sessionIDs, recipient.SessionID)
+	}
+	return sessionIDs
+}
+
+// A server that predates broadcast positions writes the same row shape, without the new column.
+// The migrated schema must accept it and readers must retain the only fallback order those rows
+// have: their timestamp and UUID.
+func TestBroadcastReadsLegacyUnpositionedRecipientsByCreatedAtAndID(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+	author := []byte(`{"kind":"user","id":"alice"}`)
+	createdAt := time.Date(2026, time.September, 29, 12, 0, 0, 0, time.UTC)
+	var broadcastID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into broadcasts (author, body, delivery, created_at)
+		values ($1, $2, $3, $4)
+		returning id::text
+	`, author, "Legacy broadcast.", "btw", createdAt).Scan(&broadcastID); err != nil {
+		t.Fatalf("insert legacy broadcast: %v", err)
+	}
+	legacy := []struct {
+		id        string
+		sessionID string
+	}{
+		{id: "00000000-0000-0000-0000-000000000001", sessionID: "zeta"},
+		{id: "00000000-0000-0000-0000-000000000002", sessionID: "alpha"},
+	}
+	for _, recipient := range legacy {
+		if _, err := database.Pool.Exec(ctx, `
+			insert into messages (id, issue_key, author, body, target, broadcast_id, created_at)
+			values ($1, null, $2, $3, $4, $5, $6)
+		`, recipient.id, author, "Legacy broadcast.", "session:"+recipient.sessionID, broadcastID, createdAt); err != nil {
+			t.Fatalf("insert legacy message for %s: %v", recipient.sessionID, err)
+		}
+	}
+	var position *int
+	if err := database.Pool.QueryRow(ctx,
+		`select broadcast_position from messages where id = $1`, legacy[0].id).Scan(&position); err != nil {
+		t.Fatalf("read legacy broadcast position: %v", err)
+	}
+	if position != nil {
+		t.Fatalf("legacy broadcast position = %d, want null", *position)
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts/"+broadcastID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read legacy broadcast: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if got, want := broadcastRecipientSessionIDs(decodeBody[broadcastResponse](t, read)), []string{"zeta", "alpha"}; !equalStrings(got, want) {
+		t.Fatalf("legacy recipient order = %v, want created_at and id order %v", got, want)
 	}
 }

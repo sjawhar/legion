@@ -41,7 +41,7 @@ else
     # own index is never written.
     index=$(mktemp)
     trap 'rm -f "$index"' EXIT
-    cp "$(git -C "$root" rev-parse --path-format=absolute --git-path index)" "$index"
+    cp -- "$(git -C "$root" rev-parse --path-format=absolute --git-path index)" "$index"
     GIT_INDEX_FILE=$index git -C "$root" add --intent-to-add --all
     echo "working-tree changes, sha256 $(GIT_INDEX_FILE=$index git -C "$root" diff HEAD | sha256sum | cut -d' ' -f1):"
     GIT_INDEX_FILE=$index git -C "$root" diff HEAD --stat | sed 's/^/  /'

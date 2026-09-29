@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
@@ -22,8 +23,8 @@ import (
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
-	// footnoteLabels is every footnote label the document defines, lowercased.
-	footnoteLabels map[string]bool
+	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
+	footnoteLabels footnoteLabelSet
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
 	// began in an earlier one: the writer's long-standing list, heading, quote and ordered-list
 	// escapes are judged here, in headings, cells and inside marks as well, so that the markdown
@@ -44,6 +45,10 @@ type escapeContext struct {
 	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
 	// the run they are in does not read back with them as written (inlineWithEscapes).
 	delimiters delimiterEscapes
+	// afterBareURL reports whether the text is written right after a bare URL, which linkify would
+	// continue into its first character, because the run does not read back with that character
+	// as written (inlineWithEscapes).
+	afterBareURL bool
 	// heading reports whether the text is a heading's.
 	heading bool
 	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
@@ -55,11 +60,23 @@ type escapeContext struct {
 	// opener and closer are the delimiter character (`*` or `~`) of the mark written right
 	// before the text and of the one written right after it, or 0 when that is no delimiter.
 	opener, closer byte
+	// flankFirst and flankLast report whether the text's first and last character are written as
+	// character references, for the delimiter run beside each to open or close (runSpelling).
+	flankFirst, flankLast bool
+}
+
+// endsBareURL reports whether the character is ASCII punctuation opening text written right after
+// a bare URL, which linkify would continue the URL into unless a backslash stops it.
+func endsBareURL(offset int, char rune, context escapeContext) bool {
+	return offset == 0 && context.afterBareURL && char < utf8.RuneSelf && isASCIIPunctuation(byte(char))
 }
 
 // needsInlineEscape decides one character from the text alone.
 func needsInlineEscape(value string, offset int, char rune, context escapeContext) bool {
 	textLineStart := context.textLineStart
+	if endsBareURL(offset, char, context) {
+		return true
+	}
 	switch char {
 	case '\\':
 		// Before whitespace written as a reference, a backslash would escape its `&`; before a
@@ -138,8 +155,13 @@ func escaped(char rune) string {
 
 // textEscape is how the text writer spells an escaped character: a tilde as its numeric
 // reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
-// a backslash escapes it, and anything else as escaped spells it.
-func textEscape(char rune) string {
+// a backslash escapes it, and anything else as escaped spells it - except the character that ends
+// a bare URL (endsBareURL), which is always a backslash, since linkify continues a URL through the
+// `&` that opens either reference.
+func textEscape(char rune, endsBareURL bool) string {
+	if endsBareURL {
+		return "\\" + string(char)
+	}
 	if char == '~' {
 		return numericEntity(char)
 	}
@@ -301,10 +323,19 @@ func taskCheckboxText(value string, offset int) bool {
 		(len(rest) == 3 || strings.IndexByte(" \t\n", rest[3]) >= 0)
 }
 
-// closesTypedBlock reports whether line, written at the prefix of the typed block around it, is
-// the lone `:::` that closes the block, which the line read on its own cannot show.
+// closesTypedBlock reports whether line, written at prefix within the reach of the typed block
+// around it (typedFenceReach), is the lone `:::` that closes the block, which the line read on its
+// own cannot show.
 func closesTypedBlock(line, prefix string) bool {
 	return strings.TrimSpace(strings.TrimPrefix(line, prefix)) == ":::"
+}
+
+// typedFenceReach reports whether a line written at prefix starts less than four columns past a
+// typed block's lines, written at typed, with no quote marker between, where both parsers read a
+// fence as closing the typed block whatever block inside it the line would otherwise continue.
+func typedFenceReach(typed, prefix string) bool {
+	rest, ok := strings.CutPrefix(prefix, typed)
+	return ok && len(rest) < 4 && strings.Trim(rest, " ") == ""
 }
 
 // lineReadsAsText reports whether a written line reads the same with its text's first character
@@ -315,18 +346,28 @@ func closesTypedBlock(line, prefix string) bool {
 // anything here. The lines are read as the content of the blockquotes their prefix opens, without
 // the list indentation they share up to the indentation of that prefix, so a deeply nested item
 // is not read as indented code while text that is itself indented still is. footnote is the
-// label, as written, of the footnote definition the read begins with, or empty: the parser drops a
-// definition nothing refers to, so the lines are read after a reference to it.
+// label, as written, of the footnote definition the read begins with, or empty: its opener stands
+// in the columns its later lines are indented, so the lines are read as its content with the
+// opener written as those columns' spaces, and a quote opening its first line is read as the one
+// its later lines carry.
 func lineReadsAsText(before, line, rewrittenLine, prefix, footnote string) bool {
+	if footnote != "" {
+		opener := "[^" + footnote + "]: "
+		if before != "" {
+			before = definitionIndent + strings.TrimPrefix(before, opener)
+		} else {
+			line = definitionIndent + strings.TrimPrefix(line, opener)
+			rewrittenLine = definitionIndent + strings.TrimPrefix(rewrittenLine, opener)
+		}
+	}
 	quote, indentation := splitPrefix(prefix)
 	written := dedent(unquote(before+line, quote), indentation)
 	rewritten := dedent(unquote(before+rewrittenLine, quote), indentation)
-	if footnote != "" {
-		reference := "x[^" + footnote + "]\n\n"
-		written, rewritten = reference+written, reference+rewritten
-	}
 	return slices.Equal(blockKinds(written), blockKinds(rewritten))
 }
+
+// definitionIndent is the indentation a footnote definition's later lines are written with.
+const definitionIndent = "    "
 
 // splitPrefix splits a textblock's line prefix into the blockquote markers it opens with - up to
 // its last `>` and the one space after it - and the indentation of the list items inside them.
@@ -341,7 +382,8 @@ func splitPrefix(prefix string) (quote string, indentation int) {
 }
 
 // unquote drops quote from the start of each line that carries it, or its trimmed form from a
-// blank quoted line.
+// blank quoted line. A container's first line carries it with list markers where its later lines
+// write spaces (`- > ` over `  > `), and drops the same columns.
 func unquote(lines, quote string) string {
 	if quote == "" {
 		return lines
@@ -349,19 +391,33 @@ func unquote(lines, quote string) string {
 	blank := strings.TrimRight(quote, " ")
 	parts := strings.Split(lines, "\n")
 	for index, line := range parts {
-		if strings.HasPrefix(line, quote) {
+		if quotedBy(line, quote) {
 			parts[index] = line[len(quote):]
-		} else if strings.HasPrefix(line, blank) {
+		} else if quotedBy(line, blank) {
 			parts[index] = line[len(blank):]
 		}
 	}
 	return strings.Join(parts, "\n")
 }
 
+// quotedBy reports whether line opens with quote, or with a list marker's characters in the
+// columns quote holds spaces.
+func quotedBy(line, quote string) bool {
+	if len(line) < len(quote) {
+		return false
+	}
+	for index := range len(quote) {
+		if quote[index] != line[index] && (quote[index] != ' ' || !strings.ContainsRune("-+*.)0123456789", rune(line[index]))) {
+			return false
+		}
+	}
+	return true
+}
+
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
 	source := []byte(markdown)
-	root := blockReader.parse(source)
+	root := blockReader.parse(source, false)
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		// A task checkbox is inline, but it is the list item's syntax, not its text.
@@ -508,14 +564,14 @@ func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 	return (delimiter != '_' || !before || !after) && (before || after)
 }
 
-// footnoteReferenceText reports whether the text at offset, a `[`, reads as a reference to one of
-// labels, the document's defined footnote labels lowercased: `[^label]`.
-func footnoteReferenceText(value string, offset int, labels map[string]bool) bool {
+// footnoteReferenceText reports whether the text at offset, a `[`, is shaped like a reference to
+// one of labels, the document's defined footnote labels (footnoteLabelSet.refersTo): `[^label]`.
+func footnoteReferenceText(value string, offset int, labels footnoteLabelSet) bool {
 	if offset+1 >= len(value) || value[offset+1] != '^' {
 		return false
 	}
 	closing := strings.IndexByte(value[offset+2:], ']')
-	return closing > 0 && labels[strings.ToLower(value[offset+2:offset+2+closing])]
+	return closing > 0 && labels.refersTo(value[offset+2:offset+2+closing])
 }
 
 func linkOpener(value string, offset int) bool {

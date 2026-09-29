@@ -62,7 +62,7 @@ func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader) ([]*Node, 
 func readElement(e *crdt.YXmlElement, readDelta textDeltaReader) (*Node, error) {
 	n := &Node{Type: e.NodeName}
 	if attrs := e.GetAttributeValues(); len(attrs) > 0 {
-		n.Attrs = Attrs(attrs)
+		n.Attrs = treeAttrs(e.NodeName, attrs)
 	}
 	children, err := readChildren(&e.YXmlFragment, readDelta)
 	if err != nil {
@@ -100,6 +100,17 @@ func readText(t *crdt.YXmlText, readDelta textDeltaReader) ([]*Node, error) {
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// treeAttrs is attrs, a live element's attributes, as the tree holds them: the value liveNulls
+// writes for a null attribute is null. It maps attrs in place.
+func treeAttrs(nodeName string, attrs map[string]any) Attrs {
+	for name, value := range liveNulls[nodeName] {
+		if attrs[name] == value {
+			attrs[name] = nil
+		}
+	}
+	return Attrs(attrs)
 }
 
 func attrsFromY(raw any) (Attrs, error) {

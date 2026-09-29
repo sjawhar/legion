@@ -156,7 +156,7 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
 			opts.DispatchURL, opts.DispatchToken != "")
 	case poolSet:
-		return refuse("scheduling node selector sets %s=%q: %s is the runtime's, which puts every pod on the %s pool agent-c's policy requires",
+		return refuse("scheduling node selector sets %s=%q: %s is the runtime's, which puts every pod on the %s pool the cluster's admission policy requires",
 			poolKey, pool, poolKey, poolValue)
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
@@ -181,7 +181,7 @@ func configure(opts Options) (*Runtime, error) {
 		case a.Audience == "":
 			return refuse("agent secrets: no token audience")
 		case a.TokenExpiry < 10*time.Minute || a.TokenExpiry > time.Hour:
-			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and agent-c's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
+			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and the cluster's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
 		}
 	}
 	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets); err != nil {

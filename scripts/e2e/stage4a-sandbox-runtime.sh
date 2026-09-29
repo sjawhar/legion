@@ -7,9 +7,9 @@
 # hash, the namespace list) use the admin context. Each check prints what it observed, naming the
 # identity, then `CHECK <name>: PASS`; the first that fails ends the run non-zero, naming it.
 #
-# Every pod carries the operator fixture's pod (scripts/e2e/fixtures/operator-route/pod.yml): its
+# Every pod carries the operator route's pod (deploy/kubernetes/operator-route/pod.yml): its
 # model route, overlay, ServiceAccount and projected token. Legion holds none of it. The run
-# creates its own copy of the ConfigMap the fixture mounts, named for the run's project, its
+# creates its own copy of the ConfigMap it mounts, named for the run's project, its
 # models.yml pointed at LEGION_E2E_MODEL_GATEWAY_URL, and its own providers Secret
 # (legion-<project>-providers, one key provider_keys names), before the harness runs; the teardown
 # deletes both with the rest of the run's objects.
@@ -23,8 +23,10 @@
 # Inputs: LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 # ~/.kube/legion-daemon-production) name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT
 # (default production) the admin one; LEGION_E2E_IMAGE (required) the worker image by digest;
-# LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, the route the
-# fixture's models.yml names;
+# LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, which the run
+# substitutes for the operator route's models.yml placeholder; LEGION_E2E_MODEL_GATEWAY_AUDIENCE
+# (required) the audience that gateway accepts on a worker's projected token, which the run
+# substitutes for the operator route's pod.yml placeholder;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
 #
@@ -56,7 +58,7 @@ work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
 label_prefix=s4a-
 project="${label_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 run_label=$project
-fixture=$root/scripts/e2e/fixtures/operator-route
+operator_route=$root/deploy/kubernetes/operator-route
 route_configmap=legion-operator-route-$project
 providers_secret=legion-$project-providers
 record=$work/sandboxes
@@ -87,6 +89,8 @@ fail() {
 }
 # shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
 . "$root/scripts/e2e/lib/namespace-rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
+. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 cleanup() {
   local status=$?
@@ -112,7 +116,9 @@ for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/nul
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
-  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
+gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
@@ -141,15 +147,21 @@ snapshotted=1
 note "[operator] $(wc -l <"$evidence/namespace-before.txt") objects in $namespace carry no project label or project $project"
 
 begin operator-route
-# shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
-placeholder='${LEGION_E2E_MODEL_GATEWAY_URL}'
-models=$(<"$fixture/models.yml")
+# shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+placeholder='${MODEL_BASE_URL}'
+models=$(<"$operator_route/models.yml")
 printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
-grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
-op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the operator route's models.yml has no baseUrl $placeholder to point at the gateway"
+# shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+placeholder='${MODEL_TOKEN_AUDIENCE}'
+pod=$(<"$operator_route/pod.yml")
+printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
+grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the operator route's pod.yml has no token audience $placeholder to fill with the gateway's"
+op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
   --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
-note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
+note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
+note "operator pod: $work/pod.yml, the operator route's with its token audience from LEGION_E2E_MODEL_GATEWAY_AUDIENCE"
 # The run's providers Secret, named as the runtime names it (ProvidersSecretName), holding one key no
 # model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
 # it arrives.
@@ -161,8 +173,9 @@ pass
 
 begin build
 go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
+stage_role_prompts "$root" "$work"
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
-note "built the e2e harness and agent-secrets from the checkout"
+note "built the e2e harness and agent-secrets from the checkout, with role-prompts beside the harness"
 
 harness_ok=
 if env \
@@ -180,7 +193,7 @@ if env \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \
-  LEGION_E2E_OPERATOR_POD="$fixture/pod.yml" \
+  LEGION_E2E_OPERATOR_POD="$work/pod.yml" \
   LEGION_E2E_OPERATOR_CONFIGMAP="$route_configmap" \
   LEGION_E2E_AGENT_SECRETS_URL="$agent_secrets_url" \
   LEGION_E2E_AGENT_SECRETS_OPERATOR="$agent_secrets_operator" \

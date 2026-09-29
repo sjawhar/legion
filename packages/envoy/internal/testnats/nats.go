@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // Image is the NATS server image every Envoy test container runs. The envoy-go CI job reads this
@@ -237,8 +239,93 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 // and returns its client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
+	_, uri := startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
+	return uri
+}
+
+// NkeyGrant is a NATS test server, started by StartNkeyGranted, whose one nkey user may publish
+// only to the subjects its grant names; Grant changes the grant.
+type NkeyGrant struct {
+	URL  string
+	user string
+	ctr  *tcnats.NATSContainer
+}
+
+// StartNkeyGranted runs a NATS test container as StartNkeyAuthorized does, whose one user may
+// publish only to the subjects allow names (and subscribe to anything): a publish to any other
+// subject is the server's permissions violation, as a per-client grant makes it. The test can
+// change the grant.
+func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
+	t.Helper()
+	ctr, uri := startNkeyConfig(t, publishGrantConfig(user, allow))
+	return &NkeyGrant{URL: uri, user: user, ctr: ctr}
+}
+
+// Grant replaces the user's publish grant with allow and has the server reload its configuration,
+// as an operator changing a grant does: the server keeps its connections and applies the new grant
+// to them. It returns once the server reports the outcome of this reload, not an earlier one - it
+// waits for one more outcome line than the server's log held before the signal - and fails the
+// test, with the server's reason, when the server refused the new configuration.
+func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
+	t.Helper()
 	ctx := context.Background()
-	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	earlier := len(g.reloadOutcomes(t))
+	if err := g.ctr.CopyToContainer(ctx, []byte(publishGrantConfig(g.user, allow)), "/etc/nats.conf", 0o644); err != nil {
+		t.Fatalf("write the new grant: %v", err)
+	}
+	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
+	if err != nil {
+		t.Fatalf("docker client: %v", err)
+	}
+	defer docker.Close()
+	if err := docker.ContainerKill(ctx, g.ctr.GetContainerID(), "HUP"); err != nil {
+		t.Fatalf("signal NATS to reload: %v", err)
+	}
+	reloaded := wait.ForLog(reloadOutcome.String()).AsRegexp().WithOccurrence(earlier + 1).WithStartupTimeout(connectTimeout)
+	if err := reloaded.WaitUntilReady(ctx, g.ctr); err != nil {
+		t.Fatalf("NATS did not report reloading its configuration: %v", err)
+	}
+	// This reload's outcome is the one after the earlier ones, whatever may have followed it.
+	if outcome := g.reloadOutcomes(t)[earlier]; outcome != "Reloaded server configuration" {
+		t.Fatalf("NATS refused the new grant %q: %s", allow, outcome)
+	}
+}
+
+// reloadOutcome matches each line nats-server logs when a reload ends: done, or refused with its
+// reason.
+var reloadOutcome = regexp.MustCompile(`Reloaded server configuration|Failed to reload server configuration: [^\r\n]*`)
+
+// reloadOutcomes lists the reload outcomes the server's log reports so far, oldest first.
+func (g *NkeyGrant) reloadOutcomes(t testing.TB) []string {
+	t.Helper()
+	logs, err := g.ctr.Logs(context.Background())
+	if err != nil {
+		t.Fatalf("read NATS's log: %v", err)
+	}
+	defer logs.Close()
+	text, err := io.ReadAll(logs)
+	if err != nil {
+		t.Fatalf("read NATS's log: %v", err)
+	}
+	return reloadOutcome.FindAllString(string(text), -1)
+}
+
+func publishGrantConfig(user string, allow []string) string {
+	quoted := make([]string, len(allow))
+	for index, subject := range allow {
+		quoted[index] = fmt.Sprintf("%q", subject)
+	}
+	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { publish: { allow: [%s] } } }",
+		user, strings.Join(quoted, ", ")))
+}
+
+func nkeyConfig(entry string) string {
+	return fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", entry)
+}
+
+func startNkeyConfig(t testing.TB, config string) (*tcnats.NATSContainer, string) {
+	t.Helper()
+	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
 	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
@@ -249,7 +336,7 @@ func StartNkeyAuthorized(t testing.TB, user string) string {
 		t.Fatalf("NATS connection string: %v", err)
 	}
 	answering(t, uri)
-	return uri
+	return ctr, uri
 }
 
 // answering waits, within connectTimeout, for the server at uri to refuse a connection with no

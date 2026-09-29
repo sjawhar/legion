@@ -14086,6 +14086,16 @@ var messageValidation = {
   },
   message: "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue."
 };
+var readOwner = documentOwnerValidation(true);
+var readValidation = {
+  check: (value) => {
+    const input = value;
+    if (typeof input.message !== "string")
+      return readOwner.check(value);
+    return input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
+  },
+  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`
+};
 var ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"];
 function componentsArgument(z2) {
   return z2.object({
@@ -14310,7 +14320,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " + "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " + "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " + "the reply lands in that conversation, and a second call with the same in_reply_to posts nothing because " + "Dispatch keeps the one reply per message. Every other message names its issue. " + `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " + "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " + "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " + "the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z2.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
@@ -14404,14 +14414,15 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain. Do not use it for document " + "contents; use dispatch_doc_read instead. Supply ref, issue, or project plus artifact. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename.").optional(),
-      ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional()
+      ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional()
     }),
-    validation: documentOwnerValidation(true)
+    validation: readValidation
   },
   {
     name: "dispatch_search",
@@ -14425,8 +14436,8 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC", route_status: "no_holder" },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
+    example: { project: "AGENTC", limit: 250, offset: 250 },
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are paged after the server returns the full response: limit sets the page size (default 50, " + "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " + "enumerate every matching issue.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -14435,7 +14446,8 @@ var dispatchToolSpecs = [
       priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
-      limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional()
+      limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional(),
+      offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional()
     })
   },
   {
@@ -14629,6 +14641,7 @@ var LEGION_ROLES = [
 
 // ../contracts/src/legion-daemon-api.ts
 var nonEmptyString = exports_external.string().min(1);
+var appLogin = exports_external.string().regex(/^[^[\]]+\[bot\]$/);
 var legionRole = exports_external.enum(LEGION_ROLES);
 var requiredUnknown = exports_external.unknown().refine((value) => value !== undefined, {
   message: "Required"
@@ -14882,7 +14895,11 @@ var LegionDaemonApi = {
   },
   GitHubToken: {
     request: exports_external.strictObject({ grantId: nonEmptyString }),
-    response: exports_external.object({ token: nonEmptyString, appLogin: exports_external.string().endsWith("[bot]") })
+    response: exports_external.object({
+      token: nonEmptyString,
+      appLogin: exports_external.string().endsWith("[bot]"),
+      legionAppLogins: exports_external.object({ implement: appLogin, review: appLogin }).optional()
+    })
   },
   GitCredential: {
     request: exports_external.strictObject({ grantId: nonEmptyString })
@@ -15214,8 +15231,8 @@ class DispatchClient {
   async message(issue2, input) {
     return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "messages"], input);
   }
-  async messageReply(id, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input);
+  async messageReply(id, input, options = {}) {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
   }
   async getMessage(issue2, id) {
     return this.#json("GET", [
@@ -15226,6 +15243,9 @@ class DispatchClient {
       "messages",
       id
     ]);
+  }
+  async getMessageThread(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
   }
   async artifact(issue2, input) {
     const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"];
@@ -15901,6 +15921,13 @@ function argumentProblems(tool, args) {
       }
       break;
     }
+    case "dispatch_read": {
+      const message = optionalString(args, "message");
+      if (message !== undefined && messageIdOf(message) === undefined) {
+        problems.push("message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference");
+      }
+      break;
+    }
   }
   return problems;
 }
@@ -16036,6 +16063,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
   }
   const replyTarget = args.in_reply_to;
   if (tool === "dispatch_message" && typeof replyTarget === "string" && !replyTarget.startsWith("dispatch://")) {
+    return { args, ref, owner: null };
+  }
+  if (tool === "dispatch_read" && typeof args.message === "string") {
     return { args, ref, owner: null };
   }
   const legionIssue = env.LEGION_ISSUE;
@@ -16745,6 +16775,7 @@ async function executeDispatchTool(input) {
       const updatedSince = optionalString(args, "updated_since");
       const routeStatus = optionalString(args, "route_status");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
+      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
       const issues = await client.listIssues({
         project,
         ...status === undefined ? {} : { status },
@@ -16754,7 +16785,8 @@ async function executeDispatchTool(input) {
         ...updatedSince === undefined ? {} : { updated_since: updatedSince },
         ...routeStatus === undefined ? {} : { route_status: routeStatus }
       });
-      const rows = issues.slice(0, limit).map((row) => ({
+      const total = issues.length;
+      const rows = issues.slice(offset, offset + limit).map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -16769,13 +16801,15 @@ async function executeDispatchTool(input) {
         updated_at: row.updated_at
       }));
       const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
+      const isPartial = offset !== 0 || rows.length !== total;
+      const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
       return {
-        text: rows.length === 0 ? `No issues in ${project}.` : [
-          `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (issues.length > rows.length ? ` (showing ${rows.length} of ${issues.length})` : ""),
+        text: rows.length === 0 ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}` : [
+          `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
           ...rows.map((row) => `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`))
         ].join(`
 `),
-        details: { issues: rows }
+        details: { issues: rows, total, offset, limit }
       };
     }
     case "dispatch_architecture_sync": {
@@ -16957,16 +16991,30 @@ ${followsAsk(askOwner)}`,
       const inReplyTo = messageInReplyTo(args);
       const body = stringArg(args, "body");
       if (owner === null && inReplyTo !== undefined) {
-        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor });
+        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
+        if (reply.duplicate === true && reply.body === body) {
+          return {
+            text: `Dispatch already has this exact text in the conversation (message ${reply.id}); ` + "nothing new was posted. Send different text if you have more to say.",
+            details: { message: reply.id, in_reply_to: inReplyTo, posted: false, duplicate: true }
+          };
+        }
         if (reply.body !== body) {
           return {
             text: `Message ${inReplyTo} was already answered by message ${reply.id}; Dispatch kept ` + "that reply and posted nothing. Wait for their next message rather than answering " + "this one again.",
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false }
           };
         }
+        const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
+        const parent = reply.in_reply_to ?? undefined;
+        const follows = parent === inReplyTo ? undefined : parent;
         return {
-          text: `Replied to message ${inReplyTo} with message ${reply.id}`,
-          details: { message: reply.id, in_reply_to: inReplyTo, posted: true }
+          text: follows === undefined ? `Replied to message ${inReplyTo} with message ${reply.id}. ${readBack}` : `Replied to message ${inReplyTo} with message ${reply.id}, a follow-up threaded ` + `under your reply ${follows}. ${readBack}`,
+          details: {
+            message: reply.id,
+            in_reply_to: inReplyTo,
+            posted: true,
+            ...follows === undefined ? {} : { follows }
+          }
         };
       }
       const issueKey = issue2();
@@ -17138,6 +17186,21 @@ ${trailer.join(`
       };
     }
     case "dispatch_read": {
+      const message = optionalString(args, "message");
+      if (message !== undefined) {
+        const sessionId = input.sessionId?.trim();
+        if (!sessionId)
+          throw new Error("host session id is required for dispatch_read({message})");
+        const thread = await client.getMessageThread(messageIdOf(message), sessionId);
+        const issueKey2 = thread.message.issue_key;
+        return {
+          text: messageSummary(thread, issueKey2 === null ? [] : await graphSections(client, dispatchChildRef(dispatchIssueRef(issueKey2), "message", thread.message.id))),
+          details: {
+            message: thread.message.id,
+            ...issueKey2 === null ? {} : { issue: issueKey2 }
+          }
+        };
+      }
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
         const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));

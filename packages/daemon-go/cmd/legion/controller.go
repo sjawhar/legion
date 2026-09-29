@@ -164,6 +164,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
+	composer, err := prompts.New(rolesDir, stateDir)
+	if err != nil {
+		return 0, fmt.Errorf("snapshot controller role prompts: %w", err)
+	}
+	controllerPrompt, err := composer.ControllerPromptPath()
+	if err != nil {
+		return 0, err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return 0, fmt.Errorf("resolve the legion executable the controller's launcher runs: %w", err)
@@ -178,7 +186,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		}
 	}
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
-		RolePromptPaths:            []string{filepath.Join(rolesDir, "controller-root.md")},
+		RolePromptPaths:            []string{controllerPrompt},
 		DeploymentInstructionsPath: instructionsFile,
 	})
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)

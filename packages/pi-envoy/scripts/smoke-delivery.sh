@@ -59,6 +59,10 @@ workdir="$(mktemp -d "/tmp/${session}.XXXXXX")"
 workdir_basename="$(basename "$workdir")"
 readonly workdir_basename
 readonly received_file="${workdir}/received.txt"
+# The smoke runs its own tmux server on a socket in its scratch directory, so its cleanup can end
+# only the session it started: `tmux kill-session` on the shared default server could end anyone's.
+readonly tmux_socket="${workdir}/tmux.sock"
+tmux() { command tmux -S "$tmux_socket" "$@"; }
 
 # GET/POST wrapper with a caller-supplied per-request timeout (bounded
 # overall by wall-clock deadlines in the wait_for_* helpers below) plus a
@@ -183,7 +187,8 @@ wait_for_role_clear() {
 }
 
 printf 'plugin version: %s (from %s)\n' "$plugin_version" "$plugin_pkg"
-printf 'starting tmux session %s (omp TUI) in %s\n' "$session" "$workdir"
+printf 'starting tmux session %s (omp TUI) in %s; watch it with: tmux -S %s attach -t %s\n' \
+  "$session" "$workdir" "$tmux_socket" "$session"
 tmux new-session -d -s "$session" -x 220 -y 50 -c "$workdir" "$omp_bin"
 session_created=1
 

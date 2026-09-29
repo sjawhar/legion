@@ -190,6 +190,8 @@ export function activityDescription(
       return `failed to sync the architecture model: ${event.payload.error}`;
     case "user_state.updated":
       return "updated user state";
+    case "user_agent_state.updated":
+      return "updated agent conversation state";
     case "issue.created":
       return "created the issue";
     case "issue.updated":

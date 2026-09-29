@@ -7,7 +7,10 @@ plugin. It launches a real, interactive `omp` session (TUI mode, never `-p`)
 in a scratch tmux session and a throwaway directory outside any repo
 checkout, so the only extension that loads is whatever is materialized at
 `~/.omp/plugins/node_modules` — never a local source checkout via a repo's
-own `omp.extensions` manifest. It drives the session with `tmux send-keys` to
+own `omp.extensions` manifest. The session runs on the smoke's own tmux
+server, on a socket in that throwaway directory, and the script prints the
+`tmux -S <socket> attach -t <session>` line that watches it. It drives the
+session with `tmux send-keys` to
 call `envoy_role_set` and wait for a message, publishes to that role's
 namespaced topic through the live Envoy HTTP API, asserts the session wrote
 the exact payload to disk, then kills the session and asserts teardown: the
@@ -94,4 +97,79 @@ blackholed Envoy fails at its stated timeout instead of quietly stretching it.
 | 1 | Any assertion failed — see the `FAIL:` line for which one, plus a captured pane or HTTP status. |
 
 Cleanup (`tmux kill-session`, `rm -rf` the temp dir) runs in an exit trap on
-every exit path, so a failed run leaves nothing behind either.
+every exit path, so a failed run leaves nothing behind either. Both smokes run
+their tmux on a private socket in their temp dir, so the kill can end only the
+session the smoke started; on the shared default server it could end anyone's,
+and the Legion pane guard refuses it there.
+
+## measure-pane-guard-paths.ts
+
+The pane guard's path battery, run against whatever guard the checkout holds. Each row of
+`src/legion/pane-guard-path-rows.ts` is measured twice — what `guard.bash` returns, and what real
+bash does to a canary HOME in the same fixture — so a row is a leak only when the guard allowed it
+and bash damaged the canary. Swap `src/legion/pane-guard.ts` for another revision's and diff the
+output to get that revision's column. `src/legion/pane-guard-bash.test.ts` asserts the same
+measurement through the same functions, so the numbers in a pull request body and the test cannot
+drift apart.
+
+```bash
+cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts
+cd packages/pi-envoy && bun scripts/measure-pane-guard-paths.ts --summary
+```
+
+## measure-pane-guard-model.ts
+
+Runs the LEGION-354 batch — the rows `pane-guard-bash.test.ts` runs, from
+`src/legion/pane-guard-model-rows.ts` — against a guard build, and prints
+what each row does: the verdict `guard.bash` returned, and whether real bash
+destroyed that row's canary `HOME`. A row is a leak when the guard allowed it
+and bash destroyed the canary.
+
+The test asserts each row against the guard beside it. This measures the same
+rows against any build, so a claim about what a change to the file model
+closed, or what it cost, is derived from the rows that ship rather than
+counted by hand.
+
+```bash
+jj file show -r main@origin packages/pi-envoy/src/legion/pane-guard.ts \
+  > packages/pi-envoy/src/legion/pane-guard.base.ts
+bun packages/pi-envoy/scripts/measure-pane-guard-model.ts \
+  packages/pi-envoy/src/legion/pane-guard.base.ts base
+bun packages/pi-envoy/scripts/measure-pane-guard-model.ts \
+  packages/pi-envoy/src/legion/pane-guard.ts head
+```
+
+The copy goes inside the package: a guard build imports the package's own
+modules, so one written to a temporary directory fails to resolve them. The
+unwaited shapes (a background command, a coprocess, an earlier part of the
+same pipeline, a process substitution) are races, so one trial per row settles
+nothing about them — their live rate comes from repeating the run.
+
+## measure-pane-guard-writes.ts
+
+Runs the LEGION-357 batch — the rows `pane-guard-bash.test.ts` runs, from
+`src/legion/pane-guard-write-rows.ts` — against a guard build: the verbs that
+write a path they name (`cp`, `dd of=`, `install`, `ln`, `sed -i`), each
+through the operand its own grammar makes the destination. Every row is
+measured twice, what `guard.bash` returned and whether real bash changed
+anything under that row's canary `HOME`, so no row carries a written-down
+verdict for the dangerous direction.
+
+A row is a LEAK when the guard allowed it and bash changed the canary, and a
+COST when the guard refused a row a pane is meant to be able to run. Both
+counts come from the same run, because a change that closes leaks by refusing
+everything is not a fix.
+
+```bash
+jj file show -r main@origin packages/pi-envoy/src/legion/pane-guard.ts \
+  > packages/pi-envoy/src/legion/pane-guard.base.ts
+bun packages/pi-envoy/scripts/measure-pane-guard-writes.ts \
+  packages/pi-envoy/src/legion/pane-guard.base.ts base
+bun packages/pi-envoy/scripts/measure-pane-guard-writes.ts \
+  packages/pi-envoy/src/legion/pane-guard.ts head
+```
+
+The copy goes inside the package for the same reason as above. The rows the
+documented boundary leaves open are named `RESIDUAL`, and the test lists them
+by name: a new leak fails there, and a residual that closes is a boundary
+someone moved on purpose.

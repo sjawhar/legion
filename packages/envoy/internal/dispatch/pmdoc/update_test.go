@@ -13,6 +13,11 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
+// Go-authored bytes read back as the tree, and the browser editor loads them as the node it would
+// author the tree as, schema defaults applied, but for the null attributes whose default is not
+// null: a table cell with no alignment holds "none", since that editor gives an absent alignment
+// the default, left, and writes it back when the cell is edited, and a code block with no
+// language and an image with no title hold "", that editor's own default.
 func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
@@ -39,13 +44,43 @@ func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 			}
 
 			pm := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil))
-			if !pm.Equal(want) {
+			if live := asTheLiveDocumentHoldsIt(want); !pm.Equal(live) {
 				actual, _ := pm.JSON()
-				expected, _ := want.JSON()
+				expected, _ := live.JSON()
 				t.Fatalf("y-prosemirror decodes Go-authored bytes differently\n got: %s\nwant: %s", actual, expected)
 			}
 		})
 	}
+}
+
+// asTheLiveDocumentHoldsIt is doc with each table cell's null alignment written "none", and each
+// code block's null language and image's null title "".
+func asTheLiveDocumentHoldsIt(doc *Node) *Node {
+	out := *doc
+	set := func(name string, value any) {
+		if doc.Attrs[name] != nil {
+			return
+		}
+		attrs := Attrs{}
+		for key, current := range out.Attrs {
+			attrs[key] = current
+		}
+		attrs[name] = value
+		out.Attrs = attrs
+	}
+	switch doc.Type {
+	case "table_cell", "table_header":
+		set("alignment", "none")
+	case "code_block":
+		set("language", "")
+	case "image":
+		set("title", "")
+	}
+	out.Children = make([]*Node, len(doc.Children))
+	for index, child := range doc.Children {
+		out.Children[index] = asTheLiveDocumentHoldsIt(child)
+	}
+	return &out
 }
 
 func TestUpdateIsNoOpForEqualTree(t *testing.T) {
@@ -185,6 +220,80 @@ func runDecoder(script, encoded string) ([]byte, []byte, error) {
 		stderr = exitErr.Stderr
 	}
 	return output, stderr, err
+}
+
+// Every null attribute Go writes into the live document survives the browser editor: loaded as its
+// sync plugin loads it, with a header cell, a body cell and a code block typed into and an image's
+// alt text edited, written back as that plugin writes them, the document reads back with each
+// attribute as written. The plugin writes an edited node back with the attributes the editor
+// holds, schema defaults included: an unaligned column comes back left unless the live document
+// holds "none", and a code block with no language and an image with no title come back holding ""
+// unless the read gives "" back as null (liveNulls).
+func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		if os.Getenv("CI") == "" {
+			t.Skip("bun is not on PATH; the browser editor's sync is required in CI")
+		}
+		t.Fatalf("bun is required in CI: %v", err)
+	}
+	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n\n```\ncode\n```\n\n![alt](src.png) tail\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := crdt.New(crdt.WithClientID(1))
+	frag := doc.GetXmlFragment("prosemirror")
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, written)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, stderr, err := runDecoder("edit-blocks.ts", base64.StdEncoding.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
+	if err != nil {
+		t.Fatalf("run edit-blocks.ts: %v\nstderr:\n%s", err, stderr)
+	}
+	update, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+	if err != nil {
+		t.Fatalf("edit-blocks.ts output: %v\n%s", err, output)
+	}
+	edited := crdt.New()
+	if err := crdt.ApplyUpdateV1(edited, update, nil); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := Read(edited.GetXmlFragment("prosemirror"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "| ax | b | c |\n| --- | :---: | ---: |\n| dy | e | f |\n\n```\ncodez\n```\n\n![alt2](src.png) tail\n"; markdown != want {
+		t.Fatalf("after the browser editor's edits, the document renders %q, want %q", markdown, want)
+	}
+	for _, attr := range []struct{ node, name string }{{"code_block", "language"}, {"image", "title"}} {
+		node := firstNodeOfType(tree, attr.node)
+		if node == nil {
+			t.Fatalf("no %s in the edited tree", attr.node)
+		}
+		if value := node.Attrs[attr.name]; value != nil {
+			t.Errorf("after the browser editor's edit, the %s's %s reads back %#v, want null", attr.node, attr.name, value)
+		}
+	}
+}
+
+// firstNodeOfType is the first node of type in node's tree, in document order, or nil.
+func firstNodeOfType(node *Node, nodeType string) *Node {
+	if node.Type == nodeType {
+		return node
+	}
+	for _, child := range node.Children {
+		if found := firstNodeOfType(child, nodeType); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 func TestUpdateAppliesMarksToInsertedTextAtRunBoundary(t *testing.T) {

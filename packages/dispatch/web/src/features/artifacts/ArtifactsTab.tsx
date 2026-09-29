@@ -4,6 +4,7 @@ import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, IssueReferences } from "../../api/types";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   badgePrimary,
   borderDefault,
@@ -152,11 +153,13 @@ function ArtifactRow({
         />
       ) : null}
       <div className="min-w-32 flex-1">
+        {/* `max-w-full`: below 1280 px the link is inline-flex rather than `block`, and an
+            inline-flex box is as wide as its whole name unless something caps it. */}
         <Link
-          className={`block truncate font-medium underline ${linkText} ${linkHoverText}`}
+          className={`block max-w-full truncate font-medium underline ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: issueKey, kind: "artifact", slug: artifact.slug })}
         >
-          {artifact.name}
+          <TruncatedText title={artifact.name}>{artifact.name}</TruncatedText>
         </Link>
         {/* The name truncates; its details wrap. Truncating them hid the update time on a row
             with room to spare. */}

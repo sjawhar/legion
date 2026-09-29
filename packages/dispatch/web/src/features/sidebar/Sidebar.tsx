@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery, projectsQuery } from "../../api/queries";
+import { inboxQuery, projectsQuery, userAgentStateQuery } from "../../api/queries";
 import type { AuthenticatedUser } from "../../api/types";
 import {
   railAccentText,
@@ -19,6 +19,7 @@ import {
   railNeedsYouBadgeText,
   railSecondaryText,
 } from "../../theme/classes";
+import { totalUnreadReplies, unreadRepliesLabel } from "../agents/unread";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { buildIssuePath, buildProjectPath, parseIssuePath, parseProjectPath } from "../refs/routes";
 
@@ -80,6 +81,7 @@ export function Sidebar({
     queryFn: () => api.listIssues({ pinned: true }),
   });
   const projects = useQuery(projectsQuery());
+  const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
   const currentIssue = parseIssuePath(location.pathname)?.key;
   const currentProject = parseProjectPath(location.pathname)?.project;
 
@@ -144,7 +146,14 @@ export function Sidebar({
             onClick={onNavigate}
             to="/agents"
           >
-            Agents
+            <span>Agents</span>
+            {unreadReplies === 0 ? null : (
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-xs ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+              >
+                {unreadRepliesLabel(unreadReplies)}
+              </span>
+            )}
           </Link>
         </section>
         {pinned.data.length === 0 ? null : (

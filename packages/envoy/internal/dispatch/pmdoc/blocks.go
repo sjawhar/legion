@@ -286,8 +286,9 @@ func marksInNodes(nodes []*Node) []MarkRef {
 // empty ones of their row's kind, a header row header cells; the last such row takes them at its
 // start when it is the table's first row, or follows the first such row, and every other row takes
 // them at its end, as fixTables places them. A new cell takes its column's alignment from the
-// widest row, where fixTables gives it left: the renderer writes one alignment per column, so the
-// column reads back as it was.
+// widest row, none where that row's cell has none (a cell read from the live document carries no
+// null attribute), where fixTables gives it left: the renderer writes one alignment per column, so
+// the column reads back as it was.
 func PadTables(doc *Node, first, last int) *Node {
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: append([]*Node(nil), doc.Children...)}
 	for index := first; index <= last && index < len(out.Children); index++ {
@@ -339,12 +340,7 @@ func padTable(table *Node) {
 		}
 		cells := make([]*Node, 0, width-widths[index])
 		for range width - widths[index] {
-			alignment := any("left")
-			if column < len(widest.Children) {
-				if value, ok := widest.Children[column].Attrs["alignment"]; ok {
-					alignment = value
-				}
-			}
+			alignment := widest.Children[column].Attrs["alignment"]
 			cells = append(cells, &Node{
 				Type:     kind,
 				Attrs:    Attrs{"alignment": alignment, "colspan": 1, "colwidth": nil, "rowspan": 1},

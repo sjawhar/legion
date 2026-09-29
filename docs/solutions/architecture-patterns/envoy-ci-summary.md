@@ -11,16 +11,19 @@ Each commit uses the KV key `<owner>.<repo>.pr<number>.<sha>` in
 earlier listener wrote is skipped, never cached as state, until its TTL expires. A dot in a segment is written `=` (`sjawhar/.github` keys as
 `sjawhar.=github...`): a KV key's tokens must not be empty, and no GitHub name holds
 `=`, so `foo.bar` and `foo_bar` keep distinct keys. State contains checks, suites, a state-version `Generation`, `EmittedCount`,
-`SettledEmitted`, and an optional claim `{hash, generation, claimed_at}`.
+`SettledEmitted`, an optional claim `{hash, generation, claimed_at}`, and `schema: 1`, which
+every write of the record stamps.
 
 1. `Record` and `RecordSuite` CAS-update the aggregate. A new record starts at
    generation 0; every later aggregate-hash change and every re-arm advances the
    state version, then clears `SettledEmitted`.
-2. The reconcile loop reads its rebuildable cache and selects every quiet, terminal
-   state without an emitted or live claim, whichever commit of the pull request it is for. A claim older
-   than twice the debounce interval is reclaimed.
-3. `ClaimSettlement` re-reads durable state, verifies the expected hash, generation,
-   terminality and debounce window, then CAS-writes the hash-bound claim. A mismatch publishes nothing.
+2. The reconcile loop reads its rebuildable cache and selects every record `due` to settle:
+   unsettled, terminal, quiet for the debounce and, when it has no `schema`, inside the handover
+   grace (see below), whichever commit of the pull request it is for. It checks that before a
+   claim older than twice the debounce interval is reclaimed.
+3. `ClaimSettlement` re-reads durable state, verifies the expected hash, generation and no live
+   claim, applies `due` to the durable record, then CAS-writes the hash-bound claim. A mismatch
+   publishes nothing.
 4. The claimant renders that durable snapshot and publishes with
    `github.checks.<owner>/<repo>.pr.<number>.<sha>.g<generation>`.
 5. `MarkSettled` records the emission in `EmittedCount` and clears its claim. A
@@ -30,6 +33,89 @@ earlier listener wrote is skipped, never cached as state, until its TTL expires.
 All local cache write-through and watcher updates carry a KV revision and only
 apply at or above the cached revision. This prevents an older claim/mark write
 from replacing a newer watcher state.
+
+## Records a head-gated listener left
+
+A listener that settled only a pull request's head left every other terminal commit's record
+unsettled until the bucket's seven-day TTL; on 2026-09-28 production held 1,442 of them across
+595 `pr.<n>.checks` subjects, the youngest six minutes old and the median 65 hours. Settling them
+would publish verdicts days late, which an agent waiting on its head can read as its head's. So a
+record without `schema` settles only in `[debounce, debounce + 5 min)` after its last event
+(`handoverGrace`); past the band it never settles.
+
+### The grace
+
+A head that finished just before the old listener was replaced is still owed its settlement, and
+the window must cover the time between the old listener's last tick (it stops ticking at SIGTERM,
+`summaryCancel` in `cmd/listener`'s main) and the new one's first. Only a listener that mounts the
+GitHub webhook route runs the summary loop, and the longest such gap is a compose deploy of one,
+which is stop-then-start, on a slow path whose named terms are a floor:
+
+| Term | Bound |
+| --- | --- |
+| old listener's stop grace (`stop_grace_period`, `deploy/compose/listener.compose.yml`) | 30 s |
+| `bus.ConnectOwningStream`: a first 5 s dial, then the stream's info and update, each bounded by the 10 s JetStream MaxWait | 25 s |
+| durable check (`listenerDurable`), one JetStream call | 10 s |
+| interest and session cache gates (`registry.WaitForCacheReady`, `sessions.WaitForCacheReady`) | 60 s |
+| subscribe retry loop around `startListenerSubscription`, sleeping attempt×3 s after each of its first nine attempts | 135 s |
+| **floor, before container start and image pull** | **260 s** |
+
+`cistore.go` (`handoverGrace`) and `packages/envoy/AGENTS.md` cite this total; update them if it changes.
+
+The degraded path adds terms that are bounded but not counted: `bus.connectWithContext` retries the
+dial up to ten times (about 59 s); `cistore.Open`, `store.Open`'s two buckets and
+`session.OpenSessionRegistry` each wait up to the 10 s MaxWait (40 s); and
+`startListenerSubscription` reruns `listenerDurable`'s ConsumerInfo on every attempt (up to about
+100 s), which is slow exactly when the backoff runs. Production's ECS rollouts take 0.6 to 20.5 s
+from SIGTERM to ready, once 58.9 s (2026-09-28).
+
+Every admitted record is at most debounce plus grace old, by construction. The head-gated listener
+keeps leaving non-head records until its SIGTERM, so any width admits the ones it left in its last
+debounce plus grace, and a listener with #1526 settles those commits anyway: the width bounds how
+late such a settlement can arrive, not whether one arrives. The aged backlog is held back by its
+age at any width shorter than its records' ages, and widening only slides that age cutoff. There is
+no threshold anywhere: at 1,442 records over the 7-day TTL (0.143 arrivals a minute), the aged
+backlog is admitted in proportion to the width, 0.29 records per cutover at 2 minutes, 0.72 at 5,
+0.86 at 6, 8.6 at an hour, and all 1,442 only at a grace equal to the TTL. What prevents a burst is
+5 minutes against 7 days, about 1 in 2,000. Measured on production NATS on 2026-09-28: at 07:17Z the
+band `[5 s, 305 s)` held no record; over the past week a 305 s band held 0.73 records on average and
+14 at worst, and was empty 54% of the time (a 65 s band: 0.16 and 9); such records replenish at
+about 8.6 an hour.
+
+Five is the smallest round figure above the 260 s floor, leaving 40 s for container start and image
+pull. The residual risk at five minutes is under-admission, not over: a handover slower than the
+grace leaves its head's record held back, silently, until a new check event on that commit stamps
+it, while each extra minute of grace costs only 0.14 of a settlement, and that one correct and
+recent.
+
+Three limits on the bound. It is on `now - last_event_at`, where `last_event_at` was stamped by the
+writing listener's clock, not on the commit's true age. It governs only unstamped records: a stamped
+record is never held back. And `now` is computed once per summary pass, so at publish the bound is
+debounce plus grace plus that pass's duration.
+
+### What an operator sees
+
+A record past the band stays `settled_emitted: false` with no `schema` until the TTL expires it;
+that is expected, and it is history, not pending work. The listener's `/metrics` gauge
+`envoy_ci_legacy_records_held` carries how many the last tick held back, and it logs `checks held
+back a head-gated listener's unsettled records, at least` with the count the first time a process
+holds any; that count is a floor, since the loop does not wait for the CI cache to load. An
+observation that changes the record (a new check run, a re-run, a
+suite) stamps it, and the commit then settles as any other; a redelivery of what the record already
+holds writes nothing. A stamped record, of any schema, is never held back, so a settlement pending
+across a restart of the listener still publishes; a process-start cutoff would drop those. A record
+without a schema whose `last_event_at` is ahead of the listener's clock publishes once wall time
+reaches its band, and raising `ENVOY_CI_DEBOUNCE` moves the band's far edge, admitting the records
+in the added slice.
+
+### Rollback and upgrade order
+
+A head-gated listener (legion 9de053a2, or 1ad2466c) run after a rollback decodes a stamped record,
+ignoring the field it does not know, and does not mistake it for a head record, which it recognizes
+by `kind`; its own writes drop the stamp. Seven days after the last head-gated listener stops, no
+record without a schema remains. Until then a head-gated listener still running settles backlog
+records as their head records expire, and one upgraded to a build carrying #1526 but not this rule
+publishes the whole backlog, so every head-gated listener moves straight to a build with this rule.
 
 ## Envelope
 

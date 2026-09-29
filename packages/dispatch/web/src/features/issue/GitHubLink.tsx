@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import { ApiError, api } from "../../api/client";
 import type { ExternalLink } from "../../api/types";
+import { TruncatedText } from "../../components/TruncatedText";
 import { badgeLow, linkHoverText, linkText, textMutedOnSurface } from "../../theme/classes";
 
 function safeExternalHref(value: string): string | undefined {
@@ -88,7 +89,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
         href={href}
         title={link.url}
       >
-        {link.url}
+        <TruncatedText>{link.url}</TruncatedText>
       </a>
     );
   }
@@ -120,9 +121,9 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       }
     >
       <span className="shrink-0 font-medium">{number}</span>
-      <span className="max-w-[18ch] truncate sm:max-w-[32ch]">
+      <TruncatedText className="max-w-[18ch] sm:max-w-[32ch]">
         {reference === undefined ? repository : reference.title}
-      </span>
+      </TruncatedText>
       {state === undefined ? null : (
         <span
           className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}

@@ -1,8 +1,10 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -14,11 +16,12 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
+import { useMarkRepliesRead } from "../agents/unread";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { AgentRuntimeThread, type SentMessage } from "./AgentRuntimeThread";
+import { AgentRuntimeThread } from "./AgentRuntimeThread";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
 /** What the live dot says about the relay, and how it reads to a screen reader. */
@@ -63,12 +66,16 @@ export function AgentConversationPage(): ReactNode {
   const modes = deliveryModes(agent?.capabilities ?? []);
   const [mode, setMode] = useState<MessageDeliveryMode>("aside");
   const [sendError, setSendError] = useState<string | null>(null);
-  // What this viewer sent, in the order it sent it. A targeted delivery reaches the session as
-  // a steer notice rather than one of its own user messages, so the session publishes no frame
-  // for it (measured against a live Oh My Pi session) and the thread would otherwise show a
-  // reply to a message the human cannot see. These are this page's own echo and are dropped on
-  // reload, which is what "nothing is stored" means here too.
-  const [sent, setSent] = useState<readonly SentMessage[]>([]);
+  // The human's direct messages and the session's replies to them, as Dispatch stores them. A
+  // targeted delivery reaches the session as a notice rather than one of its own user messages,
+  // so the session publishes no frame for it (measured against a live Oh My Pi session), and it
+  // answers through dispatch_message, which the stream shows only as that tool call. Without
+  // these the thread would show replies to messages the human cannot see, and no replies at all.
+  // Seeing them here is reading them.
+  const queryClient = useQueryClient();
+  const stored = useQuery(agentMessagesQuery(sessionId));
+  useMarkRepliesRead(sessionId, stored.data);
+  const viewer = useQuery(whoAmIQuery()).data;
 
   // Talking to the agent is Dispatch's existing targeted delivery, unchanged: the stream itself
   // stays read-only and this adds no write path of its own.
@@ -81,20 +88,22 @@ export function AgentConversationPage(): ReactNode {
         .trim();
       if (body === "") return;
       setSendError(null);
-      const at = Date.now();
       try {
-        const created = await api.createAgentMessage(sessionId, { body, delivery: mode });
-        setSent((previous) => [...previous, { at, body, id: `sent:${created.id}` }]);
+        await api.createAgentMessage(sessionId, { body, delivery: mode });
+        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
       } catch (error) {
         setSendError(error instanceof Error ? error.message : "could not reach the session");
       }
     },
-    [mode, sessionId]
+    [mode, queryClient, sessionId]
   );
   const presence = STATUS[status];
 
+  // The shell hands this route the viewport below its header as a flex column; the page takes
+  // all of it and the thread is its only scroller, so the header and composer never leave the
+  // screen and the document never scrolls.
   return (
-    <div className="flex h-[calc(100vh-6rem)] flex-col" data-testid="agent-conversation">
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-conversation">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Link className={`text-sm ${linkText} ${linkHoverText}`} to="/agents">
           ← Agents
@@ -133,8 +142,14 @@ export function AgentConversationPage(): ReactNode {
         </label>
       </header>
       <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
-        Live from the session. Nothing here is stored — Dispatch relays it while this page is open.
+        Live from the session: its turns are relayed while this page is open and are not stored.
+        Messages sent to it through Dispatch, and its Dispatch replies, are kept.
       </p>
+      {stored.isError ? (
+        <p className={`mt-2 text-sm ${dangerText}`}>
+          Could not load your messages with this session.
+        </p>
+      ) : null}
       {status === "unavailable" ? (
         <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-stream-unavailable">
           This Dispatch cannot reach the session's conversation.
@@ -159,7 +174,9 @@ export function AgentConversationPage(): ReactNode {
           onNew={onNew}
           placeholder={`Message ${label} — delivered as ${mode}…`}
           resetKey={sessionId}
-          sent={sent}
+          sessionId={sessionId}
+          stored={stored.data ?? []}
+          viewer={viewer?.kind === "user" ? viewer.login : undefined}
         />
       </ErrorBoundary>
     </div>

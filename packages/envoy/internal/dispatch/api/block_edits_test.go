@@ -447,18 +447,18 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		// accept stores its code without them, as it reads back.
 		{"code text ending in a backslash and a line break", code, "x\\\n", "Intro.\n\n```\nx\\\n```\n"},
 		{"code text ending in spaces and a line break", code, "x  \n", "Intro.\n\n```\nx  \n```\n"},
-		// A line holding only whitespace in a list item's code reads back empty, so an accept
-		// writes the line it brings so.
-		{"a whitespace line in a list item's code", "- ```\n  Body.\n  ```\n", " ", "- ```\n  \n  ```\n"},
+		// A line holding only whitespace in a list item's code reads back holding what it holds past
+		// the item's own columns, so an accept writes the line as it brings it.
+		{"a whitespace line in a list item's code", "- ```\n  Body.\n  ```\n", " ", "- ```\n   \n  ```\n"},
 		{"a form-feed line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\f", "- ```\n  a\n  \f\n  b\n  ```\n"},
 		{"a no-break space line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\u00a0", "- ```\n  a\n  \u00a0\n  b\n  ```\n"},
 		{"a vertical tab line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\v", "- ```\n  a\n  \v\n  b\n  ```\n"},
 		{"an ideographic space line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\u3000", "- ```\n  a\n  \u3000\n  b\n  ```\n"},
 		{"nothing between no-break spaces on a line of a list item's code", "- ```\n  \u00a0Body.\u00a0\n  ```\n", "", "- ```\n  \u00a0\u00a0\n  ```\n"},
-		{"text ending in a whitespace line at the end of a list item's code", "- ```\n  Body.\n  ```\n", "x\n  ", "- ```\n  x\n  ```\n"},
-		{"nothing over an indented line of a list item's code", "- item\n\n  ```\n    Body.\n  ```\n", "", "- item\n\n  ```\n  \n  ```\n"},
-		{"two paragraphs beside an item holding a nested list", "- Body.\n- two\n  - nested\n", "x\n\ny", "- x\n\n  y\n- two\n\n  - nested\n"},
-		{"two paragraphs beside an item holding a quote, in an ordered list", "1. Body.\n2. two\n   > q\n", "x\n\ny", "1. x\n\n   y\n2. two\n\n   > q\n"},
+		{"text ending in a whitespace line at the end of a list item's code", "- ```\n  Body.\n  ```\n", "x\n  ", "- ```\n  x\n    \n  ```\n"},
+		{"nothing over an indented line of a list item's code", "- item\n\n  ```\n    Body.\n  ```\n", "", "- item\n\n  ```\n    \n  ```\n"},
+		{"two paragraphs beside an item holding a nested list", "- Body.\n- two\n  - nested\n", "x\n\ny", "- x\n\n  y\n- two\n  - nested\n"},
+		{"two paragraphs beside an item holding a quote, in an ordered list", "1. Body.\n2. two\n   > q\n", "x\n\ny", "1. x\n\n   y\n2. two\n   > q\n"},
 		// An emptied footnote definition holds one empty paragraph, which reads back as the
 		// definition, so its reference stays a reference.
 		{"nothing in a footnote definition", footnote, "", "x[^1]\n\n[^1]: \n"},
@@ -606,40 +606,43 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		{name: "a list consuming a callout beside a list", spec: "Intro.\n\n" + callout + "\n\n- After here.\n", quote: "Body. After", with: "- a", want: "Intro.\n\n- a\n\n* &#32;here.\n"},
 		{name: "nothing in a task item", spec: "- [ ] Body.\n- [x] two\n", quote: "Body.", says: task},
 		{name: "nothing in a task item, in a document already reading another back as a plain item", spec: "- [ ] Done\n\nIntro.\n\n- [ ] Body.\n", quote: "Body.", emptied: "Done", says: task},
-		{name: "text in a document already reading a task item back as a plain item", spec: "- [ ] Done\n\nBody.\n", quote: "Body.", emptied: "Done", with: "Changed.", want: "- [ ] \n\nChanged.\n"},
+		{name: "text in a document already reading a task item back as a plain item", spec: "- [ ] Done\n\nBody.\n", quote: "Body.", emptied: "Done", with: "Changed.", want: "- \n\nChanged.\n"},
 		// A block that already reads back otherwise the same way is not the accept's, though the
 		// accept changes it: text beside a stale break in it is stored, a new break is refused.
-		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- [ ] \n- [x] Changed.\n\nAfter.\n"},
+		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- \n- [x] Changed.\n\nAfter.\n"},
 		{name: "nothing in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n", quote: "Body.", emptied: "Gone.", says: task},
-		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "- [ ] \n- [x] two\n\n  paras\n\nAfter.\n"},
+		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "- \n- [x] two\n\n  paras\n\nAfter.\n"},
 		{name: "text from code into the paragraph after it", spec: "Intro.\n\n```\nabc\n```\n\nNext here.\n", quote: "abc Next", with: "x", want: "Intro.\n\n```\nx here.\n```\n"},
 		{name: "text from a list item's code into the next item", spec: "- ```\n  abc\n  ```\n- Next\n", quote: "abc Next", with: "x", want: "- ```\n  x\n  ```\n"},
 		{name: "text ending in a break from code through the whole next paragraph", spec: "Intro.\n\n```\nabc\n```\n\nNext here.\n", quote: "abc Next here.", with: "x\n", want: "Intro.\n\n```\nx\n```\n"},
 		{name: "text ending in a break from a list item's code through the whole next item", spec: "- ```\n  abc\n  ```\n- Next\n", quote: "abc Next", with: "x\n", want: "- ```\n  x\n  ```\n"},
 		{name: "text ending in breaks from a list item's code through a whole nested item", spec: "- ```\n  abc\n  ```\n  - Next\n", quote: "abc Next", with: "x\n\n", want: "- ```\n  x\n  ```\n"},
 		{name: "text ending in a break from a list item's code through the item's whole paragraph", spec: "- ```\n  abc\n  ```\n\n  Next\n", quote: "abc Next", with: "x\n", want: "- ```\n  x\n  ```\n"},
-		{name: "text ending in a blank line from a list item's code through the whole next item", spec: "- ```\n  abc\n  ```\n- Next\n", quote: "abc Next", with: "x\n  ", want: "- ```\n  x\n  ```\n"},
+		{name: "text ending in a line of spaces from a list item's code through the whole next item, which keeps them", spec: "- ```\n  abc\n  ```\n- Next\n", quote: "abc Next", with: "x\n  ", want: "- ```\n  x\n    \n  ```\n"},
+		// A column its delimiter row aligns nowhere is written `---` and reads back with no
+		// alignment, so a table with one is stored where the document held no table before.
+		{name: "a table with an unaligned column over a paragraph", spec: "Intro.\n\nBody.\n", quote: "Body.", with: "| a | b |\n| --- | :---: |\n| c | d |", want: "Intro.\n\n| a | b |\n| --- | :---: |\n| c | d |\n"},
 		{name: "text from code into a table cell", spec: "Intro.\n\n```\nabc\n```\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "X", want: "Intro.\n\n```\nX\n```\n\n|  | b |\n| :--- | :--- |\n| c | d |\n"},
 		{name: "text from a paragraph into a table cell", spec: "Intro abc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "x", want: "Intro x\n\n|  | b |\n| :--- | :--- |\n| c | d |\n"},
 		{name: "text from code in a callout into a table after the callout", spec: ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabc\n```\n:::\n\n| Next | b |\n| :--- | :--- |\n| x | y |\n", quote: "abc Next", with: "x", want: ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nx\n```\n:::\n\n|  | b |\n| :--- | :--- |\n| x | y |\n"},
 		{name: "text from code emptying the next task item ahead of its nested list", spec: "```\nabc\n```\n\n- [ ] Next\n  - child\n", quote: "abc Next", with: "x", says: "changes how the bullet list reads back"},
-		{name: "text from one table through the next table's header row", spec: "| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n\n| EEE | FFF |\n| :--- | :--- |\n| GGG | HHH |\n", quote: "DDD EEE FFF", with: "x", says: "leaves text the document reads back as another block where it lands (a table reads back as a paragraph)"},
-		{name: "text from one table's cell into the next table's body", spec: "| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n\n| EEE | FFF |\n| :--- | :--- |\n| GGG | HHH |\n", quote: "DD EEE FFF GG", with: "x", says: "leaves text the document reads back as another block where it lands (a table reads back as a paragraph)"},
-		{name: "text from one one-column table into the next", spec: "| AA |\n| :--- |\n| BB |\n\n| CC |\n| :--- |\n| DD |\n", quote: "BB CC", with: "x", says: "leaves text the document reads back as another block where it lands (a table reads back as a paragraph)"},
-		{name: "a list from a whole list item into a table cell", spec: "- abc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this list item, which the document cannot read back there (a table cell reads back as nothing)"},
-		{name: "a list over three whole textblocks into a table cell", spec: "abc\n\nMid\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Mid Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there (a table cell reads back as nothing)"},
+		{name: "text from one table through the next table's header row", spec: "| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n\n| EEE | FFF |\n| :--- | :--- |\n| GGG | HHH |\n", quote: "DDD EEE FFF", with: "x", says: "leaves text the document reads back as another block where it lands"},
+		{name: "text from one table's cell into the next table's body", spec: "| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n\n| EEE | FFF |\n| :--- | :--- |\n| GGG | HHH |\n", quote: "DD EEE FFF GG", with: "x", says: "leaves text the document reads back as another block where it lands"},
+		{name: "text from one one-column table into the next", spec: "| AA |\n| :--- |\n| BB |\n\n| CC |\n| :--- |\n| DD |\n", quote: "BB CC", with: "x", says: "leaves text the document reads back as another block where it lands"},
+		{name: "a list from a whole list item into a table cell", spec: "- abc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this list item, which the document cannot read back there"},
+		{name: "a list over three whole textblocks into a table cell", spec: "abc\n\nMid\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Mid Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there"},
 		{name: "a list from a whole heading into a table cell", spec: "# abc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", want: "- a\n\n|  | b |\n| :--- | :--- |\n| c | d |\n"},
-		{name: "a list from one character into a paragraph into a table cell", spec: "Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there (a table cell reads back as nothing)"},
-		{name: "two paragraphs from one character into a paragraph into a table cell", spec: "Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "a\n\nb", says: "writes two paragraphs in this document, which the document cannot read back there (a table cell reads back as nothing)"},
-		{name: "a heading from one character into a paragraph into a table cell", spec: "Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "# H", says: "writes a heading in this document, which the document cannot read back there (a table cell reads back as nothing)"},
-		{name: "a list from one character into a heading into a table cell", spec: "# Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there (a table cell reads back as nothing)"},
-		{name: "a list from part of a paragraph into a table cell", spec: "Intro abc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there (a table cell reads back as nothing)"},
-		{name: "a list from a callout's paragraph into a table cell", spec: ":::callout{#c1 kind=\"note\" title=\"T\"}\nabc\n:::\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this callout, which the document cannot read back there (a table cell reads back as nothing)"},
-		{name: "a list from two characters into a heading into a table's first cell", spec: "# PPP\n\n| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n", quote: "PP AAA", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there (a table cell reads back as nothing)"},
+		{name: "a list from one character into a paragraph into a table cell", spec: "Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there"},
+		{name: "two paragraphs from one character into a paragraph into a table cell", spec: "Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "a\n\nb", says: "writes two paragraphs in this document, which the document cannot read back there"},
+		{name: "a heading from one character into a paragraph into a table cell", spec: "Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "# H", says: "writes a heading in this document, which the document cannot read back there"},
+		{name: "a list from one character into a heading into a table cell", spec: "# Xabc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there"},
+		{name: "a list from part of a paragraph into a table cell", spec: "Intro abc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there"},
+		{name: "a list from a callout's paragraph into a table cell", spec: ":::callout{#c1 kind=\"note\" title=\"T\"}\nabc\n:::\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "- a", says: "writes a bullet list in this callout, which the document cannot read back there"},
+		{name: "a list from two characters into a heading into a table's first cell", spec: "# PPP\n\n| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n", quote: "PP AAA", with: "- a", says: "writes a bullet list in this document, which the document cannot read back there"},
 		{name: "text from a body row's last cell into the next body row's first cell", spec: "| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n| EEE | FFF |\n", quote: "DD EE", with: "x", says: "leaves text the document reads back as another block where it lands (the table row's end reads back as a table cell)"},
 		{name: "text from the header row's last cell into the first body row's first cell", spec: "| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n", quote: "BB CC", with: "x", want: "| AAA | BxC |\n| :--- | :--- |\n| DDD |  |\n"},
 		{name: "a list from a body cell into the next row's cell", spec: "| H | I |\n| :--- | :--- |\n| c | aa |\n| bb e | f |\n", quote: "aa bb", with: "- a", says: "writes a bullet list in this table cell, which the document cannot read back there (the table row's end reads back as a table cell)"},
-		{name: "a list over a table's first header cell", spec: "| Body. | b |\n| :---: | --- |\n| x | y |\n", quote: "Body.", with: "- a", says: "writes a bullet list in this table header, which the document cannot read back there (a table cell reads back as nothing)"},
+		{name: "a list over a table's first header cell", spec: "| Body. | b |\n| :---: | --- |\n| x | y |\n", quote: "Body.", with: "- a", says: "writes a bullet list in this table header, which the document cannot read back there"},
 		{name: "text ending in a break over code that already ends in one", spec: "Intro.\n\n```\nabc\n```\n", quote: "abc", emptied: "abc", refill: "abc\n", with: "xyz\n", want: "Intro.\n\n```\nxyz\n\n```\n"},
 		{name: "text beside code the document already writes with ending breaks", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n```\nc\n```\n:::\n", quote: "Body.", emptied: "c", refill: "c\n\n", with: "Changed.", want: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nChanged.\n\n```\nc\n\n\n```\n:::\n"},
 		{name: "text in a paragraph already reading back with a literal backslash", spec: "Body. more\\\nxyz\n\nAfter.\n", quote: "Body.", emptied: "xyz", with: "Changed.", want: "Changed. more\\\n\n\nAfter.\n"},
@@ -651,8 +654,8 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 }
 
 // An empty accept inside a typed block stores the block holding the one empty paragraph it reads
-// back holding, and is refused where that does not read back, as in a list item, and for an ask,
-// whose question paragraph+ bullet_list? cannot be empty.
+// back holding, in a list item written as its fence pair alone, and is refused for an ask, whose
+// question paragraph+ bullet_list? cannot be empty.
 func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -666,7 +669,7 @@ func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 		{"a top-level callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\n:::\n"},
 		{"a nested callout", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\nBody.\n:::\n::::\n", "", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\n\n:::\n::::\n"},
 		{"a callout in a blockquote", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n", "", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> \n> :::\n"},
-		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "INVALID_OP", ""},
+		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  :::\n"},
 		{"an ask", ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n", "INVALID_ASK_BLOCK", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -710,9 +713,10 @@ func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 
 // An accept in or around a typed block is judged by what the typed block reads back as: lists of
 // one kind side by side in a callout are written with different markers, as they are in the
-// blockquote a callout rewritten under its own id stands in, and read back as written. Blocks a
-// same-id rewrite puts where the typed block stood are refused naming that block, a list item for
-// an empty callout, which cannot be written there.
+// blockquote a callout rewritten under its own id stands in, and read back as written, with no
+// blank line between them in a quote, where one would spread the first. Blocks a same-id rewrite
+// puts where the typed block stood are stored beside it, an empty callout in a list item as its
+// fence pair alone.
 func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -726,11 +730,12 @@ func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
 	)
 	for index, test := range []acceptCase{
 		{name: "a list beside a list in a callout", spec: "Intro.\n\n" + callout + "Body.\n\n- y\n:::\n", quote: "Body.", with: "- x", want: "Intro.\n\n" + callout + "- x\n\n* y\n:::\n"},
-		{name: "a list beside a list in a blockquote inside a callout", spec: callout + "> Body.\n>\n> - y\n:::\n", quote: "Body.", with: "- x", want: callout + "> - x\n>\n> * y\n:::\n"},
+		{name: "a list beside a list in a blockquote inside a callout", spec: callout + "> Body.\n>\n> - y\n:::\n", quote: "Body.", with: "- x", want: callout + "> - x\n> * y\n:::\n"},
 		{name: "a callout rewritten beside a list in a blockquote", spec: "Intro.\n\n> " + callout + "> Body.\n> :::\n>\n> - y\n", quote: "Body.", with: rewrite,
-			want: "Intro.\n\n> " + callout + "> Body2.\n> :::\n>\n> - x\n>\n> * y\n"},
+			want: "Intro.\n\n> " + callout + "> Body2.\n> :::\n>\n> - x\n> * y\n"},
 		{name: "an empty callout beside a callout rewritten in a list item", spec: "- Lead.\n\n  " + callout + "  Body.\n  :::\n", quote: "Body.",
-			with: callout + "Re.\n:::\n\n:::callout{kind=\"note\" title=\"T\"}\n:::", says: "writes two callouts in this list item"},
+			with: callout + "Re.\n:::\n\n:::callout{#c2 kind=\"note\" title=\"T\"}\n:::",
+			want: "- Lead.\n\n  " + callout + "  Re.\n  :::\n\n  :::callout{#c2 kind=\"note\" title=\"T\"}\n  :::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			checkAccept(t, handler, documentService, "N"+string(rune('A'+index)), test)
@@ -815,7 +820,7 @@ func TestDocumentEditsDeleteTableHeaderRowInPlace(t *testing.T) {
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| A10 | old |\n| :--- | :--- |\n| A11 | new |\n"
+	const want = "| A10 | old |\n| --- | --- |\n| A11 | new |\n"
 	if text.Markdown != want {
 		t.Fatalf("after header-row deletion = %q, want %q", text.Markdown, want)
 	}
@@ -846,7 +851,7 @@ func TestDocumentEditsRejectInvalidTableIndicesWithoutChangingDocument(t *testin
 	if tableID == "" {
 		t.Fatalf("blocks = %#v, want a table", blocks)
 	}
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n"
 	for _, test := range []struct {
 		name     string
 		hasIndex bool
@@ -913,7 +918,7 @@ func TestDocumentEditsDeleteTableColumnInPlace(t *testing.T) {
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| Key | Notes |\n| :--- | :--- |\n| A10 | first |\n| A11 | second |\n"
+	const want = "| Key | Notes |\n| --- | --- |\n| A10 | first |\n| A11 | second |\n"
 	if text.Markdown != want {
 		t.Fatalf("after column deletion = %q, want %q", text.Markdown, want)
 	}
@@ -953,7 +958,7 @@ func TestDocumentEditsCanonicalizeRaggedTableBeforeColumnDeletion(t *testing.T) 
 	after := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| One | Three |\n| :--- | :--- |\n| first | third |\n| only |  |\n"
+	const want = "| One | Three |\n| --- | --- |\n| first | third |\n| only |  |\n"
 	if after.Markdown != want {
 		t.Fatalf("ragged column deletion = %q, want %q", after.Markdown, want)
 	}
@@ -1142,7 +1147,7 @@ func TestDocumentEditsProtectLiveCellAnchorsAndListThemOnTheirTable(t *testing.T
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| Key | Keep |\n| :--- | :--- |\n| A10 | first |\n| A11 | second |\n"
+	const want = "| Key | Keep |\n| --- | --- |\n| A10 | first |\n| A11 | second |\n"
 	if text.Markdown != want {
 		t.Fatalf("table after deleting historical anchors = %q, want %q", text.Markdown, want)
 	}
@@ -1178,7 +1183,7 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| Key |\n| :--- |\n| A10 |\n"
+	const want = "| Key |\n| --- |\n| A10 |\n"
 	if text.Markdown != want {
 		t.Fatalf("cascaded table batch changed document = %q, want %q", text.Markdown, want)
 	}

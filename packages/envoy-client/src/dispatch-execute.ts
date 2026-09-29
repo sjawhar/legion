@@ -87,6 +87,7 @@ type ToolArguments = {
   readonly external_links?: unknown;
   readonly ops?: unknown;
   readonly in_reply_to?: unknown;
+  readonly message?: unknown;
 } & Record<string, unknown>;
 
 type ExecutorEnvironment = {
@@ -721,6 +722,15 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       }
       break;
     }
+    case "dispatch_read": {
+      const message = optionalString(args, "message");
+      if (message !== undefined && messageIdOf(message) === undefined) {
+        problems.push(
+          "message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
+        );
+      }
+      break;
+    }
   }
   return problems;
 }
@@ -921,6 +931,11 @@ async function resolveOwnerArguments(
     typeof replyTarget === "string" &&
     !replyTarget.startsWith("dispatch://")
   ) {
+    return { args, ref, owner: null };
+  }
+  // A read by `message` names a conversation, which a direct message's has no issue to own; the
+  // `dispatch_read` case reads it through GET /api/v1/messages/{id}.
+  if (tool === "dispatch_read" && typeof args.message === "string") {
     return { args, ref, owner: null };
   }
   const legionIssue = env.LEGION_ISSUE;
@@ -1945,6 +1960,7 @@ export async function executeDispatchTool(
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
+      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
       const issues = await client.listIssues({
         project,
         ...(status === undefined ? {} : { status }),
@@ -1954,7 +1970,8 @@ export async function executeDispatchTool(
         ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
         ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
       });
-      const rows = issues.slice(0, limit).map((row) => ({
+      const total = issues.length;
+      const rows = issues.slice(offset, offset + limit).map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -1972,15 +1989,19 @@ export async function executeDispatchTool(
         client,
         rows.some((row) => holdsSession(row.claim))
       );
+      const isPartial = offset !== 0 || rows.length !== total;
+      const showing = !isPartial
+        ? ""
+        : rows.length === 0
+          ? `showing 0-0 of ${total}`
+          : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
       return {
         text:
           rows.length === 0
-            ? `No issues in ${project}.`
+            ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}`
             : [
                 `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` +
-                  (issues.length > rows.length
-                    ? ` (showing ${rows.length} of ${issues.length})`
-                    : ""),
+                  (isPartial ? ` (${showing})` : ""),
                 ...rows.map(
                   (row) =>
                     `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
@@ -1995,7 +2016,7 @@ export async function executeDispatchTool(
                       : ` · route ${routeText(row)}`)
                 ),
               ].join("\n"),
-        details: { issues: rows },
+        details: { issues: rows, total, offset, limit },
       };
     }
     case "dispatch_architecture_sync": {
@@ -2231,13 +2252,31 @@ export async function executeDispatchTool(
         // is delivered as attempt 1 when it is created, and a later retry never retires that
         // row, so 1 is the attempt this session was handed. Dispatch takes the reply as proof
         // the message arrived whatever that attempt's receipt says.
-        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor });
-        // One reply per delivery: an attempt that already carries one is answered with the
-        // reply Dispatch stored, at 200, and nothing is posted. The stored body is how that
-        // reads apart from a fresh one - often the host's own automatic BTW answer, sent
-        // before the model got here - so say what happened instead of reporting a send that
-        // did not occur. A resend of byte-identical text is indistinguishable and harmless:
-        // the thread holds exactly the one reply either way.
+        // A model calling dispatch_message means to post, so it asks to follow up: once the
+        // attempt is answered, Dispatch posts new text as this session's follow-up, threaded
+        // under its first reply. The host's automatic BTW answer never asks (delivery.ts), so a
+        // frame handed to the session twice cannot post a second answer.
+        const reply = await client.messageReply(
+          inReplyTo,
+          { body, attempt: 1, actor },
+          { followUp: true }
+        );
+        // Text this session already posted in the conversation (its first reply or an earlier
+        // follow-up) posts nothing, and Dispatch says so, so the session is not told it sent
+        // something new.
+        if (reply.duplicate === true && reply.body === body) {
+          return {
+            text:
+              `Dispatch already has this exact text in the conversation (message ${reply.id}); ` +
+              "nothing new was posted. Send different text if you have more to say.",
+            details: { message: reply.id, in_reply_to: inReplyTo, posted: false, duplicate: true },
+          };
+        }
+        // A Dispatch that predates follow-ups ignores `?follow_up=true` and keeps one reply per
+        // attempt: it answers any second call with the stored reply - often the host's own
+        // automatic BTW answer, sent before the model got here - and posts nothing. The stored
+        // body is how that reads apart from a send, so this says what happened instead of
+        // reporting a send that did not occur.
         if (reply.body !== body) {
           return {
             text:
@@ -2247,9 +2286,21 @@ export async function executeDispatchTool(
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false },
           };
         }
+        const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
+        const parent = reply.in_reply_to ?? undefined;
+        const follows = parent === inReplyTo ? undefined : parent;
         return {
-          text: `Replied to message ${inReplyTo} with message ${reply.id}`,
-          details: { message: reply.id, in_reply_to: inReplyTo, posted: true },
+          text:
+            follows === undefined
+              ? `Replied to message ${inReplyTo} with message ${reply.id}. ${readBack}`
+              : `Replied to message ${inReplyTo} with message ${reply.id}, a follow-up threaded ` +
+                `under your reply ${follows}. ${readBack}`,
+          details: {
+            message: reply.id,
+            in_reply_to: inReplyTo,
+            posted: true,
+            ...(follows === undefined ? {} : { follows }),
+          },
         };
       }
       const issueKey = issue();
@@ -2476,6 +2527,28 @@ export async function executeDispatchTool(
     }
     // Reads report their owner and follow nothing; no result subscribes the session.
     case "dispatch_read": {
+      const message = optionalString(args, "message");
+      if (message !== undefined) {
+        const sessionId = input.sessionId?.trim();
+        if (!sessionId) throw new Error("host session id is required for dispatch_read({message})");
+        const thread = await client.getMessageThread(messageIdOf(message) as string, sessionId);
+        const issueKey = thread.message.issue_key;
+        return {
+          text: messageSummary(
+            thread,
+            issueKey === null
+              ? []
+              : await graphSections(
+                  client,
+                  dispatchChildRef(dispatchIssueRef(issueKey), "message", thread.message.id)
+                )
+          ),
+          details: {
+            message: thread.message.id,
+            ...(issueKey === null ? {} : { issue: issueKey }),
+          },
+        };
+      }
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
         const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () =>

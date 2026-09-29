@@ -7,6 +7,7 @@ import { architectureSourcesQuery } from "../../api/queries";
 import type { ArchitectureTree, ArchitectureTreeComponent } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { QueryError } from "../../components/QueryError";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   badgeHigh,
   badgeLow,
@@ -588,7 +589,9 @@ function ComponentRow({
                   className={`flex min-h-11 min-w-0 flex-1 items-center py-2 font-medium md:min-h-0 md:py-0 ${textPrimaryOnSurface} ${linkHoverText}`}
                   to={{ search: rowSearch(component.id) }}
                 >
-                  <span className="min-w-0 flex-1 truncate">{component.title}</span>
+                  <TruncatedText className="min-w-0 flex-1" title={component.title}>
+                    {component.title}
+                  </TruncatedText>
                 </Link>
               </div>
             </div>

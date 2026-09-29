@@ -734,6 +734,11 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
     await expect(page.getByText(/Blocked on you: 1 item/)).toBeVisible();
     // The row's link was not followed by any of it.
     expect(new URL(page.url()).pathname).toBe("/");
+    // What the page shows so far is the optimistic write; the reload reads the server, and a
+    // reload while the DELETE is unanswered aborts it, so the un-snooze must be recorded first.
+    await expect
+      .poll(async () => (await getInbox({ login: "alice" })).at(0)?.snoozed_until)
+      .toBeNull();
 
     await page.reload();
     await expect(row).toHaveAttribute("data-inbox-section", "human");

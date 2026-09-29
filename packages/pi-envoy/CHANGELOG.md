@@ -39,6 +39,19 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 11. Contract 11 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, each Legion role App's login keyed by its App role (`{implement, review}`), which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
+- `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
+  role Apps once the Legion review App's `Accepted:` is its newest submitted comment. A CI bot
+  never posts `Accepted:`, so the merger's zero-open-threads check could never pass on a
+  repository whose CI bot opens review threads; the reviewer, the independent party, now decides
+  such a finding. GitHub cannot tell a CI bot from a person whose `gh` is routed to an App, so the
+  reviewer may accept a finding such a person raised, and each `resolved <url>` line says whose
+  acceptance closed the thread. The pull request author's reply closes nothing. A Legion App's
+  thread and a person's still close only on the opener's `Accepted:`. Legion's role Apps are the
+  logins the daemon now names on `/legion/v1/gh-token`, keyed by App role (`legionAppLogins`,
+  optional, in both daemons). Without them (`--gh`, which has no grant, or a daemon that could not
+  read every App) no thread counts as a bot's, and a bot's left-open line says the session cannot
+  identify the review App. The implementer, reviewer and merger role texts say so (LEGION-208).
 - `legion.goDaemonApiVersion` is 10. Contract 9 adds the daemon's own agent-secrets machine login
   state (`agentSecretsLogin`) to `GET /legion/v1/state` (AGENTC-393). Contract 10 adds
   `POST /legion/v1/roots/close`, the Go `legion` tool's `close_root`: a tree root's own architect
@@ -122,6 +135,74 @@
   acceptance are refused at their gateway key command's write, and Stage 4b and the controller
   proof at the plugin unpack. The allow-list test records each refused script's `file:line`, derived
   by `src/legion/pane-guard-scripts.ts`, where it had recorded a phrase several refusals share.
+- The pane guard resolves more of what a script computes before it refuses a target it cannot
+  (LEGION-300). A script or function run with arguments the guard knows has them as `$1`, `$#` and
+  `${1:-…}`, so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
+  is walked pass by pass, a `case` on a known word takes its one matching item, and a `shift` past
+  the last argument shifts nothing, as in bash. A word that may be several arguments or none (an
+  unquoted `$v` holding a space, `$*`, a glob) leaves the arguments unknown, `"$@"` of no arguments
+  is none (and assigned, `x="$@"`, the empty string, one argument when quoted), `unset` leaves a
+  name unset rather than empty, and in a shell whose arguments the guard does not know `${1-…}` and
+  `${1+…}` stay unknown. It also evaluates pattern replacement and removal of a known ASCII value
+  (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose output passes through
+  `(umask 077 && …)`, and a script a brace group writes from here-documents and `printf` before
+  running it. A target it cannot resolve is still refused, and some stay
+  unknown on purpose: `$(git rev-parse --show-toplevel)`, whose answer the repository's config
+  decides and an earlier command in the same line can rewrite; an operand the parser splits
+  differently from bash (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a
+  `case` whose word matches no item, which walks every branch. A pattern is matched in time its
+  value and itself bound, never by a backtracking regular expression (`*a*a*a*b` over a run of
+  `a`s held a regex for hours), and the work is charged to the walk budget. No value the guard
+  builds is longer than 65,536 characters: a replacement of a replacement reached 134 million in a
+  tenth of a second and held the pane for seconds on each read, so past the bound a value is
+  unknown. A script a command writes is read whole up to the 1 MiB the guard reads of one on disk,
+  and past it is refused as one it cannot read: a 176 KB brace group rendering 655 MB held the pane
+  for 30 s. So is a script whose code holds a value the guard cannot know: `printf %s`, `printf %q`
+  and `echo` write the value into it, and bash parses what the value holds, where a `;`, a quote or
+  a newline reaches out of any position (an operand of `echo`, a quoted string, a comment), and a
+  value containing a newline makes `%q` select `$'…'`, which closes a single- or double-quoted
+  position. So is one `echo` writes with an option first, since the option changes what it prints:
+  a harmless `echo -e 'ls' > f; bash f` is refused as well, and writing the file stays allowed.
+  `printf %d` writes only digits and a sign, so there its value stays one unknown word. The Stage
+  2, 3, 4b.13b, 4b and controller drivers are refused for killing the processes a query selects
+  (`$(run_processes)`, `first_child`), all but the controller's first for running the gateway key
+  command `install-model-gateway.sh` writes, whose `command=(…)` line takes a value built from
+  `$(command -v hawk-token)`, and the five manual smokes (`smoke-delivery.sh`, `smoke-btw.sh`,
+  `smoke-channel.sh`, `smoke-clear-rebind.sh`, `omp-roundtrip.sh`) run their sessions on their own
+  tmux server, where a `kill-session` can end only the session each started.
+  `src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first.
+- A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
+  below `/tmp` except the socket families as the pane's scratch, so with `HOME` at
+  `/tmp/<run>/omp-home` and no `TMUX_TMPDIR` in the same directory, `rm -rf ~`,
+  `rm -rf "$HOME/.ssh"`, `find /tmp/<run> -delete` and `rm -rf "$LEGION_STATE_DIR"` were allowed.
+  The e2e rigs that run guarded panes set `TMUX_TMPDIR` beside their Oh My Pi home, so the
+  protection of its directory covered them by that coincidence, which nothing enforced. The
+  directory holding `HOME` is now protected as the one holding `TMUX_TMPDIR` is, by exact name; the
+  workspace inside it stays writable.
+- The pane guard follows the writes to a variable it sees (LEGION-300). It kept values bash had
+  changed, so a target built from one afterwards was judged on the stale value: `unset d;
+  : "${d:=$HOME/.ssh}"; rm -rf "$d"`, a function's `local d=…` still in force after it returned,
+  `printf -v 'd[0]'`, `read -ra d`, `declare "d=$HOME/.ssh"`, a plain `d=x` over an array's other
+  elements, arithmetic, `wait -p`, `unset -f` of a function that shadowed a command, and a write
+  bash refuses or rewrites for a `readonly`, `-i`, `-l` or `-u` name were all allowed where bash
+  deletes outside the roots. Each now assigns as bash does, and a write the guard cannot model (a
+  variable named at run time, `eval "$(tool)"`) leaves every variable unknown, so a target built
+  from one afterwards is refused. A nameref (`declare -n`) is refused. Still not followed: a
+  `source` of a path the guard cannot read at check time, such as a process substitution, which it
+  takes as sourcing nothing (LEGION-332), and an assignment to `IFS`, since it splits an unquoted
+  value on whitespace alone.
+- The pane guard reads no unquoted here-document that bash expands (LEGION-300). `cat > f <<EOF`
+  and `tee f <<EOF` stored the text as written, so `x='rm -rf ~'; cat > f <<EOF` with `$x` in the
+  body, then `bash f`, was allowed while bash wrote and ran the expanded line; a shell or
+  interpreter reading one as its program (`bash <<EOF`, `python3 - <<PY`) was judged on the same
+  unexpanded text. A here-document whose unquoted text holds `$`, a backquote, or a backslash
+  before one of them or a newline is now a script the guard cannot read, and a shell or
+  interpreter reading it is refused, as a rendered brace group already treated one.
+- The pane guard gives an array's literal the elements bash gives it (LEGION-300). It took one
+  element per word, where bash makes `("$@")` one per argument, `("${arr[@]}")` none for an empty
+  array, and a word that may split several, so `Y=("$@"); rm -rf "${Y[1]}"` with a second argument
+  outside the roots was allowed. A word that may be several elements now leaves every element
+  unknown.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot

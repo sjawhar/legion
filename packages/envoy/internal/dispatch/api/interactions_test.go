@@ -676,7 +676,7 @@ func TestDocumentEditExtendsTableAfterCellAnchor(t *testing.T) {
 	got := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, text)
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n"
 	if got.Markdown != want {
 		t.Fatalf("table row insertion = %q, want %q", got.Markdown, want)
 	}
@@ -702,7 +702,7 @@ func TestDocumentEditInsertsParagraphAfterTableContainingCellAnchor(t *testing.T
 	got := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, text)
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
 	if got.Markdown != want {
 		t.Fatalf("paragraph insertion = %q, want %q", got.Markdown, want)
 	}

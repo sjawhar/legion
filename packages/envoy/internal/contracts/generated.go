@@ -142,6 +142,11 @@ const DeliveryDuplicateWindow = 259200000 * time.Millisecond
 // and the string the dashboard keys its retry wording on cannot drift apart.
 const ReceiptTimeoutCause = "The listener didn't answer within the send window; the message may already have been delivered."
 
+// MaxBroadcastRecipients is the most sessions one broadcast sends to. Generated from
+// MAX_BROADCAST_RECIPIENTS in packages/contracts so the server's limit and the dashboard's
+// cannot drift apart.
+const MaxBroadcastRecipients = 100
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

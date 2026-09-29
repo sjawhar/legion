@@ -15,3 +15,17 @@ b
 ::::
 
 After.
+
+A callout whose opening line is indented, holding code:
+
+  ::::callout{#ind kind="note" title="T"}
+      b
+  ::::
+
+And one holding a callout its closing line, indented past the outer opener's column, closes:
+
+  ::::callout{#ino kind="note" title="T"}
+  :::callout{#inn kind="note" title="T"}
+  a
+     :::
+  ::::

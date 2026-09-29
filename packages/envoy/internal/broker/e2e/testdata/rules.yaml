@@ -11,7 +11,7 @@
 version: 1
 secrets:
   DEEL_API_KEY:
-    source: dev1/agent-secrets/DEEL_API_KEY
+    source: example/agent-secrets/DEEL_API_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
@@ -24,7 +24,7 @@ secrets:
         decision: approval
         approver: login:sjawhar
   AUTO_TOKEN:
-    source: dev1/agent-secrets/AUTO_TOKEN
+    source: example/agent-secrets/AUTO_TOKEN
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
@@ -33,7 +33,7 @@ secrets:
         operator: sjawhar
         decision: automatic
   DENIED_KEY:
-    source: dev1/agent-secrets/DENIED_KEY
+    source: example/agent-secrets/DENIED_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200

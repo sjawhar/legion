@@ -1,7 +1,9 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"slices"
 	"sort"
@@ -21,17 +23,23 @@ var shapeOnly = skip{all: true, text: true}
 func (s skip) has(name string) bool { return s.all || s.names[name] }
 
 // A document's markdown reads back as written when Parse gives back its blocks, their attributes and
-// their text. Block ids, a typed block's server-owned attributes and anchor marks are not written,
-// so they are not compared, and neither is an empty paragraph the renderer does not write
-// (writtenChildren).
+// their text, as the markdown writes them (asWritten). Block ids, a typed block's server-owned
+// attributes and anchor marks are not written, so they are not compared, and neither is an empty
+// paragraph the renderer does not write (writtenChildren).
 
 // ReadBack is what doc's markdown reads back as.
 func ReadBack(doc *Node) (*Node, error) {
-	markdown, err := Render(doc)
+	return readBack(doc, maxSpanCells)
+}
+
+// readBack is what doc's markdown, its tables' spans adding at most spanCells cells (render),
+// reads back as.
+func readBack(doc *Node, spanCells int) (*Node, error) {
+	r, err := render(doc, spanCells)
 	if err != nil {
 		return nil, err
 	}
-	return Parse(markdown)
+	return Parse(r.b.String())
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before
@@ -44,24 +52,34 @@ func ReadBack(doc *Node) (*Node, error) {
 // another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
 // parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
 // or not after parses: the checks that read each changed block alone still refuse one the write
-// leaves unreadable.
-func NewMisread(before, after *Node) string {
-	backAfter, err := ReadBack(after)
+// leaves unreadable. Only a refusal (ErrSchema) reading either back is a verdict; any other error,
+// a panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
+func NewMisread(before, after *Node) (string, error) {
+	return newMisread(before, after, maxSpanCells)
+}
+
+// newMisread is NewMisread reading before and after back with their tables' spans adding at most
+// spanCells cells each.
+func newMisread(before, after *Node, spanCells int) (string, error) {
+	backAfter, err := readBack(after, spanCells)
+	if err != nil && !errors.Is(err, ErrSchema) {
+		return "", err
+	}
+	written := asWritten(after)
+	if err == nil && readDifference(written, backAfter, skip{}) == "" {
+		return "", nil
+	}
+	backBefore, beforeErr := readBack(before, spanCells)
+	if beforeErr != nil && !errors.Is(beforeErr, ErrSchema) {
+		return "", beforeErr
+	}
+	if beforeErr != nil {
+		return "", nil
+	}
 	if err != nil {
-		if _, beforeErr := ReadBack(before); beforeErr != nil {
-			return ""
-		}
-		return err.Error()
+		return err.Error(), nil
 	}
-	written := StripAnchorMarks(after)
-	if readDifference(written, backAfter, skip{}) == "" {
-		return ""
-	}
-	backBefore, err := ReadBack(before)
-	if err != nil {
-		return ""
-	}
-	previous := StripAnchorMarks(before)
+	previous := asWritten(before)
 	drift := skip{names: attributeDrift(previous, backBefore)}
 	type sameMisread struct{ id, differs string }
 	known := map[sameMisread]bool{}
@@ -70,10 +88,68 @@ func NewMisread(before, after *Node) string {
 	}
 	for _, found := range misreads(written, backAfter, drift) {
 		if found.id == "" || !known[sameMisread{found.id, found.differs}] {
-			return found.reason
+			return found.reason, nil
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// documentMisread names how doc, a whole document a write makes, reads back otherwise, or is ""
+// when it does not: every block that reads back otherwise is the write's, the first named as far
+// down as its markdown still pairs (misreads), and a doc whose markdown the parser refuses is named
+// by that refusal. Only a refusal (ErrSchema) is a verdict; any other error is the error.
+func documentMisread(doc *Node) (string, error) {
+	back, err := ReadBack(doc)
+	if err != nil {
+		if errors.Is(err, ErrSchema) {
+			return err.Error(), nil
+		}
+		return "", err
+	}
+	written := asWritten(doc)
+	difference := readDifference(written, back, skip{})
+	if difference == "" {
+		return "", nil
+	}
+	if found := misreads(written, back, skip{}); len(found) > 0 {
+		return found[0].reason, nil
+	}
+	return difference, nil
+}
+
+// RefuseMisreadDocument refuses (ErrSchema) a whole document a write makes, a spec, an upload or a
+// version, that reads back otherwise (documentMisread), and RefuseMisreadWrite a write into a
+// document, an insert, whose result reads back otherwise where before did not (NewMisread). What
+// is stored is the rendering, which the next read would give back as another document or refuse.
+// The rules that read a shape refuse what they know first, so a refusal here names a shape none of
+// them reads, and is logged. Any other error reading it back, a panic (ErrPanic) among them, is
+// the error.
+func RefuseMisreadDocument(doc *Node) error {
+	return refuseMisread(documentMisread(doc))
+}
+
+// RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument. It reads both
+// documents back as renderSpanless writes them. An insert checks its write with it once for each
+// operation of a batch, and a batch holds as many as a request carries, where a budget of span
+// cells for each read-back would let one batch spend two for every operation. An insert writes
+// markdown, which carries no span, between document-level blocks, so it changes no table, and every
+// table reads back the same way before and after it under the same block ids: a table that reads
+// back otherwise does so in both, and NewMisread's filter of misreads before already held, which
+// keys on the block id, sets it aside either way. Spanless, a read-back costs no more than the
+// cells the tables hold.
+func RefuseMisreadWrite(before, after *Node) error {
+	return refuseMisread(newMisread(before, after, 0))
+}
+
+func refuseMisread(misread string, err error) error {
+	if err != nil {
+		return err
+	}
+	if misread == "" {
+		return nil
+	}
+	slog.Warn("pmdoc: refused a write whose markdown reads back otherwise", "misread", misread)
+	return fmt.Errorf("%w: the markdown the document would be stored as reads back otherwise (%s)", ErrSchema, misread)
 }
 
 // misread is a block that reads back otherwise: its id, what differs (the same for the same
@@ -403,7 +479,10 @@ func resync(written, back []*Node, i, j int, ignore skip) (int, int, bool) {
 }
 
 // attributeDrift is the attributes doc's blocks read back with other values where they read back
-// holding the same blocks and text.
+// holding the same blocks and text - but a task item's checked, which is its own item's: a task
+// item emptied of its text is written as a plain empty item and reads back with checked none, and
+// NewMisread tells a stale one from a new one by its block id, so the attribute drifting would hide
+// every other task item emptied.
 func attributeDrift(doc, back *Node) map[string]bool {
 	drift := map[string]bool{}
 	pairs, _ := alignBlocks(doc, back, skip{all: true})
@@ -411,6 +490,7 @@ func attributeDrift(doc, back *Node) map[string]bool {
 	for _, pair := range pairs {
 		collectDrift(written[pair[0]], back.Children[pair[1]], drift)
 	}
+	delete(drift, "checked")
 	return drift
 }
 
@@ -515,12 +595,15 @@ func attributeDifference(want, got *Node, ignore skip) (string, any, any, bool) 
 }
 
 // writtenAttrs is the attributes node's markdown writes: tokenAttrs, with a table column that has
-// no alignment written left (tableAlignment).
+// no alignment - null, or the "none" this parser once stored - written unaligned (tableAlignment),
+// which reads back with none.
 func writtenAttrs(node *Node) Attrs {
 	attrs := tokenAttrs(node.Type, node.Attrs)
 	if node.Type == "table_header" || node.Type == "table_cell" {
-		if alignment, _ := attrs["alignment"].(string); alignment != "center" && alignment != "right" {
-			attrs["alignment"] = "left"
+		switch attrs["alignment"] {
+		case "left", "center", "right":
+		default:
+			delete(attrs, "alignment")
 		}
 	}
 	return attrs

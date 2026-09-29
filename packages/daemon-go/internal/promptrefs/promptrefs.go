@@ -77,6 +77,30 @@ func (names Names) add(kind Kind, name, file string) {
 	}
 }
 
+// File adds references in one Markdown file. The file is named by its path relative to base under
+// prefix, as Collect names files it walks.
+func (names Names) File(base, path, prefix string) error {
+	return names.collectFile(base, path, prefix)
+}
+
+func (names Names) collectFile(base, path, prefix string) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return err
+	}
+	file := filepath.Join(prefix, rel)
+	for _, kind := range Kinds {
+		for _, match := range reference[kind].FindAllSubmatch(body, -1) {
+			names.add(kind, string(match[1]), file)
+		}
+	}
+	return nil
+}
+
 // Collect adds every reference in a Markdown file under dir, each file named by its path relative
 // to base under prefix. dir may be a link to a directory (LEGION_ROLE_PROMPTS_DIR can name one),
 // which the walk follows; filepath.WalkDir alone would report the link and read nothing under it.
@@ -93,21 +117,7 @@ func (names Names) Collect(base, dir, prefix string) error {
 		if err != nil || entry.IsDir() || filepath.Ext(path) != ".md" {
 			return err
 		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(resolved, path)
-		if err != nil {
-			return err
-		}
-		file := filepath.Join(prefix, under, rel)
-		for _, kind := range Kinds {
-			for _, match := range reference[kind].FindAllSubmatch(body, -1) {
-				names.add(kind, string(match[1]), file)
-			}
-		}
-		return nil
+		return names.collectFile(resolved, path, filepath.Join(prefix, under))
 	})
 }
 

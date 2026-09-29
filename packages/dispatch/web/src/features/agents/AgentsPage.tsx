@@ -1,17 +1,24 @@
-import { DELIVERY_CAPABILITIES } from "@legion/contracts";
+import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery } from "../../api/queries";
+import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
 import type {
   Agent,
   Message,
   MessageDelivery,
   MessageDeliveryMode,
   MessageRead,
-  UserAgentStates,
 } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
@@ -19,6 +26,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   card,
@@ -57,8 +65,16 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
+import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
+import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
+import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
+
+/** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at
+ *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
+ *  mode and Send on a narrow screen, adding no height, and the third and last row on a short one. */
+const composerLine = `mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1 ${dangerText}`;
 
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
@@ -216,7 +232,9 @@ function AgentExchangeReply({
   const retry = useMutation({
     mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
     onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
+      void queryClient.invalidateQueries({
+        queryKey: agentMessagesQuery(agent.session_id).queryKey,
+      }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
   const author = resolveAuthor(reply.author, titles);
@@ -292,7 +310,9 @@ function AgentTargetedMessage({
     mutationFn: (delivery: MessageDeliveryMode) =>
       api.createMessageDelivery(read.message.id, delivery),
     onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
+      void queryClient.invalidateQueries({
+        queryKey: agentMessagesQuery(agent.session_id).queryKey,
+      }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
   const titles = useMemo(
@@ -376,28 +396,36 @@ function AgentMessageList({
   onReply: (reply: AgentReply) => void;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const messages = useQuery({
-    queryFn: () => api.listAgentMessages(agent.session_id),
-    queryKey: ["agents", agent.session_id, "messages"],
-  });
-  const agentState = useQuery({
-    queryFn: () => api.getMyAgentState(),
-    queryKey: ["user-agent-state"],
-  });
+  const messages = useQuery(agentMessagesQuery(agent.session_id));
+  const agentState = useQuery(userAgentStateQuery());
   const [showOlder, setShowOlder] = useState(false);
   const [showCleared, setShowCleared] = useState(false);
+  const clearedBefore = agentState.data?.[agent.session_id]?.cleared_before;
+  const all = messages.data ?? [];
+  const unread = exchangesAfter(all, clearedBefore);
+  const visible = showCleared ? all : unread;
+  const [newest, ...older] = visible;
+  // Each of the viewer's own exchanges with a reply newer than how far they had read when the row
+  // opened is shown, not left behind "Show N older". The watermark stays where it was while the
+  // row is open, so marking those replies read does not fold them away from the viewer reading
+  // them.
+  const unreadAtOpen = useUnreadAtOpen(messages.data);
+  const olderShown = older.filter((read) => unreadAtOpen?.has(read.message.id) === true);
+  const olderFolded = older.filter((read) => !olderShown.includes(read));
+  const rendered =
+    newest === undefined ? [] : [newest, ...olderShown, ...(showOlder ? olderFolded : [])];
+  useMarkRepliesRead(
+    agent.session_id,
+    messages.isPending || agentState.isPending ? undefined : rendered
+  );
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
   // make Clear a silent no-op. This hides exactly what the viewer saw.
   const clear = useMutation({
-    mutationFn: (clearedBefore: string) =>
-      api.putAgentState(agent.session_id, { cleared_before: clearedBefore }),
+    mutationFn: (cutoff: string) => api.putAgentState(agent.session_id, { cleared_before: cutoff }),
     onSuccess: (next) => {
       setShowCleared(false);
-      queryClient.setQueryData<UserAgentStates>(["user-agent-state"], (current) => ({
-        ...current,
-        [agent.session_id]: next,
-      }));
+      storeAgentState(queryClient, agent.session_id, next);
     },
   });
   const label = sessionLabel(agent.session_id, agent.title);
@@ -405,46 +433,36 @@ function AgentMessageList({
   if (messages.isError || agentState.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
   }
-  if (messages.data.length === 0) return null;
-  const clearedBefore = agentState.data[agent.session_id]?.cleared_before;
-  const unread = exchangesAfter(messages.data, clearedBefore);
-  const visible = showCleared ? messages.data : unread;
-  const [newest, ...older] = visible;
+  if (all.length === 0) return null;
+  const row = (read: MessageRead) => (
+    <AgentTargetedMessage
+      agent={agent}
+      key={read.message.id}
+      liveAgents={liveAgents}
+      onReply={onReply}
+      read={read}
+    />
+  );
   return (
     <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
       {newest === undefined ? null : (
         <ol aria-label={`Conversation with ${label}`} className="space-y-2">
-          <AgentTargetedMessage
-            agent={agent}
-            key={newest.message.id}
-            liveAgents={liveAgents}
-            onReply={onReply}
-            read={newest}
-          />
-          {older.length === 0 ? null : (
+          {row(newest)}
+          {olderShown.map(row)}
+          {olderFolded.length === 0 ? null : (
             <li>
               <DisclosureToggle
                 expanded={showOlder}
-                label={`Show ${older.length} older`}
+                label={`Show ${olderFolded.length} older`}
                 onToggle={() => setShowOlder((open) => !open)}
               />
             </li>
           )}
-          {showOlder
-            ? older.map((read) => (
-                <AgentTargetedMessage
-                  agent={agent}
-                  key={read.message.id}
-                  liveAgents={liveAgents}
-                  onReply={onReply}
-                  read={read}
-                />
-              ))
-            : null}
+          {showOlder ? olderFolded.map(row) : null}
         </ol>
       )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        {clearedBefore === undefined || unread.length === messages.data.length ? null : (
+        {clearedBefore === undefined || unread.length === all.length ? null : (
           <p className={`flex flex-wrap items-center gap-x-1 text-sm ${textMutedOnCanvas}`}>
             <span>
               Cleared <Timestamp at={clearedBefore} />
@@ -563,7 +581,7 @@ function AgentMessageComposer({
         onSent={() => {
           onCancelReply();
           void queryClient.invalidateQueries({
-            queryKey: ["agents", agent.session_id, "messages"],
+            queryKey: agentMessagesQuery(agent.session_id).queryKey,
           });
         }}
         owner={composerOwner}
@@ -624,6 +642,8 @@ function AgentRow({
   // The inbox query and the agent list are polled separately, so the two counts can briefly
   // disagree in either direction; a negative remainder renders nothing.
   const waitingOnAgent = agent.open_asks - needsYou;
+  const unreadReplies =
+    useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
   const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
   const detailsId = useId();
@@ -649,7 +669,7 @@ function AgentRow({
               title={label}
               type="button"
             >
-              <span className="min-w-0 truncate">{label}</span>
+              <TruncatedText className="min-w-0">{label}</TruncatedText>
               <span className={disclosureButtonText}>
                 <ChevronIcon expanded={expanded} />
               </span>
@@ -688,6 +708,18 @@ function AgentRow({
               <Timestamp at={agent.last_activity} />
             )}
           </span>
+          {unreadReplies === 0 ? null : (
+            // Opening the conversation is what reads it, so the badge opens it.
+            <button
+              aria-label={`${label} replied: ${unreadReplies} unread`}
+              className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
+              onClick={() => setExpanded(true)}
+              title={`Replies from ${label} you have not read`}
+              type="button"
+            >
+              <LabelPill selected>{unreadRepliesLabel(unreadReplies)}</LabelPill>
+            </button>
+          )}
           {needsYou === 0 ? null : (
             <AskCountPill
               agent={agent}
@@ -738,8 +770,8 @@ function AgentRow({
   );
 }
 
-/** A collapsed `<label> (N)` disclosure over rows the page keeps out of the way; absent when
- * empty, closed on every load, and open only while this page stays mounted. */
+/** A collapsed disclosure over rows the page keeps out of the way, labelled by `foldLabel`;
+ * absent when empty, closed on every load, and open only while this page stays mounted. */
 function AgentFold({
   agents,
   label,
@@ -765,7 +797,7 @@ function AgentFold({
     <div className="space-y-3">
       <DisclosureToggle
         expanded={expanded}
-        label={`${label} (${agents.length})`}
+        label={foldLabel(label, agents, selected)}
         onToggle={() => setExpanded((open) => !open)}
       />
       {expanded ? (
@@ -863,19 +895,11 @@ function filterOptions(agents: readonly Agent[]): { machines: string[]; roles: s
 function AgentFilterBar({
   agents,
   filters,
-  listed,
-  onClear,
   onFilters,
-  onSelectAll,
-  selectedCount,
 }: {
   agents: readonly Agent[];
   filters: AgentFilters;
-  listed: readonly Agent[];
-  onClear: () => void;
   onFilters: (filters: AgentFilters) => void;
-  onSelectAll: () => void;
-  selectedCount: number;
 }): ReactNode {
   const { machines, roles } = filterOptions(agents);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
@@ -916,23 +940,61 @@ function AgentFilterBar({
         type="search"
         value={filters.dir}
       />
-      <button
-        className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-        onClick={onSelectAll}
-        type="button"
-      >
-        Select all ({listed.length})
-      </button>
-      {selectedCount === 0 ? null : (
+    </fieldset>
+  );
+}
+
+/**
+ * The list's select-all checkbox. Its 13 px inset lines it up with the rows' checkboxes (their
+ * 1 px border plus 12 px padding). Matching means every row the filters match, folded sections
+ * included, and `Clear selection` also empties the selected rows the filters hide.
+ */
+function SelectionHeader({
+  listed,
+  matching,
+  onClear,
+  onToggle,
+  selected,
+}: {
+  listed: readonly Agent[];
+  matching: readonly Agent[];
+  onClear: () => void;
+  onToggle: () => void;
+  selected: ReadonlySet<string>;
+}): ReactNode {
+  const selection = matchingSelection(listed, matching, selected);
+  const { state } = selection;
+  const checkbox = useRef<HTMLInputElement>(null);
+  const countId = useId();
+  // `indeterminate` is a DOM property with no attribute, so React cannot render it.
+  useLayoutEffect(() => {
+    if (checkbox.current !== null) checkbox.current.indeterminate = state === "some";
+  }, [state]);
+  return (
+    <div className="mb-2 flex min-h-11 items-center gap-x-2 px-[13px] md:min-h-8">
+      <input
+        aria-describedby={countId}
+        aria-label="Select all matching agents"
+        checked={state === "all"}
+        className={`size-4 shrink-0 ${checkboxAccent}`}
+        disabled={matching.length === 0}
+        onChange={onToggle}
+        ref={checkbox}
+        type="checkbox"
+      />
+      <span className={`min-w-0 flex-1 text-xs ${textMutedOnCanvas}`} id={countId}>
+        {selectionSummary(selection)}
+      </span>
+      {selected.size === 0 ? null : (
         <button
-          className={`min-h-11 rounded-lg px-3 text-sm ${textMutedHoverToSecondary}`}
+          className={`min-h-11 shrink-0 rounded-lg border px-2 text-xs font-medium md:min-h-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
           onClick={onClear}
           type="button"
         >
           Clear selection
         </button>
       )}
-    </fieldset>
+    </div>
   );
 }
 
@@ -940,24 +1002,36 @@ function AgentFilterBar({
  * The broadcast a selection is waiting to become: one body, one mode, and one message per
  * recipient. Selection is what the human ticked, so a recipient that a later filter hides is
  * still listed here rather than silently dropped; every selected session is named, including
- * the ones this mode leaves out.
+ * the ones this mode leaves out. It follows the list and sticks to the viewport's bottom, so
+ * appearing costs no layout above the rows: the checkbox that summoned it stays under the
+ * pointer. A long recipient list scrolls inside it rather than growing it past half the screen.
  */
 function BroadcastComposer({
   agents,
+  body,
+  delivery,
+  onBody,
+  onDelivery,
   onSent,
   selected,
   onDeselect,
 }: {
   agents: readonly Agent[];
+  body: string;
+  delivery: MessageDeliveryMode;
+  onBody: (body: string) => void;
+  onDelivery: (delivery: MessageDeliveryMode) => void;
   onDeselect: (sessionID: string) => void;
   onSent: () => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [body, setBody] = useState("");
-  const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
   const { excluded, recipients } = broadcastPlan(selected, agents, delivery);
+  // The server counts the `session_ids` it is sent - these recipients - against the shared limit
+  // and refuses a send over it; saying so before Send saves the round trip. The same predicate
+  // gives the limit the notice slot.
+  const overLimit = recipients.length > MAX_BROADCAST_RECIPIENTS;
   const send = useMutation({
     mutationFn: () =>
       api.createBroadcast({
@@ -966,11 +1040,10 @@ function BroadcastComposer({
         session_ids: recipients.map((agent) => agent.session_id),
       }),
     onSuccess: (created) => {
-      setBody("");
       onSent();
       for (const recipient of created.recipients) {
         void queryClient.invalidateQueries({
-          queryKey: ["agents", recipient.session_id, "messages"],
+          queryKey: agentMessagesQuery(recipient.session_id).queryKey,
         });
       }
       void queryClient.invalidateQueries({ queryKey: ["broadcast"] });
@@ -980,23 +1053,36 @@ function BroadcastComposer({
     },
   });
 
+  // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
+  // so it takes about a third of a phone screen: the heading on one line, the recipients in one
+  // sideways-scrolling line, the message sized to its text (`field-sizing`) from two rows up to
+  // `max-h-32`, and the mode beside Send. A short screen (a phone in landscape) folds that into
+  // two lines - heading beside the recipients, then the message beside the mode and Send - with
+  // the message held at two rows. `min-h-16` is important because styles.css's unlayered
+  // below-1280 touch floor (`min-height: 44px`) would otherwise override it and shrink the
+  // message box on its first character. Elsewhere none of these classes apply.
   return (
     <section
       aria-label="Broadcast"
-      className={`mb-4 rounded-xl border p-3 ${card} ${borderDefault}`}
+      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
     >
-      <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>
+      <h2
+        className={`text-sm font-semibold narrow-or-short:col-span-full narrow-or-short:truncate short:col-span-1 ${textPrimaryOnCanvas}`}
+      >
         Broadcast to {recipients.length} of {selected.size} selected
       </h2>
-      <ul aria-label="Selected agents" className="mt-2 flex flex-wrap gap-2">
+      <ul
+        aria-label="Selected agents"
+        className="mt-2 flex flex-wrap gap-2 narrow-or-short:col-span-full narrow-or-short:mt-0 narrow-or-short:flex-nowrap narrow-or-short:overflow-x-auto short:col-span-3"
+      >
         {[...selected].map((sessionID) => {
           const agent = agents.find((candidate) => candidate.session_id === sessionID);
           const label = sessionLabel(sessionID, agent?.title ?? "");
           const left = excluded.find((item) => item.sessionID === sessionID);
           return (
-            <li key={sessionID}>
+            <li className="narrow-or-short:shrink-0" key={sessionID}>
               <button
-                className={`min-h-8 rounded-full border px-2 py-1 text-xs ${secondaryButtonBorder} ${left === undefined ? secondaryButtonText : dangerText} ${secondaryButtonHoverBorder}`}
+                className={`min-h-8 rounded-full border px-2 py-1 text-xs narrow-or-short:min-h-11 narrow-or-short:whitespace-nowrap ${secondaryButtonBorder} ${left === undefined ? secondaryButtonText : dangerText} ${secondaryButtonHoverBorder}`}
                 onClick={() => onDeselect(sessionID)}
                 title={`Remove ${label} from this broadcast`}
                 type="button"
@@ -1008,11 +1094,11 @@ function BroadcastComposer({
           );
         })}
       </ul>
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-2 narrow-or-short:order-2 narrow-or-short:mt-0">
         <select
           aria-label="Delivery mode"
           className={`min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
-          onChange={(event) => setDelivery(event.target.value as MessageDeliveryMode)}
+          onChange={(event) => onDelivery(event.target.value as MessageDeliveryMode)}
           value={delivery}
         >
           {DELIVERY_CAPABILITIES.map((mode) => (
@@ -1024,14 +1110,26 @@ function BroadcastComposer({
       </div>
       <textarea
         aria-label="Broadcast message"
-        className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
-        onChange={(event) => setBody(event.target.value)}
+        className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 narrow-or-short:max-h-32 short:col-span-2 narrow-or-short:min-h-16! narrow-or-short:field-sizing-content short:max-h-16 ${inputClasses(true)}`}
+        onChange={(event) => onBody(event.target.value)}
         placeholder="One message, sent to each selected agent"
         rows={3}
         value={body}
       />
-      {excluded.length === 0 ? null : (
-        <p className={`mt-2 text-sm ${dangerText}`}>
+      {/* One notice at a time, in priority order: the limit, then a refused send, then the
+          exclusions. A higher notice hiding the Excluded line hides no name: every excluded
+          session's chip still carries its reason. */}
+      {overLimit ? (
+        <p className={composerLine}>
+          At most {MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach{" "}
+          {recipients.length}.
+        </p>
+      ) : send.isError ? (
+        <p className={composerLine}>
+          Could not send: {send.error instanceof Error ? send.error.message : "network error"}
+        </p>
+      ) : excluded.length === 0 ? null : (
+        <p className={composerLine}>
           Excluded:{" "}
           {excluded
             .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
@@ -1039,14 +1137,9 @@ function BroadcastComposer({
           . Nothing is sent to them, and no other mode is substituted.
         </p>
       )}
-      {send.isError ? (
-        <p className={`mt-2 text-sm ${dangerText}`}>
-          Could not send: {send.error instanceof Error ? send.error.message : "network error"}
-        </p>
-      ) : null}
       <button
-        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={recipients.length === 0 || body.trim() === "" || send.isPending}
+        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+        disabled={recipients.length === 0 || overLimit || body.trim() === "" || send.isPending}
         onClick={() => send.mutate()}
         type="button"
       >
@@ -1086,11 +1179,16 @@ export function AgentsPage(): ReactNode {
   // list after ticking a row must not quietly drop that row from the send. Every selected
   // session is named in the composer, so nothing is hidden either way.
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
-  const listed = filterAgents(agents, filters);
+  // The draft is page state too: the composer unmounts whenever the selection empties, and
+  // clearing a selection to pick again must not throw away a typed message or its mode. A
+  // successful send clears it.
+  const [draft, setDraft] = useState("");
+  const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
+  const matching = filterAgents(agents, filters);
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
   const { active, quiet, inactive } = partitionAgents(
-    listed,
+    matching,
     pinned,
     needsYouBySession,
     Date.now()
@@ -1130,28 +1228,15 @@ export function AgentsPage(): ReactNode {
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
         <>
-          <AgentFilterBar
-            agents={agents}
-            filters={filters}
-            listed={listed}
+          <AgentFilterBar agents={agents} filters={filters} onFilters={setFilters} />
+          <SelectionHeader
+            listed={agents}
+            matching={matching}
             onClear={() => setSelected(new Set())}
-            onFilters={setFilters}
-            onSelectAll={() =>
-              setSelected(
-                (current) => new Set([...current, ...listed.map((agent) => agent.session_id)])
-              )
-            }
-            selectedCount={selected.size}
+            onToggle={() => setSelected((current) => toggleMatching(matching, current))}
+            selected={selected}
           />
-          {selected.size === 0 ? null : (
-            <BroadcastComposer
-              agents={agents}
-              onDeselect={(sessionID) => select(sessionID, false)}
-              onSent={() => setSelected(new Set())}
-              selected={selected}
-            />
-          )}
-          {listed.length === 0 ? (
+          {matching.length === 0 ? (
             <EmptyState
               label="Agents filtered empty state"
               message="No agent matches these filters."
@@ -1190,8 +1275,24 @@ export function AgentsPage(): ReactNode {
               />
             </div>
           )}
+          {selected.size === 0 ? null : (
+            <BroadcastComposer
+              agents={agents}
+              body={draft}
+              delivery={delivery}
+              onBody={setDraft}
+              onDelivery={setDelivery}
+              onDeselect={(sessionID) => select(sessionID, false)}
+              onSent={() => {
+                setSelected(new Set());
+                setDraft("");
+              }}
+              selected={selected}
+            />
+          )}
         </>
       )}
+      <EndedAgentsWithReplies live={agents} />
     </section>
   );
 }

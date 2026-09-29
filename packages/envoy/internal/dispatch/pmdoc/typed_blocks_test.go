@@ -309,6 +309,29 @@ func TestTypedStringArrayAttributesUpdateAfterYjsReload(t *testing.T) {
 		t.Fatalf("update reloaded ask: %v", err)
 	}
 }
+
+// A typed block's attributes are a map, so a refusal that named the first undeclared one it met
+// named a different one from run to run; it names every undeclared attribute, sorted, reading the
+// markdown or checking a tree.
+func TestTypedBlockNamesItsUndeclaredAttributesSorted(t *testing.T) {
+	const want = `outside Proof schema: typed block "callout" does not declare attributes "bar", "foo"`
+	markdown := ":::callout{#block-1 kind=\"note\" title=\"T\" foo=\"x\" bar=\"y\"}\nBody.\n:::\n"
+	tree := &Node{Type: "doc", Children: []*Node{{
+		Type:     "callout",
+		Attrs:    Attrs{BlockIDAttr: "block-1", "kind": "note", "title": "T", "foo": "x", "bar": "y"},
+		Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Body."}}}},
+	}}}
+	// Go starts each map range at a random entry, so a hundred runs meet both orders.
+	for run := 0; run < 100; run++ {
+		if _, err := Parse(markdown); err == nil || err.Error() != want {
+			t.Fatalf("Parse(%q) = %v, want %q", markdown, err, want)
+		}
+		if err := tree.Validate(); err == nil || err.Error() != want {
+			t.Fatalf("Validate() = %v, want %q", err, want)
+		}
+	}
+}
+
 func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -331,8 +354,157 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     `does not declare attribute "priority"`,
 		},
 		{
+			// The browser editor's parser reads a name up to a space, so `title\tkind` is one name,
+			// which the schema does not declare.
+			name:     "a tab after a bare attribute",
+			markdown: ":::callout{#block-1 title\tkind=\"warning\"}\nBody.\n:::\n",
+			want:     "malformed directives are not supported",
+		},
+		{
+			name:     "a tab after a bare attribute at the end",
+			markdown: ":::callout{#block-1 kind=\"warning\" title\t}\nBody.\n:::\n",
+			want:     "malformed directives are not supported",
+		},
+		{
+			// The browser editor's parser continues no paragraph in a typed block lazily: the line
+			// ends the typed block, where goldmark reads it as the paragraph's.
+			name:     "a line continuing a paragraph in a typed block in a list item",
+			markdown: "- :::callout{#block-1 kind=\"note\" title=\"T\"}\n  p\ntail\n",
+			want:     "a line continuing a paragraph in a typed block from outside the block's container",
+		},
+		{
+			name:     "a line continuing a paragraph in a typed block in a quote",
+			markdown: "> :::callout{#block-1 kind=\"note\" title=\"T\"}\n> p\ntail\n",
+			want:     "a line continuing a paragraph in a typed block from outside the block's container",
+		},
+		{
+			// The browser editor's parser reads a label holding whitespace as no label.
+			name:     "a footnote definition whose label holds whitespace",
+			markdown: "[^x y]: note\n",
+			want:     "a footnote definition whose label holds whitespace",
+		},
+		{
+			// Goldmark reads a line continuing a quote, a list item or a footnote definition lazily
+			// after a table as the table's row; the browser editor's parser ends the table, and
+			// every container the line does not continue, there.
+			name:     "a lazy line after a table in a quote",
+			markdown: "> | a |\n> | - |\n> | b |\ntail\n",
+			want:     "a table a line continuing its container lazily would be a row of",
+		},
+		{
+			name:     "a lazy line after a table in a footnote definition in a list item",
+			markdown: "x[^n]\n\n* [^n]: | a |\n      | - |\n      | b |\n  tail\n",
+			want:     "a table a line continuing its container lazily would be a row of",
+		},
+		{
+			// Goldmark's table is a paragraph, so a line that cannot interrupt one - a list item
+			// numbered other than 1, an empty item, indented code - is its row; the browser editor's
+			// parser ends its table there and reads the line as that block.
+			name:     "an ordered item numbered 2 after a table",
+			markdown: "| a | b |\n| - | - |\n| 1 | 2 |\n2. a\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			name:     "indented code after a table in a quote",
+			markdown: "> | a |\n> | - |\n> | b |\n>     code\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			name:     "an empty item after a table in a footnote definition",
+			markdown: "x[^n]\n\n[^n]: | a |\n    | - |\n    | b |\n    *\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			// A lone `-` under the rows is a setext underline to goldmark, which trims every line of
+			// the paragraph before its table transformer reads it, and then an empty list item.
+			name:     "indented code before a lone dash after a table",
+			markdown: "| a |\n| - |\n    code\n-\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			name:     "the same in a footnote definition",
+			markdown: "x[^a1]\n\n[^a1]: | a | b |\n    | --- | --- |\n    | 1 | 2 |\n        indented code\n    -\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			// Where text stands before the table in its paragraph, goldmark makes that text a
+			// heading after the table, underlined by the dash; the browser editor's parser reads
+			// the paragraph, the table and an empty list item.
+			name:     "a lone dash under a table after text",
+			markdown: "text\n| a | b |\n| - | :-: |\n| 1 | 2 |\n-\n",
+			want:     "a lone - under a table that text stands before in its paragraph",
+		},
+		{
+			name:     "the same in a footnote definition in a quote",
+			markdown: "x[^a1]\n\n> [^a1]:     text\n>     | a | b |\n>     | - | :-: |\n>     | 1 | 2 |\n>     -\n",
+			want:     "a lone - under a table that text stands before in its paragraph",
+		},
+		{
+			// The browser editor's parser keeps a list whose item holds its content five or more
+			// columns in open across the code's first line, and so reads the code's later lines as
+			// a second code block.
+			name:     "an indented code block after a list whose item's content stands past it",
+			markdown: "100. a\n\n    x\n    y\n",
+			want:     "an indented code block right after a list, which the browser editor's parser splits after its first line",
+		},
+		{
+			name:     "the same, with tabs widening the item",
+			markdown: ">\t* \t> a\n>\n>\t  ```\n>\t      x\n>\t  ```\n",
+			want:     "an indented code block right after a list, which the browser editor's parser splits after its first line",
+		},
+		{
+			// A quote the next line does not continue stays open across the code's first line in
+			// the browser editor's parser, as a list does, so it reads each later line as a code
+			// block of its own.
+			name:     "an indented code block right after an empty quote",
+			markdown: ">\n    a\n    b\n",
+			want:     "an indented code block right after a quote, which the browser editor's parser splits after its first line",
+		},
+		{
+			name:     "the same after a quote holding a heading, a blank line in the code",
+			markdown: "> # h\n    a\n\n    b\n",
+			want:     "an indented code block right after a quote, which the browser editor's parser splits after its first line",
+		},
+		{
+			name:     "the same in a list item",
+			markdown: "- >\n      a\n\n      b\n",
+			want:     "an indented code block right after a quote, which the browser editor's parser splits after its first line",
+		},
+		{
 			name:     "Pandoc fenced div",
 			markdown: "::: {.callout}\nBody.\n:::\n",
+			want:     "Pandoc fenced divs and malformed directives are not supported",
+		},
+		{
+			// The browser editor's parser takes each line of a paragraph's source with the
+			// whitespace it opens with trimmed, so a line continuing the paragraph four or more
+			// columns in refuses it too.
+			name:     "a Pandoc fence continuing a paragraph four columns in",
+			markdown: "x\n    ::::\n",
+			want:     "Pandoc fenced divs and malformed directives are not supported",
+		},
+		{
+			// A paragraph's line passes that parser only as `:::` or a three-colon opening, so a
+			// four-colon one continuing a paragraph is refused where a block would open with it.
+			name:     "a four-colon typed block opening continuing a paragraph",
+			markdown: "x\n    ::::callout{#c1 kind=\"note\" title=\"\"}\n",
+			want:     "Pandoc fenced divs and malformed directives are not supported",
+		},
+		{
+			name:     "a leaf directive continuing a paragraph in a list item",
+			markdown: "- a\n        ::leaf\n",
+			want:     "leaf directives (::name) are not supported",
+		},
+		{
+			name:     "a text directive continuing a paragraph after a tab",
+			markdown: "x\n\t:t{a}\n",
+			want:     "text directives (:name{...}) are not supported",
+		},
+		{
+			// A list item numbered 10 cannot interrupt the paragraph, so the rest is the item's
+			// paragraph, its fence an inline code span over the line of colons.
+			name:     "the same in a paragraph an inline code span crosses",
+			markdown: "Para.\n1.\t10. ```\n          ::::\n        ```\n",
 			want:     "Pandoc fenced divs and malformed directives are not supported",
 		},
 		{

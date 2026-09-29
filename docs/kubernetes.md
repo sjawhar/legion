@@ -23,7 +23,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
-- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon inlines the prompts it composes from its own copy into each pod it runs, and `legion probe-image` resolves the task agents and skills this copy names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). They are not part of the packed plugin (its `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any prompt part is absent there;
+- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon resolves and validates its bundle at boot from that override or `role-prompts` beside its own executable, then snapshots it into its state directory before a pane can read it. It inlines that snapshot into each pod it runs, and `legion probe-image` resolves the task agents and skills the configured bundle names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). The role prompts are not part of the packed plugin (its `files` is `dist`), so the image supplies this explicit copy;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -112,7 +112,7 @@ unguarded. The workflow's `packages`/`contents` permissions apply to same-repo p
 repository takes no fork PRs, whose token would be read-only).
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
-— no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the sami-agents
+— no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
 host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is not a workstation). Iterate by
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
@@ -318,7 +318,7 @@ runtime:
     storage_class: gp2          # required: the tree volume's class (the cluster has no default)
     tree_volume: 20Gi           # default 20Gi
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production   # relative to legion.yaml's directory
-    context: legion-daemon@production   # required when the kubeconfig sets no current context
+    context: legion-daemon@example   # required when the kubeconfig sets no current context
     scheduling:                 # optional, beyond the Legion pool the runtime always selects
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
@@ -347,7 +347,7 @@ Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
 image probe's included, and refused where they name a path or variable of Legion's own or the
 worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
-keys alone, for the shim to export. `scripts/e2e/fixtures/operator-route/` is one operator's: the
+keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is one operator's: the
 Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
 overlay, and the pod that mounts them; the Stage 4a and 4b proofs run on it, each with its own copy
 of its ConfigMap.
@@ -584,7 +584,7 @@ first pod placed decides the node, and a request on a later pod would strand it.
 
 **The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
 trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
-raises the pool's `limits.cpu` in agent-c's Legion component to at least `4 × admission_cap`; until
+raises the `legion` NodePool's `limits.cpu` to at least `4 × admission_cap`; until
 then an `admission_cap` above 16 admits trees whose pods cannot schedule.
 
 ### Trust model: the provisioning token
@@ -625,8 +625,8 @@ on its way to github.com.
 
 ### RBAC the Go daemon needs
 
-The daemon runs as a restricted identity (production: the `legion-daemon` group, as the
-`production-legion-daemon` role). It needs:
+The daemon runs as a restricted identity (in production, an IAM role mapped to the `legion-daemon`
+group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
@@ -676,7 +676,7 @@ worker image's; and the top-level `provider_keys` maps each variable Oh My Pi re
 providers Secret, of which every pod then mounts those keys alone, for the shim to export.
 Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
 a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
-`provider_keys`. `scripts/e2e/fixtures/operator-route/` is one such operator's (the Go live
+`provider_keys`. `deploy/kubernetes/operator-route/` is one such operator's (the Go live
 harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token). [Operator
 configuration](#operator-configuration) is what an operator gives it.
 
@@ -777,15 +777,19 @@ claim's pod and the image probe's.
 
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
-  `service_account_token` must last at least 600 s, the least the API server issues. `volume_mounts`
+  `service_account_token` must last at least 600 s, the least the API server issues, and its
+  `audience` may not still hold a `${…}` placeholder, which nothing expands. `volume_mounts`
   are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
   ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
   Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
-  check. [`scripts/e2e/fixtures/operator-route/pod.yml`](../scripts/e2e/fixtures/operator-route/pod.yml)
-  is a complete one, the live harnesses': a `models.yml` and a settings overlay from a ConfigMap, and
-  a projected token its key command reads.
+  check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is a
+  complete one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
+  ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
+  and how `pod` and `provider_keys` compose; its `apply.sh` creates the ConfigMap. Both files are
+  mounted by `subPath`, which the kubelet never refreshes, so a changed ConfigMap reaches only pods
+  created after the change.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
@@ -798,7 +802,7 @@ claim's pod and the image probe's.
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a human
   approves the code there. On expiry or revocation the daemon starts a fresh login and logs a new
   code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
-  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, agent-c's admission cap)
+  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
   operator's middleman token. With the block, the worker container mounts that token read-only at
   `/var/run/legion/agent-secrets-token/token`, a memory-backed key directory at
@@ -1177,8 +1181,8 @@ keeping nothing until the daemon has answered, the command:
 1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
    file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
    holds no nkey user seed, a
-   role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or the checkout's
-   `packages/pi-envoy/roles`), a missing or blank instructions file, and an Oh My Pi invocation that
+   role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or `role-prompts` beside the
+   running `legion` executable), a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
    refuses a pi-legion-envoy it does not load, or one speaking another Go daemon API contract;

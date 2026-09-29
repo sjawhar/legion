@@ -26,13 +26,13 @@ already encrypted; nothing else on the host can reach that address:
 
 ```
 DISPATCH_LISTEN_HOST=100.x.y.z        # tailscale ip -4
-DISPATCH_SERVER_URL=http://sami-agents:8766 # the exact browser URL and OAuth callback origin
+DISPATCH_SERVER_URL=http://example-host-devbox:8766 # the exact browser URL and OAuth callback origin
 DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 ```
 
 The origin humans open in the browser is the OAuth callback origin: the server builds
 `<dispatch.serverUrl>/auth/callback` from `dispatch.serverUrl` in the mounted `envoy.json`, and
-the GitHub App must list exactly that URL. On Sami's devbox that is `http://sami-agents:8766`
+the GitHub App must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
 (recorded as `DISPATCH_PUBLIC_ORIGIN` in `compose/.env`); a deploy whose `/auth/start` redirect
 stops matching it breaks sign-in for everyone, so the auto-deployer checks the redirect after
 every deploy and rolls back on a mismatch.
@@ -104,7 +104,7 @@ restarts only `dispatch`.
 | `ENVOY_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`envoy`). Set with `ENVOY_OIDC_ISSUER` or not at all. |
 | `ENVOY_API_ALLOW_UNAUTHENTICATED` | Fargate transition only | Set to `1` only temporarily to start a non-loopback listener with neither credential. |
 | `ENVOY_HOST_BRIDGE` | no | Address used to reach host services; defaults to `127.0.0.1`. |
-| `ENVOY_WEBHOOKS` | no | Comma-separated enabled webhook providers. |
+| `ENVOY_WEBHOOKS` | no | Comma-separated enabled webhook providers. Without `github` the listener opens no CI store and publishes no CI settlements. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when GitHub webhooks are enabled. |
 | `ENVOY_GITHUB_MENTION_TRIGGER` | no | Defaults to `@legion`. |
 | `ENVOY_SLACK_SIGNING_SECRET` | conditional | Required when Slack webhooks are enabled. |
@@ -162,13 +162,11 @@ The Dispatch signing material is a named volume; the database is external.
 
 ## Backups and restore
 
-The database's nightly logical backup is not this compose's job: agent-c's
-`dispatch-backup` Fargate task (`meta/infra/pulumi/components/dispatch/backup.py`)
-`pg_dump`s the Aurora `dispatch` database into `production-dispatch-pg-backups`
-under the `dispatch/` prefix and pages `#eng-alerts` when a day has no dump; restores
-go through agent-c's `scripts/dispatch_restore.py`. `scripts/autodeploy.sh` still
-takes its own pre-deploy dump of `DATABASE_URL` before every image roll, kept locally
-for rollback.
+The database's nightly logical backup is not this compose's job: the production
+deployment's own scheduled backup task `pg_dump`s the `dispatch` database to object
+storage and alerts when a day has no dump; restores go through that deployment's own
+restore tooling. `scripts/autodeploy.sh` still takes its own pre-deploy dump of
+`DATABASE_URL` before every image roll, kept locally for rollback.
 
 ## Sync to a remote host
 

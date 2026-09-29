@@ -26,7 +26,15 @@ check() { # check DESCRIPTION true|false
 is() { [ "$1" = "$2" ] && echo true || echo false; }
 
 # contains <text> <regex>: true/false for check; greps the whole text.
-contains() { printf '%s\n' "$1" | grep -q -- "$2" && echo true || echo false; }
+#
+# A here-string, not a pipe. `printf … | grep -q` makes grep exit at the first match while
+# printf is still writing, so printf takes SIGPIPE and, under the harnesses' `set -o pipefail`,
+# the pipeline reports 141 and a matching text is reported as a MISS. It is a race, so it shows
+# up as one assertion failing in maybe one run of six, a different assertion each time, with
+# the case count unchanged — which is what makes it look like a mystery rather than a bug.
+# Measured on a 4000-line text with a match on line 1: 300/300 spurious with the pipe, 0/300
+# with the here-string.
+contains() { grep -q -- "$2" <<<"$1" && echo true || echo false; }
 
 summary() { # summary WHAT-WAS-TESTED
   echo

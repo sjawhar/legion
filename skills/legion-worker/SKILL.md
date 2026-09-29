@@ -188,11 +188,17 @@ reviewer, or an architect (in Legion's own deployment, `legion-implementer[bot]`
 check
 `jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
 shows your role's App in both columns **on every commit you made** — not on the whole list:
-earlier phases' commits are legitimately authored by their own role's App, and a conflict-forced
-rebase legitimately sets the committer of every rebased commit, other roles' included, to the
-rebaser. A wrong identity on your own commit, the other App or none, is a pane-environment
-problem to report to the architect, not something to pin
-(`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
+earlier phases' commits are legitimately authored by their own role's App. Their *committer* is
+a different matter, and no longer noise to accept. Resolving a conflict rewrites nothing now —
+it is the forward merge above — so it changes no committer at all, and the one rewrite still
+open to you (*Rewriting pushed commits*, below) resets the committer only of commits on your own
+chain that descend from the commit you named, after its guard cleared. Another role's commit
+carrying you as committer, which you did not rewrite that way, is evidence that something
+rewrote commits it should not have — the observable symptom of LEGION-118. Stop and send the
+architect that log; do not accept it as a side effect. A wrong identity on your own commit, the
+other App or none, is a pane-environment problem to report to the architect, not something to
+pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
+Hazard 1).
 Your session receives the credential capability it needs; invoke GitHub through the
 credential helper:
 
@@ -285,9 +291,11 @@ later phase keeps it current rather than replacing it:
 - Thread <id>: fixed in <commit-sha> — <one line>.
 - Thread <id>: not a defect — <reason>.
 `legion threads resolve --pr <n> --repo <owner>/<repo>` at <head-sha>:
-resolved <thread URL>
+resolved <thread URL> — its opener's acceptance
+resolved <thread URL> — the Legion reviewer's acceptance of a bot's thread
 left open <thread URL> — newest reply by <login> is not an acceptance
 left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
+left open <thread URL> — newest reply by <login> is not its opener's or the Legion reviewer's acceptance
 
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
@@ -329,7 +337,8 @@ this proof.
 
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
   thread gets its own line naming the fixing commit or the reason it isn't a defect. The
-  reviewer answers each thread it opened with exactly one of `Accepted: fixed in <commit> — <one line>`,
+  reviewer answers each thread it opened, and each thread a bot opened that is none of Legion's
+  role Apps, with exactly one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
   `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
@@ -341,9 +350,16 @@ this proof.
   In a Legion pane, the **implementer** runs the command before every push that answers a review
   (the corrective push and the final `.legion/` deletion push) and pastes its output into the
   `Threads` section. The command resolves each unresolved thread whose newest submitted comment is
-  the opener's own `Accepted:` reply, one `resolveReviewThread` per thread, prints `resolved <url>`
-  or `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the
-  thread's URL and GitHub's message when GitHub refuses one.
+  the opener's own `Accepted:` reply. On a thread a bot account opened that is none of Legion's
+  role Apps (the daemon names them, keyed by App role), the Legion reviewer's `Accepted:` also
+  closes it. GitHub cannot tell a CI bot, which never accepts, from a person whose `gh` is routed
+  to an App, so the reviewer adjudicates such a finding, and it may accept one an App-routed person
+  raised. The subject of a finding never closes it: the implementer's `Fixed in <commit>: …` or
+  `Declined: …` answers a thread and closes none. A thread either Legion App opened, a reviewer's
+  finding included, still needs its opener's `Accepted:`. It makes one `resolveReviewThread` per
+  thread, prints `resolved <url> — <whose acceptance>` (its opener's, or the Legion reviewer's on a
+  bot's thread, so the ledger shows which) or `left open <url> — newest reply by <login> is …`
+  naming why, and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one.
 
   Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
   with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
@@ -353,15 +369,18 @@ this proof.
     pageInfo { hasNextPage endCursor }
     nodes {
       id isResolved
-      opener: comments(first: 1) { nodes { author { login } } }
-      newest: comments(last: 1) { nodes { author { login } body state } }
+      opener: comments(first: 1) { nodes { author { __typename login } } }
+      newest: comments(last: 1) { nodes { author { __typename login } body state } }
     }
   }
   ```
 
-  Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
-  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. For each
-  such thread:
+  Resolve only when the newest comment is submitted, its `author` is the opener's account (the same
+  `__typename` and `login`: a login alone is a string anyone may register), and its `body`, after
+  removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
+  grant nothing names Legion's own App logins, so this route closes a bot's thread only on its
+  opener's `Accepted:`: leave one the Legion reviewer accepted for the implementer's or merger's
+  run in a pane, or report it. For each thread to resolve:
 
   ```graphql
   mutation($threadId: ID!) {
@@ -377,14 +396,17 @@ this proof.
   changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
   Findings about naming, duplication, or wording are batched into the single `Fast-follow`
   line instead of iterating per push.
-- **Rebase only on a real conflict, except after a base retarget.** Sami, 2026-09-11, verbatim:
+- **Reintegrate the base only on a real conflict, except after a base retarget — and with a
+  merge, never `jj rebase`.** Sami, 2026-09-11, verbatim:
   "Please don't do unnecessary rebases (i.e. unless there are merge conflicts). The CI queue is too long and slow."
-  The implementer rebases the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
-  because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never rebase to
+  The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
+  because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
   pick up `main` or refresh CI. A single failed CI job is re-run on its own with `legion gh -- run rerun <run-id> --failed`, never by
   pushing a new commit. A conflict-forced rebase that leaves the branch's diff unchanged is a
-  confirmation, not a new round (see *The unchanged-diff check* below). Before rebasing, record
-  the fingerprint at the current tip; after pushing the rebased branch, record it at the new
+  confirmation, not a new round (see *The unchanged-diff check* below); that name is the event's,
+  kept by the rules below and the learnings that cite it, and the operation it names is always
+  the merge here. Before merging, record
+  the fingerprint at the current tip; after pushing the merged branch, record it at the new
   tip; post one PR comment (Legion footer):
   `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
   Every issue workspace is a `jj workspace` of the same shared repository and operation log, and
@@ -633,12 +655,19 @@ remote branch sideways onto your commit and drops theirs (jj 0.45.1:
 push is refused by jj itself (`unexpectedly moved on the remote`).
 
 **Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
-rewrite of a commit you already pushed — leaves the pushed tip outside `::@-`, so record
-that tip first, after a fetch and while your chain still descends from it:
+rewrite of a commit you already pushed — is the LEGION-118 hazard in a second shape: jj rebases
+every descendant of any commit it rewrites, and in the one shared repository a descendant can be
+another tree's branch stacked on your pushed commit, which then moves, with its bookmark, onto a
+rewritten copy. So look for a descendant outside your own chain first, and record the pushed tip
+— which the rewrite leaves outside `::@-` — after a fetch and while your chain still descends
+from it:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
   jj -R "$LEGION_WORKSPACE" git fetch && \
+  foreign=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
+    -r 'descendants(<the commit you are about to rewrite>) ~ ::@') && \
+  { [ -z "$foreign" ] || { echo "not mine, and descends from the commit to rewrite: $foreign" >&2; false; }; } && \
   behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
     -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
   { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
@@ -646,6 +675,13 @@ cd -- "$LEGION_WORKSPACE" && \
     -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin")' \
     >"${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip"
 ```
+
+`descendants(<commit>) ~ ::@` is everything built on the commit you are about to rewrite that is
+not on your own chain. Non-empty means the rewrite would move work that is not yours: do not
+rewrite it. Put the change in a new commit on top instead, and report the listed commits to the
+architect. On a two-workspace rig of this shape a `jj squash --into` a pushed commit reported
+`Rebased 13 descendant commits` and moved a second issue's twelve commits and its bookmark; the
+check above listed those thirteen and refused before anything moved.
 
 Then rewrite, resolve, and push with the procedure above. It lets the remote branch sit on the
 tip you recorded, which the rewrite replaced, and on nothing else: when another role pushed after

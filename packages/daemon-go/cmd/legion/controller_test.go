@@ -22,7 +22,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -230,10 +229,12 @@ exit %[2]d
 	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", prompts.SourceRolePromptsDir())
+	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	c.installPlugin(api.GoDaemonAPIVersion)
 	return c
 }
+
+
 
 // installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
 // declaring contract, and has the recording Oh My Pi load it.
@@ -451,9 +452,9 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 
-	controllerPrompt, err := os.ReadFile(filepath.Join(prompts.SourceRolePromptsDir(), "controller-root.md"))
+	controllerPrompt, err := os.ReadFile(filepath.Join(c.defaultDir, "prompts", "shared", "controller-root.md"))
 	if err != nil {
-		t.Fatalf("read controller-root.md: %v", err)
+		t.Fatalf("read the controller prompt snapshot: %v", err)
 	}
 	instructions, err := os.ReadFile(filepath.Join(c.defaultDir, "deployment-instructions.md"))
 	if err != nil {

@@ -213,11 +213,16 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
   });
 
-  test("dispatch_issues requires a project and rejects a limit above 250", () => {
+  test("dispatch_issues requires a project and accepts only a nonnegative integer offset", () => {
     const schema = schemaFor("dispatch_issues");
+    const spec = dispatchToolSpecs.find((candidate) => candidate.name === "dispatch_issues");
+    if (!spec) throw new Error("dispatch_issues spec is missing");
+    expect(schema.safeParse(spec.example).success).toBe(true);
 
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ project: "AGENTC", limit: 251 }).success).toBe(false);
+    expect(schema.safeParse({ project: "AGENTC", offset: -1 }).success).toBe(false);
+    expect(schema.safeParse({ project: "AGENTC", offset: 0.5 }).success).toBe(false);
     expect(schema.safeParse({ project: "AGENTC", status: "not_a_status" }).success).toBe(false);
     expect(
       schema.safeParse({
@@ -228,6 +233,7 @@ describe("dispatchToolSpecs", () => {
         priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
         limit: 250,
+        offset: 0,
       }).success
     ).toBe(true);
   });
@@ -259,6 +265,19 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ issue: "DSP-1", body: "Implementation started." }).success).toBe(
       true
     );
+  });
+
+  test("dispatch_read reads a direct-message conversation by message id alone", () => {
+    const schema = schemaFor("dispatch_read");
+    const message = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+
+    // A human's direct message and the replies to it belong to no issue or document, so the
+    // message id is the whole address of that conversation.
+    expect(schema.safeParse({ message }).success).toBe(true);
+    for (const owner of [{ issue: "DSP-1" }, { project: "CORE", artifact: "runbook" }]) {
+      expect(schema.safeParse({ message, ...owner }).success, JSON.stringify(owner)).toBe(false);
+    }
+    expect(schema.safeParse({}).success).toBe(false);
   });
 
   test("dispatch_whoami accepts no arguments and rejects any key", () => {

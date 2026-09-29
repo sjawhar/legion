@@ -3,7 +3,6 @@ package bus_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -153,7 +152,7 @@ func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 	if errors.Is(err, bus.ErrReceiptTimeout) {
 		t.Fatalf("a flush timeout was reported as the receipt sentinel: %v", err)
 	}
-	if !errors.Is(err, natsgo.ErrTimeout) || !strings.HasPrefix(err.Error(), "bus: flush forward: ") {
+	if !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("RequestCoreTo error = %v, want a wrapped nats.ErrTimeout from the flush", err)
 	}
 	if elapsed < window || elapsed > 2*time.Second {

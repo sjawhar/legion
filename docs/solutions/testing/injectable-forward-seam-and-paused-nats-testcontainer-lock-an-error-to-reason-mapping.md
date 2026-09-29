@@ -64,7 +64,7 @@ then a table with one row per error shape, deterministic and instant:
 
 ```go
 {"raw nats.ErrTimeout from the flush", natsgo.ErrTimeout, "delivery_failed", "listener role forward failed"},
-{"flush timeout wrapped by the client", fmt.Errorf("bus: flush forward: %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
+{"flush timeout wrapped by the client", fmt.Errorf("bus: flush publish to \"agent.x\": %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
 {"bus.ErrReceiptTimeout", bus.ErrReceiptTimeout, "receipt_timeout", "listener role receipt timed out"},
 {"bus.ErrReceiptTimeout wrapped", fmt.Errorf("forward: %w", bus.ErrReceiptTimeout), "receipt_timeout", "listener role receipt timed out"},
 ```
@@ -123,7 +123,7 @@ t.Cleanup(func() { _ = docker.ContainerUnpause(context.Background(), ctr.GetCont
 
 err = client.RequestCoreTo(subject, item, 500*time.Millisecond)
 // want: err != nil; !errors.Is(err, bus.ErrReceiptTimeout); errors.Is(err, natsgo.ErrTimeout);
-//       strings.HasPrefix(err.Error(), "bus: flush forward: "); elapsed within [window, 2s]
+//       elapsed within [window, 2s]
 ```
 
 Why this reproduces the reviewer's scenario faithfully: a paused server keeps the TCP connection open,
@@ -164,4 +164,3 @@ issue:
 
 - [Receipt-backed core NATS delivery to current holders](../architecture-patterns/core-nats-receipt-backed-current-holder-delivery.md) — the pattern these locks protect, and its *Pitfalls learned on LEGION-108* section for why the flush and receipt exits needed distinct errors.
 - [Race regression tests: gate the racing side, hard-assert the precondition, prove the pre-fix failure](race-regression-tests-that-fail-before-the-fix.md) — the Bun-side twin of "a lock must fail before the fix".
-- [testcontainers-go resolves all Docker credhelpers](testcontainers-go-resolves-all-docker-credhelpers.md) — the fixture these tests share, and its one known local failure mode.

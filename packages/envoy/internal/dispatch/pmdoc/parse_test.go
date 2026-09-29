@@ -2,8 +2,10 @@ package pmdoc
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseMatchesMilkdownForFixtures(t *testing.T) {
@@ -69,6 +71,70 @@ func TestParseRejectsBlockHTML(t *testing.T) {
 	_, err := Parse("<div>\nblock HTML\n</div>\n")
 	if err == nil || !errors.Is(err, ErrSchema) {
 		t.Fatalf("Parse(block HTML) = %v, want ErrSchema", err)
+	}
+}
+
+// The browser editor's parser reads a line of `=` or `-` continuing the paragraph of a footnote
+// definition inside another as a setext underline, where CommonMark reads it as the paragraph's
+// text, and resolves a reference to a definition inside a typed block only from inside a typed
+// block or after it, so a definition inside either is refused.
+func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T) {
+	for _, test := range []struct{ markdown, reason string }{
+		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n", "a footnote definition inside another"},
+		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n    =\n", "a footnote definition inside another"},
+		{"Ref[^n].\n\n[^n]: > a\n    >\n    > [^1]: x\n", "a footnote definition inside another"},
+		{"Ref[^1].\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n[^1]: x\n:::\n", "a footnote definition inside a typed block"},
+		{":::callout{#c1 kind=\"note\" title=\"T\"}\n> [^1]: x\n:::\n\nRef[^1].\n", "a footnote definition inside a typed block"},
+	} {
+		_, err := Parse(test.markdown)
+		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), test.reason) {
+			t.Errorf("Parse(%q) error = %v, want a schema refusal naming %s", test.markdown, err, test.reason)
+		}
+	}
+}
+
+// A linked image is read as the browser editor stores it: the image without the link, which the
+// editor's store keeps on text alone (LEGION-365). A refusal would leave a document the editor
+// holds unsavable, so the link's text around the image keeps its link and the write is taken.
+func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
+	for _, test := range []struct{ linked, stored string }{
+		{"[![x](i.png)](https://u.com)\n", "![x](i.png)\n"},
+		{"see [a ![x](i.png) b](https://u.com \"t\") now\n", "see [a ](https://u.com \"t\")![x](i.png)[ b](https://u.com \"t\") now\n"},
+		{"- **[![x](i.png)](https://u.com)**\n", "- ![x](i.png)\n"},
+	} {
+		got, err := ParseForWrite(test.linked, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", test.linked, err)
+			continue
+		}
+		want, err := Parse(test.stored)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.stored, err)
+		}
+		if !got.Equal(want) {
+			markdown, _ := Render(got)
+			t.Errorf("ParseForWrite(%q) reads as %q, want what %q reads as", test.linked, markdown, test.stored)
+		}
+	}
+}
+
+// The browser editor's parser matches a reference to its definition by the labels as written,
+// before their character references are decoded, and a label is stored and written decoded, so a
+// reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
+// `[^&auml;]: `, but written `[^\&AUML;]` beside `[^ä]: ` it is text. One whose decoded label still
+// matches the definition's reads.
+func TestParseRefusesAReferenceMatchingItsDefinitionOnlyAsWritten(t *testing.T) {
+	for _, markdown := range []string{
+		"x[^&auml;] and [^&AUML;]\n\n[^&auml;]: d\n",
+		"x[^&auml;]\n\n[^&AUML;]: d\n",
+	} {
+		if _, err := Parse(markdown); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "only as written") {
+			t.Errorf("Parse(%q) error = %v, want a schema refusal of a reference matching only as written", markdown, err)
+		}
+	}
+	readable := "x[^&auml;] and [^&Auml;]\n\n[^&auml;]: d\n"
+	if _, err := Parse(readable); err != nil {
+		t.Errorf("Parse(%q): %v", readable, err)
 	}
 }
 
@@ -210,5 +276,85 @@ func TestParseReadsAFootnoteDefinitionEndingInABlock(t *testing.T) {
 				t.Fatalf("Render(Parse(%q)) = %q, which does not read back the same (%v)", test.markdown, markdown, err)
 			}
 		})
+	}
+}
+
+// A reference goldmark's exact match leaves unresolved is looked up among the definitions by its
+// label's key once, not compared with every definition: with 2,000 definitions and 2,000 such
+// references a document parses in about the time it takes with the definitions written as plain
+// paragraphs, where comparing each pair took over a hundred times as long. The two timings are
+// taken in the same run, so a slow machine slows both.
+func TestParseResolvesUnmatchedReferencesWithoutComparingEveryDefinition(t *testing.T) {
+	document := func(definitions bool) string {
+		var markdown strings.Builder
+		for range 2000 {
+			markdown.WriteString("Unmatched [^QQ].\n\n")
+		}
+		for index := range 2000 {
+			if definitions {
+				fmt.Fprintf(&markdown, "[^d%d]: x\n\n", index)
+			} else {
+				fmt.Fprintf(&markdown, "d%d: x\n\n", index)
+			}
+		}
+		return markdown.String()
+	}
+	fastest := func(markdown string) time.Duration {
+		best := time.Duration(1<<63 - 1)
+		for range 3 {
+			start := time.Now()
+			if _, err := Parse(markdown); err != nil {
+				t.Fatal(err)
+			}
+			best = min(best, time.Since(start))
+		}
+		return best
+	}
+	plain, withDefinitions := fastest(document(false)), fastest(document(true))
+	if withDefinitions > 10*plain {
+		t.Fatalf("parsing took %v with 2,000 definitions and %v with them as paragraphs, want under ten times as long", withDefinitions, plain)
+	}
+}
+
+// A panic in this package's reader or renderer is recovered at the entry point, so it never
+// crashes the caller, and is this package's bug: an ErrPanic, which callers answer as an internal
+// error, never an ErrSchema refusal of the caller's markdown.
+func TestAPanicWhileReadingIsAnInternalErrorNotARefusal(t *testing.T) {
+	read := func() (doc *Node, err error) {
+		defer recoverPanic(&doc, &err, "reading markdown")
+		panic("can not call with inline nodes.")
+	}
+	doc, err := read()
+	if doc != nil || !errors.Is(err, ErrPanic) || errors.Is(err, ErrSchema) || !strings.HasPrefix(err.Error(), "panic: ") {
+		t.Fatalf("read() = %v, %v; want nil and an ErrPanic that is not an ErrSchema, reading \"panic: ...\"", doc, err)
+	}
+}
+
+// A run that can both open and close pairs by the lengths it has left once a pair used part of
+// it, as the browser editor's parser pairs it: after the strong pair, `***Note:****&#32;see
+// below*` leaves the closer's other `**` as text, and the opener's last `*` pairs with the final
+// one. Goldmark judged the lengths the runs were written with and paired that `*` with the
+// closer, reading " see below" as emphasis alone.
+func TestParsePairsARunByTheLengthsItHasLeft(t *testing.T) {
+	nodes, err := ParseInline("***Note:****&#32;see below*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, node := range nodes {
+		var marks []string
+		for _, mark := range node.Marks {
+			marks = append(marks, mark.Type)
+		}
+		got = append(got, fmt.Sprintf("%q %v", node.Text, marks))
+	}
+	want := []string{`"Note:" [emphasis strong]`, `"** see below" [emphasis]`}
+	if strings.Join(got, "; ") != strings.Join(want, "; ") {
+		t.Errorf("ParseInline = %v, want %v", got, want)
+	}
+	for _, line := range got {
+		if line == `" see below" [emphasis]` {
+			t.Errorf("ParseInline still reads %s, goldmark's pairing of the closer's last delimiter", line)
+		}
 	}
 }

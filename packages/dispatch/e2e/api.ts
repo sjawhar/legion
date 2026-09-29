@@ -1,5 +1,4 @@
 import type { EditArtifactInput } from "@legion/contracts";
-
 import type {
   Actor,
   AnswerAskInput,
@@ -12,6 +11,7 @@ import type {
   Ask,
   AskFollower,
   AskRead,
+  BroadcastCreated,
   BroadcastRead,
   BroadcastSummary,
   Comment,
@@ -19,6 +19,7 @@ import type {
   CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
+  CreateBroadcastInput,
   CreateCommentInput,
   CreateMessageInput,
   CreateProjectInput,
@@ -33,12 +34,14 @@ import type {
   MessageRead,
   Project,
   UpdateIssueInput,
+  UserAgentState,
+  UserAgentStateInput,
   UserIssueState,
   Version,
 } from "../web/src/api/types";
+import { dispatchPort } from "./harness-ports";
 
-const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${e2ePort}`;
+const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
 // e2e/run-server.sh, so an E2E_AGENT_TOKEN left in the shell from a deployed run would only
 // make every bearer-seeded call 401 against it.
@@ -432,6 +435,13 @@ export function createAgentMessage(
   );
 }
 
+export function createBroadcast(
+  input: CreateBroadcastInput,
+  options: ApiOptions = {}
+): Promise<BroadcastCreated> {
+  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
+}
+
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
   return request<BroadcastSummary[]>("/api/v1/broadcasts", "GET", undefined, options);
 }
@@ -458,13 +468,17 @@ export function getMessage(
   );
 }
 
+/** A session answers a targeted message's delivery. `followUp` is `dispatch_message`'s
+ *  `?follow_up=true`: once the attempt is answered, other text posts as a follow-up instead of
+ *  handing back the stored reply. */
 export function replyToMessageDelivery(
   messageID: string,
   input: { attempt: number; body?: string; error?: string },
-  actor: Actor
+  actor: Actor,
+  { followUp = false }: { followUp?: boolean } = {}
 ): Promise<Message | MessageDelivery> {
   return request<Message | MessageDelivery>(
-    `/api/v1/messages/${encodeURIComponent(messageID)}/reply`,
+    `/api/v1/messages/${encodeURIComponent(messageID)}/reply${followUp ? "?follow_up=true" : ""}`,
     "POST",
     input,
     {
@@ -494,10 +508,10 @@ export function replyToCommentDelivery(
 /** The signed-in human's own per-agent conversation state, as another of their devices sets it. */
 export function putAgentState(
   sessionID: string,
-  input: { cleared_before: string },
+  input: UserAgentStateInput,
   options: ApiOptions = {}
-): Promise<{ cleared_before: string }> {
-  return request<{ cleared_before: string }>(
+): Promise<UserAgentState> {
+  return request<UserAgentState>(
     `/api/v1/me/agents/${encodeURIComponent(sessionID)}/state`,
     "PUT",
     input,
