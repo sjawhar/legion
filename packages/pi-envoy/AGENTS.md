@@ -294,13 +294,14 @@ For a file command and a tmux socket, an unknown component after a permitted-roo
 refused, even when it is final: it can contain `/` and `..` itself. A visible `..` after a glob or
 an unknown component is refused too. Redirections and `tee` deliberately allow unknown components
 anywhere after a permitted-root prefix: both `echo v > "$LEGION_WORKSPACE/$x"` and
-`echo v > "$LEGION_WORKSPACE/$x/out.log"` can overwrite outside the roots. Refusing only the
-middle-component form raises the all-refusal walk from 63 to 110: 46 redirections and one `tee`.
-LEGION-379 tracks this residual. One residual of this family is a symlink the same command both
-creates and writes through: it is not on disk when the guard reads the command. Others are tracked
-rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an expansion slice
-(LEGION-376), a `sed` script's own writes (LEGION-377), and a word bash passes no argument for read
-as a command name, a wrapper's or `xargs`'s or `find -exec`'s program, or `cd`'s directory
+`echo v > "$LEGION_WORKSPACE/$x/out.log"` can overwrite outside the roots. At commit
+`70483b24accd094ad727eafdf1dc2dcbc3991d8f`, the all-refusal walk is 64 under the selected policy;
+refusing only middle components is 111 (46 redirections and one `tee`), and refusing every unknown
+component is 114. LEGION-379 tracks this residual. One residual of this family is a symlink the
+same command both creates and writes through: it is not on disk when the guard reads the command.
+Others are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
+expansion slice (LEGION-376), a `sed` script's own writes (LEGION-377), and a word bash passes no
+argument for read as a command name, a wrapper's or `xargs`'s or `find -exec`'s program, or `cd`'s
 (LEGION-378). `src/legion/pane-guard-write-rows.ts` holds the rows this is measured on, and
 `scripts/measure-pane-guard-writes.ts` runs them against any guard build.
 

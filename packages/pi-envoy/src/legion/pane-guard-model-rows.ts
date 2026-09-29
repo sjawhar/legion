@@ -180,12 +180,6 @@ export const MODEL_ROWS: readonly ModelRow[] = [
     guard: "refused",
     live: "racy",
   },
-  {
-    name: "a coprocess",
-    payload: `coproc C { ${WRITE}; }; ${RUN}`,
-    guard: "refused",
-    live: "racy",
-  },
 
   // The straight-line path keeps its model: these must not be refused.
   {

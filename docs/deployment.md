@@ -65,11 +65,13 @@ cannot read is refused. For a file command or tmux socket, every unknown compone
 permitted-root prefix is refused, even if it is final: that one component can contain `/` and `..`
 itself. Redirections and `tee` deliberately allow unknown components anywhere after a
 permitted-root prefix: both `echo v > "$LEGION_WORKSPACE/$x"` and
-`echo v > "$LEGION_WORKSPACE/$x/out.log"` can overwrite outside the roots. Refusing only the
-middle-component form raises the all-refusal walk from 63 to 110: 46 redirections and one `tee`.
-LEGION-379 tracks this residual. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
-kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`,
-then `$TMUX`, then the default socket) and refuses a resolved path outside the pane roots. `kill`
+`echo v > "$LEGION_WORKSPACE/$x/out.log"` can overwrite outside the roots. At commit
+`70483b24accd094ad727eafdf1dc2dcbc3991d8f`, the all-refusal walk is 64 under the selected policy;
+refusing only middle components is 111 (46 redirections and one `tee`), and refusing every unknown
+component is 114. LEGION-379 tracks this residual. `pkill`, `killall`, and `fuser -k` are refused
+outright. For `tmux kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under
+`TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then the default socket) and refuses a resolved path outside
+the pane roots. `kill`
 only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every
 refusal names the target, where it resolved, and the rule, so the agent can rewrite the command.
 
