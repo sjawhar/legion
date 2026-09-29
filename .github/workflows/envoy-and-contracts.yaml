@@ -127,6 +127,14 @@ jobs:
               - 'packages/workspace/package.json'
               - '.dockerignore'
               - '.github/workflows/envoy-and-contracts.yaml'
+              # The job also COMPILES TestSmoke, in workspace mode, so the workspace files and
+              # every module in it belong here too — `envoy` carried go.work and go.work.sum and
+              # this filter must not be narrower. packages/daemon-go requires testcontainers-go,
+              # so its manifests move the smoke's module graph.
+              - 'go.work'
+              - 'go.work.sum'
+              - 'packages/daemon-go/go.mod'
+              - 'packages/daemon-go/go.sum'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, must run it.

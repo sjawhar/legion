@@ -245,16 +245,19 @@ def mount_sources(instruction: str) -> list[str]:
 # command substitution, `eval`, `docker buildx bake`, `docker compose up --build` — and a shape
 # it cannot see is an image whose inputs no trigger owes. The build form this check CAN read is
 # a `docker/build-push-action` step, so a run step matching any of these words fails and says
-# so. This catches the words, not every build: a script file, a composite action, or a build
-# behind a variable still passes unseen.
+# so. `docker buildx b` covers every subcommand that starts a build, since the abbreviation is
+# what a reviewer's counterexample used. This catches the words, not every build: a script
+# file, a composite action, or a command assembled from a variable still passes unseen.
 RUN_STEP_BUILD = re.compile(
     r"docker\s+build(?![\w-])"
-    r"|docker\s+buildx\s+(build|bake)(?![\w-])"
-    r"|docker(\s+compose|-compose)\b[^\n]*--build"
+    r"|docker\s+buildx\s+b[a-z]*"
+    r"|docker(\s+compose|-compose)\b[^\n]*(--build|\sbuild\b)"
     r"|\bbuildah\b"
     r"|\bkaniko\b|gcr\.io/kaniko-project",
 )
-
+# An action that builds an image and is not the one this check reads. Trusting only the build
+# form it can read means refusing the others rather than ignoring them.
+IMAGE_ACTION = re.compile(r"docker/bake-action|buildah|kaniko|ko-build|buildpacks", re.I)
 
 def context_files(context: str, source: str, ignored) -> list[str]:
     """Repository paths of the files a context source brings in, after the .dockerignore."""
@@ -551,10 +554,18 @@ for workflow, document in documents.items():
                 dockerfile = str(options.get("file", posixpath.join(context, "Dockerfile")))
                 builds.append((workflow, job_name, step, context, posixpath.normpath(dockerfile)))
                 continue
+            uses = str(step.get("uses", ""))
+            where = step.get("name") or "an unnamed step"
+            if IMAGE_ACTION.search(uses):
+                problems.append(
+                    f"::error file={workflow}::{workflow}: {where} builds an image with "
+                    f"{uses}; build images with docker/build-push-action so this check can "
+                    f"read the build"
+                )
+                continue
             script = step.get("run")
             if not isinstance(script, str) or not RUN_STEP_BUILD.search(script):
                 continue
-            where = step.get("name") or "an unnamed run step"
             problems.append(
                 f"::error file={workflow}::{workflow}: {where} builds an image in a run step; "
                 f"build images with docker/build-push-action so this check can read the build"

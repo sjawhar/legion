@@ -613,6 +613,12 @@ step_if "$root" "vars.RUN_IT"
 run_check "$root"
 check "a step gate on vars is refused too" "$(is "$status" 1)"
 
+root=$(fixture step-gate-false)
+gate_probe "$root" "$unchanged"
+step_if "$root" "false"
+run_check "$root"
+check "a step gate of false is refused too" "$(is "$status" 1)"
+
 echo "case: a run step that builds an image is refused, whatever shape it takes"
 while IFS='|' read -r label body; do
   [ -n "$label" ] || continue
@@ -624,13 +630,28 @@ while IFS='|' read -r label body; do
 done <<'SHAPES'
 plain|docker build -f docker/Dockerfile .
 buildx|docker buildx build --load -f docker/Dockerfile .
-bake|docker buildx bake --load listener
-compose|docker compose up --build -d
+V1-abbreviated|docker buildx b --load -f docker/Dockerfile .
+V2-bake|docker buildx bake --load listener
+V3-compose-up|docker compose up --build -d
+V4-compose-build|docker-compose build listener
 eval|eval "docker build -f docker/Dockerfile ."
 github-env|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
 buildah|buildah bud -f docker/Dockerfile .
 kaniko|/kaniko/executor --dockerfile docker/Dockerfile --context .
 SHAPES
+
+# V5: an action that builds an image and is not the one this check reads.
+root=$(fixture tripwire-bake-action)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+head, _, _ = text.partition("      - uses: docker/build-push-action@v6")
+open(path, "w").write(f"{head}      - name: Bake\n        uses: docker/bake-action@v5\n")
+PYEOF
+run_check "$root"
+check "V5 docker/bake-action is refused" "$(is "$status" 1)"
+check "  and names the action" "$(contains "$out" 'builds an image with docker/bake-action@v5')"
 
 root=$(fixture tripwire-not-a-build)
 run_step "$root" 'docker pull debian:trixie-slim'
