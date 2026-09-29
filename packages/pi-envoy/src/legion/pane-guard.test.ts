@@ -233,6 +233,13 @@ describe("resolution", () => {
     expect(bash(`rm -rf "\${HOME:-/nowhere}"`)).toContain(home);
   });
 
+  test("tells an unresolvable in-workspace path how to become resolvable", () => {
+    const reason = bash("rm -rf out/tmp/../old");
+    expect(reason).toContain("cannot know where the `..` after it leads");
+    expect(reason).toContain("Make the unresolved path component resolvable in an earlier command");
+    expect(reason).not.toContain("Name a path under $LEGION_WORKSPACE");
+  });
+
   test("keeps a variable unset after unset, apart from empty and from the pane's environment", () => {
     const ssh = path.join(home, ".ssh");
     // `-` and `+` test whether a name is set, where `:-` and `:+` test whether it is non-empty.
@@ -318,13 +325,38 @@ describe("resolution", () => {
   });
 
   test("resolves the paths realpath, dirname, basename and readlink -f print", () => {
-    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/a/../b"); rm -rf "$d"')).toBeUndefined();
-    expect(bash('d=$(realpath -m -- "$HOME/a/../.ssh"); rm -rf "$d"')).toContain(
+    expect(
+      bash('d=$(realpath -m -- "$LEGION_WORKSPACE/../LEGION-1/b"); rm -rf "$d"')
+    ).toBeUndefined();
+    expect(bash('d=$(realpath -m -- "$HOME/.ssh/../.ssh"); rm -rf "$d"')).toContain(
       path.join(home, ".ssh")
     );
     expect(bash('d=$(dirname "$HOME/.ssh/id"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
     expect(bash('d="$LEGION_WORKSPACE/$(basename "$HOME/x")"; rm -rf "$d"')).toBeUndefined();
     expect(bash('d=$(readlink -f "$HOME/.ssh"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+    // More than one operand prints one line each, which an unquoted substitution splits into
+    // several targets: the guard cannot say which it judged, so the value stays unknown.
+    expect(bash('rm -rf $(dirname "$LEGION_WORKSPACE/x" "$HOME/.ssh/id")')).toBeDefined();
+    expect(bash('rm -rf $(realpath -m -- "$LEGION_WORKSPACE/x" "$HOME/.ssh")')).toBeDefined();
+    // GNU `basename /` prints `/`, so this is `$HOME` itself, not a path under the workspace.
+    expect(bash(`chmod -R 000 "$(basename /)\${HOME#/}"`)).toBeDefined();
+    // GNU `dirname ///` prints `/` (a path of separators alone), not `.` (a word with none).
+    expect(bash(`chmod -R 000 "$(dirname ///)\${HOME#/}"`)).toBeDefined();
+    // `cd -@` is an invalid option on Linux: bash stays where it was.
+    expect(bash('cd "$HOME"; cd -@ "$LEGION_WORKSPACE"; rm -f .bashrc')).toBeDefined();
+    // `--relative-to`/`--relative-base` override any `-s`/`-L`/`-P` reading: read `-s` first and
+    // the substitution gets a lexical path as if `--relative-to` were not there at all.
+    expect(bash('rm -rf $(realpath -s --relative-to=d "$LEGION_WORKSPACE/keep")')).toBeDefined();
+    // `path.dirname` leaves a doubled separator GNU's own dirname strips: it would print
+    // `$LEGION_WORKSPACE/` (trailing slash) for a `//` input, and the `0` suffix below then
+    // names the sibling workspace `…10` rather than a path inside this one.
+    expect(bash('rm -rf "$(dirname "$LEGION_WORKSPACE//x")0"')).toBeDefined();
+    // A `..` after a component that is not there is never resolved to the path the text reads
+    // as: whatever creates that component decides where the `..` leads, so the guard models no
+    // path at all and the value stays a command's output (LEGION-355).
+    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/gone/../b"); rm -rf "$d"')).toContain(
+      "(a command's output)"
+    );
   });
 
   test("never resolves git rev-parse --show-toplevel, whose answer config it cannot read decides", () => {

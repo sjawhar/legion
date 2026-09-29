@@ -24,11 +24,12 @@ e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which ot
 `/tmp` directory belongs to this pane.
 **Known shapes that still reach outside the roots
 are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
-expansion slice (LEGION-376), the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
-`s///e`, which the guard does not read (LEGION-377), and a word bash passes no argument for — an
-unquoted empty value, an empty `"${a[@]}"` — read as a command name, a wrapper's or `xargs`'s or
-`find -exec`'s program, or `cd`'s directory (LEGION-378).**
-It parses the command with a bash parser and resolves each
+expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
+`s///e`, which the guard does not read (LEGION-377).**
+Before it selects a program or positional operand, the guard drops a word bash passes no argument
+for — an unquoted empty value, an empty `"$@"`, or an empty `"${a[@]}"` — while `""`, an empty
+quoted scalar, an empty `"$*"`, and an empty `"${a[*]}"` remain arguments. It parses the command
+with a bash parser and resolves each
 target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
 assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
 command,
@@ -58,31 +59,43 @@ cannot decide it and will not assume it; write the script with the write tool fi
 the straight-line path is read as before, and so is one in a subshell, a brace group, a command
 substitution, a called function or an `EXIT` handler this shell certainly registered. The same
 rule governs a file holding a pid that `kill "$(<file)"` reads, except that a body which can only
-replace one pid this shell started with another leaves it signalable. A shell or interpreter reading
-such a here-document as its program is refused too. A target with no proven path prefix is refused,
-as is a command the parser reports as malformed. A visible `..` after a glob or a value the guard
-cannot read is refused. For a file command or tmux socket, every unknown component after a
-permitted-root prefix is refused, even if it is final: that one component can contain `/` and `..`
-itself. Redirections and `tee` deliberately allow unknown components anywhere after a
-permitted-root prefix: both `echo v > "$LEGION_WORKSPACE/$x"` and
+replace one pid this shell started with another leaves it signalable. A shell or interpreter
+reading such a here-document as its program is refused too. Every target, and every file the guard
+models a write to, is resolved the way `open(2)` resolves it: each component's symlink is followed
+before the next is read, so a `..` after a symlink leaves the directory the link points into
+(`ln -s "$HOME/.ssh" e; rm -f e/../.bashrc` deletes the operator's profile and is refused), and so
+does a relative target after a `cd` into a symlink, where bash keeps a logical `PWD` while the
+kernel uses the physical path. The property is whether the guard can resolve the path rather than
+whether a `..` is in it — a directory it may not search diverges with no `..` anywhere — so a
+component it cannot read is unknown and file commands and tmux sockets refuse it, because whatever
+an earlier stage of the same command makes of that component decides where the path lands. A write
+whose file the guard cannot name makes every modelled file unknown and every later script unreadable,
+since the one on disk may be the one just written. What none of this covers is a command that
+changes the namespace it is judged against while it runs, by retargeting a link the guard followed
+(`ln -sfn "$HOME" d && rm -f d/x`) or by creating the component that decides where a path lands. A
+target with no proven path prefix is refused, as is a command the parser reports as malformed. A
+visible `..` after a glob or a value the guard cannot read is refused. For a file command or tmux
+socket, every unknown component after a permitted-root prefix is refused, even if it is final: that
+one component can contain `/` and `..` itself. Redirections and `tee` deliberately allow unknown
+components anywhere after a permitted-root prefix: both `echo v > "$LEGION_WORKSPACE/$x"` and
 `echo v > "$LEGION_WORKSPACE/$x/out.log"` can overwrite outside the roots. At commit
 `70483b24accd094ad727eafdf1dc2dcbc3991d8f`, the all-refusal walk is 64 under the selected policy;
 refusing only middle components is 111 (46 redirections and one `tee`), and refusing every unknown
 component is 114. LEGION-379 tracks this residual. `pkill`, `killall`, and `fuser -k` are refused
 outright. For `tmux kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under
 `TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then the default socket) and refuses a resolved path outside
-the pane roots. `kill`
-only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every
-refusal names the target, where it resolved, and the rule, so the agent can rewrite the command.
+the pane roots. `kill` only reaches a pid that `/proc` shows descending from the pane's own Oh My
+Pi process. Every refusal names the target, where it resolved, and the rule, so the agent can
+rewrite the command.
 
 Which operand a write verb's destination is comes from that verb's own grammar, measured rather
-than assumed: `cp` and `install` write their last operand, or the directory `-t` names, where
-every other operand is a source they read; `install -d` creates directories, so there every operand
-is judged. `mv` uses the same option reader and also judges the
-sources it moves. The reader stops at `--` and at the first value-taking letter in a cluster,
-and accepts GNU's unambiguous long-option abbreviations. Any word before `--` that the guard
-cannot read whole and that may be an option — a glob, a
-command's output, an unquoted expansion — refuses `cp`, `mv`, `install` and `ln`, since one
+than assumed: `cp` and `install` write their last operand, or the directory `-t` or
+`--target-directory` names (including an unambiguous GNU abbreviation), where every other operand
+is a source they read; `install -d` creates directories, so there every operand is judged. `mv`
+uses the same option reader and also judges the sources it moves. The reader stops at `--` and at
+the first value-taking letter in a cluster, and accepts GNU's unambiguous long-option
+abbreviations. Any word before `--` that the guard cannot read whole and that may be an option — a
+glob, a command's output, an unquoted expansion — refuses `cp`, `mv`, `install` and `ln`, since one
 reading of it hides a destination; the refusal names the written word and the `--` or `-T`
 remedy, rather than treating the command as one with no destination. A `-T` the guard HAS read
 settles which operand is the destination, so an unreadable word after it is no longer a possible
@@ -108,10 +121,10 @@ A single glob in a `for` loop retains its expansion only when its first piece is
 literal starting with a character other than `-`, such as `./*.txt` or `src/*.go`. Wildcard-led
 and dash-led loop values stay unknown for every command, including `truncate` and redirections,
 not only copy commands. `dd` writes the path inside its `of=` word, wherever that
-word stands. `ln` writes its last operand, or the working directory when given one operand the
-guard reads whole, and a hard link (no `-s`) also makes its source writable under the new name,
-which no later command can resolve as it can a symlink. `sed` is judged on the files it names with
-`-i`, including inside a cluster (`-ni`) and
+word stands. `ln` writes its last operand, the directory `-t` or `--target-directory` names, or
+the working directory when given one operand the guard reads whole; a hard link (no `-s`) also
+makes its source writable under the new name, which no later command can resolve as it can a
+symlink. `sed` is judged on the files it names with `-i`, including inside a cluster (`-ni`) and
 with a suffix joined to it (`-i.bak`) — **the files its SCRIPT names are not judged at all
 (LEGION-377)**; a word the guard cannot read may itself be that `-i`, and
 the readings are judged together rather than worst-of-each, so a quoted word plays one part at a

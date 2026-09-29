@@ -1,10 +1,29 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
 import { DESTRUCTIVE, KILL_PID, type Live, MODEL_ROWS, PID_ROWS } from "./pane-guard-model-rows";
+import {
+  buildPathFixture,
+  DOTDOT_COMPONENT,
+  fixtureGuard,
+  measureAllPathRows,
+  measureRow,
+  PATH_ROWS,
+  type PathRowResult,
+} from "./pane-guard-path-rows";
 import {
   fixtureProperties,
   measureWriteRow,
@@ -48,6 +67,11 @@ function insideRoots(target: string): boolean {
   return (
     target === workspace || target.startsWith(`${workspace}/`) || target.startsWith(`${scratch}/`)
   );
+}
+
+function removePathFixture(root: string): void {
+  chmodSync(path.join(root, "ws", "perm"), 0o755);
+  rmSync(root, { recursive: true, force: true });
 }
 
 /** The cases bash puts a target outside the roots in, each run by one bash as a subshell whose
@@ -157,7 +181,7 @@ test("every pattern expansion is unknown or bash's own value, and never allows a
   expect(wrong).toEqual([]);
   // The harness itself: most cases resolve, so an empty comparison is not a pass by default.
   expect(resolved).toBeGreaterThan(cases.length / 2);
-});
+}, 60_000);
 
 test("an operator on whether a parameter is set never allows a target bash puts outside the roots", () => {
   // Set, empty, unset, unset after a value, left to the pane's environment or removed from it, and
@@ -199,7 +223,7 @@ test("an operator on whether a parameter is set never allows a target bash puts 
   );
   // The harness itself: bash deletes outside the roots in many cases, so none allowed is a result.
   expect(outside.length).toBeGreaterThan(commands.length / 10);
-});
+}, 60_000);
 
 test("a function's arguments are bash's own, and never let a target outside the roots through", () => {
   // Words that are one argument, none (an empty unquoted value, `"$@"` of no arguments, an empty
@@ -254,7 +278,7 @@ test("a function's arguments are bash's own, and never let a target outside the 
     []
   );
   expect(outside.length).toBeGreaterThan(commands.length / 10);
-});
+}, 60_000);
 
 test("every write to a variable is bash's own, and never leaves a stale value to let a target through", () => {
   // A variable, an array, an element, a variable already outside the roots, one `readonly` and
@@ -320,6 +344,244 @@ test("every write to a variable is bash's own, and never leaves a stale value to
     []
   );
   expect(outside.length).toBeGreaterThan(commands.length / 10);
+}, 60_000);
+
+// Where the guard's path and the kernel's part company is a component the guard cannot RESOLVE,
+// not a `..`: `path.resolve` — and `realpathSync` on this runtime — strip a `..` before the
+// symlink in front of it is read, which is the shape that makes the divergence visible, but a
+// directory the guard may not search diverges with no `..` anywhere. These rows are judged by
+// what real bash did to a canary HOME, never by their names (LEGION-355).
+//
+// One residual remains, allowed here and with its own controls in the batch: the command changing,
+// during its own run, the namespace the guard resolved against. It retargets a link the guard
+// already followed, or creates the component that decides where the path lands (`ln -s .. sub/made;
+// echo <payload> >> sub/made/unread.sh`, which carries no `..` in the written path at all — the
+// `..` is the link's target). Resolving harder cannot reach either: the first reading was right
+// when it was taken, and in the second there was nothing on disk to read. The `prelink.*` rows are
+// the discriminator — the same write through a link ALREADY on disk is refused here and allowed at
+// base.
+const PATH_ROW_RESIDUAL = [
+  "retarget.realdir.dotdot",
+  "retarget.script",
+  "madelink.append",
+  "madelink.group",
+  "madelink.tee",
+  "retarget.symlink.dotdot",
+  "retarget.symlink.nodotdot",
+  "retarget.truncate",
+];
+
+// This row became a current-guard control when the forward merge added destination judgement; its
+// merge-base guard did not inspect `cp` destinations, so it cannot be used to test LEGION-355's
+// invariant across that base.
+const PATH_ROW_BASE_CONTROL_EXEMPT = ["cp.symlink.nodotdot"];
+
+test("the path battery's rows measure the property they name", () => {
+  // `path.join` normalises a `..` away, so a row whose property is the `..` and whose fixture was
+  // built with it would pass while measuring nothing. This is the assertion that catches that.
+  expect(
+    PATH_ROWS.filter((row) => row.dotdot && !DOTDOT_COMPONENT.test(row.command)).map((r) => r.name)
+  ).toEqual([]);
+
+  // Every operation class carries a control in both directions, so no class rests on probes alone.
+  const families = [...new Set(PATH_ROWS.map((row) => row.family))].sort();
+  expect(
+    families.filter(
+      (family) =>
+        !PATH_ROWS.some((row) => row.family === family && row.role === "must-refuse") ||
+        !PATH_ROWS.some((row) => row.family === family && row.role === "must-allow")
+    )
+  ).toEqual([]);
+  expect(families.length).toBeGreaterThan(10);
+}, 60_000);
+
+test("a must-refuse row is a control, not a probe: refused at the merge base's guard too", async () => {
+  // A row `PATH_ROWS` names `must-refuse` is meant to hold steady across a fix, distinguishing it
+  // from a `probe`, which is meant to flip. The battery only ever measured the CURRENT guard, so
+  // a row could be relabelled `must-refuse` for having reached ALLOW → refused across this PR's
+  // own fixes — exactly a probe's signature — and nothing would catch it.
+  //
+  // The base is `merge-base(HEAD, origin/main)`, not the `main` branch name: a local bookmark
+  // lags, a shallow checkout has none, and after this change merges, `main` IS this change's own
+  // guard, so comparing against the branch name would compare the guard to itself. The CI job
+  // fetches `origin/main` and checks out full history for exactly this.
+  //
+  // Three files are read from that same base commit: `pane-guard.ts` itself, plus its two local
+  // imports, `./pane-guard-bash` and `./pane-guard-code` (both unchanged by this PR today, but
+  // not asserted so). All three are written together into one generated directory, so the loaded
+  // module resolves its relative imports to siblings that actually existed on that commit, not a
+  // hybrid of the base's `pane-guard.ts` against a sibling only the current change carries.
+  // `git show` writes no working-copy state, but the generated directory itself is real files on
+  // disk for the length of this test, and `packages/pi-envoy/.gitignore` keeps a concurrent
+  // `jj`/`git status` from recording it — without that, a `jj new`/`jj commit` racing this test
+  // could carry the base guard's own files into a finished change. The name is a fresh
+  // `mkdtempSync` one inside the package (so `@legion/envoy-client/errors` and `unbash` still
+  // resolve through its `node_modules` chain) rather than a fixed name two concurrent runs would
+  // race on, and it lives beside `package.json`, not under `src/`, so a glob scoped to tracked
+  // source never sees it even for the moment before cleanup.
+  const legionDir = path.dirname(new URL(import.meta.url).pathname);
+  const pkgDir = path.resolve(legionDir, "..", "..");
+  const repoRoot = path.resolve(legionDir, "..", "..", "..", "..");
+  let base: string;
+  try {
+    base = execFileSync("git", ["merge-base", "HEAD", "origin/main"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    }).trim();
+  } catch (error) {
+    // Fail loudly, never skip: a base this check cannot read is exactly the state that would
+    // silently turn off the one assertion that stops a probe being relabelled as a control.
+    throw new Error(
+      `cannot resolve merge-base(HEAD, origin/main) in ${repoRoot} — is origin/main fetched? (${error})`
+    );
+  }
+  const siblings = ["pane-guard.ts", "pane-guard-bash.ts", "pane-guard-code.ts"];
+  const tempDir = mkdtempSync(path.join(pkgDir, ".base-guard-check-"));
+  let baseCreatePaneGuard: typeof createPaneGuard;
+  try {
+    for (const sibling of siblings) {
+      const content = execFileSync(
+        "git",
+        ["show", `${base}:packages/pi-envoy/src/legion/${sibling}`],
+        { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 26 }
+      );
+      writeFileSync(path.join(tempDir, sibling), content);
+    }
+    // Dynamic import, not static: the module's content is the merge base's committed text,
+    // fetched at test time and written to a path this run generates — genuinely runtime-selected,
+    // not a literal known at author time.
+    const mod = (await import(pathToFileURL(path.join(tempDir, "pane-guard.ts")).href)) as {
+      createPaneGuard: typeof createPaneGuard;
+    };
+    baseCreatePaneGuard = mod.createPaneGuard;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-base-control-"));
+  try {
+    const mustRefuse = PATH_ROWS.filter(
+      (row) => row.role === "must-refuse" && !PATH_ROW_BASE_CONTROL_EXEMPT.includes(row.name)
+    );
+    const stillAllowedAtBase = mustRefuse
+      .filter((row) => measureRow(row, root, baseCreatePaneGuard).refusal === undefined)
+      .map((row) => row.name);
+    expect(stillAllowedAtBase).toEqual([]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 120_000);
+
+test("a target is judged as the kernel resolves it, not as the text reads", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-paths-"));
+  try {
+    const results = measureAllPathRows(root);
+    const live = results.filter((result) => result.live);
+    const named = (subset: readonly PathRowResult[]): string[] =>
+      subset.map((result) => result.row.name).sort();
+
+    // Positive controls: a harness whose bash did nothing, or whose controls stopped
+    // discriminating, must fail rather than report a clean zero.
+    expect(live.length).toBeGreaterThan(20);
+    expect(
+      named(results.filter((r) => r.row.role === "must-refuse" && r.refusal === undefined))
+    ).toEqual([]);
+
+    // The claim: every command real bash used to damage the canary is refused.
+    expect(named(live.filter((result) => result.refusal === undefined))).toEqual(
+      [...PATH_ROW_RESIDUAL].sort()
+    );
+
+    // The other direction, at equal standing: nothing ordinary is refused for it.
+    expect(
+      named(results.filter((r) => r.row.role === "must-allow" && r.refusal !== undefined))
+    ).toEqual([]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 180_000);
+
+test("matches bash's directory builtins without inventing a directory stack", () => {
+  const destructive = [
+    "cd ../home; pushd -P mine/..; rm -f .bashrc",
+    'cd ../home; pushd -n "$LEGION_WORKSPACE"; rm -f .bashrc',
+    'cd ../home; pushd "$LEGION_WORKSPACE" >/dev/null; pushd +1 >/dev/null; rm -f .bashrc',
+    'cd ../home; cd -Z "$LEGION_WORKSPACE"; rm -f .bashrc',
+  ];
+  for (const command of destructive) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-directory-"));
+    try {
+      const fixture = buildPathFixture(root);
+      const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
+      expect(pane.bash(command, fixture.workspace, paneEnv), command).toBeDefined();
+      const run = spawnSync("bash", ["-c", command], {
+        cwd: fixture.workspace,
+        env: paneEnv,
+      });
+      expect(run.status, command).toBe(0);
+      expect(existsSync(path.join(fixture.home, ".bashrc")), command).toBe(false);
+    } finally {
+      removePathFixture(root);
+    }
+  }
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-directory-stack-"));
+  try {
+    const fixture = buildPathFixture(root);
+    const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
+    expect(pane.bash("pushd; rm -f inside", fixture.workspace, paneEnv)).toContain(
+      "directory stack"
+    );
+    expect(
+      pane.bash('pushd "$LEGION_WORKSPACE" >/dev/null; rm -f inside', fixture.workspace, paneEnv)
+    ).toBeUndefined();
+  } finally {
+    removePathFixture(root);
+  }
+}, 60_000);
+
+test("uses basename's first operand and refuses options it does not model", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-basename-"));
+  try {
+    const fixture = buildPathFixture(root);
+    const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
+    const command = 'rm -rf "$LEGION_WORKSPACE/$(basename ..x x)/home/keep"';
+    expect(pane.bash(command, fixture.workspace, paneEnv), command).toBeDefined();
+    const run = spawnSync("bash", ["-c", command], { cwd: fixture.workspace, env: paneEnv });
+    expect(run.status).toBe(0);
+    expect(existsSync(path.join(fixture.home, "keep"))).toBe(false);
+    expect(
+      pane.bash('rm -f "$(basename -s ignored "$HOME/.ssh")"', fixture.workspace, paneEnv)
+    ).toBeDefined();
+  } finally {
+    removePathFixture(root);
+  }
+});
+
+test("blurs models after any write whose target it cannot name", () => {
+  const commands = [
+    `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' > "$LEGION_WORKSPACE/$(echo t.sh)"; bash t.sh`,
+    `echo 'rm -f "$HOME/.bashrc"' > "$LEGION_WORKSPACE/$(echo t.sh)"; bash t.sh`,
+    `echo 'rm -f "$HOME/.bashrc"' > "./$(echo t.sh)"; bash t.sh`,
+    `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' > t.s[h]; bash t.sh`,
+    `echo 'rm -f "$HOME/.bashrc"' | tee "$LEGION_WORKSPACE/$(echo t.sh)" >/dev/null; bash t.sh`,
+  ];
+  for (const command of commands) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-unnameable-write-"));
+    try {
+      const fixture = buildPathFixture(root);
+      const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
+      expect(pane.bash(command, fixture.workspace, paneEnv), command).toBeDefined();
+      const run = spawnSync("bash", ["-c", command], {
+        cwd: fixture.workspace,
+        env: paneEnv,
+      });
+      expect(run.status, command).toBe(0);
+      expect(existsSync(path.join(fixture.home, ".bashrc")), command).toBe(false);
+    } finally {
+      removePathFixture(root);
+    }
+  }
 }, 60_000);
 
 test("a file a branch or an unwaited command writes is never modelled as its text", () => {
@@ -405,6 +667,12 @@ test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(rowWorkspace, { recursive: true });
     writeFileSync(path.join(rowWorkspace, "safe.sh"), "PRESENT\n");
+    // A pre-existing symlink and a foreign pid file, for the two rows that need a physical
+    // ancestor a lexical read would misresolve, and a target `mv` overwrites out from under
+    // a stale model.
+    mkdirSync(path.join(dir, "home", ".ssh"), { recursive: true });
+    symlinkSync(path.join(dir, "home", ".ssh"), path.join(rowWorkspace, "e"));
+    writeFileSync(path.join(rowWorkspace, "victim.pid"), "999999\n");
     const rowEnv: NodeJS.ProcessEnv = {
       HOME: path.join(dir, "home"),
       LEGION_WORKSPACE: rowWorkspace,
@@ -417,10 +685,13 @@ test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
     });
     const verdict = rowGuard.bash(row.payload, rowWorkspace, rowEnv);
     // The same payload with the `kill` replaced by a report of what it would have signalled and
-    // of every child this shell holds, so the signal is never actually sent from a test.
+    // of every child this shell holds, so the signal is never actually sent from a test. The
+    // read expression is whatever the payload's own `kill "$(< …)"` names, not always `pid`.
+    const killMatch = /kill "\$\(<\s*([^)]+?)\s*\)"/.exec(row.payload);
+    const readExpr = killMatch?.[1] ?? "pid";
     const probe = row.payload.replace(
-      KILL_PID,
-      'printf "%s|%s" "$(<pid)" "$(jobs -p | tr "\\n" ",")"'
+      killMatch?.[0] ?? KILL_PID,
+      `printf "%s|%s" "$(<${readExpr})" "$(jobs -p | tr "\\n" ",")"`
     );
     const seen = spawnSync("bash", ["-c", probe], {
       cwd: rowWorkspace,

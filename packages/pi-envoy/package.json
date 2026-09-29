@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/pi-legion-envoy",
-  "version": "5.17.4",
+  "version": "5.17.5",
   "type": "module",
   "omp": {
     "extensions": [
