@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2134,4 +2137,427 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if err := reg.WatchErr(); err != nil {
 		t.Fatalf("WatchErr after the failed Rewatch: %v; the interest watcher moved to the closed connection", err)
 	}
+}
+
+// Opening the registry snapshots the revision of every stored role claim, so a claim restored by a
+// restart keeps its holder's grace while the bucket still holds the revision the restart read. It
+// must read them in one pass over the bucket rather than one round trip per key, and the snapshot
+// it ends up with must be the bucket's: every claim at the revision stored for it, no entry for a
+// deleted key, and the grace those revisions exist for.
+func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	names := testBuckets(t)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	const claims = 64
+	want := map[string]uint64{}
+	for i := range claims + 1 {
+		role := fmt.Sprintf("role-%03d", i)
+		revision := putRoleClaim(t, rawRoles, role, fmt.Sprintf("ses_%03d", i))
+		want[role] = revision
+	}
+	// A deleted claim leaves a marker on its subject, which the bucket keeps until something
+	// purges it. The marker is not a claim and gets no grace.
+	deleted := fmt.Sprintf("role-%03d", claims)
+	if err := rawRoles.Delete(deleted); err != nil {
+		t.Fatalf("delete %s: %v", deleted, err)
+	}
+	delete(want, deleted)
+
+	// Every read of one key is a request the store sends on this connection: a direct get when the
+	// bucket allows one, a stream message get otherwise.
+	gets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", names.roles))
+	if err != nil {
+		t.Fatalf("watch direct gets: %v", err)
+	}
+	defer func() { _ = gets.Unsubscribe() }()
+	legacyGets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", names.roles))
+	if err != nil {
+		t.Fatalf("watch stream message gets: %v", err)
+	}
+	defer func() { _ = legacyGets.Unsubscribe() }()
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the watches: %v", err)
+	}
+
+	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush after Open: %v", err)
+	}
+	if sent := pending(t, gets) + pending(t, legacyGets); sent != 0 {
+		t.Fatalf("Open sent %d per-key reads of the role bucket holding %d claims; want none, one pass over the bucket", sent, claims)
+	}
+
+	if len(registry.restoredRoleRevisions) != len(want) {
+		t.Fatalf("Open restored %d role revisions, want %d", len(registry.restoredRoleRevisions), len(want))
+	}
+	for role, revision := range want {
+		if got := registry.restoredRoleRevisions[role]; got != revision {
+			t.Fatalf("restored revision of %s = %d, want the stored %d", role, got, revision)
+		}
+	}
+	// What the snapshot is for, through the caller that reads it: an absent holder keeps its claim
+	// for one session TTL after the restart, and a key the bucket no longer holds has none to keep.
+	if release, err := registry.ReleaseExpiredRoleClaim("role-000", "ses_000", time.Minute); err != nil || release != ExpiredRoleClaimRetained {
+		t.Fatalf("restored claim within its grace = %v, %v; want it retained", release, err)
+	}
+	if release, err := registry.ReleaseExpiredRoleClaim(deleted, fmt.Sprintf("ses_%03d", claims), time.Minute); err != nil || release != ExpiredRoleClaimMissing {
+		t.Fatalf("deleted claim = %v, %v; want it missing", release, err)
+	}
+}
+
+// pending counts the requests sub has received. conn.Flush has already round-tripped every request
+// the store sent, so the server has echoed each one back to sub before this reads the count.
+func pending(t *testing.T, sub *natsgo.Subscription) int {
+	t.Helper()
+	count, _, err := sub.Pending()
+	if err != nil {
+		t.Fatalf("pending on %s: %v", sub.Subject, err)
+	}
+	return count
+}
+
+func putRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder string) uint64 {
+	t.Helper()
+	value, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatalf("encode claim: %v", err)
+	}
+	revision, err := kv.Put(role, value)
+	if err != nil {
+		t.Fatalf("store %s: %v", role, err)
+	}
+	return revision
+}
+
+// A restart's own log says how much of the role bucket it read. The SRE reading a staging restart
+// (listener ready 84 s after the update began) could not tell from the logs whether the revision
+// scan had completed, because nothing recorded its size. The two counts are disjoint on purpose:
+// restored is the claims that got their grace back, delete_markers is what the scan streamed past
+// to find them and is what grows without bound. A single total of both would read as claims the
+// restart failed to restore, which is the misreading this whole issue was filed on.
+func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	const (
+		claims  = 5
+		markers = 3
+	)
+	for i := range claims {
+		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%d", i), fmt.Sprintf("ses_%d", i))
+	}
+	for i := range markers {
+		gone := fmt.Sprintf("gone-%d", i)
+		putRoleClaim(t, rawRoles, gone, "ses_gone")
+		if err := rawRoles.Delete(gone); err != nil {
+			t.Fatalf("delete %s: %v", gone, err)
+		}
+	}
+
+	logs := captureRegistryLogs(t)
+	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+
+	want := fmt.Sprintf(`msg="restored role claims" restored=%d delete_markers=%d`, claims, markers)
+	if got := logs.String(); !strings.Contains(got, want) {
+		t.Fatalf("the restart logged no line saying how much of the role bucket it read.\nwant: %s\ngot:\n%s", want, got)
+	}
+}
+
+// earlyEndKV hands out a watcher over the real bucket that ends its scan early, the two ways
+// nats.go ends one early (nats.go v1.50.0 kv.go). With no fault it closes the updates channel
+// after `after` entries and never sends the nil marker, which is what a subscription that ends
+// mid-scan looks like (:1170). With one it sends the marker after `after` entries and puts the
+// fault on Error() first, which is what the idle timer does when no entry arrives within the
+// JetStream MaxWait (:1145-1156).
+type earlyEndKV struct {
+	natsgo.KeyValue
+
+	after int
+	fault error
+}
+
+func (k earlyEndKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+	watcher, err := k.KeyValue.Watch(keys, opts...)
+	if err != nil {
+		return nil, err
+	}
+	ended := &earlyEndWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
+	go func() {
+		defer close(ended.updates)
+		for delivered := 0; delivered < k.after; delivered++ {
+			entry, ok := <-watcher.Updates()
+			if !ok || entry == nil {
+				return
+			}
+			ended.updates <- entry
+		}
+		if k.fault != nil {
+			ended.faults <- k.fault
+			ended.updates <- nil
+		}
+	}()
+	return ended, nil
+}
+
+type earlyEndWatcher struct {
+	natsgo.KeyWatcher
+
+	updates chan natsgo.KeyValueEntry
+	faults  chan error
+}
+
+func (w *earlyEndWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+
+func (w *earlyEndWatcher) Error() <-chan error { return w.faults }
+
+// A revision snapshot that ends before the bucket's keys are all delivered is not a snapshot: the
+// claims it missed are still in the bucket, and each one is a restored holder that would lose the
+// grace a restart owes it and be released a session TTL early. nats.go ends a scan early two ways
+// and they look different to the caller - a closed updates channel, and its own idle timeout,
+// which arrives as the same nil marker a complete scan ends with. Neither may return what the scan
+// managed to read; Open returns the error unchanged, failing the start as a failed read did when
+// this was one Get per key.
+func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	for i := range 4 {
+		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%d", i), fmt.Sprintf("ses_%d", i))
+	}
+
+	for _, ending := range []struct {
+		name  string
+		fault error
+		want  string
+	}{
+		{name: "the subscription ends mid-scan", want: "ended after 1 entries"},
+		{name: "the idle timer gives up mid-scan", fault: natsgo.ErrKeyWatcherTimeout, want: "stopped after 1 entries"},
+	} {
+		t.Run(ending.name, func(t *testing.T) {
+			handle := bus.KeyValue{KeyValue: earlyEndKV{KeyValue: rawRoles, after: 1, fault: ending.fault}}
+			revisions, err := roleRevisions(handle, slog.Default())
+			if err == nil {
+				t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
+			}
+			if revisions != nil {
+				t.Fatalf("a failed scan returned %d revisions; a partial snapshot must not reach the registry", len(revisions))
+			}
+			if !strings.Contains(err.Error(), ending.want) {
+				t.Fatalf("error = %q, want it to say %q: how the scan ended and how many entries it read", err, ending.want)
+			}
+			if ending.fault != nil && !errors.Is(err, ending.fault) {
+				t.Fatalf("error = %q, want it to carry %v", err, ending.fault)
+			}
+		})
+	}
+}
+
+// armOn arms once trigger has passed through it, keeping the last trigger-length bytes so a
+// trigger split across two reads is still seen.
+type armOn struct {
+	trigger []byte
+	armed   *atomic.Bool
+	tail    []byte
+}
+
+func (a *armOn) Write(p []byte) (int, error) {
+	if !a.armed.Load() {
+		a.tail = append(a.tail, p...)
+		if bytes.Contains(a.tail, a.trigger) {
+			a.armed.Store(true)
+		} else if len(a.tail) > len(a.trigger) {
+			a.tail = append(a.tail[:0], a.tail[len(a.tail)-len(a.trigger):]...)
+		}
+	}
+	return len(p), nil
+}
+
+// holdAfter passes writes through to `to` until it is armed and budget bytes have gone by, then
+// buffers everything for `hold` and sends it on. It keeps taking the writes, so the server never
+// blocks and never sees a slow consumer; the client simply hears nothing for `hold` and then the
+// link recovers. A hold longer than the reader's JetStream MaxWait is what fires nats.go's
+// initial-values timer, and the recovery afterwards is what lets a reader that took the timer's
+// marker for a finished scan go on to succeed with less than the bucket.
+type holdAfter struct {
+	to     io.Writer
+	armed  *atomic.Bool
+	budget int
+	hold   time.Duration
+
+	mu        sync.Mutex
+	forwarded int
+	holding   bool
+	released  bool
+	held      []byte
+}
+
+func (h *holdAfter) Write(p []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.armed.Load() && h.forwarded >= h.budget && !h.released {
+		if !h.holding {
+			h.holding = true
+			time.AfterFunc(h.hold, h.release)
+		}
+		h.held = append(h.held, p...)
+		return len(p), nil
+	}
+	if h.armed.Load() {
+		h.forwarded += len(p)
+	}
+	return h.to.Write(p)
+}
+
+func (h *holdAfter) release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.released = true
+	if len(h.held) > 0 {
+		_, _ = h.to.Write(h.held)
+		h.held = nil
+	}
+}
+
+// stallingProxy forwards a NATS connection to target until the client creates the watcher named by
+// trigger and budget bytes of that watcher's scan have reached it, then holds the server's bytes
+// for hold and sends them on: a relayed link that goes quiet mid-scan and comes back. It returns
+// the URL to connect to.
+func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.Duration) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			server, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = client.Close()
+				continue
+			}
+			var armed atomic.Bool
+			go func() {
+				defer func() { _ = server.Close() }()
+				_, _ = io.Copy(server, io.TeeReader(client, &armOn{trigger: []byte(trigger), armed: &armed}))
+			}()
+			go func() {
+				defer func() { _ = client.Close() }()
+				_, _ = io.Copy(&holdAfter{to: client, armed: &armed, budget: budget, hold: hold}, server)
+			}()
+		}
+	}()
+	return "nats://" + listener.Addr().String()
+}
+
+// The listener's own failure, through real nats.go: a link that goes quiet partway through the
+// revision scan and then comes back must fail Open, not open the registry on the claims that
+// happened to arrive. nats.go's idle timer reports the quiet as ErrKeyWatcherTimeout on Error()
+// and then sends the same nil entry a finished scan sends, so a reader that takes the nil for a
+// finished scan restores a snapshot missing most of the bucket, and every claim it misses is a
+// restored holder released a session TTL early. Which error Open reports depends on how it reads
+// the bucket; that it reports one is the contract. The deterministic halves of both endings,
+// including that the timeout is carried, are in
+// TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot.
+//
+// The stall shape is load-bearing and a weaker one hides the defect, so do not simplify it to a
+// link that stays down. stallingProxy holds the server's bytes past Open's JetStream MaxWait, so
+// the timer fires, and then sends them on, so the reader is free to carry on and succeed with part
+// of the bucket instead of failing on a later request. The stalled.Flush below has to answer
+// before Open's outcome is judged, so a hold that never releases — whether edited in or produced
+// by load ending the run early — reds this test instead of passing it. That catches a PERMANENT
+// hold and nothing subtler: with budget 0 the consumer-create reply is held too, so the watch
+// fails on its own request deadline, the link still comes back, the Flush still answers and this
+// test passes on every build ("came back: context deadline exceeded", measured here; the review
+// measured the same at 88f9fbaa and 3fa4774d). Held against three builds of this package:
+//
+//	88f9fbaa  Keys() plus a Get per key             FAIL  "restoring 232 of 400 claims", err=nil
+//	3fa4774d  one watch, closed-channel check only  FAIL  "restoring 232 of 400 claims", err=nil
+//	this build                                      PASS  "the bucket's watch stopped after 232
+//	                                                      keys: nats: key watcher timed out
+//	                                                      waiting for initial keys"
+//
+// How far each partial scan got varies with the link; that it completed and returned no error is
+// the constant. A one-hour hold, the weakening, reds here on the Flush: "the link never came back
+// after the hold ... nats: timeout".
+//
+// 88f9fbaa is main, so the defect predates the one-pass read: Keys() is itself a watch carrying
+// the same timer. With a stall that never recovers all three would pass, main because its per-key
+// Gets then time out on a dead link — a second route to a failed start that hides the first — and
+// that is the run the Flush assertion refuses.
+//
+// Those FAIL rows can flip to PASS under load, and do: this test's review saw 2 false passes at
+// 88f9fbaa in 45 iterations, both "context deadline exceeded", and 3fa4774d passed 1 of 3 runs
+// here the same way. A run whose requests time out before the release never reaches the shape
+// being measured. It has never gone red on correct code, so this is a demonstration, and it is
+// not the regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
+// which is deterministic, cannot pass vacuously, and failed on both of those builds in every run.
+func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
+	names := testBuckets(t)
+	direct, cleanup := connectNATS(t)
+	defer cleanup()
+	js, err := direct.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	const claims = 400
+	for i := range claims {
+		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%03d", i), fmt.Sprintf("ses_%03d", i))
+	}
+
+	target := strings.TrimPrefix(sharedTestNATSURI(t), "nats://")
+	stalled := testnats.Connect(t, stallingProxy(t, target, "$JS.API.CONSUMER.CREATE.KV_"+names.roles, 16*1024, 13*time.Second))
+	defer stalled.Close()
+
+	registry, err := Open(stalled, WithReplicas(1), withTestBuckets(t))
+	// The link has to have come back before Open's outcome means anything: a stall that stays down
+	// fails every build, main by its per-key Gets timing out, so this run could not tell them
+	// apart. Assert it rather than trusting the hold, since load can end a run before the release
+	// too.
+	if err := stalled.Flush(); err != nil {
+		t.Fatalf("the link never came back after the hold, so this run cannot tell a build that fails the stalled scan from one that returns part of the bucket: %v", err)
+	}
+	if err == nil {
+		t.Cleanup(registry.StopWatch)
+		t.Fatalf("Open succeeded over a link that stopped mid-scan, restoring %d of %d claims; the rest lose their grace", len(registry.restoredRoleRevisions), claims)
+	}
+	t.Logf("Open over a stalled link that came back: %v", err)
 }

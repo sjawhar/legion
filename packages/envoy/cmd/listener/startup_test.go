@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -324,4 +326,81 @@ func do(t *testing.T, request *http.Request) (int, string) {
 		t.Fatalf("%s %s: read the answer: %v", request.Method, request.URL.Path, err)
 	}
 	return response.StatusCode, string(answer)
+}
+
+// Two packages the listener calls into log two different ways, and both are load-bearing.
+// internal/store's lines exist for the SRE to query a restart, so they go through the listener's
+// own handler and arrive as JSON records with this machine's id. internal/bus's lines, and the
+// stdlib log package's, must stay in Go's text format: the deployed CloudWatch metric filters for
+// publish failures, webhook refusals and dropped stream subjects are space-delimited patterns
+// anchored on that format's date and time prefix (agent-c
+// meta/infra/pulumi/components/envoy/listener.py), so routing them into the JSON handler with
+// slog.SetDefault stops three alarms without failing anything. This test holds both halves, so
+// reintroducing that SetDefault reds it.
+func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
+	const machineID = "logger-split"
+	container, uri := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registry: %v", err)
+	}
+	if _, err := registry.SetRole("ses_"+machineID, machineID, "role-"+machineID, false); err != nil {
+		t.Fatalf("claim a role for the restart to restore: %v", err)
+	}
+	registry.StopWatch()
+	client.Close()
+
+	listener := startListenerProcess(t, buildListener(t), uri, machineID)
+	listener.waitHealthy(t)
+
+	restored := listenerJSONRecord(t, listener, "restored role claims")
+	if restored == nil {
+		t.Fatalf("internal/store's role-restore line is not a JSON record in the listener's output:\n%s", listener.output.String())
+	}
+	if restored["machine_id"] != machineID {
+		t.Fatalf("the role-restore record's machine_id = %v, want %q; a query keyed on it cannot find this restart", restored["machine_id"], machineID)
+	}
+	if _, ok := restored["restored"].(float64); !ok {
+		t.Fatalf("the role-restore record has no numeric restored field: %v", restored)
+	}
+	if _, ok := restored["delete_markers"].(float64); !ok {
+		t.Fatalf("the role-restore record has no numeric delete_markers field: %v", restored)
+	}
+
+	// internal/bus logs its connection lines through the default logger. Taking the server away is
+	// how this test gets one to read.
+	if err := container.Stop(context.Background(), nil); err != nil {
+		t.Fatalf("stop the listener's NATS: %v", err)
+	}
+	textLine := regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} .*envoy nats disconnected`)
+	deadline := time.Now().Add(30 * time.Second)
+	for !textLine.MatchString(listener.output.String()) {
+		if time.Now().After(deadline) {
+			if listenerJSONRecord(t, listener, "envoy nats disconnected") != nil {
+				t.Fatalf("internal/bus's disconnect line is a JSON record: the default logger was replaced, and the deployed text metric filters for publish failures, webhook refusals and dropped stream subjects no longer match:\n%s", listener.output.String())
+			}
+			t.Fatalf("no disconnect line in Go's text format after the server stopped:\n%s", listener.output.String())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// listenerJSONRecord is the first line of the listener's output that parses as a JSON object whose
+// msg is name, or nil when no line does.
+func listenerJSONRecord(t *testing.T, p *listenerProcess, name string) map[string]any {
+	t.Helper()
+	for line := range strings.SplitSeq(p.output.String(), "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		if record["msg"] == name {
+			return record
+		}
+	}
+	return nil
 }
