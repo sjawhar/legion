@@ -299,6 +299,15 @@ test("a priority the server refuses shows the header's own failure, whether the 
       .getByRole("alert")
       .filter({ hasText: `Could not update the priority of ${issue.key}.` });
     await expect(failure).toBeVisible();
+    await expect(failure).toHaveCount(1);
+    await expect(failure.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(header.locator("span", { hasText: /^Priority$/ })).toBeVisible();
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
+
+    // The picker goes through that same write, so its refusal lands in the one failure the
+    // digit key already showed instead of raising a second beside it.
+    await header.getByRole("combobox", { name: `Priority of ${issue.key}` }).selectOption("3");
+    await expect(failure).toHaveCount(1);
     await expect(failure.getByRole("button", { name: "Retry" })).toBeVisible();
     await expect(header.locator("span", { hasText: /^Priority$/ })).toBeVisible();
     await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
