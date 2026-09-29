@@ -413,6 +413,7 @@ post-update text selection; Yjs document transport and local editing remain acti
 the room's next durable append for 20 s with a `doc_updates` trigger and cancels that backend, so
 it costs about 40 s and does not belong in the suite CI runs. Run it as
 `DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
+That recipe loads the same config, so it refuses the harness ports while another run holds them.
 It is the end-to-end check for a failed document room: the writer inside the docs layer when the
 room fails is answered `503 DOC_SERVICE_UNAVAILABLE` rather than waiting for a recovery that
 cannot finish, the writer behind it is answered the same way or admitted once the room has
@@ -451,9 +452,17 @@ still listening on `DISPATCH_E2E_PORT` — keeps a client backend out of `idle`,
 never clears and `resetDatabase` throws in `beforeEach`. Because it throws in the hook, **every**
 spec in the file reports failed, each carrying the `psql … DO $$` wait loop in its message, which
 reads as a catastrophic regression in the change under test. Recognise that shape as the rig: kill
-whatever holds the port and run again. Relatedly, `e2e/playwright.config.ts` reuses an
-already-running harness server only while `CI` is unset; with `CI` set it refuses the port instead
-of reusing it, so a shell that exports `CI` cannot share one harness across runs.
+whatever holds the port and run again. With reuse off a run cannot reach that shape through the
+port at all, because `e2e/playwright.config.ts` probes `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT` and
+`FAKE_GITHUB_PORT` before any web server starts and fails the run with `The Dispatch e2e harness
+cannot start: <port> (<variable>) already in use`, one message listing every taken port beside its
+own variable, before a single spec runs. Reuse is opt-in through `DISPATCH_E2E_REUSE_SERVERS`,
+whose only accepted value is `1`: unset or empty starts this run's own servers, and any other
+value is refused at config load naming the variable and the value. `CI` takes no part in that
+decision, so a shell that exports it and one that does not behave alike; a lane that shares one
+hand-started harness across runs sets `DISPATCH_E2E_REUSE_SERVERS=1`. The probe is skipped
+entirely when `PLAYWRIGHT_BASE_URL` selects a deployed server, and because it runs while the
+config module evaluates it applies to `--list` exactly as to a real run.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` alone. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
@@ -463,6 +472,9 @@ WebKit beside Chromium for it (`bun run e2e:install` does the same locally).
 The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat the check whenever the `grep` or the titles change.
+
+That `--list` evaluates the config, so it refuses a harness port another run still holds: free the
+ports or set `DISPATCH_E2E_REUSE_SERVERS=1` for it, as for any other invocation of this config.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` alone: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a
