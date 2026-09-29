@@ -2,13 +2,26 @@ import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 
+// The three harness ports are shared inputs: `run-server.sh` and the e2e helpers resolve the same
+// variables. A value that is not a port number is refused here, naming its variable, because every
+// later consumer turns it into something that names nothing — `net.connect` raises `RangeError:
+// Port should be >= 0 and < 65536` on `NaN`, and a `webServer` entry would wait on it.
+function harnessPort(variable: string, resolved: string): number {
+  const port = Number(resolved);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${variable} must be a port number, not ${JSON.stringify(resolved)}.`);
+  }
+  return port;
+}
+
 const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
-const e2ePortNumber = Number(e2ePort);
+const e2ePortNumber = harnessPort("DISPATCH_E2E_PORT", e2ePort);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${e2ePort}`;
+const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
-const fakeEnvoyPort = Number(process.env.FAKE_ENVOY_PORT ?? "9021");
+const fakeEnvoyPort = harnessPort("FAKE_ENVOY_PORT", process.env.FAKE_ENVOY_PORT ?? "9021");
 const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
-const fakeGithubPort = Number(process.env.FAKE_GITHUB_PORT ?? "9022");
+const fakeGithubPort = harnessPort("FAKE_GITHUB_PORT", process.env.FAKE_GITHUB_PORT ?? "9022");
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
 // `DISPATCH_E2E_REUSE_SERVERS=1` runs the suite against a harness the caller started and left
@@ -63,15 +76,23 @@ function isPortUsed(port: number): Promise<boolean> {
 
 // The probe runs while this module evaluates because no Playwright hook runs before the web
 // servers: `webServer` entries become plugins, and `createGlobalSetupTasks` puts `globalSetup`
-// after `createPluginSetupTasks` (`lib/runner/index.js:6321-6328`). Playwright re-imports this
-// config once the servers are up — in its out-of-process test loader
-// (`lib/loader/loaderProcessEntry.js:16`) and in every worker
-// (`lib/worker/workerProcessEntry.js:1481`) — where the harness ports are legitimately taken, by
-// this run's own servers. Both are `child_process.fork`s whose stdio carries an `"ipc"` channel
-// (`lib/runner/index.js:1915-1929`), so `process.send` is a function there and undefined in the
-// CLI process that starts the servers. `TEST_WORKER_INDEX` cannot discriminate them: the loader
-// never sets it.
-if (!process.env.PLAYWRIGHT_BASE_URL && !reuseServers && typeof process.send !== "function") {
+// after `createPluginSetupTasks` (`lib/runner/index.js:6321-6328`). Two things must not reach it.
+// Every worker re-imports this config once the servers are up
+// (`lib/worker/workerProcessEntry.js:1481`), when the harness ports are legitimately taken by this
+// run's own servers, and so does the out-of-process test loader
+// (`lib/loader/loaderProcessEntry.js:16`) under the test server — UI mode and the editor
+// extension; the plain CLI loads tests in-process (`lib/runner/index.js:6947`). Each is a
+// `child_process.fork` whose stdio carries an `"ipc"` channel (`lib/runner/index.js:1915-1929`),
+// so `process.send` is a function there and undefined in the CLI that starts the servers;
+// `TEST_WORKER_INDEX` cannot discriminate them, because the loader never sets it. `--list` starts
+// no web server at all: `listMode` builds only a load task and a report-begin task
+// (`lib/runner/index.js:6946-6949`), with no `createGlobalSetupTasks`.
+if (
+  startsOwnServers &&
+  !reuseServers &&
+  typeof process.send !== "function" &&
+  !process.argv.includes("--list")
+) {
   const used = await Promise.all(harnessPorts.map((entry) => isPortUsed(entry.port)));
   const taken = harnessPorts.filter((_, index) => used[index]);
   if (taken.length > 0) {
@@ -103,9 +124,8 @@ export default defineConfig({
     headless: true,
     trace: "retain-on-failure",
   },
-  ...(process.env.PLAYWRIGHT_BASE_URL
-    ? {}
-    : {
+  ...(startsOwnServers
+    ? {
         webServer: [
           {
             command: `bun ${fakeEnvoy}`,
@@ -123,7 +143,8 @@ export default defineConfig({
             reuseExistingServer: reuseServers,
           },
         ],
-      }),
+      }
+    : {}),
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "iphone", use: { ...devices["iPhone 13"], browserName: "chromium" } },

@@ -55,8 +55,9 @@ setting nor `~/.config/opencode/envoy.json` /
 truncates it before every scenario and never selects a shared default. The
 harness ports `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
 `9021`) and `FAKE_GITHUB_PORT` (default `9022`) are its other inputs; the
-Playwright config and test helpers read them too. A run starts its own servers
-on those three ports and refuses before any of them starts if one is already in
+Playwright config and test helpers read them too, and a value that is not a
+port number is refused naming its variable. A run starts its own servers on
+those three ports and refuses before any of them starts if one is already in
 use, naming every taken port beside its variable, so it never truncates the
 database behind a server it did not start. `DISPATCH_E2E_REUSE_SERVERS=1` is
 the opt-in for running against a harness you started yourself: `1` is the only

@@ -95,7 +95,7 @@ probes it — so name your own.
 ```sh
 docker exec dispatch-pg createdb -U postgres dispatch_<issue>      # once
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
-DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=90NN \
+DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN \
   bun run e2e
 ```
 

@@ -460,9 +460,11 @@ own variable, before a single spec runs. Reuse is opt-in through `DISPATCH_E2E_R
 whose only accepted value is `1`: unset or empty starts this run's own servers, and any other
 value is refused at config load naming the variable and the value. `CI` takes no part in that
 decision, so a shell that exports it and one that does not behave alike; a lane that shares one
-hand-started harness across runs sets `DISPATCH_E2E_REUSE_SERVERS=1`. The probe is skipped
-entirely when `PLAYWRIGHT_BASE_URL` selects a deployed server, and because it runs while the
-config module evaluates it applies to `--list` exactly as to a real run.
+hand-started harness across runs sets `DISPATCH_E2E_REUSE_SERVERS=1`. Two invocations never probe
+at all, because neither starts a web server: one where `PLAYWRIGHT_BASE_URL` selects a deployed
+server, and `--list`, whose task list is a load task and a report-begin task with no global setup.
+A malformed port is refused on its own, in any invocation: `DISPATCH_E2E_PORT must be a port
+number, not "abc"`.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` alone. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
@@ -472,9 +474,6 @@ WebKit beside Chromium for it (`bun run e2e:install` does the same locally).
 The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat the check whenever the `grep` or the titles change.
-
-That `--list` evaluates the config, so it refuses a harness port another run still holds: free the
-ports or set `DISPATCH_E2E_REUSE_SERVERS=1` for it, as for any other invocation of this config.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` alone: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a
