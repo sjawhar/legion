@@ -21,9 +21,11 @@ var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:
 
 // readyChecks refuses a READY whose head GitHub will not merge for its checks: every check the
 // base branch requires - its rulesets' required status checks and its branch protection's - must
-// have succeeded on the pull request's head. A head whose push skipped CI when it should not have
-// (legion push's rule) reports none of them; it is refused here, naming the head and the check,
-// rather than left for GitHub to block the human merge.
+// have succeeded on the pull request's head. A head reports none of them when its push skipped CI
+// when it should not have (legion push's rule), or when the pull request conflicts with its base,
+// since GitHub starts no pull_request run for a pull request it cannot merge; it is refused here,
+// naming the head, the check and which of the two GitHub shows, rather than left for GitHub to
+// block the human merge.
 //
 // A base branch that requires no check has nothing to refuse, and READY is published. It says so
 // on stdout rather than reading like a head whose every required check was read and passed: a
@@ -54,6 +56,8 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
+		// MergeableState is "dirty" while the pull request conflicts with its base.
+		MergeableState string `json:"mergeable_state"`
 	}
 	if err := github.get(ctx, fmt.Sprintf("/pulls/%d", issue.PullRequest.Number), &pull); err != nil {
 		return err
@@ -76,6 +80,8 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout 
 	}
 	for _, name := range required {
 		switch result, reported := results[name]; {
+		case !reported && pull.MergeableState == "dirty":
+			return fmt.Errorf("head %s of pull request #%d has no result for the required check %q: the pull request conflicts with %s, and GitHub starts no pull_request CI for a pull request it cannot merge; tell the architect", head, issue.PullRequest.Number, name, pull.Base.Ref)
 		case !reported:
 			return fmt.Errorf("head %s of pull request #%d has no result for the required check %q: its push may have skipped CI when it should not have; tell the architect", head, issue.PullRequest.Number, name)
 		case result == "pending":

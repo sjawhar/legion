@@ -175,22 +175,22 @@ func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 	// tests pass would depend on the shell that ran them.
 	t.Setenv("JJ_USER", "")
 	t.Setenv("JJ_EMAIL", "")
-	readyGitHub(t, `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`, `{"context":"legacy","state":"success"}`)
+	readyGitHub(t, `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`, `{"context":"legacy","state":"success"}`, "clean")
 	return bodies
 }
 
 // readyGitHub serves acme/widgets#42 to a merger's READY check: head c0de on main, whose ruleset
 // requires the check "ci" and whose branch protection requires the status "legacy", reporting the
-// given check run and commit status on the head (either may be empty), plus the token route of
-// the daemon the check redeems its grant at.
-func readyGitHub(t *testing.T, checkRun, status string) {
+// given check run and commit status on the head (either may be empty) and the pull request's
+// mergeable_state, plus the token route of the daemon the check redeems its grant at.
+func readyGitHub(t *testing.T, checkRun, status, mergeableState string) {
 	t.Helper()
 	repo := "/repos/acme/widgets"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case repo + "/pulls/42":
-			_, _ = w.Write([]byte(`{"head":{"sha":"c0de0000000000000000000000000000000000ff"},"base":{"ref":"main"}}`))
+			_, _ = w.Write([]byte(`{"head":{"sha":"c0de0000000000000000000000000000000000ff"},"base":{"ref":"main"},"mergeable_state":"` + mergeableState + `"}`))
 		case repo + "/rules/branches/main":
 			_, _ = w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`))
 		case repo + "/branches/main":
@@ -661,22 +661,43 @@ func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
 // branch requires has succeeded there. A head whose push skipped CI when it should not have reports
 // none of them, so the completion refuses READY naming the head and the check, and nothing reaches
 // the daemon; a required check still running, or one that failed, is refused the same way.
+//
+// A pull request that conflicts with its base (mergeable_state "dirty") gets no pull_request run,
+// so a required check with no result on its head is refused naming the conflict rather than a
+// skipped push. The conflict changes only that text, never which heads are refused: every row is
+// posted or refused by its checks alone, whatever its mergeable_state, and a conflicting head
+// whose required checks all succeeded is posted.
 func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testing.T) {
+	const (
+		ciGreen      = `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`
+		ciSkipped    = `{"id":1,"name":"ci","status":"completed","conclusion":"skipped"}`
+		ciRunning    = `{"id":1,"name":"ci","status":"in_progress","conclusion":null}`
+		legacyGreen  = `{"context":"legacy","state":"success"}`
+		legacyFailed = `{"context":"legacy","state":"failure"}`
+		skippedPush  = `: its push may have skipped CI`
+		conflict     = `: the pull request conflicts with main, and GitHub starts no pull_request CI`
+	)
 	for _, tc := range []struct {
-		name, checkRun, status, refusal string
+		name, checkRun, status, mergeableState, refusal string
 	}{
-		{"every required check green", `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`, `{"context":"legacy","state":"success"}`, ""},
-		{"a required check that ended skipped counts", `{"id":1,"name":"ci","status":"completed","conclusion":"skipped"}`, `{"context":"legacy","state":"success"}`, ""},
-		{"a head whose push skipped CI", "", "", `head c0de00000000 of pull request #42 has no result for the required check "ci"`},
-		{"a required check still running", `{"id":1,"name":"ci","status":"in_progress","conclusion":null}`, `{"context":"legacy","state":"success"}`, `the required check "ci" is still running on head c0de00000000`},
-		{"a required status that failed", `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`, `{"context":"legacy","state":"failure"}`, `the required check "legacy" ended failure on head c0de00000000`},
+		{"every required check green", ciGreen, legacyGreen, "clean", ""},
+		{"a required check that ended skipped counts", ciSkipped, legacyGreen, "clean", ""},
+		{"every required check green on a conflicting pull request", ciGreen, legacyGreen, "dirty", ""},
+		{"a head whose push skipped CI", "", "", "blocked", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + skippedPush},
+		{"a head whose mergeability GitHub has not computed", "", "", "unknown", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + skippedPush},
+		{"a head of a conflicting pull request", "", "", "dirty", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + conflict},
+		{"a conflicting pull request missing one required check", ciGreen, "", "dirty", `head c0de00000000 of pull request #42 has no result for the required check "legacy"` + conflict},
+		{"a required check still running", ciRunning, legacyGreen, "blocked", `the required check "ci" is still running on head c0de00000000`},
+		{"a required check still running on a conflicting pull request", ciRunning, legacyGreen, "dirty", `the required check "ci" is still running on head c0de00000000`},
+		{"a required status that failed", ciGreen, legacyFailed, "blocked", `the required check "legacy" ended failure on head c0de00000000`},
+		{"a required status that failed on a conflicting pull request", ciGreen, legacyFailed, "dirty", `the required check "legacy" ended failure on head c0de00000000`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			workspace := t.TempDir()
 			t.Setenv("LEGION_ROLE", "merger")
 			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
 			bodies := handoffDaemon(t, phase.Merging)
-			readyGitHub(t, tc.checkRun, tc.status)
+			readyGitHub(t, tc.checkRun, tc.status, tc.mergeableState)
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
 			if tc.refusal == "" {
@@ -685,8 +706,11 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 				}
 				return
 			}
-			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "READY refused: "+tc.refusal) {
-				t.Fatalf("READY = %d, daemon read %v, stderr %q; want a refusal naming %q and nothing posted", code, *bodies, errb.String(), tc.refusal)
+			if code != 1 || len(*bodies) != 0 {
+				t.Fatalf("READY = %d, daemon read %v, stderr %q; want it refused and nothing posted", code, *bodies, errb.String())
+			}
+			if !strings.Contains(errb.String(), "READY refused: "+tc.refusal) {
+				t.Fatalf("READY refused with stderr %q; want the refusal to name %q", errb.String(), tc.refusal)
 			}
 		})
 	}
