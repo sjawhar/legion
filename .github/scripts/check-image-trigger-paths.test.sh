@@ -663,5 +663,63 @@ run_check "$root"
 check "a bash -c build fails" "$(is "$status" 1)"
 check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
 
+echo "case: a build step's own if: is a gate too"
+# step_if <root> <expression>: names and gates the build-push-action step itself.
+step_if() {
+  local root=$1 expression=$2
+  python3 - "$root/.github/workflows/image.yaml" "$expression" <<'PY'
+import sys
+path, expression = sys.argv[1], sys.argv[2]
+text = open(path).read()
+marker = "      - uses: docker/build-push-action@v6\n"
+replacement = "      - name: Build image\n        uses: docker/build-push-action@v6\n" + f"        if: {expression}\n"
+open(path, "w").write(text.replace(marker, replacement))
+PY
+}
+unchanged="  docker:
+    runs-on: ubuntu-24.04
+"
+
+root=$(fixture step-gate-complete)
+gate_probe "$root" "$unchanged"
+step_if "$root" "needs.changes.outputs.img == 'true'"
+run_check "$root"
+check "a complete gate on the step passes" "$(is "$status" 0)"
+check "and is named" "$(contains "$out" "jobs.docker step 'Build image' if (jobs.changes filter img)")"
+
+root=$(fixture step-gate-narrow)
+gate_probe "$root" "$unchanged"
+step_if "$root" "needs.changes.outputs.narrow == 'true'"
+run_check "$root"
+check "a narrow gate on the step fails" "$(is "$status" 1)"
+check "names an input it drops" "$(contains "$out" 'does not cover package.json')"
+
+root=$(fixture step-gate-unreadable)
+gate_probe "$root" "$unchanged"
+step_if "$root" "github.event_name == 'push'"
+run_check "$root"
+check "a step gate this check cannot evaluate is refused" "$(is "$status" 1)"
+check "quotes the term" "$(contains "$out" "is narrowed by \`github.event_name == 'push'\`")"
+
+echo "case: a build inside a command substitution is not skipped"
+root=$(fixture buildx-run-command-substitution)
+buildx_step "$root" 'img=$(docker buildx build --load -q --file docker/Dockerfile .)'
+run_check "$root"
+check "img=\$(docker buildx build …) fails" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
+root=$(fixture buildx-run-backticks)
+buildx_step "$root" 'img=`docker buildx build --load -q --file docker/Dockerfile .`'
+run_check "$root"
+check "the backtick form fails" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
+root=$(fixture buildx-run-echo-substitution)
+buildx_step "$root" 'echo $(docker build --file docker/Dockerfile .)'
+run_check "$root"
+check "echo \$(docker build …) fails" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
+
 
 summary "check-image-trigger-paths.sh"

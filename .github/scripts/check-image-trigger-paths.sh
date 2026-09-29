@@ -13,10 +13,10 @@
 # `merge_group` event. An event with no `paths` covers everything; `paths-ignore` covers whatever
 # it does not name. A job whose `if:` tests `needs.<job>.outputs.<name> == 'true'` for several
 # outputs joined by `||` runs only when one of them is set, so an input is covered only if the
-# event covers it AND one of those `dorny/paths-filter` filters does. That holds for the job
-# that builds, for a job that calls a workflow which builds, and for every job either of them
-# transitively `needs:` — GitHub skips a job whose needed job was skipped — so the gates of
-# different jobs AND while the filters inside one `if:` OR.
+# event covers it AND one of those `dorny/paths-filter` filters does. That holds for the build
+# step's own `if:`, for the job that builds, for a job that calls a workflow which builds, and
+# for every job either of those transitively `needs:` — GitHub skips a job whose needed job was
+# skipped — so separate gates AND while the filters inside one `if:` OR.
 #
 # A directory source is covered when every file under it that the context keeps (the
 # `.dockerignore` drops the rest) matches, so a new file outside a partial filter fails here on
@@ -249,6 +249,8 @@ BUILDX_BOOLEAN_FLAGS = {
     "--check", "--debug", "-D", "--force-rm", "--load", "--no-cache", "--pull", "--push",
     "--quiet", "-q", "--rm",
 }
+# A command substitution inside one shlex word: `$(` or a backtick.
+SUBSTITUTION = re.compile(r"\$\(|`")
 SEPARATOR = re.compile(r"[;|&]+")
 # A `bash -c` / `sh -c` argument whose program invokes a docker build: the whole command is one
 # shlex word, so it is matched on the word's contents rather than parsed.
@@ -295,12 +297,15 @@ def build_arguments(command: list[str]) -> list[str] | None:
     write the same build. Anything else that reaches a `docker … build` — a subshell, a retry
     wrapper, `docker compose build` — is Unreadable rather than None: a build this check skips
     is a build whose inputs nothing owes, which is the failure the check exists to prevent."""
-    # shlex keeps `(docker` as one word, so strip a leading grouping character before asking
-    # whether a word names docker — otherwise `(docker buildx build …)` reads as neither a build
-    # nor an unreadable one and passes unseen. `bash -c "docker …"` hides the whole command
-    # inside one quoted word, so it is matched on the word's contents instead.
+    # shlex keeps `(docker`, `img=$(docker` and `` `docker `` as one word each, so reduce a word
+    # to what follows its last command substitution and strip a leading grouping character
+    # before asking whether it names docker. Without that, `img=$(docker buildx build …)` — the
+    # recipe listener_test.go prints — is stripped as an assignment and never looked inside, so
+    # it reads as neither a build nor an unreadable one and passes unseen. `bash -c "docker …"`
+    # hides the whole command in one quoted word, so it is matched on the word's contents.
     shaped = any(
-        posixpath.basename(word.lstrip("({")) == "docker" and "build" in command[index + 1 :]
+        posixpath.basename(SUBSTITUTION.split(word)[-1].lstrip("({")) == "docker"
+        and "build" in command[index + 1 :]
         for index, word in enumerate(command)
     ) or any(
         posixpath.basename(word) in {"bash", "sh", "zsh"}
@@ -538,14 +543,15 @@ def gate_outputs(condition: str) -> list[tuple[str, str]]:
     return outputs
 
 
-def gating_filters(document: dict, job_name: str, job: dict) -> list[tuple[str, Filter]]:
-    """The dorny/paths-filter filters a job's `if:` is gated on — a job that builds an image, or
-    one that calls a workflow which does. A gate this check cannot evaluate is reported, never
-    ignored, since ignoring it would treat a gated job as one that runs on every change."""
+def gating_filters(document: dict, describe: str, holder: dict) -> list[tuple[str, Filter]]:
+    """The dorny/paths-filter filters an `if:` is gated on. The holder is a job that builds an
+    image, a job that calls a workflow which does, a job either of those needs, or the build
+    step itself. A gate this check cannot evaluate is reported, never ignored, since ignoring it
+    would treat a gated build as one that runs on every change."""
     try:
-        outputs = gate_outputs(str(job.get("if", "")))
+        outputs = gate_outputs(str(holder.get("if", "")))
     except Unreadable as error:
-        problems.append(f"::error::jobs.{job_name} builds or calls an image, and its if: {error}")
+        problems.append(f"::error::{describe} builds or calls an image, and its if: {error}")
         return []
     jobs = document.get("jobs") or {}
     found = []
@@ -566,7 +572,7 @@ def gating_filters(document: dict, job_name: str, job: dict) -> list[tuple[str, 
             )
         if step is None:
             problems.append(
-                f"::error::jobs.{job_name} builds or calls an image and is gated on "
+                f"::error::{describe} builds or calls an image and is gated on "
                 f"needs.{needed}.outputs.{output}, which is not a dorny/paths-filter filter "
                 f"this check can read"
             )
@@ -613,7 +619,7 @@ def triggers_for(workflow: Path) -> list[tuple[str, list]]:
         for job_name, job in (caller_document.get("jobs") or {}).items():
             if not isinstance(job, dict) or job.get("uses") != f"./{workflow}":
                 continue
-            gates = gating_filters(caller_document, job_name, job)
+            gates = gating_filters(caller_document, f"jobs.{job_name}", job)
             for label, caller_filter in event_filters(caller, caller_document):
                 if gates:
                     names = " or ".join(name for name, _ in gates)
@@ -638,7 +644,7 @@ for workflow, document in documents.items():
                 options = step.get("with") or {}
                 context = posixpath.normpath(str(options.get("context", ".")))
                 dockerfile = str(options.get("file", posixpath.join(context, "Dockerfile")))
-                builds.append((workflow, job_name, context, posixpath.normpath(dockerfile)))
+                builds.append((workflow, job_name, step, context, posixpath.normpath(dockerfile)))
                 continue
             script = step.get("run")
             if not isinstance(script, str) or "docker" not in script:
@@ -653,6 +659,7 @@ for workflow, document in documents.items():
                         (
                             workflow,
                             job_name,
+                            step,
                             posixpath.normpath(posixpath.join(directory, context)),
                             posixpath.normpath(posixpath.join(directory, dockerfile)),
                         )
@@ -666,7 +673,7 @@ if not builds:
         "build`: this check covered 0 image builds, so it proves nothing"
     )
 
-for workflow, job_name, context, dockerfile in builds:
+for workflow, job_name, step, context, dockerfile in builds:
     if not Path(dockerfile).is_file():
         problems.append(f"::error file={workflow}::{workflow} builds {dockerfile}, which is missing")
         continue
@@ -701,7 +708,8 @@ for workflow, job_name, context, dockerfile in builds:
     # A trigger that starts the workflow is not enough: a gate can skip the building job on a
     # change the trigger let through, and the image is then not built for that change either.
     # GitHub skips a job whose needed job was skipped, unless its own `if:` says always(), so a
-    # build is gated by every job it transitively needs as well as by its own `if:`.
+    # build is gated by every job it transitively needs, by its own job's `if:`, and by the
+    # build step's own `if:`.
     document = documents[workflow]
     groups, seen, queue = [], set(), [job_name]
     while queue:
@@ -710,22 +718,28 @@ for workflow, job_name, context, dockerfile in builds:
             continue
         seen.add(name)
         gated = document["jobs"].get(name) or {}
-        found = gating_filters(document, name, gated)
+        found = gating_filters(document, f"jobs.{name}", gated)
         if found:
-            groups.append((name, found))
+            groups.append((f"jobs.{name}.if", found))
         condition = str(gated.get("if", ""))
         if name != job_name and ("always()" in condition or "cancelled()" in condition):
             continue
         needs = gated.get("needs") or []
         queue += [needs] if isinstance(needs, str) else list(needs)
+    if str(step.get("if", "")):
+        where = step.get("name") or "an unnamed step"
+        describe = f"jobs.{job_name} step '{where}'"
+        found = gating_filters(document, describe, step)
+        if found:
+            groups.append((f"{describe} if", found))
     triggers = triggers_for(workflow)
-    # Filters inside one job's `if:` are ||-joined and widen, but two jobs' gates must both
-    # hold, so they AND: one AnyOf per job, all of them in the filter list.
-    for name, found in groups:
+    # Filters inside one `if:` are ||-joined and widen, but separate gates must all hold, so
+    # they AND: one AnyOf per gate, all of them in the filter list.
+    for gate_label, found in groups:
         names = " or ".join(label for label, _ in found)
         gate = AnyOf([f for _, f in found])
         triggers = [
-            (f"{label} + jobs.{name}.if ({names})", filters + [gate])
+            (f"{label} + {gate_label} ({names})", filters + [gate])
             for label, filters in triggers
         ]
     for label, filters in triggers:
