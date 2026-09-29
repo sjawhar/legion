@@ -213,11 +213,16 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
   });
 
-  test("dispatch_issues requires a project and rejects a limit above 250", () => {
+  test("dispatch_issues requires a project and accepts only a nonnegative integer offset", () => {
     const schema = schemaFor("dispatch_issues");
+    const spec = dispatchToolSpecs.find((candidate) => candidate.name === "dispatch_issues");
+    if (!spec) throw new Error("dispatch_issues spec is missing");
+    expect(schema.safeParse(spec.example).success).toBe(true);
 
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ project: "AGENTC", limit: 251 }).success).toBe(false);
+    expect(schema.safeParse({ project: "AGENTC", offset: -1 }).success).toBe(false);
+    expect(schema.safeParse({ project: "AGENTC", offset: 0.5 }).success).toBe(false);
     expect(schema.safeParse({ project: "AGENTC", status: "not_a_status" }).success).toBe(false);
     expect(
       schema.safeParse({
@@ -228,6 +233,7 @@ describe("dispatchToolSpecs", () => {
         priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
         limit: 250,
+        offset: 0,
       }).success
     ).toBe(true);
   });

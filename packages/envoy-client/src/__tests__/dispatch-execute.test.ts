@@ -1680,6 +1680,9 @@ describe("executeDispatchTool", () => {
           updated_at: "2026-09-13T00:00:00Z",
         },
       ],
+      total: 1,
+      offset: 0,
+      limit: 50,
     });
   });
 
@@ -1789,6 +1792,90 @@ describe("executeDispatchTool", () => {
 
     expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({ project: "AGENTC" });
     expect(result.details.issues).toHaveLength(2);
+    expect(result.text).toContain("2 issues in AGENTC (showing 1-2 of 5)");
+    expect(result.details).toMatchObject({ total: 5, offset: 0, limit: 2 });
+  });
+
+  test("dispatch_issues returns the last 50 after offset 250 and renders the total", async () => {
+    const issues = Array.from({ length: 300 }, (_, index) => ({
+      key: `AGENTC-${index}`,
+      title: `Issue ${index}`,
+      status: "todo",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+    }));
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> => response(issues);
+
+    const defaultPage = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "AGENTC" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(defaultPage.text).toContain("50 issues in AGENTC (showing 1-50 of 300)");
+    expect(defaultPage.details).toMatchObject({ total: 300, offset: 0, limit: 50 });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "AGENTC", offset: 250 },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain("50 issues in AGENTC (showing 251-300 of 300)");
+    expect(result.text).toContain("AGENTC-250 [todo] Issue 250");
+    expect(result.text).toContain("AGENTC-299 [todo] Issue 299");
+    expect(result.details).toMatchObject({ total: 300, offset: 250, limit: 50 });
+    expect(result.details.issues).toHaveLength(50);
+  });
+
+  test("dispatch_issues names an empty page beyond the response", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      response([
+        {
+          key: "AGENTC-1",
+          title: "Only issue",
+          status: "todo",
+          priority: null,
+          rank: "a",
+          labels: [],
+          parent: null,
+          assignee: null,
+          updated_at: "2026-09-13T00:00:00Z",
+          last_seq: 1,
+          open_asks: 0,
+        },
+      ]);
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "AGENTC", offset: 1 },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("No issues in AGENTC. (showing 0-0 of 1)");
+    expect(result.details).toMatchObject({ total: 1, offset: 1, limit: 50 });
+    expect(result.details.issues).toEqual([]);
   });
 
   test("dispatch_issue returns duplicate candidates instead of throwing", async () => {
