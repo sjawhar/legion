@@ -460,10 +460,13 @@ port at all, and this paragraph is where the harness-port rule lives — `README
 `9021`) and `FAKE_GITHUB_PORT` (default `9022`) once for every reader in `e2e/`, the Playwright
 config and the two fake listeners included. An empty value means the default for all three alike,
 matching `run-server.sh`'s `${VAR:-default}`; anything that is not a port in canonical decimal is
-refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777` and `" 8777"` are all refused,
-rather than binding one port while every URL built from the raw string points somewhere else).
-Two variables naming one port are refused together, since each port would pass a per-port check
-and Playwright would then refuse the second server without naming either variable.
+refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
+`08777` are all refused, rather than binding one port while every URL built from the raw string
+points somewhere else, or writing one port two ways). Two variables naming one port are refused
+together, naming both: each port passes a per-port check on its own, and every consumer would
+otherwise fail in its own words — Playwright refusing the second `webServer` without naming a
+variable, the second fake listener dying on `EADDRINUSE`. Because the check lives with the
+resolution, the fake listeners refuse it too, not only the Playwright config.
 
 `e2e/playwright.config.ts` then probes the three ports before any web server starts and fails the
 run with one message listing every taken port beside its own variable, before a single spec runs.

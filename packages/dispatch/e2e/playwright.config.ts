@@ -27,30 +27,6 @@ function resolveReuseServers(): boolean {
 
 const reuseServers = resolveReuseServers();
 
-// Two variables naming one port pass the probe below — each port is free on its own — and then
-// reach Playwright's own refusal, which names no variable. Refused here rather than inside the
-// probe's gate, so a `--list` run and the deployed path catch it too.
-const collisions = [...new Set(harnessPorts.map((entry) => entry.port))]
-  .map((port) => ({
-    port,
-    variables: harnessPorts.filter((entry) => entry.port === port).map((entry) => entry.variable),
-  }))
-  .filter((collision) => collision.variables.length > 1);
-if (collisions.length > 0) {
-  const named = collisions
-    .map(({ port, variables }) => {
-      const names =
-        variables.length > 2
-          ? `${variables.slice(0, -1).join(", ")} and ${variables[variables.length - 1]}`
-          : variables.join(" and ");
-      return `${names} name port ${port}`;
-    })
-    .join("; ");
-  throw new Error(
-    `The Dispatch e2e harness cannot start: ${named}. Give each harness server its own port.`
-  );
-}
-
 // Playwright's own port predicate (playwright@1.63.0 `lib/runner/index.js:958-977`): a port counts
 // as used when either `127.0.0.1` or `::1` accepts a connection. A probe that dialled only
 // `127.0.0.1` would miss a listener bound on `::1` alone — what a docker-published port binds —
@@ -80,22 +56,23 @@ function isPortUsed(port: number): Promise<boolean> {
 // A listing run starts no web server: `listMode` builds only a load task and a report-begin task
 // (`lib/runner/index.js:6946-6949`), where an ordinary run's in-process load sits at `:6952`,
 // beneath `createGlobalSetupTasks`. This argv test is a CLI-shape proxy for that, not the rule
-// itself: it counts `--list` only before a `--` separator and never as the value of the preceding
-// option, and it yields to a UI token, because `--ui`/`--ui-*` outrank the computed `listMode`
-// (`lib/cli/testActions.js:52`, `:62`). Both of its errors are safe. A false skip leaves
-// Playwright's own refusal (`lib/runner/index.js:865`), never a reuse; a false probe only replaces
-// a listing with our named refusal — which is also what the test server's own list path
-// (`lib/runner/index.js:6763-6784`) gets, since it carries no `--list` in argv and nothing in this
-// repository uses it.
+// itself, and it is deliberately the loose one: it takes any `--list` before a `--` separator,
+// without asking whether the preceding token is an option that consumes a value. Reading `--list`
+// as `--grep`'s value would be exact, but it also reads it as `--headed`'s value, and refusing a
+// read-only listing because another lane holds a port is the error that costs a developer
+// something. The other direction costs nothing: `--grep --list` is a real run that skips the
+// probe and then meets Playwright's own refusal (`lib/runner/index.js:865`) — no spec runs and
+// nothing is reused, only the message is less specific than ours. Enumerating Playwright's
+// boolean flags to tell the two apart would pin this file to one version of its CLI. It does
+// yield to a UI token, because `--ui`/`--ui-*` outrank the computed `listMode`
+// (`lib/cli/testActions.js:52`, `:62`) and a UI session does start servers. The test server's own
+// list path (`lib/runner/index.js:6763-6784`) carries no `--list` in argv, so it is probed;
+// nothing in this repository uses it.
 function isListMode(argv: readonly string[]): boolean {
   if (argv.some((arg) => arg === "--ui" || arg.startsWith("--ui-"))) return false;
   const separator = argv.indexOf("--");
   const scanned = separator === -1 ? argv : argv.slice(0, separator);
-  return scanned.some((arg, index) => {
-    if (arg !== "--list") return false;
-    const previous = scanned[index - 1];
-    return previous === undefined || !previous.startsWith("-") || previous.includes("=");
-  });
+  return scanned.includes("--list");
 }
 
 // The probe runs while this module evaluates because no Playwright hook runs before the web

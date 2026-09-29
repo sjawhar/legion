@@ -101,11 +101,14 @@ DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN \
   bun run e2e
 ```
 
-`DATABASE_URL` is read by the server script and the seed; the three ports are resolved for the
-whole TypeScript suite by `e2e/harness-ports.ts`, which the config, the seeds, the API helpers and
-both fake listeners import, so those variables move the whole harness together. Start nothing
-else: the container from `packages/envoy/scripts/dev-postgres.sh` and what the Playwright config
-starts are the harness.
+`DATABASE_URL` is read by the server script and by `e2e/seed.ts`. The three ports are resolved for
+the whole TypeScript suite by `e2e/harness-ports.ts`, whose eight importers are
+`e2e/playwright.config.ts`, `e2e/api.ts`, `e2e/agents.ts`, `e2e/agent-tokens.e2e.ts`,
+`e2e/failed-room.e2e.ts`, `e2e/fake-envoy.ts`, `e2e/fake-github.ts` and
+`e2e/fake-github-helpers.ts` — `e2e/seed.ts` is not one of them; it reaches the server through
+`e2e/api.ts`. So those variables move the whole harness together. Start nothing else: the
+container from `packages/envoy/scripts/dev-postgres.sh` and what the Playwright config starts are
+the harness.
 
 To run the suite repeatedly against a harness you started yourself — `run-server.sh` and the two
 fakes, left listening on your ports — set `DISPATCH_E2E_REUSE_SERVERS=1` (see AGENTS.md for the
