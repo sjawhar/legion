@@ -163,7 +163,7 @@ func padCutTables(before, after *pmdoc.Node, r pmdoc.Range) (*pmdoc.Node, error)
 	if err != nil {
 		return nil, err
 	}
-	return pmdoc.PadTables(after, first, last), nil
+	return pmdoc.PadTables(after, first, last)
 }
 
 // padsLikeTheBrowser reports whether an accept may pad the tables its splice cut: whether the

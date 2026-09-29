@@ -358,7 +358,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// the replacement where Splice does (padsLikeTheBrowser).
 		if padsLikeTheBrowser(tree, range_, at, inline) {
 			if next, err = padCutTables(tree, next, range_); err != nil {
-				return err
+				return acceptSpliceRefusal(err)
 			}
 		}
 		if code {

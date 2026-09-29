@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -357,4 +358,58 @@ func TestParsePairsARunByTheLengthsItHasLeft(t *testing.T) {
 			t.Errorf("ParseInline still reads %s, goldmark's pairing of the closer's last delimiter", line)
 		}
 	}
+}
+
+func TestParseRejectsExcessiveTablePaddingBeforeAllocation(t *testing.T) {
+	const maximumAllocation = 8 << 20
+	for _, width := range []int{500, 1000, 1500} {
+		markdown := tablePaddingBomb(width)
+		for _, parser := range []struct {
+			name string
+			read func(string) (*Node, error)
+		}{
+			{name: "Parse", read: Parse},
+			{name: "ParseForWrite", read: func(markdown string) (*Node, error) {
+				return ParseForWrite(markdown, nil)
+			}},
+		} {
+			t.Run(fmt.Sprintf("%s/n=%d", parser.name, width), func(t *testing.T) {
+				runtime.GC()
+				var before, after runtime.MemStats
+				runtime.ReadMemStats(&before)
+				started := time.Now()
+				_, err := parser.read(markdown)
+				elapsed := time.Since(started)
+				runtime.ReadMemStats(&after)
+				allocated := after.TotalAlloc - before.TotalAlloc
+				t.Logf("n=%d elapsed=%s allocated=%d", width, elapsed, allocated)
+				if !errors.Is(err, ErrSchema) {
+					t.Errorf("parse error = %v, want ErrSchema", err)
+				} else {
+					for _, want := range []string{"table 1", "writes", "header implies", "limit 100000"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("parse error = %q, want it to name %q", err, want)
+						}
+					}
+				}
+				if allocated > maximumAllocation {
+					t.Errorf("allocated %d bytes, want at most %d", allocated, maximumAllocation)
+				}
+			})
+		}
+	}
+}
+
+func TestParseRejectsTablePaddingBudgetAcrossTables(t *testing.T) {
+	markdown := tablePaddingBomb(250) + "\n" + tablePaddingBomb(250)
+	_, err := Parse(markdown)
+	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 2") {
+		t.Fatalf("Parse() error = %v, want ErrSchema naming table 2", err)
+	}
+}
+
+func tablePaddingBomb(width int) string {
+	return strings.Repeat("| header ", width) + "|\n" +
+		strings.Repeat("| --- ", width) + "|\n" +
+		strings.Repeat("| body |\n", width)
 }

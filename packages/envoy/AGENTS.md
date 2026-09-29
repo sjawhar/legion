@@ -424,17 +424,21 @@ since the same accept is refused every time.
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
 index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
-partially mutates a table. Parsing pads a short row to the header's width, as the browser editor's
-table plugin does on load: Milkdown's gfm preset installs prosemirror-tables' `tableEditing`, whose
-`fixTables` pads a table a transaction brings in (verified on an `EditorState`; that the browser
-loads by a transaction is y-prosemirror's sync, not checked in a browser). The headless engine runs
-no plugins and keeps the short row. Each padded cell takes its column's alignment, as its rendering
-reads back, so column deletion operates on that complete representation and leaves every
-non-selected cell intact. Deleting the last remaining body row or any row's last remaining column
-is refused, retaining the table block. Table `references` from `GET /api/v1/artifacts/{id}/blocks`
-aggregate anchors pinned to descendant cells. A row or column deletion that would remove an open
-ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
-answered asks and resolved comments remain historical and do not block it. Block ids stay with
+partially mutates a table. Parsing pads short rows to their headers' widths, as the browser editor's
+table plugin does on load, only while a document's tables add at most 100,000 cells in total; a
+larger document is refused before its cells are allocated, naming the table, cells written, cells its
+header implies, and the limit. `pmdoc.PadTables` applies the same cumulative ceiling when an accept
+or reject pads cut tables.
+Milkdown's gfm preset installs prosemirror-tables' `tableEditing`, whose `fixTables` pads a table a
+transaction brings in (verified on an `EditorState`; that the browser loads by a transaction is
+y-prosemirror's sync, not checked in a browser). The headless engine runs no plugins and keeps the short
+row. Each padded cell takes its column's alignment, as its rendering reads back, so column deletion
+operates on that complete representation and leaves every non-selected cell intact. Deleting the last
+remaining body row or any row's last remaining column is refused, retaining the table block. Table
+`references` from `GET /api/v1/artifacts/{id}/blocks` aggregate anchors pinned to descendant cells.
+A row or column deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on
+index, naming the axis and anchor ids; answered asks and resolved comments remain historical and do not
+block it. Block ids stay with
 moved, retyped, and table-edited nodes, so the ask reconciliation keeps a moved ask; a removed
 block retracts its ask only while the ask is open (an answered or resolved ask is already closed,
 and `asks_answer_state_check` forbids a resolved row that still carries an answer). Within one

@@ -34,7 +34,7 @@ func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
 			return nil, rejectSpliceRefusal(err)
 		}
 		if next, err = padCutTables(next, spliced, span); err != nil {
-			return nil, err
+			return nil, rejectSpliceRefusal(err)
 		}
 		if err := next.Validate(); err != nil {
 			return nil, rejectSpliceRefusal(err)

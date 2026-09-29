@@ -289,23 +289,34 @@ func marksInNodes(nodes []*Node) []MarkRef {
 // widest row, none where that row's cell has none (a cell read from the live document carries no
 // null attribute), where fixTables gives it left: the renderer writes one alignment per column, so
 // the column reads back as it was.
-func PadTables(doc *Node, first, last int) *Node {
+// The operation refuses (ErrSchema) before allocating missing cells when the tables it pads would
+// add more than maxTablePaddingCells cells in total.
+func PadTables(doc *Node, first, last int) (*Node, error) {
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: append([]*Node(nil), doc.Children...)}
+	tableCount := 0
+	paddedCells := 0
 	for index := first; index <= last && index < len(out.Children); index++ {
 		block := cloneNode(out.Children[index])
+		var paddingErr error
 		Walk(block, func(node *Node) bool {
-			if node.Type == "table" {
-				padTable(node)
-				return false
+			if node.Type != "table" {
+				return true
 			}
-			return true
+			tableCount++
+			if err := padTable(node, tableCount, &paddedCells); err != nil {
+				paddingErr = err
+			}
+			return false
 		})
+		if paddingErr != nil {
+			return nil, paddingErr
+		}
 		out.Children[index] = block
 	}
-	return out
+	return out, nil
 }
 
-func padTable(table *Node) {
+func padTable(table *Node, tableCount int, paddedCells *int) error {
 	widths := make([]int, len(table.Children))
 	width := 0
 	var widest *Node
@@ -315,6 +326,15 @@ func padTable(table *Node) {
 			widest = row
 		}
 		width = max(width, widths[index])
+	}
+	padding := tablePadding{}
+	for _, rowWidth := range widths {
+		padding.written += rowWidth
+		padding.implied += width
+	}
+	*paddedCells += padding.cells()
+	if *paddedCells > maxTablePaddingCells {
+		return padding.refusal(tableCount, *paddedCells)
 	}
 	firstShort, lastShort := -1, -1
 	for index := range table.Children {
@@ -354,6 +374,7 @@ func padTable(table *Node) {
 			row.Children = append(row.Children, cells...)
 		}
 	}
+	return nil
 }
 
 // DeleteTableRow returns a copy of doc with the zero-based row removed from

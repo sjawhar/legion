@@ -32,12 +32,16 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 // parse parses source. unclosedFrontmatter says source opens a document with a front-matter opener
 // no later line closes, after which no container opens at the document's level
 // (frontmatterAttempt).
-func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool) ast.Node {
+func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool) (ast.Node, error) {
 	pc := parser.NewContext()
 	if unclosedFrontmatter {
 		pc.Set(unclosedFrontmatterKey, true)
 	}
-	return withLineStarts(reader.md.Parser(), source, pc)
+	root := withLineStarts(reader.md.Parser(), source, pc)
+	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
+		return nil, err
+	}
+	return root, nil
 }
 
 // unclosedFrontmatterKey marks the parse of a document that opens with a front-matter opener no

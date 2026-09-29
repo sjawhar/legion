@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -263,4 +264,52 @@ func TestRetypeBlockRejectsBlocksThatAreNeitherParagraphsNorTyped(t *testing.T) 
 	if !errors.Is(err, ErrSchema) || errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("retype heading error = %v, want a schema error, not target not found", err)
 	}
+}
+
+func TestPadTablesBoundsShortRowsBeforeAllocation(t *testing.T) {
+	const maximumAllocation = 8 << 20
+	doc := shortTableForPadding(500, 500)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	padded, err := PadTables(doc, 0, 0)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("allocated=%d", allocated)
+	if !errors.Is(err, ErrSchema) {
+		t.Fatalf("PadTables error = %v, want ErrSchema", err)
+	}
+	if padded != nil {
+		t.Fatalf("PadTables returned a document after refusing excessive padding")
+	}
+	if allocated > maximumAllocation {
+		t.Fatalf("allocated %d bytes, want at most %d", allocated, maximumAllocation)
+	}
+}
+
+func TestPadTablesSharesThePaddingBudgetAcrossTables(t *testing.T) {
+	doc := shortTableForPadding(250, 250)
+	doc.Children = append(doc.Children, shortTableForPadding(250, 250).Children...)
+
+	_, err := PadTables(doc, 0, 1)
+	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 2") {
+		t.Fatalf("PadTables error = %v, want ErrSchema naming table 2", err)
+	}
+}
+
+func shortTableForPadding(width, bodyRows int) *Node {
+	header := &Node{Type: "table_header_row", Children: make([]*Node, width)}
+	for index := range header.Children {
+		header.Children[index] = emptyTableCellForPadding("table_header")
+	}
+	table := &Node{Type: "table", Children: []*Node{header}}
+	for range bodyRows {
+		table.Children = append(table.Children, &Node{Type: "table_row", Children: []*Node{emptyTableCellForPadding("table_cell")}})
+	}
+	return &Node{Type: "doc", Children: []*Node{table}}
+}
+
+func emptyTableCellForPadding(kind string) *Node {
+	return &Node{Type: kind, Children: []*Node{{Type: "paragraph"}}}
 }

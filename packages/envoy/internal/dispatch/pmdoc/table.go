@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 
 	"github.com/yuin/goldmark"
@@ -20,6 +21,50 @@ type lazyAwareTable struct{}
 // tableTransformer is goldmark's table paragraph transformer, which lazyTableRows runs and
 // formsTable tries.
 var tableTransformer = extension.NewTableParagraphTransformer()
+
+const maxTablePaddingCells = 100_000
+
+var (
+	tablePaddingErrorKey = parser.NewContextKey()
+	tablePaddingCountKey = parser.NewContextKey()
+	tablePaddingCellsKey = parser.NewContextKey()
+)
+
+type tablePadding struct {
+	written int
+	implied int
+}
+
+func (p tablePadding) cells() int {
+	return p.implied - p.written
+}
+
+func (p tablePadding) refusal(table, total int) error {
+	return fmt.Errorf(
+		"%w: table %d writes %d cells, its header implies %d cells, and padding would add %d cells; tables in this operation would add %d cells (limit %d)",
+		ErrSchema,
+		table,
+		p.written,
+		p.implied,
+		p.cells(),
+		total,
+		maxTablePaddingCells,
+	)
+}
+
+func recordTablePadding(pc parser.Context, padding tablePadding) bool {
+	count, _ := pc.Get(tablePaddingCountKey).(int)
+	count++
+	pc.Set(tablePaddingCountKey, count)
+	cells, _ := pc.Get(tablePaddingCellsKey).(int)
+	cells += padding.cells()
+	pc.Set(tablePaddingCellsKey, cells)
+	if cells <= maxTablePaddingCells {
+		return false
+	}
+	pc.Set(tablePaddingErrorKey, padding.refusal(count, cells))
+	return true
+}
 
 func (lazyAwareTable) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(
@@ -42,6 +87,15 @@ type lazyTableRows struct{ table parser.ParagraphTransformer }
 func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
 	source := reader.Source()
 	lazy := lazyLines(node.Lines(), source)
+	if padding, header, found := tablePaddingForLines(tabExpandedLines(node.Lines(), source), source); found {
+		line := node.Lines().At(header)
+		if lazy != nil && (lazy[header] || lazy[header+1]) || lonePipe(source[line.Start:line.Stop]) {
+			return
+		}
+		if recordTablePadding(pc, padding) {
+			return
+		}
+	}
 	if lazy == nil && !holdsLonePipeLine(node.Lines(), source) {
 		t.transform(node, reader, pc)
 		return
@@ -74,6 +128,90 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 		}
 	}
 	t.transform(node, reader, pc)
+}
+
+// tablePaddingForLines reports the table Goldmark's paragraph transformer will form from lines,
+// before that transformer creates cells for its short rows.
+func tablePaddingForLines(lines *gmtext.Segments, source []byte) (tablePadding, int, bool) {
+	for delimiter := 1; delimiter < lines.Len(); delimiter++ {
+		width, ok := tableDelimiterWidth(lines.At(delimiter), source)
+		if !ok {
+			continue
+		}
+		header := tableRowWidth(lines.At(delimiter-1), source)
+		if header != width {
+			return tablePadding{}, 0, false
+		}
+		padding := tablePadding{written: header, implied: width}
+		for row := delimiter + 1; row < lines.Len(); row++ {
+			written := min(tableRowWidth(lines.At(row), source), width)
+			padding.written += written
+			padding.implied += width
+		}
+		return padding, delimiter - 1, true
+	}
+	return tablePadding{}, 0, false
+}
+
+func tableDelimiterWidth(segment gmtext.Segment, source []byte) (int, bool) {
+	line := segment.Value(source)
+	if indent, _ := util.IndentWidth(line, 0); indent > 3 {
+		return 0, false
+	}
+	allHyphens := true
+	for _, char := range line {
+		if char != '-' {
+			allHyphens = false
+		}
+		if !(util.IsSpace(char) || char == '-' || char == '|' || char == ':') {
+			return 0, false
+		}
+	}
+	if allHyphens {
+		return 0, false
+	}
+	cells := bytes.Split(line, []byte{'|'})
+	if len(cells) > 0 && util.IsBlank(cells[0]) {
+		cells = cells[1:]
+	}
+	if len(cells) > 0 && util.IsBlank(cells[len(cells)-1]) {
+		cells = cells[:len(cells)-1]
+	}
+	if len(cells) == 0 {
+		return 0, false
+	}
+	for _, cell := range cells {
+		cell = bytes.TrimSpace(cell)
+		cell = bytes.TrimPrefix(cell, []byte{':'})
+		cell = bytes.TrimSuffix(cell, []byte{':'})
+		if len(cell) == 0 || len(bytes.Trim(cell, "-")) != 0 {
+			return 0, false
+		}
+	}
+	return len(cells), true
+}
+
+func tableRowWidth(segment gmtext.Segment, source []byte) int {
+	segment = segment.TrimLeftSpace(source)
+	segment = segment.TrimRightSpace(source)
+	line := segment.Value(source)
+	position, limit := 0, len(line)
+	if limit > 0 && line[position] == '|' {
+		position++
+	}
+	if limit > 0 && line[limit-1] == '|' {
+		limit--
+	}
+	width := 0
+	for position < limit {
+		width++
+		closure := position
+		for closure < limit && (line[closure] != '|' || closure > 0 && line[closure-1] == '\\') {
+			closure++
+		}
+		position = closure + 1
+	}
+	return width
 }
 
 // transform is goldmark's table transformer, reading the paragraph's lines with their indentation

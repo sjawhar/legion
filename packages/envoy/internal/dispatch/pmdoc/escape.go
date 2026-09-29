@@ -417,7 +417,10 @@ func quotedBy(line, quote string) bool {
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
 	source := []byte(markdown)
-	root := blockReader.parse(source, false)
+	root, err := blockReader.parse(source, false)
+	if err != nil {
+		return nil
+	}
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		// A task checkbox is inline, but it is the list item's syntax, not its text.

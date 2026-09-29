@@ -189,7 +189,10 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
 		source = source[rest:]
 	}
-	root := blockReader.parse(source, unclosedFrontmatter)
+	root, err := blockReader.parse(source, unclosedFrontmatter)
+	if err != nil {
+		return nil, err
+	}
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
