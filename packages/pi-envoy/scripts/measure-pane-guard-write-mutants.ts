@@ -50,6 +50,7 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["install directory flag", 'found.flags.has("d") || found.flags.has("--directory")', "false"],
   ["ln one operand", "found.operands.length === 1 &&", "false &&"],
   ["ln one read word", "readableWord(sole).whole", "true"],
+  ["a word that passes no argument", 'return arg.fields !== "none";', "return true;"],
   [
     "ln symbolic operands",
     'const symbolic = found.flags.has("s") || found.flags.has("--symbolic");',

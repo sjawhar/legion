@@ -4167,6 +4167,14 @@ interface WriteArguments {
  * whole table (`completeName`). A word before `--` that the guard cannot read whole and that may be
  * an option is `uncertain`: it may be `-t` with another directory, or `-T`, so `writeDestinations`
  * refuses to read a destination past it. */
+/** Whether bash passes this word to the command at all. A word of no fields — an unquoted empty
+ * value, `"${e[@]}"` of an empty array, `"$@"` of no positional parameters — produces NO
+ * argument, so it is not the last operand and cannot be the destination. Counting it made the
+ * real destination a source: `x=; cp payload "$HOME/.bashrc" $x` overwrote the profile. */
+function passesAnArgument(arg: Arg): boolean {
+  return arg.fields !== "none";
+}
+
 function writeArguments(rest: readonly Arg[], valued: string, long: LongOptions): WriteArguments {
   const names = Object.keys(long);
   const operands: Arg[] = [];
@@ -4177,12 +4185,12 @@ function writeArguments(rest: readonly Arg[], valued: string, long: LongOptions)
     const arg = rest[i] as Arg;
     const { text, whole } = readableWord(arg);
     if (whole && text === "--") {
-      operands.push(...rest.slice(i + 1));
+      operands.push(...rest.slice(i + 1).filter(passesAnArgument));
       break;
     }
     if (!whole || !text.startsWith("-") || text === "-") {
       if (!whole && mayBeSomeOption(text)) uncertain = arg;
-      operands.push(arg);
+      if (passesAnArgument(arg)) operands.push(arg);
       continue;
     }
     let takesValue = false;

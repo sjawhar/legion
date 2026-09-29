@@ -1043,6 +1043,38 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     plant: `printf '%s\\n' 'notes.txt '"$HOME/.bashrc" > list`,
     command: `s=$(cat list); ln -sf -- $s`,
   },
+  // A word of no fields produces NO argument, so it is not the last operand. Counting it made the
+  // real destination a source, and the copy landed outside the roots (#1565, the deep lens).
+  {
+    name: "cp whose trailing word is an unquoted empty value, passing no argument",
+    family: "cp",
+    role: "probe",
+    command: `x=; cp payload "$HOME/.bashrc" $x`,
+  },
+  {
+    name: "cp whose trailing word is an empty array, passing no argument",
+    family: "cp",
+    role: "probe",
+    command: `e=(); cp payload "$HOME/.bashrc" "\${e[@]}"`,
+  },
+  {
+    name: "install whose trailing word passes no argument",
+    family: "install",
+    role: "probe",
+    command: `x=; install payload "$HOME/.bashrc" $x`,
+  },
+  {
+    name: "ln -sf whose trailing word passes no argument",
+    family: "ln",
+    role: "probe",
+    command: `x=; ln -sf payload "$HOME/.bashrc" $x`,
+  },
+  {
+    name: "cp into a workspace destination with a trailing no-argument word",
+    family: "cp",
+    role: "must-allow",
+    command: `x=; cp payload dest $x`,
+  },
   {
     name: "ln -sf over a positional slice, which is one operand the guard cannot read",
     family: "ln",

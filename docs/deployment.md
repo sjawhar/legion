@@ -15,16 +15,18 @@ since LEGION-121, destructive commands and signals outside the pane's own work. 
 `eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`, `find -exec rm`,
 `shred`), move (`mv`), truncate (`truncate`), overwrite by redirection, `tee`, `cp`, `dd of=`,
 `install`, `ln` or `sed -i` (an existing file only; a symlink the same command creates and then
-writes through is not on disk when the guard reads the command). **Known shapes that still reach
-outside the roots are tracked, not covered: a value re-parsed by `eval` or `bash -c` (LEGION-375),
-an expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e`
-or `s///e`, which the guard does not read (LEGION-377).**, or recursively change the mode or owner
-(`chmod -R`, `chown -R`) of paths under the pane's
+writes through is not on disk when the guard reads the command), or recursively change the mode
+or owner (`chmod -R`, `chown -R`) of paths under the pane's
 issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below `/tmp` except
 `/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp` directory that
 holds the pane's `HOME` or `TMUX_TMPDIR` when either sits there, by that directory's exact name (an
 e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which other permitted
-`/tmp` directory belongs to this pane. It parses the command with a bash parser and resolves each
+`/tmp` directory belongs to this pane.
+**Known shapes that still reach outside the roots
+are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
+expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
+`s///e`, which the guard does not read (LEGION-377).**
+It parses the command with a bash parser and resolves each
 target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
 assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
 command,
