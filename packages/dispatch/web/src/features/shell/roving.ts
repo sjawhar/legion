@@ -11,8 +11,7 @@ export function closestMatching(node: Element | null, selector: string): HTMLEle
  * all, so counting it would dead-end the keys on the row before the band and strand every row
  * past it. A closed band is the whole of it for the three lists that rove: the project List
  * keeps each status band in a `details` (`project/IssueList.tsx`), while the Inbox renders no
- * row of a folded band (`inbox/Inbox.tsx:541-548`) and Architecture renders only the current
- * level's rows. `checkVisibility()` would answer this and more, and needs Safari 17.4 / Chrome
+ * row of a folded band and Architecture renders only the current level's rows. `checkVisibility()` would answer this and more, and needs Safari 17.4 / Chrome
  * 105 / Firefox 106; a focus rule is not worth raising the browsers Dispatch runs on.
  */
 export function reachableRows(nodes: readonly HTMLElement[]): HTMLElement[] {

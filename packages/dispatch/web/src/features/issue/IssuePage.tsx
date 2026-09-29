@@ -4,6 +4,7 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../../api/client";
 import type { Artifact, IssuePriority } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
+import { tabButtonId } from "../../components/Tabs";
 import {
   dangerText,
   linkHoverText,
@@ -87,10 +88,11 @@ function ItemLandingFailure({
 
 /**
  * What the `issue` scope acts on. Every target is a control the header or the tablist already
- * renders, so a key does exactly what a click on it does. Scoping the header lookup to
- * `issue-header` keeps a child issue's row in the Children tab - it carries the same accessible
- * names - out of reach.
+ * renders, so a key does exactly what a click on it does. Scoping the lookup to
+ * `[data-issue-header]` keeps a child issue's row in the Children tab - it carries the same
+ * accessible names - out of reach.
  */
+const HEADER = "[data-issue-header]";
 const LABELS_TRIGGER = 'button[aria-label="Edit labels"]';
 const PIN_TOGGLE = 'button[aria-label="Pin issue"], button[aria-label="Unpin issue"]';
 const PRIORITY_SELECT = 'select[aria-label^="Priority of "]';
@@ -101,9 +103,7 @@ const TITLE_HEADING = 'h1[tabindex="0"]';
  *  issue, a save in flight): the one fact both the key's `run` and the `when` that offers it read,
  *  so a shortcut is listed exactly while its control would take a click. */
 function usableControl(selector: string): HTMLElement | null {
-  const node = document
-    .querySelector("[data-testid=issue-header]")
-    ?.querySelector<HTMLElement>(selector);
+  const node = document.querySelector(HEADER)?.querySelector<HTMLElement>(selector);
   if (node == null) {
     return null;
   }
@@ -112,13 +112,12 @@ function usableControl(selector: string): HTMLElement | null {
   return disabled ? null : node;
 }
 
-/** The tab chords `IssueTabs` answers, keyed by the tablist button id `components/Tabs.tsx`
- *  gives each tab. */
-const tabChords: readonly { id: string; keys: string; label: string; tab: IssueTab }[] = [
-  { id: "tab-spec", keys: "t s", label: "Spec tab", tab: "spec" },
-  { id: "tab-conversation", keys: "t c", label: "Conversation tab", tab: "conversation" },
-  { id: "tab-children", keys: "t h", label: "Children tab", tab: "children" },
-  { id: "tab-artifacts", keys: "t a", label: "Artifacts tab", tab: "artifacts" },
+/** The tabs the chords reach, each through the tablist button `IssueTabs` renders for it. */
+const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
+  { keys: "t s", label: "Spec tab", tab: "spec" },
+  { keys: "t c", label: "Conversation tab", tab: "conversation" },
+  { keys: "t h", label: "Children tab", tab: "children" },
+  { keys: "t a", label: "Artifacts tab", tab: "artifacts" },
 ];
 
 function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
@@ -206,12 +205,27 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       run: () => usableControl(PIN_TOGGLE)?.click(),
       when: () => usableControl(PIN_TOGGLE) !== null,
     },
-    ...tabChords.map(({ id, keys, label, tab }) => ({
-      id,
+    {
+      // `s` and `p` put focus in a native select, where every single-key binding is suspended
+      // and the next keystroke is the select's own type-ahead - `t` would pick Todo or Testing
+      // rather than start the tab chord. Escape is the way back out, as it is on the Inbox
+      // rows, the board's cards and the architecture rows.
+      id: "back",
+      inEditable: true,
+      keys: "Escape",
+      label: "Back out of the focused header control",
+      run: () => (document.activeElement as HTMLElement | null)?.blur(),
+      when: () => {
+        const active = document.activeElement;
+        return active === usableControl(STATUS_SELECT) || active === usableControl(PRIORITY_SELECT);
+      },
+    },
+    ...tabChords.map(({ keys, label, tab }) => ({
+      id: `tab-${tab}`,
       keys,
       label,
-      run: () => document.getElementById(`issue-${tab}-tab`)?.click(),
-      when: () => document.getElementById(`issue-${tab}-tab`) !== null,
+      run: () => document.getElementById(tabButtonId("issue", tab))?.click(),
+      when: () => document.getElementById(tabButtonId("issue", tab)) !== null,
     })),
   ]);
 

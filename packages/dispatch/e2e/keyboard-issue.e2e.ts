@@ -70,9 +70,16 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await expect(page.getByRole("listbox", { name: "Labels options" })).toHaveCount(0);
     await leaveFocus(page);
 
-    // Shift+P pins through the header's own control, and the pin is saved.
+    // Shift+P pins through the header's own control. The pin is optimistic, so the reload
+    // below waits for the write itself rather than racing the navigation against it.
+    const pinned = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        new URL(response.url()).pathname === `/api/v1/me/issues/${issue.key}/state`
+    );
     await page.keyboard.press("Shift+P");
     await expect(header.getByRole("button", { name: "Unpin issue" })).toBeVisible();
+    expect((await pinned).ok()).toBe(true);
     await page.reload();
     await expect(header.getByRole("button", { name: "Unpin issue" })).toBeVisible();
     await leaveFocus(page);
@@ -402,6 +409,95 @@ test("with every band collapsed j and k do nothing and ? greys them, and opening
     for (const row of roving) {
       await expect(row).toHaveAttribute("data-enabled", "true");
     }
+  } finally {
+    await context.close();
+  }
+});
+
+test("Escape leaves a focused header select, so the next chord is a chord and not type-ahead", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Type-ahead" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openIssue(page, issue.key, "Type-ahead");
+    // Every PATCH this page sends, so a status the select's own type-ahead picked is caught
+    // even though the pill would show it for only as long as the reader stayed.
+    const patched: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "PATCH") {
+        patched.push(new URL(request.url()).pathname);
+      }
+    });
+    const onBody = () => page.evaluate(() => document.activeElement === document.body);
+
+    // Three of the status labels begin with `t` (Triage, Todo, Testing), so a `t` that reached
+    // the Status select would write one of them instead of starting the tab chord.
+    for (const [key, control] of [
+      ["s", page.getByRole("combobox", { name: "Status" })],
+      ["p", page.getByRole("combobox", { name: `Priority of ${issue.key}` })],
+    ] as const) {
+      await page.keyboard.press(key);
+      await expect(control).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect.poll(onBody).toBe(true);
+      await page.keyboard.press("t");
+      await expect(page.getByTestId("chord-indicator")).toHaveText(/t/);
+      await page.keyboard.press("c");
+      await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+        "aria-selected",
+        "true"
+      );
+      await page.getByRole("tab", { name: "Spec" }).click();
+      await page.locator("body").focus();
+    }
+
+    expect(patched).toEqual([]);
+    await expect
+      .poll(() => getIssue(issue.key))
+      .toMatchObject({
+        priority: null,
+        status: "triage",
+      });
+  } finally {
+    await context.close();
+  }
+});
+
+test("the Board lists its own roving keys once: the List's are not registered while it shows", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Alpha" });
+  await patchIssue(issue.key, { status: "todo" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/projects/CORE/issues");
+    await expect(page.locator("[data-issue-row]")).toHaveCount(1);
+    await page.getByRole("button", { name: "Board" }).click();
+    await expect(page.getByRole("region", { name: "Todo" }).getByRole("article")).toHaveCount(1);
+    await page.locator("body").focus();
+
+    // The List's rows are gone, so its keys are not the reader's here and `?` must not list
+    // them: `o` and `Enter` would otherwise appear twice over, once per scope.
+    await page.keyboard.press("?");
+    const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+    await expect(dialog.getByRole("region", { name: "Board", exact: true })).toBeVisible();
+    const project = dialog.getByRole("region", { name: "Project", exact: true });
+    for (const label of ["Next issue", "Previous issue", "Open the focused issue"]) {
+      await expect(project.getByRole("listitem").filter({ hasText: label })).toHaveCount(0);
+    }
+    await expect(dialog.getByRole("listitem").filter({ hasText: "Open issue" })).toHaveCount(1);
+    await expect(
+      project.getByRole("listitem").filter({ hasText: "Toggle List / Board" })
+    ).toHaveCount(1);
   } finally {
     await context.close();
   }

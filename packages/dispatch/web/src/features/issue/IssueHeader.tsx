@@ -264,7 +264,15 @@ export function IssueHeader({
   // click — to a different element, swallowing the first click after a title edit.
 
   return (
-    <header className={`mb-3 min-w-0 rounded-xl border p-3 ${card}`} data-testid="issue-header">
+    // `data-issue-header` is load-bearing for the keyboard: the `issue` scope's bindings find
+    // the Status, priority, labels, title and pin controls through it, and scoping to it is
+    // what keeps a child issue's row in the Children tab, which carries the same accessible
+    // names, out of their reach.
+    <header
+      className={`mb-3 min-w-0 rounded-xl border p-3 ${card}`}
+      data-issue-header=""
+      data-testid="issue-header"
+    >
       {isClosed ? (
         <div
           className={`mb-2 flex flex-wrap items-center justify-between gap-2 rounded-lg p-3 text-sm ${calloutWarningBorder} ${calloutWarningBg} ${calloutWarningText}`}

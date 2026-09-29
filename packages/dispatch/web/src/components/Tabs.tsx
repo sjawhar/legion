@@ -15,6 +15,12 @@ export interface TabDefinition<Id extends string> {
   count?: number;
 }
 
+/** The DOM id of the tablist button for `id` under `idPrefix`. A keyboard binding that
+ *  activates a tab finds its button by this, so the format has one owner. */
+export function tabButtonId(idPrefix: string, id: string): string {
+  return `${idPrefix}-${id}-tab`;
+}
+
 /** A tablist may be narrower than its tabs (a phone); a tab focused from the keyboard or
  *  selected must be fully visible, which Chromium's `focus()` alone does not guarantee. Only the
  *  tablist scrolls: `scrollIntoView` would also move the page, undoing the per-tab scroll
@@ -118,7 +124,7 @@ export function Tabs<Id extends string>({
                 ? `${tabMinHeight} ${tabPadding} inline-flex shrink-0 items-center gap-1.5 border-b-2 py-2 text-sm font-semibold whitespace-nowrap ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
                 : `${tabMinHeight} ${tabPadding} inline-flex shrink-0 items-center gap-1.5 py-2 text-sm whitespace-nowrap ${textSecondaryOnCanvas}`
             }
-            id={`${idPrefix}-${tab.id}-tab`}
+            id={tabButtonId(idPrefix, tab.id)}
             key={tab.id}
             onClick={() => selectTab(tab.id)}
             onKeyDown={(event) => onTabKeyDown(event, tab.id)}
