@@ -1043,6 +1043,153 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     plant: `printf '%s\\n' 'notes.txt '"$HOME/.bashrc" > list`,
     command: `s=$(cat list); ln -sf -- $s`,
   },
+  // Bash removes these words before it chooses a command or positional argument. Each dangerous
+  // row is paired with a harmless command that exercises the same position, and the final four
+  // prove that quoted empty strings remain arguments rather than disappearing with no-field words.
+  {
+    name: "an unquoted empty scalar before rm passes no command argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; $x rm -rf "$HOME/.ssh"`,
+  },
+  {
+    name: "an unquoted empty scalar after sudo passes no wrapper argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; sudo $x rm -rf "$HOME/.ssh"`,
+  },
+  {
+    name: "an unquoted empty scalar after env passes no wrapper argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; env $x rm -rf "$HOME/.ssh"`,
+  },
+  {
+    name: "an unquoted empty scalar after nice passes no wrapper argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; nice $x rm -rf "$HOME/.ssh"`,
+  },
+  {
+    name: "an unquoted empty scalar after command passes no wrapper argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; command $x rm -rf "$HOME/.ssh"`,
+  },
+  {
+    name: "an unquoted empty scalar before an xargs program passes no argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; printf '%s\\n' "$HOME/.ssh" | xargs $x rm -rf`,
+  },
+  {
+    name: "an unquoted empty scalar before a find-exec program passes no argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; find "$HOME" -maxdepth 1 -name .ssh -exec $x rm -rf {} +`,
+  },
+  {
+    name: "an unquoted empty scalar leaves cd without an argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `x=; cd $x; rm -rf .ssh`,
+  },
+  {
+    name: "an empty array leaves cd without an argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `e=(); cd "\${e[@]}"; rm -rf .ssh`,
+  },
+  {
+    name: "known-empty positional parameters before rm pass no command argument",
+    family: "no-argument word",
+    role: "probe",
+    command: `f() { "$@" rm -rf "$HOME/.ssh"; }; f`,
+  },
+  {
+    name: "an unquoted empty scalar before a harmless command stays allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; $x true`,
+  },
+  {
+    name: "an unquoted empty scalar after sudo before a harmless command stays allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; sudo $x true`,
+  },
+  {
+    name: "an unquoted empty scalar after env before a harmless command stays allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; env $x true`,
+  },
+  {
+    name: "an unquoted empty scalar after nice before a harmless command stays allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; nice $x true`,
+  },
+  {
+    name: "an unquoted empty scalar after command before a harmless command stays allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; command $x true`,
+  },
+  {
+    name: "an unquoted empty scalar before a harmless xargs program stays allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `printf '%s\\n' harmless | xargs $x true`,
+  },
+  {
+    name: "an unquoted empty scalar before a harmless find-exec program stays allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; find "$LEGION_WORKSPACE" -maxdepth 1 -name notes.txt -exec $x true {} +`,
+  },
+  {
+    name: "an unquoted empty scalar leaves harmless cd without an argument",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; cd $x; true`,
+  },
+  {
+    name: "an empty array leaves harmless cd without an argument",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `e=(); cd "\${e[@]}"; true`,
+  },
+  {
+    name: "known-empty positional parameters before a harmless command stay allowed",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `f() { "$@" true; }; f`,
+  },
+  {
+    name: "a literal quoted empty string stays a command argument",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `"" rm -rf "$HOME/.ssh"`,
+  },
+  {
+    name: "a quoted empty scalar stays a command argument",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `x=; "$x" rm -rf "$HOME/.ssh"`,
+  },
+  {
+    name: "known-empty positional parameters joined by star stay a command argument",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `f() { "$*" rm -rf "$HOME/.ssh"; }; f`,
+  },
+  {
+    name: "a quoted empty array joined by star stays a command argument",
+    family: "no-argument word",
+    role: "must-allow",
+    command: `e=(); "\${e[*]}" rm -rf "$HOME/.ssh"`,
+  },
   // A word of no fields produces NO argument, so it is not the last operand. Counting it made the
   // real destination a source, and the copy landed outside the roots (#1565, the deep lens).
   {

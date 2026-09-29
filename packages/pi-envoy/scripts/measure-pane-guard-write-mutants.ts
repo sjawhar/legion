@@ -50,9 +50,24 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["install directory flag", 'found.flags.has("d") || found.flags.has("--directory")', "false"],
   ["ln one operand", "found.operands.length === 1 &&", "false &&"],
   ["ln one read word", "readableWord(sole).whole", "true"],
-  ["a word that passes no argument", 'return arg.fields !== "none";', "return true;"],
-  ["no-argument word after --", "...rest.slice(i + 1).filter(passesAnArgument)", "...rest.slice(i + 1)"],
-  ["rsync destination counts a word", ".operands.filter(passesAnArgument)", ".operands"],
+  [
+    "no-field simple command argument",
+    'return args(words, st, ctx).filter((arg) => arg.fields !== "none");',
+    "return args(words, st, ctx);",
+    "function commandArgs(",
+  ],
+  [
+    "no-field command argument is unreadable",
+    'return args(words, st, ctx).filter((arg) => arg.fields !== "none");',
+    'return args(words, st, ctx).filter((arg) => arg.fields !== "unknown");',
+    "function commandArgs(",
+  ],
+  [
+    "no-field command argument is the only field",
+    'return args(words, st, ctx).filter((arg) => arg.fields !== "none");',
+    'return args(words, st, ctx).filter((arg) => arg.fields === "none");',
+    "function commandArgs(",
+  ],
   [
     "ln symbolic operands",
     'const symbolic = found.flags.has("s") || found.flags.has("--symbolic");',

@@ -24,11 +24,12 @@ e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which ot
 `/tmp` directory belongs to this pane.
 **Known shapes that still reach outside the roots
 are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
-expansion slice (LEGION-376), the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
-`s///e`, which the guard does not read (LEGION-377), and a word bash passes no argument for — an
-unquoted empty value, an empty `"${a[@]}"` — read as a command name, a wrapper's or `xargs`'s or
-`find -exec`'s program, or `cd`'s directory (LEGION-378).**
-It parses the command with a bash parser and resolves each
+expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
+`s///e`, which the guard does not read (LEGION-377).**
+Before it selects a program or positional operand, the guard drops a word bash passes no argument
+for — an unquoted empty value, an empty `"$@"`, or an empty `"${a[@]}"` — while `""`, an empty
+quoted scalar, an empty `"$*"`, and an empty `"${a[*]}"` remain arguments. It parses the command
+with a bash parser and resolves each
 target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
 assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
 command,
