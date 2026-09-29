@@ -568,13 +568,25 @@ function AgentMessageComposer({
     carried.current = draft;
   }, []);
   /** What the picker's selection reads while it is open, which is the reader's until they commit
-   *  it: the arrows move it, `Enter` (or a pointer's own pick) takes it. */
+   *  it: the select's own keys move it, and `Enter`, or a pick made with the pointer or in the
+   *  native popup, takes it. */
   const [pendingIssue, setPendingIssue] = useState(issueKey);
-  /** Whether the next change on the select comes from its own keys, which only move the
-   *  selection. A fact about one open of the picker: each open starts from the pointer's
-   *  assumption (the effect below that seeds `pendingIssue`), and a press on the select says so
-   *  again. */
+  /** Whether the change arriving now is a key on the select stepping its selection, which only
+   *  moves it: `Enter` is the pick. The test is the task the change arrives in, not the key.
+   *  Chromium, Firefox and WebKit all step a closed select from the key event's own default
+   *  action - the arrows, `Home`/`End` and the page keys from `keydown`, type-ahead from
+   *  `keypress` - and dispatch `change` in that same task. A key that opens the native popup
+   *  instead (the arrows on macOS; `Alt+ArrowDown` in Chromium and Firefox on Linux) steps
+   *  nothing, and the pick then made in the popup arrives in a later task, as a pointer's does:
+   *  that is a pick made, and it commits at once. So each key on the select marks the flag and
+   *  the next task clears it. */
   const movedByKeyboard = useRef(false);
+  const markKeyStep = () => {
+    movedByKeyboard.current = true;
+    setTimeout(() => {
+      movedByKeyboard.current = false;
+    }, 0);
+  };
   /** Bumped by every commit, the issue changed or not, since every commit unmounts the select the
    *  reader is in. The hand-off keys on it rather than on `issueKey`, which re-confirming the
    *  issue already held leaves alone. */
@@ -675,10 +687,10 @@ function AgentMessageComposer({
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
                 onChange={(event) => {
                   setPendingIssue(event.target.value);
-                  // Chromium commits a closed select's value on the first arrow, so a keyboard
-                  // reader who never reaches the second option would have chosen the first by
-                  // trying to pass it. From the keyboard the change only moves the selection;
-                  // `Enter` below is the pick. A pointer has already chosen when it lets go.
+                  // A step from the select's own keys only moves the selection, so a keyboard
+                  // reader can pass the first option to reach the second; `Enter` below is the
+                  // pick. Any other change - a pointer's, or one made in the native popup - is a
+                  // pick already made.
                   if (movedByKeyboard.current) return;
                   commitIssue(event.target.value);
                 }}
@@ -690,11 +702,9 @@ function AgentMessageComposer({
                     commitIssue(event.currentTarget.value);
                     return;
                   }
-                  movedByKeyboard.current = true;
+                  markKeyStep();
                 }}
-                onPointerDown={() => {
-                  movedByKeyboard.current = false;
-                }}
+                onKeyPress={markKeyStep}
                 ref={issueSelect}
                 value={pendingIssue}
               >

@@ -1282,8 +1282,7 @@ test.describe("agents page", () => {
     }
   });
 
-  // Which hand moved the selection is a fact about one open of the picker. An arrow and an
-  // Escape in the last open must not make this one's pointer pick wait for an Enter.
+  // A key pressed in the last open must not make this one's pointer pick wait for an Enter.
   test("a pointer pick commits at once after an arrow and Escape in the last open", async ({
     browser,
   }) => {
@@ -1312,6 +1311,105 @@ test.describe("agents page", () => {
       await picker.selectOption("CORE-2");
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(toggle).toContainText("CORE-2");
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("@Planner");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A key that opens the select's native popup - `Alt+ArrowDown` here, the arrows on macOS -
+  // steps nothing, and the pick the reader then makes in that popup arrives in a later task.
+  // That is a pick made, as a pointer's is, and it commits with no second Enter.
+  test("a pick from the popup a key opened commits at once", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("Alt+ArrowDown");
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await picker.selectOption("CORE-2");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle).toContainText("CORE-2");
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("@Planner");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // Only a change the key itself made is a step. A key that moved nothing - `ArrowUp` on the
+  // first option - leaves the next change, a task later, a pick.
+  test("a key that moves nothing leaves the next change a pick", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("ArrowUp");
+      await expect(picker).toHaveValue("");
+      await picker.selectOption("CORE-1");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle).toContainText("CORE-1");
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("@Planner");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // Type-ahead steps the selection from the key's `keypress`, not its `keydown`, and is a step
+  // like the arrows: the picker stays open until Enter. A keyboard reaches the page as two input
+  // events, `rawKeyDown` then `char`, and Playwright's `press` sends both in one; this row sends
+  // them apart, with a task between, so the `keypress` is judged in a task of its own.
+  test("type-ahead moves the issue selection and Enter commits it", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      const cdp = await context.newCDPSession(page);
+      const key = { code: "KeyC", key: "c", windowsVirtualKeyCode: 67 };
+      await cdp.send("Input.dispatchKeyEvent", { ...key, type: "rawKeyDown" });
+      // A timer queued after any the keydown queued, so they have all run when it resolves.
+      await page.evaluate(() => {
+        const turn = Promise.withResolvers<void>();
+        setTimeout(turn.resolve, 0);
+        return turn.promise;
+      });
+      await cdp.send("Input.dispatchKeyEvent", { ...key, text: "c", type: "char" });
+      await cdp.send("Input.dispatchKeyEvent", { ...key, type: "keyUp" });
+      await expect(picker).toHaveValue("CORE-1");
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(picker).toBeFocused();
+
+      await page.keyboard.press("Enter");
+      await expect(toggle).toContainText("CORE-1");
       await expect(field).toBeFocused();
       await expect(field).toHaveValue("@Planner");
     } finally {
