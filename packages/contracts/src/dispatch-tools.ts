@@ -919,7 +919,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC", route_status: "no_holder" },
+    example: { project: "AGENTC", limit: 250, offset: 250 },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
       "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " +
@@ -930,7 +930,9 @@ export const dispatchToolSpecs = [
       "session that is not running at the moment of the read, whatever its priority. A restarting " +
       "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
       "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
-      "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
+      "Rows are paged after the server returns the full response: limit sets the page size (default 50, " +
+      "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " +
+      "enumerate every matching issue.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -958,6 +960,10 @@ export const dispatchToolSpecs = [
       limit: z
         .number({ int: true, min: 1, max: 250 })
         .describe("Maximum rows, 1-250; default 50.")
+        .optional(),
+      offset: z
+        .number({ int: true, min: 0 })
+        .describe("Rows to skip before the page; nonnegative integer; default 0.")
         .optional(),
     }),
   },

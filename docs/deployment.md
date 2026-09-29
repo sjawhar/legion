@@ -24,10 +24,11 @@ e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which ot
 `/tmp` directory belongs to this pane.
 **Known shapes that still reach outside the roots
 are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
-expansion slice (LEGION-376), the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
-`s///e`, which the guard does not read (LEGION-377), and a word bash passes no argument for — an
-unquoted empty value, an empty `"${a[@]}"` — read as a command name, a wrapper's or `xargs`'s or
-`find -exec`'s program, or `cd`'s directory (LEGION-378).**
+expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
+`s///e`, which the guard does not read (LEGION-377).**
+Before it selects a program or positional operand, the guard drops a word bash passes no argument
+for — an unquoted empty value, an empty `"$@"`, or an empty `"${a[@]}"` — while `""`, an empty
+quoted scalar, an empty `"$*"`, and an empty `"${a[*]}"` remain arguments.
 
 A destructive `find` resolves every search root as `find` will: `-H` and `-L` follow a
 command-line symlink root, and a trailing slash is physically resolved even without either option.

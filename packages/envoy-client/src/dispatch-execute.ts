@@ -1960,6 +1960,7 @@ export async function executeDispatchTool(
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
+      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
       const issues = await client.listIssues({
         project,
         ...(status === undefined ? {} : { status }),
@@ -1969,7 +1970,8 @@ export async function executeDispatchTool(
         ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
         ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
       });
-      const rows = issues.slice(0, limit).map((row) => ({
+      const total = issues.length;
+      const rows = issues.slice(offset, offset + limit).map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -1987,15 +1989,19 @@ export async function executeDispatchTool(
         client,
         rows.some((row) => holdsSession(row.claim))
       );
+      const isPartial = offset !== 0 || rows.length !== total;
+      const showing = !isPartial
+        ? ""
+        : rows.length === 0
+          ? `showing 0-0 of ${total}`
+          : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
       return {
         text:
           rows.length === 0
-            ? `No issues in ${project}.`
+            ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}`
             : [
                 `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` +
-                  (issues.length > rows.length
-                    ? ` (showing ${rows.length} of ${issues.length})`
-                    : ""),
+                  (isPartial ? ` (${showing})` : ""),
                 ...rows.map(
                   (row) =>
                     `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
@@ -2010,7 +2016,7 @@ export async function executeDispatchTool(
                       : ` · route ${routeText(row)}`)
                 ),
               ].join("\n"),
-        details: { issues: rows },
+        details: { issues: rows, total, offset, limit },
       };
     }
     case "dispatch_architecture_sync": {

@@ -3,6 +3,7 @@ package prompts
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -54,7 +55,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			}
 			want := make([]string, 0, len(tc.shared)+len(tc.goParts))
 			for _, part := range tc.shared {
-				want = append(want, filepath.Join(rolesDir, part))
+				want = append(want, filepath.Join(stateDir, "prompts", "shared", part))
 			}
 			for _, part := range tc.goParts {
 				want = append(want, filepath.Join(stateDir, "prompts", "go", part))
@@ -89,8 +90,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		})
 	}
 }
-
-// A daemon must fail before any worker is launched when the source role-prompt directory is
+// A daemon must fail before any worker is launched when the configured role-prompt directory is
 // incomplete; otherwise a production launch reports an opaque shell-level cat failure.
 func TestNewRefusesEveryMissingSharedRolePrompt(t *testing.T) {
 	rolesDir := t.TempDir()
@@ -111,6 +111,112 @@ func TestNewRefusesEveryMissingSharedRolePrompt(t *testing.T) {
 			t.Errorf("New error = %q, want missing file %q", err, name)
 		}
 	}
+}
+
+// A release binary runs independently of its build checkout. With no override, it must resolve
+// its prompt bundle next to itself and refuse that exact directory when it is absent.
+func TestResolveRolePromptsDirUsesTheBinarysAdjacentBundle(t *testing.T) {
+	t.Run("a copied binary reads the sidecar bundle", func(t *testing.T) {
+		binary := copyTestBinary(t)
+		rolesDir := filepath.Join(filepath.Dir(binary), "role-prompts")
+		writeCompleteRolesDir(t, rolesDir)
+
+		if got := resolveRolePromptsDirInCopiedBinary(t, binary); got != "dir="+rolesDir {
+			t.Fatalf("ResolveRolePromptsDir = %q, want %q", got, "dir="+rolesDir)
+		}
+	})
+
+	t.Run("a copied binary refuses the missing sidecar bundle", func(t *testing.T) {
+		binary := copyTestBinary(t)
+		rolesDir := filepath.Join(filepath.Dir(binary), "role-prompts")
+		got := resolveRolePromptsDirInCopiedBinary(t, binary)
+
+		for _, want := range append([]string{"error=Role prompts directory " + rolesDir, "LEGION_ROLE_PROMPTS_DIR"}, sharedPromptFiles...) {
+			if !strings.Contains(got, want) {
+				t.Errorf("ResolveRolePromptsDir = %q, want %q", got, want)
+			}
+		}
+	})
+}
+
+// Once boot validates a bundle, panes read its state-directory snapshot. Removing the deployment
+// bundle afterwards must not turn a future pane launch into a missing-prompt failure.
+func TestNewSnapshotsSharedRolePromptsBeforeComposing(t *testing.T) {
+	rolesDir := completeRolesDir(t)
+	stateDir := t.TempDir()
+	composer, err := New(rolesDir, stateDir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := os.RemoveAll(rolesDir); err != nil {
+		t.Fatalf("remove the deployment bundle: %v", err)
+	}
+
+	parts, err := composer.Compose(claim.RolePlanner, false)
+	if err != nil {
+		t.Fatalf("Compose: %v", err)
+	}
+	want := []string{
+		filepath.Join(stateDir, "prompts", "shared", "core", "common.md"),
+		filepath.Join(stateDir, "prompts", "shared", "core", "planner.md"),
+		filepath.Join(stateDir, "prompts", "shared", "mechanics", "headless.md"),
+		filepath.Join(stateDir, "prompts", "shared", "planner.md"),
+		filepath.Join(stateDir, "prompts", "go", "planner.md"),
+		filepath.Join(stateDir, "prompts", "go", "worker-common.md"),
+	}
+	if !reflect.DeepEqual(parts.RolePromptPaths, want) {
+		t.Fatalf("RolePromptPaths = %q, want %q", parts.RolePromptPaths, want)
+	}
+	for _, path := range parts.RolePromptPaths {
+		if _, err := os.ReadFile(path); err != nil {
+			t.Errorf("read snapshot %s: %v", path, err)
+		}
+	}
+}
+
+func TestResolveRolePromptsDirInCopiedBinary(t *testing.T) {
+	if os.Getenv("LEGION_TEST_RESOLVE_ROLE_PROMPTS_DIR") != "1" {
+		return
+	}
+	dir, err := ResolveRolePromptsDir(nil)
+	if err != nil {
+		fmt.Printf("error=%v\n", err)
+		return
+	}
+	fmt.Printf("dir=%s\n", dir)
+}
+
+func copyTestBinary(t *testing.T) string {
+	t.Helper()
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	body, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read test binary: %v", err)
+	}
+	binary := filepath.Join(t.TempDir(), "legion")
+	if err := os.WriteFile(binary, body, 0o700); err != nil {
+		t.Fatalf("copy test binary: %v", err)
+	}
+	return binary
+}
+
+func resolveRolePromptsDirInCopiedBinary(t *testing.T, binary string) string {
+	t.Helper()
+	cmd := exec.Command(binary, "-test.run=^TestResolveRolePromptsDirInCopiedBinary$")
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "LEGION_ROLE_PROMPTS_DIR=") {
+			cmd.Env = append(cmd.Env, variable)
+		}
+	}
+	cmd.Env = append(cmd.Env, "LEGION_TEST_RESOLVE_ROLE_PROMPTS_DIR=1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run copied binary: %v\n%s", err, output)
+	}
+	return strings.Split(strings.TrimSpace(string(output)), "\n")[0]
 }
 
 // A state directory outlives the daemon binary that wrote its Go parts, so a boot of a newer daemon
@@ -158,12 +264,13 @@ func TestNewRewritesAGoPartTheRunningDaemonDidNotWrite(t *testing.T) {
 func completeRolesDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, name := range []string{
-		"architect-root.md", "controller-root.md", "architect.md", "planner.md", "implementer.md",
-		"tester.md", "reviewer.md", "merger.md", "core/common.md", "core/planner.md",
-		"core/implementer.md", "core/tester.md", "core/reviewer.md", "core/oracle.md",
-		"mechanics/headless.md", "mechanics/interactive.md",
-	} {
+	writeCompleteRolesDir(t, dir)
+	return dir
+}
+
+func writeCompleteRolesDir(t *testing.T, dir string) {
+	t.Helper()
+	for _, name := range sharedPromptFiles {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatalf("make prompt directory: %v", err)
@@ -172,5 +279,4 @@ func completeRolesDir(t *testing.T) string {
 			t.Fatalf("write prompt: %v", err)
 		}
 	}
-	return dir
 }

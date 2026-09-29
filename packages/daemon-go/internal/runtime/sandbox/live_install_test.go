@@ -23,7 +23,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
@@ -363,11 +362,15 @@ func (r *liveRig) checkImageProbeRefusal() error {
 }
 
 // imageProbe is the probe as the daemon asks for it: its contract, and the references of the role
-// prompts it hands every pod, the checkout's (promptrefs.Roles over prompts.SourceRolePromptsDir).
-// The probe command it sends, with --role-references and, the run having a provider key,
-// --provider-env-dir, is noted.
+// prompts it hands every pod. It resolves the deployment's configured bundle before reading it, as
+// daemon boot does. The probe command it sends, with --role-references and, the run having a
+// provider key, --provider-env-dir, is noted.
 func (r *liveRig) imageProbe() (ImageProbe, error) {
-	references, err := promptrefs.Roles(prompts.SourceRolePromptsDir())
+	rolesDir, err := prompts.ResolveRolePromptsDir(nil)
+	if err != nil {
+		return ImageProbe{}, err
+	}
+	references, err := prompts.RoleReferences(rolesDir)
 	if err != nil {
 		return ImageProbe{}, err
 	}
