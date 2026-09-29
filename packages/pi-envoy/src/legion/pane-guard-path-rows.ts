@@ -90,6 +90,9 @@ export function buildPathFixture(base: string): PathFixture {
   symlinkSync(path.join(ws, "sub"), path.join(home, "mine"));
   // A link already on disk whose target is `..`: the control for a command that makes one itself.
   symlinkSync("..", path.join(ws, "sub", "up"));
+  // A relative link inside `sub` back up to an existing sibling directory: `readlink -f`/
+  // `--canonicalize` on it must print `ws/d`, not treat the long-option spelling as unknown.
+  symlinkSync(path.join("..", "d"), path.join(ws, "sub", "in2"));
   symlinkSync(path.join(home, ".gone"), path.join(ws, "dangling"));
   // A link into a directory this workspace does not have yet: an ordinary build layout, and the
   // cost of treating a non-final component the guard cannot follow as unknown.
@@ -942,6 +945,22 @@ export const PATH_ROWS: readonly PathRow[] = [
     dotdot: false,
   },
   {
+    name: "readlink.f.e.last",
+    family: "substitution",
+    role: "probe",
+    // The mirror of the must-allow below: with `-e` last the mode is `e`, which prints nothing
+    // for a missing component, so bash's target is the suffix alone.
+    command: 'rm -rf "$(readlink -f -e nope)$HOME/keep"',
+    dotdot: false,
+  },
+  {
+    name: "readlink.f.existing.long.last",
+    family: "substitution",
+    role: "probe",
+    command: 'rm -rf "$(readlink -f --canonicalize-existing nope)$HOME/keep"',
+    dotdot: false,
+  },
+  {
     name: "readlink.e.f.wins",
     family: "substitution",
     role: "must-allow",
@@ -955,6 +974,24 @@ export const PATH_ROWS: readonly PathRow[] = [
     family: "substitution",
     role: "must-allow",
     command: 'rm -rf "$(readlink -m sub/gone)"',
+    dotdot: false,
+  },
+  {
+    name: "readlink.canonicalize.long",
+    family: "substitution",
+    role: "must-allow",
+    // Pins the long-option map, not the short `-f` flag: dropping `"--canonicalize": "f"` reads
+    // this as mode `undefined` and refuses it, though bash prints `ws/d` and removes it safely.
+    command: 'rm -rf "$(readlink --canonicalize sub/in2)"',
+    dotdot: false,
+  },
+  {
+    name: "readlink.canonicalize.missing.long",
+    family: "substitution",
+    role: "must-allow",
+    // Pins the long-option map for `-m`, distinct from `readlink.m.missing.component`'s short
+    // flag: dropping `"--canonicalize-missing": "m"` reads this as mode `undefined` too.
+    command: 'rm -rf "$(readlink --canonicalize-missing sub/gone)"',
     dotdot: false,
   },
   {
