@@ -376,6 +376,11 @@ def mount_sources(instruction: str) -> list[str]:
 # entry for one fails. So does one for a plain build, `docker commit` or `docker import`, which
 # always make an image.
 #
+# Every refusal names a remedy this check then accepts, with TWO exceptions it names instead:
+# `earthly`, whose image comes from an Earthfile this check cannot read, and `compose watch`,
+# which rebuilds by design and whose `--no-up` does not stop it. A step running either has to
+# move to docker/build-push-action or out of this check's reach.
+#
 # Each entry pins COMMANDS: the full text of each command that hit, as the detector reads it -
 # not the matched span, which is the same `docker buildx build` in a `--check` lint and a
 # `--load` build. The step is excused only while its commands are exactly those, so a step
@@ -460,8 +465,10 @@ RUN_STEP_BUILD = re.compile(
     r"|\bcrane\s+append\b|\b[\w./]*jib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
 COMPOSE_VERB = re.compile(COMPOSE)
-# Which compose verb a refusal is about, since only `up` and `create` accept `--no-build`.
+# Which compose verb a refusal is about: only `up` and `create` accept `--no-build`, `run`
+# has a rewrite that does the same work, and `watch` rebuilds by design and has neither.
 COMPOSE_TAKES_NO_BUILD = re.compile(COMPOSE_CLI + OPT + r"[ \t]+(up|create)(?![\w-])")
+COMPOSE_RUN = re.compile(COMPOSE_CLI + OPT + r"[ \t]+run(?![\w-])")
 excused: list[str] = []
 matches: dict[tuple, list[str]] = {}
 
@@ -978,10 +985,18 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
                 "add --no-build, or build the image with docker/build-push-action and give the "
                 "service an `image:` to run"
             )
+        elif any(COMPOSE_RUN.search(text) for text in texts):
+            remedy = (
+                "`--no-build` is not a flag of `compose run`, so do the same work another way: "
+                "`docker compose up -d --no-build <service> && docker compose exec -T <service> "
+                "<command>`, or run the image docker/build-push-action built, `docker run --rm "
+                "<image> <command>`"
+            )
         elif any(COMPOSE_VERB.search(text) for text in texts):
             remedy = (
-                "build the image with docker/build-push-action and give the service an `image:` "
-                "to run; `--no-build` is not a flag of `compose run` or `compose watch`"
+                "there is none this check accepts: `compose watch` rebuilds by design and "
+                "`--no-up` does not stop it, so a step that runs it has to move out of this "
+                "check's reach"
             )
         elif any(EARTHLY.search(text) for text in texts):
             remedy = (

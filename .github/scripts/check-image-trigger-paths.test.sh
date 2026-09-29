@@ -1391,13 +1391,35 @@ extra_step "$root" "docker compose -f compose/listener.compose.yml create"
 run_check "$root"
 check "compose create is offered --no-build" "$(contains "$out" "add --no-build")"
 
-for verb in run watch; do
-  root=$(fixture "compose-remedy-$verb")
-  extra_step "$root" "docker compose -f compose/listener.compose.yml $verb"
-  run_check "$root"
-  check "compose $verb is not offered --no-build"     "$(contains "$out" "\`--no-build\` is not a flag of \`compose run\` or \`compose watch\`")"
-  check "  and is offered one that works" "$(contains "$out" "give the service an \`image:\` to run")"
-done
+# `compose run` is offered a rewrite, and the rewrite is then run through the check: a remedy
+# that still fails is no remedy. `compose watch` has none - it rebuilds by design and `--no-up`
+# does not stop it - so it is named as an exception instead of being promised something.
+root=$(fixture compose-remedy-run)
+extra_step "$root" "docker compose -f compose/listener.compose.yml run --rm app pytest"
+run_check "$root"
+check "compose run is not offered --no-build"   "$(contains "$out" "\`--no-build\` is not a flag of \`compose run\`")"
+check "  and is offered the exec rewrite"   "$(contains "$out" "docker compose up -d --no-build <service> && docker compose exec -T <service> <command>")"
+check "  and running the built image" "$(contains "$out" "docker run --rm <image> <command>")"
+
+root=$(fixture compose-remedy-run-applied-exec)
+extra_step "$root" "docker compose -f compose/listener.compose.yml up -d --no-build app && docker compose -f compose/listener.compose.yml exec -T app pytest"
+run_check "$root"
+check "  the exec rewrite, written literally, is accepted" "$(is "$status" 0)"
+
+root=$(fixture compose-remedy-run-applied-docker-run)
+extra_step "$root" "docker run --rm app:ci pytest"
+run_check "$root"
+check "  running the built image is accepted" "$(is "$status" 0)"
+
+root=$(fixture compose-remedy-watch)
+extra_step "$root" "docker compose -f compose/listener.compose.yml watch"
+run_check "$root"
+check "compose watch is told there is no accepted remedy"   "$(contains "$out" "there is none this check accepts: \`compose watch\` rebuilds by design")"
+
+root=$(fixture compose-remedy-watch-no-up)
+extra_step "$root" "docker compose -f compose/listener.compose.yml watch --no-up"
+run_check "$root"
+check "  and --no-up does not stop it" "$(is "$status" 1)"
 
 echo "case: --no-build must be a flag of the compose command, not a word in a value"
 root=$(fixture compose-no-build-in-value)
