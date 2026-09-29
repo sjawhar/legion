@@ -26,9 +26,9 @@ e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which ot
 are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
 expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
 `s///e`, which the guard does not read (LEGION-377).**
-Before it selects a program or positional operand, the guard drops a word bash passes no argument
-for — an unquoted empty value, an empty `"$@"`, or an empty `"${a[@]}"` — while `""`, an empty
-quoted scalar, an empty `"$*"`, and an empty `"${a[*]}"` remain arguments. It parses the command
+Before it selects a program, positional operand, or `cd` directory, the guard drops a word bash
+passes no argument for — an unquoted empty value, an empty `"$@"`, or an empty `"${a[@]}"` — while
+`""`, an empty quoted scalar, an empty `"$*"`, and an empty `"${a[*]}"` remain arguments. It parses
 with a bash parser and resolves each
 target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
 assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
