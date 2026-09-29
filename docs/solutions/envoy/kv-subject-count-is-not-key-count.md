@@ -91,7 +91,7 @@ production. It would have scaled to 35 s only on a deployment that really held 7
   keeping the watch.
 - **For `envoy_interests`, the markers are now collected, and that is the standing answer.** Every
   listener runs one pass after its interest cache's first warm-up and then every five minutes
-  (`Registry.CollectInterestMarkers`, `packages/envoy/internal/store/interest_markers.go`): it
+  (`Registry.StartInterestMarkerCollector`, `packages/envoy/internal/store/interest_markers.go`): it
   takes the lowest revision a MetaOnly scan of the bucket delivers as a PUT and purges the stream
   below it, which removes every marker under the live keys in one request. That floor comes from
   the stream rather than the cache, and `PurgeDeletes` above is deliberately not what runs: it

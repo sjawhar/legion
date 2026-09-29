@@ -11,21 +11,21 @@ import (
 	"testing"
 	"time"
 
-	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// captureRecords routes slog.Default() into a buffer for the test and decodes the JSON records
-// back, so a test asserts a line's fields rather than its rendering.
-func captureRecords(t *testing.T) func() []map[string]any {
+// jsonLogger is a JSON logger over a buffer, the shape of the one the listener hands a watcher, and
+// a reader that decodes its records back, so a test asserts a line's fields rather than its
+// rendering. Nothing reaches it through slog.Default(): a line the watcher writes anywhere but its
+// own logger is missing here.
+func jsonLogger(t *testing.T) (*slog.Logger, func() []map[string]any) {
 	t.Helper()
 	logs := &lockedBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return func() []map[string]any {
+	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return logger, func() []map[string]any {
 		var records []map[string]any
 		for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
 			if line == "" {
@@ -76,8 +76,8 @@ func record(t *testing.T, records []map[string]any, msg string) map[string]any {
 // A cache's warm-up says what it cost and how it ended. A listener restart is 17-25 s of no
 // deliveries on the on-prem machines (LEGION-374) and nothing in its log said where that went: the
 // interest bucket carries ~41,833 delete markers behind 40 live keys, and every warm-up streams
-// them all. The two counts are disjoint, like the role restore line's: entries are the keys the
-// cache holds afterwards, delete_markers is what the scan streamed past to find them.
+// them all. The two counts are disjoint, like the role restore line's: entries are the live keys
+// the scan delivered, delete_markers what it streamed past to find them.
 func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
@@ -100,9 +100,9 @@ func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
 		}
 	}
 
-	records := captureRecords(t)
+	logger, records := jsonLogger(t)
 	into := newSeen()
-	w := kvwatch.New("interest registry", kv, into.apply, into.reset)
+	w := kvwatch.New("interest registry", kv, into.apply, into.reset, kvwatch.WithLogger(logger))
 	t.Cleanup(w.Stop)
 	w.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -122,72 +122,17 @@ func TestAWarmUpLogsWhatItStreamedAndThatItCompleted(t *testing.T) {
 	if line["bucket"] != kv.Bucket() {
 		t.Fatalf("warm-up line bucket=%v, want %q", line["bucket"], kv.Bucket())
 	}
-	elapsed, ok := line["elapsed_ms"].(float64)
-	if !ok || elapsed < 0 {
+	if _, ok := line["elapsed_ms"].(float64); !ok {
 		t.Fatalf("warm-up line elapsed_ms=%v, want the milliseconds the scan took", line["elapsed_ms"])
 	}
-	if got := w.WarmUp(); !got.Done || got.TimedOut || got.Entries != live || got.DeleteMarkers != markers {
-		t.Fatalf("WarmUp() = %+v, want a completed scan of %d entries and %d markers", got, live, markers)
-	}
 }
-
-// timingOutKV hands out a watcher over the real bucket that ends its initial scan the way nats.go's
-// idle timer does (nats.go v1.50.0 kv.go:1145-1156): after `after` entries it puts
-// ErrKeyWatcherTimeout on Error() and sends the nil marker a complete scan also sends. The watcher
-// stays open afterwards, as nats.go's does — the timer gives up on the initial values, it does not
-// end the subscription.
-type timingOutKV struct {
-	natsgo.KeyValue
-
-	after int
-}
-
-func (k timingOutKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	watcher, err := k.KeyValue.Watch(keys, opts...)
-	if err != nil {
-		return nil, err
-	}
-	timed := &timingOutWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
-	go func() {
-		defer close(timed.updates)
-		for range k.after {
-			entry, ok := <-watcher.Updates()
-			if !ok || entry == nil {
-				return
-			}
-			timed.updates <- entry
-		}
-		timed.faults <- natsgo.ErrKeyWatcherTimeout
-		timed.updates <- nil
-		// The watcher lives on: forward whatever the bucket delivers next, as nats.go does.
-		for entry := range watcher.Updates() {
-			timed.updates <- entry
-		}
-	}()
-	return timed, nil
-}
-
-func (k timingOutKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	return k.Watch(natsgo.AllKeys, opts...)
-}
-
-type timingOutWatcher struct {
-	natsgo.KeyWatcher
-
-	updates chan natsgo.KeyValueEntry
-	faults  chan error
-}
-
-func (w *timingOutWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
-
-func (w *timingOutWatcher) Error() <-chan error { return w.faults }
 
 // A warm-up whose initial scan timed out says so, at WARN, and is not the watcher's error: the
 // watcher is still running and its cache still follows the bucket, so Err() stays nil and nothing
 // rebuilds it or answers 503 (row F2 of LEGION-374's plan). nats.go signals the timeout by putting
 // ErrKeyWatcherTimeout on the watcher's single buffered Error() channel before it sends the same
 // nil marker a complete scan ends with, so a reader that only watches the marker cannot tell them
-// apart.
+// apart (kvwatchtest.TimingOut stands in for the timer).
 func TestATimedOutWarmUpSaysSoAndLeavesTheWatcherHealthy(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
@@ -197,9 +142,9 @@ func TestATimedOutWarmUpSaysSoAndLeavesTheWatcherHealthy(t *testing.T) {
 		}
 	}
 
-	records := captureRecords(t)
+	logger, records := jsonLogger(t)
 	into := newSeen()
-	w := kvwatch.New("interest registry", bus.KeyValue{KeyValue: timingOutKV{KeyValue: kv, after: 1}}, into.apply, into.reset)
+	w := kvwatch.New("interest registry", bus.KeyValue{KeyValue: kvwatchtest.TimingOut(kv, 1)}, into.apply, into.reset, kvwatch.WithLogger(logger))
 	t.Cleanup(w.Stop)
 	w.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -211,9 +156,6 @@ func TestATimedOutWarmUpSaysSoAndLeavesTheWatcherHealthy(t *testing.T) {
 	line := record(t, records(), "interest registry cache warm-up")
 	if line["level"] != "WARN" || line["outcome"] != "timed out" {
 		t.Fatalf("a timed-out warm-up logged level=%v outcome=%v, want WARN \"timed out\": %v", line["level"], line["outcome"], line)
-	}
-	if got := w.WarmUp(); !got.Done || !got.TimedOut {
-		t.Fatalf("WarmUp() = %+v, want a scan that timed out", got)
 	}
 	if err := w.Err(); err != nil {
 		t.Fatalf("Err() = %v after a timed-out warm-up; a live watcher's cache must not read as dead", err)

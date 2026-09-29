@@ -678,9 +678,9 @@ func main() {
 	openWebhooks(&webhookGate, hooks, client, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
-	// The registry logs through the listener's own handler, so its role-restore count and its
-	// reaper cycles are JSON records with this machine's id. Never slog.SetDefault instead: see
-	// store.WithLogger for the CloudWatch filters that breaks.
+	// The registry and its cache watcher log through the listener's own handler, so its role-restore
+	// count, its warm-up and its reaper cycles are JSON records with this machine's id. Never
+	// slog.SetDefault instead: see store.WithLogger for the CloudWatch filters that breaks.
 	registry, err := store.Open(client.Conn, store.WithReplicas(cfg.NATSReplicas), store.WithLogger(logger.Slog()))
 	if err != nil {
 		log.Fatal(err)
@@ -705,6 +705,7 @@ func main() {
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
+		session.WithSessionLogger(logger.Slog()),
 	)
 	if err != nil {
 		log.Fatal(err)

@@ -72,7 +72,7 @@ func bucket(t *testing.T, uri string) (*natsgo.Conn, bus.KeyValue) {
 
 // lockedInWatch matches a sync.Mutex.Lock frame whose caller is watch itself. Inside watch that is
 // only applyMu: a wait on w.mu shows sync.(*RWMutex).Lock as the caller, and one on nats.go's
-// connection mutex, further down the call tree (streamCreated, WatchAll), shows nats.go frames.
+// connection mutex, further down the call tree (bus.ReadStreamState, WatchAll), shows nats.go frames.
 var lockedInWatch = regexp.MustCompile(`sync\.\(\*Mutex\)\.Lock\([^\n]*\n\t[^\n]*\n[^\n]*kvwatch\.\(\*Watcher\)\.watch\(`)
 
 // waitingForTheApplyLock reports whether a watch is parked on applyMu: a goroutine whose wait reason

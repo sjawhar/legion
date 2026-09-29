@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -21,8 +22,8 @@ import (
 
 // captureJSONLogs routes slog.Default() into a buffer for the test and decodes the records back, so
 // a test asserts a line's fields rather than its rendering. Open takes slog.Default() as the
-// registry's logger, and kvwatch logs through the same default, so both the pass's lines and the
-// cache's warm-up line land here.
+// registry's logger and hands it to its cache watcher, and a collector takes the registry's, so
+// the pass's lines and the cache's warm-up line both land here when it runs before Open.
 func captureJSONLogs(t *testing.T) func() []map[string]any {
 	t.Helper()
 	logs := &lockedBuffer{}
@@ -43,6 +44,12 @@ func captureJSONLogs(t *testing.T) func() []map[string]any {
 		}
 		return records
 	}
+}
+
+// collectorOf is the collector StartInterestMarkerCollector runs, without its ticker, so a test
+// drives its passes one at a time.
+func collectorOf(registry *Registry) *interestMarkerCollector {
+	return &interestMarkerCollector{registry: registry, log: registry.logger()}
 }
 
 // jsonRecord returns the one record whose msg is msg, failing when there is none or more than one.
@@ -177,9 +184,10 @@ func TestAPassCollectsTheDeleteMarkersAndKeepsEveryLiveKey(t *testing.T) {
 		t.Fatalf("the seeded bucket carries %d subjects, want %d", before.NumSubjects, markers+live)
 	}
 
-	purged, err := registry.CollectInterestMarkers(js)
+	collector := collectorOf(registry)
+	purged, err := collector.pass(js, nil)
 	if err != nil {
-		t.Fatalf("CollectInterestMarkers: %v", err)
+		t.Fatalf("pass: %v", err)
 	}
 	if purged != markers {
 		t.Fatalf("the pass purged %d messages, want the %d delete markers", purged, markers)
@@ -200,8 +208,30 @@ func TestAPassCollectsTheDeleteMarkersAndKeepsEveryLiveKey(t *testing.T) {
 			t.Fatalf("live key %s reads %q after the pass, want %q", key, entry.Value(), want)
 		}
 	}
+	// The line names each read for what it is: read 1 and read 2 both come before the purge, and
+	// only the purged_ fields are the stream the purge left.
+	floor := uint64(0)
+	for _, revision := range revisions {
+		if floor == 0 || revision < floor {
+			floor = revision
+		}
+	}
+	collected := jsonRecord(t, records(), "interest markers collected")
+	for field, want := range map[string]uint64{
+		"floor": floor, "purged": markers, "purged_first_seq": floor, "purged_msgs": live,
+		"read1_last_seq": floor + live - 1, "read2_last_seq": floor + live - 1,
+	} {
+		if collected[field] != float64(want) {
+			t.Fatalf("the collection line's %s = %v, want %d: %v", field, collected[field], want, collected)
+		}
+	}
+	for _, field := range []string{"read1_first_seq", "read1_created", "read2_first_seq", "read2_created"} {
+		if _, ok := collected[field]; !ok {
+			t.Fatalf("the collection line has no %s: %v", field, collected)
+		}
+	}
 	// A second pass has nothing below the floor and purges nothing, so every listener may run it.
-	again, err := registry.CollectInterestMarkers(js)
+	again, err := collector.pass(js, nil)
 	if err != nil || again != 0 {
 		t.Fatalf("a second pass purged %d messages (%v), want 0: the purge must be idempotent", again, err)
 	}
@@ -218,7 +248,7 @@ func TestWritesBetweenTheScanAndThePurgeSurvive(t *testing.T) {
 	registry := openRegistry(t, conn)
 
 	var added uint64
-	purged, err := registry.collectInterestMarkers(js, func(pass *interestPass) {
+	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
 		revision, err := kv.Put("ses_arrived", []byte(`{"session_id":"ses_arrived","machine_id":"m1"}`))
 		if err != nil {
 			t.Fatalf("put ses_arrived between the scan and the purge: %v", err)
@@ -229,7 +259,7 @@ func TestWritesBetweenTheScanAndThePurgeSurvive(t *testing.T) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("collectInterestMarkers: %v", err)
+		t.Fatalf("pass: %v", err)
 	}
 	if purged != 8 {
 		t.Fatalf("the pass purged %d messages, want the 8 markers it scanned", purged)
@@ -260,7 +290,8 @@ func TestWritesBetweenTheScanAndThePurgeSurvive(t *testing.T) {
 // bucket numbers its revisions from 1 again, so the floor the earlier scan computed is meaningless
 // against the new stream -- and a floor above its last sequence would make the server's unfiltered
 // purge compact the WHOLE stream (nats-server filestore.go Compact: a floor past LastSeq purges
-// everything). Both reads' sequence spaces are compared for exactly this.
+// everything). The two reads are compared for exactly this; here the replacement's sequence space
+// is lower as well, and the creation time, which bounds identity, is what the pass reports.
 func TestAPassWhoseScanReadAReplacedStreamPurgesNothing(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -272,7 +303,7 @@ func TestAPassWhoseScanReadAReplacedStreamPurgesNothing(t *testing.T) {
 	registry := openRegistry(t, conn)
 	bucket := testBuckets(t).interests
 
-	purged, err := registry.collectInterestMarkers(js, func(pass *interestPass) {
+	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
 		if err := js.DeleteKeyValue(bucket); err != nil {
 			t.Fatalf("delete the interest bucket: %v", err)
 		}
@@ -280,7 +311,7 @@ func TestAPassWhoseScanReadAReplacedStreamPurgesNothing(t *testing.T) {
 		seedLive(t, recreated, 2)
 	})
 	if err != nil {
-		t.Fatalf("collectInterestMarkers: %v", err)
+		t.Fatalf("pass: %v", err)
 	}
 	if purged != 0 {
 		t.Fatalf("the pass purged %d messages from a replaced stream, want 0", purged)
@@ -290,8 +321,8 @@ func TestAPassWhoseScanReadAReplacedStreamPurgesNothing(t *testing.T) {
 		t.Fatalf("the recreated bucket holds %d subjects and %d messages, want its 2 live keys", state.NumSubjects, state.Msgs)
 	}
 	refusal := jsonRecord(t, records(), "interest marker collection refused")
-	if refusal["level"] != "WARN" || !strings.Contains(fmt.Sprint(refusal["reason"]), "backward") {
-		t.Fatalf("a replaced stream logged %v; want a WARN saying the sequence space moved backwards", refusal)
+	if refusal["level"] != "WARN" || !strings.Contains(fmt.Sprint(refusal["reason"]), "replaced") {
+		t.Fatalf("a replaced stream logged %v; want a WARN saying the stream was replaced", refusal)
 	}
 }
 
@@ -308,11 +339,11 @@ func TestAFloorAboveTheStreamsLastSequencePurgesNothing(t *testing.T) {
 	bucket := testBuckets(t).interests
 	before := bucketState(t, js, bucket)
 
-	purged, err := registry.collectInterestMarkers(js, func(pass *interestPass) {
+	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
 		pass.floor = before.LastSeq + 1
 	})
 	if err != nil {
-		t.Fatalf("collectInterestMarkers: %v", err)
+		t.Fatalf("pass: %v", err)
 	}
 	if purged != 0 {
 		t.Fatalf("a floor above the last sequence purged %d messages, want 0", purged)
@@ -341,13 +372,13 @@ func TestASequenceSpaceThatMovedBackwardsPurgesNothing(t *testing.T) {
 	bucket := testBuckets(t).interests
 	before := bucketState(t, js, bucket)
 
-	purged, err := registry.collectInterestMarkers(js, func(pass *interestPass) {
+	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
 		// Read 1 claims a higher last sequence than the stream now reports, which is what a
 		// restore from an older snapshot produces between the two reads.
-		pass.before.LastSeq += 5
+		pass.read1.LastSeq += 5
 	})
 	if err != nil {
-		t.Fatalf("collectInterestMarkers: %v", err)
+		t.Fatalf("pass: %v", err)
 	}
 	if purged != 0 {
 		t.Fatalf("a sequence space that moved backwards purged %d messages, want 0", purged)
@@ -359,6 +390,114 @@ func TestASequenceSpaceThatMovedBackwardsPurgesNothing(t *testing.T) {
 	if refusal["level"] != "WARN" || !strings.Contains(fmt.Sprint(refusal["reason"]), "backward") {
 		t.Fatalf("a sequence space that moved backwards logged %v; want a WARN saying so", refusal)
 	}
+}
+
+// A bucket deleted and created again between the two reads does not always lower the sequence
+// space: a young bucket whose first sequence is still 1 is replaced by one that starts at 1 too,
+// and a replacement written as far as the original passes every sequence check. Here the original
+// holds a marker at sequence 1 (a delete of a key never put, which the admin delete and a reaper
+// that lost a race both write) and two live keys at 2 and 3, so the scan's floor is 2; the
+// replacement holds three live keys at 1-3, and a purge below 2 would delete the first of them.
+// Only the creation time tells the two streams apart, so it bounds identity where the sequences
+// cannot.
+func TestAPassWhoseStreamWasReplacedFromTheSameFirstSequencePurgesNothing(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	js, kv := rawInterestBucket(t, conn)
+	if err := kv.Delete("ses_never_put"); err != nil {
+		t.Fatalf("delete a key that was never put: %v", err)
+	}
+	seedLive(t, kv, 2)
+	records := captureJSONLogs(t)
+	registry := openRegistry(t, conn)
+	bucket := testBuckets(t).interests
+	if original := bucketState(t, js, bucket); original.FirstSeq != 1 || original.LastSeq != 3 {
+		t.Fatalf("the original stream runs %d-%d, want 1-3", original.FirstSeq, original.LastSeq)
+	}
+
+	var replacement map[string]uint64
+	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
+		if pass.floor != 2 {
+			t.Fatalf("the scan's floor is %d, want 2", pass.floor)
+		}
+		if err := js.DeleteKeyValue(bucket); err != nil {
+			t.Fatalf("delete the interest bucket: %v", err)
+		}
+		replacement = seedLive(t, recreateBucket(t, js, bucket), 3)
+	})
+	if err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("the pass purged %d messages from the replacement stream, want 0", purged)
+	}
+	state := bucketState(t, js, bucket)
+	if state.FirstSeq != 1 || state.LastSeq != 3 || state.Msgs != 3 {
+		t.Fatalf("the replacement stream runs %d-%d with %d messages after the pass, want its 3 live keys at 1-3",
+			state.FirstSeq, state.LastSeq, state.Msgs)
+	}
+	for key, revision := range replacement {
+		entry, err := kv.Get(key)
+		if err != nil {
+			t.Fatalf("the replacement's live key %s is gone after the pass: %v", key, err)
+		}
+		if entry.Revision() != revision {
+			t.Fatalf("the replacement's live key %s is at revision %d, want %d", key, entry.Revision(), revision)
+		}
+	}
+	refusal := jsonRecord(t, records(), "interest marker collection refused")
+	if refusal["level"] != "WARN" || !strings.Contains(fmt.Sprint(refusal["reason"]), "replaced") {
+		t.Fatalf("a replaced stream logged %v; want a WARN saying the stream was replaced", refusal)
+	}
+}
+
+// A pass that cannot read the bucket's stream changes nothing, and says so: a listener that has
+// stopped collecting must not look like one with nothing to collect, which is the state LEGION-374
+// exists because nobody could see. Each read names itself.
+func TestAPassThatCannotReadTheStreamSaysWhichReadFailed(t *testing.T) {
+	t.Run("the first read", func(t *testing.T) {
+		conn, cleanup := connectNATS(t)
+		defer cleanup()
+		js, kv := rawInterestBucket(t, conn)
+		seedMarkers(t, kv, 3)
+		seedLive(t, kv, 2)
+		records := captureJSONLogs(t)
+		registry := openRegistry(t, conn)
+		if err := js.DeleteKeyValue(testBuckets(t).interests); err != nil {
+			t.Fatalf("delete the interest bucket: %v", err)
+		}
+		if purged, _ := collectorOf(registry).pass(js, nil); purged != 0 {
+			t.Fatalf("a pass over a deleted bucket purged %d messages", purged)
+		}
+		refusal := jsonRecord(t, records(), "interest marker collection refused")
+		if refusal["level"] != "WARN" || !strings.Contains(fmt.Sprint(refusal["reason"]), "first read") || refusal["error"] == nil {
+			t.Fatalf("a pass over a deleted bucket logged %v; want one WARN naming the first read and its error", refusal)
+		}
+	})
+	t.Run("the second read", func(t *testing.T) {
+		conn, cleanup := connectNATS(t)
+		defer cleanup()
+		js, kv := rawInterestBucket(t, conn)
+		seedMarkers(t, kv, 3)
+		seedLive(t, kv, 2)
+		records := captureJSONLogs(t)
+		registry := openRegistry(t, conn)
+		purged, _ := collectorOf(registry).pass(js, func(*interestPass) {
+			if err := js.DeleteKeyValue(testBuckets(t).interests); err != nil {
+				t.Fatalf("delete the interest bucket: %v", err)
+			}
+		})
+		if purged != 0 {
+			t.Fatalf("a pass whose bucket went away purged %d messages", purged)
+		}
+		refusal := jsonRecord(t, records(), "interest marker collection refused")
+		if refusal["level"] != "WARN" || !strings.Contains(fmt.Sprint(refusal["reason"]), "second read") || refusal["error"] == nil {
+			t.Fatalf("a pass whose bucket went away before its second read logged %v; want one WARN naming the second read and its error", refusal)
+		}
+		if refusal["read1_last_seq"] == nil {
+			t.Fatalf("the refusal lost the first read it did take: %v", refusal)
+		}
+	})
 }
 
 // A live key whose value this build cannot decode is still a live key. The cache evicts it
@@ -380,8 +519,8 @@ func TestAnUndecodableLiveValueIsKept(t *testing.T) {
 		t.Fatal("the cache kept an undecodable value; this test needs the eviction that makes the cache incomplete")
 	}
 
-	if _, err := registry.CollectInterestMarkers(js); err != nil {
-		t.Fatalf("CollectInterestMarkers: %v", err)
+	if _, err := collectorOf(registry).pass(js, nil); err != nil {
+		t.Fatalf("pass: %v", err)
 	}
 	entry, err := kv.Get("ses_undecodable")
 	if err != nil {
@@ -413,15 +552,15 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 	}
 	records := captureJSONLogs(t)
 	registry := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
-	handle := bus.KeyValue{KeyValue: timingOutKV{KeyValue: kv, after: 2}}
+	handle := bus.KeyValue{KeyValue: kvwatchtest.TimingOut(kv, 2)}
 	registry.watcher = kvwatch.New("interest registry", handle, registry.applyWatched, registry.resetCache)
 	t.Cleanup(registry.StopWatch)
 	registry.watcher.Start()
 	waitFor(t, 30*time.Second, registry.watcher.Ready)
 
-	purged, err := registry.CollectInterestMarkers(js)
+	purged, err := collectorOf(registry).pass(js, nil)
 	if err != nil {
-		t.Fatalf("CollectInterestMarkers: %v", err)
+		t.Fatalf("pass: %v", err)
 	}
 	if purged != 0 {
 		t.Fatalf("a pass whose scan timed out purged %d messages, want 0", purged)
@@ -461,9 +600,9 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 	t.Run("a grant that allows it purges, and the trace names the subject", func(t *testing.T) {
 		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + testBuckets(t).interests
 		ctr, registry, js, _ := grantedRegistry(t, nil)
-		purged, err := registry.CollectInterestMarkers(js)
+		purged, err := collectorOf(registry).pass(js, nil)
 		if err != nil || purged == 0 {
-			t.Fatalf("CollectInterestMarkers under a grant that allows the purge = %d, %v; want the markers purged", purged, err)
+			t.Fatalf("a pass under a grant that allows the purge = %d, %v; want the markers purged", purged, err)
 		}
 		traced := serverLogLines(t, ctr, "[PUB "+purgeSubject)
 		if len(traced) == 0 {
@@ -486,8 +625,10 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 		records := captureJSONLogs(t)
 		ctr, registry, js, kv := grantedRegistry(t, []string{purgeSubject})
 		before := bucketState(t, js, bucket)
+		// One collector for both passes, as the listener runs one: its latch is what says once.
+		collector := collectorOf(registry)
 		for pass := range 2 {
-			purged, err := registry.CollectInterestMarkers(js)
+			purged, err := collector.pass(js, nil)
 			if err == nil || purged != 0 {
 				t.Fatalf("pass %d under a grant that denies the purge = %d, %v; want no purge and the error", pass, purged, err)
 			}
@@ -621,52 +762,3 @@ func recreateBucket(t *testing.T, js natsgo.JetStreamContext, bucket string) nat
 		time.Sleep(100 * time.Millisecond)
 	}
 }
-
-// timingOutKV hands out a watcher over the real bucket that ends its scan the way nats.go's idle
-// timer does (nats.go v1.50.0 kv.go:1145-1156): after `after` entries it puts ErrKeyWatcherTimeout
-// on Error() and sends the nil marker a complete scan also sends, then stays open, as nats.go's
-// watcher does — the timer gives up on the initial values, it does not end the subscription.
-type timingOutKV struct {
-	natsgo.KeyValue
-
-	after int
-}
-
-func (k timingOutKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	watcher, err := k.KeyValue.Watch(keys, opts...)
-	if err != nil {
-		return nil, err
-	}
-	timed := &timingOutWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
-	go func() {
-		defer close(timed.updates)
-		for range k.after {
-			entry, ok := <-watcher.Updates()
-			if !ok || entry == nil {
-				return
-			}
-			timed.updates <- entry
-		}
-		timed.faults <- natsgo.ErrKeyWatcherTimeout
-		timed.updates <- nil
-		for entry := range watcher.Updates() {
-			timed.updates <- entry
-		}
-	}()
-	return timed, nil
-}
-
-func (k timingOutKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
-	return k.Watch(natsgo.AllKeys, opts...)
-}
-
-type timingOutWatcher struct {
-	natsgo.KeyWatcher
-
-	updates chan natsgo.KeyValueEntry
-	faults  chan error
-}
-
-func (w *timingOutWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
-
-func (w *timingOutWatcher) Error() <-chan error { return w.faults }
