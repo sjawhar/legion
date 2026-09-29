@@ -982,8 +982,8 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
         # `--no-build` is a flag of `compose up` and `compose create` only.
         if any(COMPOSE_TAKES_NO_BUILD.search(text) for text in texts):
             remedy = (
-                "add --no-build, or build the image with docker/build-push-action and give the "
-                "service an `image:` to run"
+                "add --no-build, and build the image with docker/build-push-action if a "
+                "service needs one"
             )
         elif any(COMPOSE_RUN.search(text) for text in texts):
             remedy = (

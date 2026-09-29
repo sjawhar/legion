@@ -1391,6 +1391,21 @@ extra_step "$root" "docker compose -f compose/listener.compose.yml create"
 run_check "$root"
 check "compose create is offered --no-build" "$(contains "$out" "add --no-build")"
 
+# The second clause is an addition, not an alternative: building the image elsewhere does not
+# stop `compose up` from building, so offering it on its own would be a remedy that still fails.
+check "  and build-push-action is offered as an addition, not an alternative" \
+  "$(contains "$out" "add --no-build, and build the image with docker/build-push-action if a service needs one")"
+
+root=$(fixture compose-remedy-up-applied)
+extra_step "$root" "docker compose -f compose/listener.compose.yml up -d --no-build"
+run_check "$root"
+check "  the printed remedy, written literally, is accepted for up" "$(is "$status" 0)"
+
+root=$(fixture compose-remedy-create-applied)
+extra_step "$root" "docker compose -f compose/listener.compose.yml create --no-build"
+run_check "$root"
+check "  and for create" "$(is "$status" 0)"
+
 # `compose run` is offered a rewrite, and the rewrite is then run through the check: a remedy
 # that still fails is no remedy. `compose watch` has none - it rebuilds by design and `--no-up`
 # does not stop it - so it is named as an exception instead of being promised something.
