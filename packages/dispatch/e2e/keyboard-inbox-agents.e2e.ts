@@ -272,9 +272,22 @@ test.describe("inbox selection", () => {
       await expect(bar).toContainText("2 selected");
       await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
 
-      // Both rows go at once; the bar stays while its write is in the air.
+      // Both rows go at once; the bar stays while its write is in the air, and counts the pick
+      // it is waiting on rather than the selection the optimistic move has just emptied.
       await expect(rows).toHaveCount(0);
       await expect(bar).toHaveCount(1);
+      await expect(bar).toContainText("Snoozing 2…");
+      await expect(bar).not.toContainText("0 selected");
+
+      // With no row rendered anywhere, Escape from the picker still has somewhere to go: the bar
+      // itself. It is the only thing left of the list, and it holds the count and the way out.
+      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
+      await picker.focus();
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(picker).not.toBeFocused();
+      await expect(bar).toBeFocused();
+
       refuse?.();
 
       await expect(bar).toContainText("Could not snooze 1 of 2: snoozed_until must be a moment.");
@@ -888,6 +901,25 @@ test.describe("issue page", () => {
       await page.keyboard.press("2");
       expect((await patch).postDataJSON()).toEqual({ priority: 2 });
       await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 2 });
+
+      // `Shift+P` writes without focusing anything either, so it needs the same guard, and the
+      // same two halves prove it: nothing from the card, the pin itself from the page.
+      let pinned = 0;
+      await page.route(`**/api/v1/me/issues/${issue.key}/state`, (route) => {
+        if (route.request().method() === "PUT") pinned += 1;
+        return route.fallback();
+      });
+      await hold.click();
+      await expect(hold).toBeFocused();
+      await page.keyboard.press("Shift+P");
+      await page.waitForTimeout(500);
+      expect(pinned).toBe(0);
+      await expect(page.getByRole("button", { name: "Pin issue" })).toBeVisible();
+
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.keyboard.press("Shift+P");
+      await expect(page.getByRole("button", { name: "Unpin issue" })).toBeVisible();
+      expect(pinned).toBe(1);
     } finally {
       await context.close();
     }

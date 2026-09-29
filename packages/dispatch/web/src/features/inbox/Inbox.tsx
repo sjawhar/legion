@@ -1,5 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type FocusEvent,
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { inboxQuery, whoAmIQuery } from "../../api/queries";
@@ -80,8 +88,6 @@ const ROW_ATTRIBUTE = "data-inbox-row";
 const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
-/** The bar itself: Escape from the picker lands here when no row is rendered to return to. */
-const BULK_BAR_SELECTOR = "[data-inbox-bulk-bar]";
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
@@ -427,6 +433,7 @@ function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | 
  * and a bar that owned its refusal would be unmounted before the refusal arrived.
  */
 function BulkSnoozeBar({
+  barRef,
   onClear,
   onPending,
   onPickerFocus,
@@ -436,10 +443,15 @@ function BulkSnoozeBar({
   refusal,
   selected,
 }: {
+  /** The bar's own element. The Inbox renders it in two places - beside the bands, and in the
+   *  empty state a pick can leave behind - so the keymap reaches it through this rather than by
+   *  searching the list, which the empty state is not inside. */
+  barRef: RefObject<HTMLFieldSetElement | null>;
   onClear: () => void;
-  /** True the moment a pick is sent, false when it settles; the Inbox keeps this bar mounted for
-   *  as long as it is true. */
-  onPending: (pending: boolean) => void;
+  /** How many asks the write now in flight covers, 0 when none is. The bar says what it is doing
+   *  from this rather than from the selection, which the optimistic move empties under it, and
+   *  the Inbox keeps the bar mounted for as long as it is not 0. */
+  onPending: (pending: number) => void;
   /** Where focus came from as the picker took it - `h` from a row, Tab, or a pointer with nothing
    *  behind it - so Escape knows which row is one level out. */
   onPickerFocus: (from: Element | null) => void;
@@ -447,7 +459,7 @@ function BulkSnoozeBar({
   onRefusal: (refusal: string | undefined) => void;
   /** The ids the server took, once a pick has settled. */
   onSnoozed: (snoozed: readonly string[]) => void;
-  pending: boolean;
+  pending: number;
   refusal: string | undefined;
   selected: readonly string[];
 }): ReactNode {
@@ -455,9 +467,9 @@ function BulkSnoozeBar({
   const snooze = (until: string) => {
     const ids = [...selected];
     onRefusal(undefined);
-    onPending(true);
+    onPending(ids.length);
     void write.submit(ids, until).then(({ failed }) => {
-      onPending(false);
+      onPending(0);
       onRefusal(refusalText(failed, ids.length));
       const refusedIds = new Set(failed.map(({ askId }) => askId));
       onSnoozed(ids.filter((id) => !refusedIds.has(id)));
@@ -469,13 +481,19 @@ function BulkSnoozeBar({
     <fieldset
       className={`flex min-w-0 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 ${focusVisibleRing} outline-none focus-visible:ring-2 ${borderDefault}`}
       data-inbox-bulk-bar=""
+      ref={barRef}
       tabIndex={-1}
     >
       <legend className="sr-only">Selected asks</legend>
-      <span className={`text-sm ${textSecondaryOnCanvas}`}>{selected.length} selected</span>
+      {/* In flight the count is the pick's, since the rows it snoozed have already left this
+          view; settled, it is what a second pick would act on - the rows still marked. The
+          badge stays the picker's name, so the state is said once. */}
+      <span className={`text-sm ${textSecondaryOnCanvas}`}>
+        {pending === 0 ? `${selected.length} selected` : `Snoozing ${pending}…`}
+      </span>
       <span className={badgeSelectWrapper}>
         <span aria-hidden="true" className={`${badgeSelectBadge} ${badgeLow.bg} ${badgeLow.text}`}>
-          {pending ? "Snoozing…" : "Snooze"}
+          Snooze
         </span>
         <select
           aria-label="Snooze selected asks"
@@ -568,7 +586,10 @@ export function Inbox(): ReactNode {
   // The bulk write's own state lives here, not in the bar: the optimistic snooze can take every
   // marked row off this view at once, and a bar that owned its refusal would be unmounted before
   // the refusal came back. While a pick is in the air, or its refusal is on screen, the bar stays.
-  const [bulkPending, setBulkPending] = useState(false);
+  // The pick's own size is held with it, because that same move empties the selection the bar
+  // would otherwise count: `0 selected` while two asks are being snoozed.
+  const [bulkSnoozing, setBulkSnoozing] = useState(0);
+  const bulkBarRef = useRef<HTMLFieldSetElement>(null);
   const [bulkRefusal, setBulkRefusal] = useState<string | undefined>(undefined);
   const clearSelection = useCallback(() => {
     setMarked(new Set());
@@ -735,13 +756,10 @@ export function Inbox(): ReactNode {
           origin === null
             ? null
             : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
-        // With every marked row folded away there is no row to return to, so the bar itself is
-        // the level out: it holds the count and the way to clear it.
-        (
-          row ??
-          rows()[0] ??
-          listRef.current?.querySelector<HTMLElement>(BULK_BAR_SELECTOR)
-        )?.focus();
+        // With every marked row gone there is no row to return to, so the bar itself is the
+        // level out: it holds the count and the way to clear it. It is reached through its own
+        // ref, because the empty state a pick can leave behind renders it outside the list.
+        (row ?? rows()[0] ?? bulkBarRef.current)?.focus();
       },
       when: () => document.activeElement?.matches(BULK_PICKER_SELECTOR) === true,
     },
@@ -816,10 +834,11 @@ export function Inbox(): ReactNode {
   // The bar outlives an empty list: a pick that empties this view leaves its write in the air, and
   // the refusal that comes back has to land somewhere the reader can see.
   const bulkBar =
-    selected.length === 0 && !bulkPending && bulkRefusal === undefined ? null : (
+    selected.length === 0 && bulkSnoozing === 0 && bulkRefusal === undefined ? null : (
       <BulkSnoozeBar
+        barRef={bulkBarRef}
         onClear={clearSelection}
-        onPending={setBulkPending}
+        onPending={setBulkSnoozing}
         onPickerFocus={(from) => {
           pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
         }}
@@ -827,7 +846,7 @@ export function Inbox(): ReactNode {
         onSnoozed={(snoozed) =>
           setMarked((current) => new Set([...current].filter((id) => !snoozed.includes(id))))
         }
-        pending={bulkPending}
+        pending={bulkSnoozing}
         refusal={bulkRefusal}
         selected={selected}
       />

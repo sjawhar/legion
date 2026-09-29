@@ -98,12 +98,10 @@ function focusOwningAgentRow(): void {
   closestMatching(document.activeElement, AGENT_ROW_SELECTOR)?.focus();
 }
 
-/** Whether focus is inside a row's message composer, which is where that Escape applies. */
+/** Whether focus is inside a row's message composer, which is where that Escape applies. The
+ *  composer renders only inside a row, so its own ancestor is the whole question. */
 function inAgentComposer(): boolean {
-  return (
-    closestMatching(document.activeElement, AGENT_COMPOSER_SELECTOR) !== null &&
-    closestMatching(document.activeElement, AGENT_ROW_SELECTOR) !== null
-  );
+  return closestMatching(document.activeElement, AGENT_COMPOSER_SELECTOR) !== null;
 }
 
 /** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at

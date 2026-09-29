@@ -184,8 +184,11 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       keys: ["0", "1", "2", "3"],
       label: "Set priority P0–P3",
       run: (event) => priorityWrite.submit(Number(event.key) as IssuePriority),
-      // Every other header key names a control; this one writes without focusing anything, so it
-      // is the one that has to say where the reader is not.
+      // `set-priority` and `pin` are the two keys that write without focusing a control, so they
+      // are the two that have to say where the reader is not: a digit or `Shift+P` pressed while
+      // an ask's options have focus belongs to the ask, not to the issue. `l` and `e` open a
+      // control instead of writing, so a stray press there is visible and undoable, and they are
+      // offered as before.
       when: () =>
         usableControl(PRIORITY_SELECT) !== null &&
         document.activeElement?.closest(ASK_CARD) == null,
@@ -211,7 +214,8 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       keys: "Shift+P",
       label: "Pin or unpin the issue",
       run: () => usableControl(PIN_TOGGLE)?.click(),
-      when: () => usableControl(PIN_TOGGLE) !== null,
+      when: () =>
+        usableControl(PIN_TOGGLE) !== null && document.activeElement?.closest(ASK_CARD) == null,
     },
     {
       // `s` and `p` put focus in a native select, where every single-key binding is suspended
