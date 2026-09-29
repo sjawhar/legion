@@ -52,20 +52,20 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["ln one read word", "readableWord(sole).whole", "true"],
   [
     "no-field simple command argument",
-    'return args(words, st, ctx).filter((arg) => arg.fields !== "none");',
-    "return args(words, st, ctx);",
+    'if (argv[index]?.fields === "none") argv.splice(index, 1);',
+    "void argv;",
     "function commandArgs(",
   ],
   [
     "no-field command argument is unreadable",
-    'return args(words, st, ctx).filter((arg) => arg.fields !== "none");',
-    'return args(words, st, ctx).filter((arg) => arg.fields !== "unknown");',
+    'if (argv[index]?.fields === "none") argv.splice(index, 1);',
+    'if (argv[index]?.fields === "unknown") argv.splice(index, 1);',
     "function commandArgs(",
   ],
   [
     "no-field command argument is the only field",
-    'return args(words, st, ctx).filter((arg) => arg.fields !== "none");',
-    'return args(words, st, ctx).filter((arg) => arg.fields === "none");',
+    'if (argv[index]?.fields === "none") argv.splice(index, 1);',
+    'if (argv[index]?.fields === undefined) argv.splice(index, 1);',
     "function commandArgs(",
   ],
   [

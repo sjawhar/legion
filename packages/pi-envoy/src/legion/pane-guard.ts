@@ -1359,7 +1359,11 @@ function args(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
 }
 /** A simple command's argv after bash drops words that produce no fields. */
 function commandArgs(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
-  return args(words, st, ctx).filter((arg) => arg.fields !== "none");
+  const argv = args(words, st, ctx);
+  for (let index = argv.length - 1; index >= 0; index -= 1) {
+    if (argv[index]?.fields === "none") argv.splice(index, 1);
+  }
+  return argv;
 }
 
 /** The positional parameters a list of arguments gives a script, function or `set --`: undefined
