@@ -65,15 +65,21 @@ rule, so the agent can rewrite the command.
 
 Which operand a write verb's destination is comes from that verb's own grammar, measured rather
 than assumed: `cp` and `install` write their last operand, or the directory `-t` names, where
-every other operand is a source they read. `mv` uses the same option reader and also judges the
+every other operand is a source they read; `install -d` creates directories, so there every operand
+is judged. `mv` uses the same option reader and also judges the
 sources it moves. The reader stops at `--` and at the first value-taking letter in a cluster,
-and accepts GNU's unambiguous long-option abbreviations. Any word before `--` that the guard cannot read whole and that may be an option — a glob, a
+and accepts GNU's unambiguous long-option abbreviations. Any word before `--` that the guard
+cannot read whole and that may be an option — a glob, a
 command's output, an unquoted expansion — refuses `cp`, `mv`, `install` and `ln`, since one
 reading of it hides a destination; the refusal names the written word and the `--` or `-T`
-remedy, rather than treating the command as one with no destination. The accepted cost is three
-shapes that refuse where a person can see they are harmless: a bare glob before `--` with `cp` or
-`mv`, `xargs` into `cp` or `sed -i` with unreadable operands, and a glob loop into `cp` with
-neither a literal prefix nor `--`. Help and version options do not write. `cp` judges the source basename as
+remedy, rather than treating the command as one with no destination. A `-T` the guard HAS read
+settles which operand is the destination, so an unreadable word after it is judged as the source
+it can only be. The accepted cost is three shapes that refuse where a person can see they are
+harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln`; `xargs` into `cp` or
+`sed -i` with unreadable operands; and a glob loop into `cp` with neither a literal prefix nor
+`--`. So `cp *.txt dir/` and `mv *.txt dir/` are refused where they were once allowed, because a
+glob can yield `-t<link>` pointing out of the roots; `cp -- *.txt dir/` and `./*.txt` are not.
+Help and version options do not write. `cp` judges the source basename as
 written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`
 retains the source path. It inspects only existing destination entries, recursively for a recursive
 copy and under the same walk limit as shell syntax, without traversing the source tree. After `--`,
@@ -89,8 +95,11 @@ also makes its source writable under the new name, which no later command can re
 a symlink. `sed` writes the files it names only with `-i`, including inside a cluster (`-ni`) and
 with a suffix joined to it (`-i.bak`); a word the guard cannot read may itself be that `-i`, and
 the readings are judged together rather than worst-of-each, so a quoted word plays one part at a
-time and a read-only `sed -n` over two of them is allowed, while a word bash may split plays
-every part at once and is judged as a file as well. A refusal says the `-i` was inferred. A verb that replaces a symlink is judged on the link
+time and a read-only `sed -n` over two of them is allowed, while a word bash may make several of —
+one it splits, or a quoted `"$@"` or `"${a[@]}"` whose element count the guard does not know,
+which bash expands into one argument per element — plays every part at once and is judged as a
+file as well. A quoted `"${a[*]}"`, and a scalar whatever it was assigned from, stay one
+argument. A refusal says the `-i` was inferred. A verb that replaces a symlink is judged on the link
 (`sed -i`), one that writes through it on what it points at (`cp`, `dd`), and `install` and `ln`,
 which do one or the other depending on whether the link leads to a directory, on both.
 
