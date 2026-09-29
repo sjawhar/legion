@@ -272,12 +272,19 @@ not a descendant of the pane's Oh My Pi process (`/proc` read at check time). It
 both daemons set on every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify,
 `LEGION_WORKSPACE`, `HOME`), so it adds nothing to either daemon contract.
 
-For a destructive `find`, each search root is resolved with `find`'s link rule: `-H` and `-L`
-follow a command-line symlink root, and a trailing slash follows it even without either option.
-Under `-L`, the guard walks the root's current directory tree and permits the command only when
-every symlink it could follow resolves inside the pane roots. An outside, dangling, or unreadable
-link refuses; the check deliberately walks the whole root rather than trusting the expression or
-depth limit, because a permitted `-L` walk must be proved unable to escape.
+For a destructive `find`, each search root is resolved with `find`'s link rule: `-H`, `-L` and
+the expression option `-follow` follow a command-line symlink root. A trailing slash or final `/.`
+follows it even under `-P`. Under `-L` or `-follow`, the guard walks the root's current directory
+tree and permits the command only when every symlink it could follow resolves inside the pane
+roots. An outside, dangling, or unreadable link refuses; the check deliberately walks the whole
+root rather than trusting the expression or depth limit. The shared walk budget bounds that check,
+and exhaustion gives the walk-limit refusal, not an outside-workspace refusal.
+
+A non-literal shell root keeps the ordinary path judgment under `-P` when its ending cannot be
+`/` or `/.`, so workspace globs and loops over them still run. If link-following is possible and
+the root cannot be resolved, the command is refused. An unreadable Python or JavaScript argument
+keeps the lenient-code contract; a value passed to a predicate or an executed command is not
+itself `-follow`.
 
 A verb that writes a path it names is judged on the operand its own grammar makes the destination,
 which is the whole of what LEGION-357 fixed: `cp` and `install` on their last operand, or on the

@@ -30,12 +30,18 @@ Before it selects a program or positional operand, the guard drops a word bash p
 for — an unquoted empty value, an empty `"$@"`, or an empty `"${a[@]}"` — while `""`, an empty
 quoted scalar, an empty `"$*"`, and an empty `"${a[*]}"` remain arguments.
 
-A destructive `find` resolves every search root as `find` will: `-H` and `-L` follow a
-command-line symlink root, and a trailing slash is physically resolved even without either option.
-Under `-L`, the guard also walks the current directory tree and allows the command only when every
-symlink it could follow resolves inside the pane roots. It refuses an outside, dangling or unreadable
-link rather than assuming the walk stays inside; this full check is deliberately independent of
-`find` predicates and depth limits, because the guard must prove an `-L` walk cannot escape.
+A destructive `find` resolves every search root as `find` will: `-H`, `-L` and the expression
+option `-follow` follow a command-line symlink root. A trailing slash or final `/.` follows it
+even under `-P`. Under `-L` or `-follow`, the guard also walks the current directory tree and
+allows the command only when every symlink it could follow resolves inside the pane roots. It
+refuses an outside, dangling or unreadable link rather than assuming the walk stays inside. This
+full check is deliberately independent of predicates and depth limits; exhaustion of the shared
+walk budget gives a walk-limit refusal rather than an outside-workspace refusal.
+
+Under `-P`, a non-literal shell root whose ending cannot be `/` or `/.` keeps the ordinary path
+judgment, so workspace globs and loops over them still run. A non-literal root whose link-following
+cannot be ruled out is refused. Unreadable Python and JavaScript arguments keep the lenient-code
+contract. Predicate values and arguments of executed commands do not turn on `-follow`.
 
 It parses the command with a bash parser and resolves each
 target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an

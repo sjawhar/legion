@@ -4856,10 +4856,10 @@ function checkRecursiveMode(
   }
 }
 
-/** Under -L, find follows every directory symlink it encounters. Check the current directory
+/** Under -L or -follow, find follows every directory symlink it encounters. Check the current directory
  * tree, not the textual root, before allowing a destructive predicate. The kernel resolver above
  * is still the one source of truth for each link's target. */
-function checkFindLinkWalk(root: string, ctx: Ctx): Verdict {
+function checkFindLinkWalk(root: string, ctx: Ctx, site: Site): Verdict {
   const pending = [root];
   const seen = new Set<string>();
   while (pending.length > 0) {
@@ -4890,7 +4890,9 @@ function checkFindLinkWalk(root: string, ctx: Ctx): Verdict {
     }
     try {
       for (let entry = entries.readSync(); entry !== null; entry = entries.readSync()) {
-        if (++ctx.steps.count > MAX_WALK_STEPS) return { ok: false, resolution: WALK_LIMIT };
+        if (++ctx.steps.count > MAX_WALK_STEPS) {
+          throw new Refusal(site.snippet, site.line, WALK_LIMIT);
+        }
         const child = path.join(directory, entry.name);
         let childInfo: Stats;
         try {
@@ -4937,9 +4939,21 @@ function checkFindLinkWalk(root: string, ctx: Ctx): Verdict {
   return { ok: true };
 }
 
+/** A glob cannot supply a slash. An unknown shell value can, unless the readable suffix rules
+ * out both `/` and `/.`. Only the last two characters decide; never expand a glob on disk. */
+function findRootMayFollow(exp: Expansion): boolean {
+  let suffix = "";
+  for (let index = exp.length - 1; index >= 0 && suffix.length < 2; index -= 1) {
+    const piece = exp[index] as Piece;
+    if (piece.kind === "unknown") return suffix === "" || suffix === "." || suffix === "/";
+    suffix = (piece.text.slice(-2) + suffix).slice(-2);
+  }
+  return suffix.endsWith("/") || suffix === "/.";
+}
+
 /** A destructive find predicate acts under a search root rather than directly on the root. Its
- * symlink following is find's: -H and -L follow a command-line root, a trailing slash requires
- * kernel resolution, and -L also follows links met while walking. */
+ * symlink following is find's: -H, -L and -follow follow a command-line root, a trailing slash
+ * or final `/.` requires kernel resolution, and -L/-follow also follow links met while walking. */
 function checkFindRoots(
   program: string,
   verb: string,
@@ -4953,18 +4967,27 @@ function checkFindRoots(
     const text = literalText(target.exp);
     let verdict: Verdict;
     if (text === undefined) {
-      verdict = {
-        ok: false,
-        resolution: "a search root the guard cannot resolve",
-        unresolved: true,
-      };
+      // Keep the ordinary path judgment when -P cannot follow the root. Code values retain
+      // their lenient contract; unlike shell values, an unreadable code argument is not proof.
+      verdict =
+        target.exp.some((piece) => piece.lenient) || (mode === "P" && !findRootMayFollow(target.exp))
+          ? judgePath(target.exp, st, ctx, { follow: false, overwrite: false })
+          : {
+              ok: false,
+              resolution: "a search root the guard cannot resolve while following links",
+              unresolved: true,
+            };
     } else if (!text.startsWith("/") && st.cwd === undefined) {
       verdict = {
         ok: false,
         resolution: `relative to a working directory unknown after ${st.cwdWhy}`,
       };
     } else {
-      const resolved = physical(st.cwd ?? "/", text, mode !== "P" || text.endsWith("/"));
+      const resolved = physical(
+        st.cwd ?? "/",
+        text,
+        mode !== "P" || text.endsWith("/") || text.endsWith("/.")
+      );
       if ("unknown" in resolved) {
         verdict = { ok: false, resolution: resolved.unknown, unresolved: true };
       } else if (!inWorkspace(resolved.real, ctx.roots) && !inScratch(resolved.real, ctx.roots)) {
@@ -4977,7 +5000,7 @@ function checkFindRoots(
               : `${absolute}, which resolves to ${resolved.real}`,
         };
       } else {
-        verdict = mode === "L" ? checkFindLinkWalk(resolved.real, ctx) : { ok: true };
+        verdict = mode === "L" ? checkFindLinkWalk(resolved.real, ctx, site) : { ok: true };
       }
     }
     if (!verdict.ok) {
@@ -5045,28 +5068,35 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
   // A predicate that takes a value consumes the word after it, so that word is its value and no
   // predicate of its own: `-name "$pattern"` is not a `-delete` the guard failed to read.
   let consumedByPredicate = false;
+  let commandEnd = -1;
   for (const [index, word] of expression.entries()) {
-    const isValue = consumedByPredicate;
-    consumedByPredicate = word !== undefined && FIND_VALUED_PREDICATES.has(word);
+    if (index <= commandEnd) continue;
+    const isValue: boolean = consumedByPredicate;
+    consumedByPredicate = !isValue && word !== undefined && FIND_VALUED_PREDICATES.has(word);
+    if (isValue) continue;
+    if (word === "-follow") mode = "L";
     // Any other word the guard cannot read may be `-delete`, so what the search matched is taken
     // as deleted and the roots still decide.
-    if (word === undefined && !isValue) action ??= "find with a predicate the guard cannot read";
+    if (word === undefined) action ??= "find with a predicate the guard cannot read";
     if (word === "-delete") action = "find -delete";
     if (word !== "-exec" && word !== "-execdir" && word !== "-ok" && word !== "-okdir") continue;
     const end = expression.findIndex(
       (value, offset) => offset > index && (value === ";" || value === "\\;" || value === "+")
     );
     if (end === -1) continue;
+    commandEnd = end;
     const inner = unwrap(list.slice(i + index + 1, i + end), st, ctx, site);
-    const program = path.basename(literalText(inner.argv[0]?.exp) ?? "");
+    const programText = literalText(inner.argv[0]?.exp);
+    const program = path.basename(programText ?? "");
     // `sed` counts only where it writes: `find <root> -exec sed -i` rewrites what it finds, and
     // `find <root> -exec sed -n` reads it.
     if (
+      programText === undefined ||
       FILE_COMMANDS.has(program) ||
       program === "xargs" ||
       (program === "sed" && sedWrites(inner.argv.slice(1)).inPlace)
     ) {
-      action = `find ${word} ${program}`;
+      action = `find ${word} ${programText === undefined ? "a program the guard cannot read" : program}`;
     }
     if (SHELLS.has(program)) {
       action = `find ${word} ${program}`;

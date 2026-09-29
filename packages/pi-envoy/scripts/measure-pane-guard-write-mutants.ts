@@ -2,7 +2,7 @@
 /** Single-line mutations of the write and find readers, measured against their live canary rows.
  * Usage: nice -n 19 bun <this file> <absolute path to pane-guard.ts>
  * Each temporary guard stays beside its imports; the source guard is never modified. */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -359,13 +359,13 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["shred through its link", "ACTS_ON_BOTH,", "ACTS_ON_LINK,", 'case "shred":'],
   [
     "find follows command-line roots",
-    'mode !== "P" || text.endsWith("/")',
+    'mode !== "P" || text.endsWith("/") || text.endsWith("/.")',
     "false",
     "function checkFindRoots(",
   ],
   [
     "find L walk",
-    'verdict = mode === "L" ? checkFindLinkWalk(resolved.real, ctx) : { ok: true };',
+    'verdict = mode === "L" ? checkFindLinkWalk(resolved.real, ctx, site) : { ok: true };',
     "verdict = { ok: true };",
     "function checkFindRoots(",
   ],
@@ -373,6 +373,51 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
     "find L link stays in roots",
     "!inWorkspace(resolved.real, ctx.roots) && !inScratch(resolved.real, ctx.roots)",
     "false",
+    "function checkFindLinkWalk(",
+  ],
+  ["find follow expression", 'if (word === "-follow") mode = "L";', "void word;"],
+  ["find final dot", 'text.endsWith("/.")', "false", "function checkFindRoots("],
+  [
+    "find P glob allowance",
+    'mode === "P" && !findRootMayFollow(target.exp)',
+    "false",
+    "function checkFindRoots(",
+  ],
+  [
+    "find nonliteral follow refused",
+    'mode === "P" && !findRootMayFollow(target.exp)',
+    "true",
+    "function checkFindRoots(",
+  ],
+  [
+    "find lenient code allowance",
+    "target.exp.some((piece) => piece.lenient)",
+    "false",
+    "function checkFindRoots(",
+  ],
+  [
+    "find unknown suffix",
+    'if (piece.kind === "unknown") return suffix === "" || suffix === "." || suffix === "/";',
+    'if (piece.kind === "unknown") return false;',
+    "function findRootMayFollow(",
+  ],
+  [
+    "find glob dot suffix",
+    'return suffix.endsWith("/") || suffix === "/.";',
+    'return suffix.endsWith("/");',
+    "function findRootMayFollow(",
+  ],
+  ["find predicate value", "if (isValue) continue;", "void isValue;", "function checkFind("],
+  [
+    "find exec argument",
+    "if (index <= commandEnd) continue;",
+    "void commandEnd;",
+    "function checkFind(",
+  ],
+  [
+    "find walk-limit diagnostic",
+    "throw new Refusal(site.snippet, site.line, WALK_LIMIT);",
+    "return { ok: false, resolution: WALK_LIMIT };",
     "function checkFindLinkWalk(",
   ],
 ];
@@ -426,6 +471,19 @@ try {
         if ((result.refusal === undefined) !== (measured.refusal === undefined)) {
           killed.push(result.row.name);
         }
+      }
+      if (name === "find walk-limit diagnostic") {
+        const workspace = path.join(base, "find-budget");
+        mkdirSync(workspace);
+        for (let entry = 0; entry < 100_001; entry += 1) {
+          writeFileSync(path.join(workspace, String(entry)), "");
+        }
+        const options = { workspace, scratch: base, ompPid: process.pid };
+        const command = "find -L . -name absent -delete";
+        const expected = baseline.createPaneGuard(options).bash(command, workspace, {});
+        const actual = mutant.createPaneGuard(options).bash(command, workspace, {});
+        if (!expected?.includes("walk limit")) throw new Error("find did not reach its walk limit");
+        if (actual !== expected) killed.push("find walk-limit diagnostic");
       }
       const line = source.slice(0, at).split("\n").length;
       console.log(

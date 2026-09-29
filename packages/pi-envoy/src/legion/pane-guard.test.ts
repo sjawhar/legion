@@ -546,6 +546,22 @@ describe("resolution", () => {
     expect(bash(`${command}; rm -rf "$HOME"`)).toContain("walk limit");
   });
 
+  test("a find tree exhausts the shared walk budget without blaming the workspace boundary", () => {
+    const tree = path.join(workspace, "find-budget");
+    mkdirSync(tree);
+    try {
+      for (let index = 0; index < 100_001; index += 1) {
+        writeFileSync(path.join(tree, String(index)), "");
+      }
+      const reason = bash("find -L find-budget -name absent -delete");
+      expect(reason).toContain("walk limit");
+      expect(reason).not.toContain("outside the issue workspace");
+      expect(reason).not.toContain("Name a path");
+    } finally {
+      rmSync(tree, { recursive: true });
+    }
+  }, 30_000);
+
   test("charges one pattern expansion its worst-case matching, and refuses one past the budget", () => {
     // `//` over the longest value it is evaluated over (512 characters) with a pattern of 772
     // positions: its worst case is a budget of matching (`globWork`, 131,841 characters stepped

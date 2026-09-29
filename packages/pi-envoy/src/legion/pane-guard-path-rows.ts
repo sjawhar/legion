@@ -198,6 +198,11 @@ const FIND_ESCAPE_ROOTS = [
   { name: "trailing.symlink", start: "hs/", depth: 1 },
   // `hs` is a root under the workspace, while `-L` makes find descend it into the home.
   { name: "L.workspace", start: "-L .", depth: 2 },
+  { name: "follow.symlink", start: "hs -follow", depth: 1 },
+  { name: "follow.workspace", start: ". -follow", depth: 2 },
+  { name: "dot.symlink", start: "hs/.", depth: 1 },
+  { name: "dot.slash.symlink", start: "hs/./", depth: 1 },
+  { name: "dot.slashes.symlink", start: "hs/.//", depth: 1 },
 ] as const;
 
 const FIND_SAFE_ROOTS = [
@@ -206,6 +211,11 @@ const FIND_SAFE_ROOTS = [
   { name: "trailing.inside", start: "safe-link/", depth: 1 },
   // `safe/inside` stays below the workspace as -L follows it.
   { name: "L.workspace.inside", start: "-L safe", depth: 2 },
+  { name: "follow.inside", start: "safe-link -follow", depth: 1 },
+  { name: "follow.workspace.inside", start: "safe -follow", depth: 2 },
+  { name: "dot.inside", start: "safe-link/.", depth: 1 },
+  { name: "dot.slash.inside", start: "safe-link/./", depth: 1 },
+  { name: "dot.slashes.inside", start: "safe-link/.//", depth: 1 },
 ] as const;
 
 const FIND_ESCAPE_ROWS: readonly PathRow[] = FIND_ESCAPE_ROOTS.flatMap((root) =>
@@ -239,6 +249,71 @@ const FIND_SAFE_ROWS: readonly PathRow[] = [
   })),
 ];
 
+const FIND_NONLITERAL_ROWS: readonly PathRow[] = [
+  {
+    name: "find.P.glob.delete",
+    family: "find",
+    role: "must-allow",
+    command: "find ./s* -maxdepth 1 -name f -delete",
+    dotdot: false,
+  },
+  {
+    name: "find.P.glob.exec",
+    family: "find",
+    role: "must-allow",
+    command: "find ./s* -maxdepth 1 -name f -exec rm -f {} +",
+    dotdot: false,
+  },
+  {
+    name: "find.P.loop.glob.delete",
+    family: "find",
+    role: "must-allow",
+    command: 'for d in ./s*; do find "$d" -maxdepth 1 -name f -delete; done',
+    dotdot: false,
+  },
+  {
+    name: "find.P.python.lenient.delete",
+    family: "find",
+    role: "must-allow",
+    command:
+      `python3 -c "import subprocess,sys; subprocess.run(['find', sys.argv[1], '-maxdepth', '1', '-name', 'f', '-delete'])" sub`,
+    dotdot: false,
+  },
+  {
+    name: "find.P.unknown.fixed.suffix",
+    family: "find",
+    role: "must-allow",
+    command: 'prefix=$(printf s); find ./"$prefix"ub -maxdepth 1 -name f -delete',
+    dotdot: false,
+  },
+  ...[
+    { name: "predicate.value", expression: "-name -follow -delete" },
+    { name: "exec.argument", expression: "-exec printf '%s\\n' -follow \\; -name f -delete" },
+  ].map(({ name, expression }) => ({
+    name: `find.P.follow.${name}`,
+    family: "find",
+    role: "must-allow" as const,
+    command: `find hs -maxdepth 1 ${expression}`,
+    dotdot: false,
+  })),
+  ...[
+    { name: "H.glob", start: "-H ./h*" },
+    { name: "L.glob", start: "-L ./h*" },
+    { name: "follow.glob", start: "./h* -follow" },
+    { name: "P.glob.slash", start: "./h*/" },
+    { name: "P.glob.dot", start: "./h*/." },
+    { name: "P.unknown.suffix", start: './h"$suffix"' },
+    { name: "P.unknown.slash", start: './h"$suffix"/' },
+    { name: "P.unknown.dot", start: './h"$suffix".' },
+  ].map(({ name, start }) => ({
+    name: `find.${name}.delete`,
+    family: "find",
+    role: "probe" as const,
+    command: `suffix=$(printf s/); find ${start} -maxdepth 1 -name .bashrc -delete`,
+    dotdot: false,
+  })),
+];
+
 const FIND_LINK_MUTANT_ROW: PathRow = {
   name: "find.L.link.file.outside",
   family: "find",
@@ -254,12 +329,16 @@ const FIND_MUTANT_ROW_NAMES: Record<string, true> = {
   "find.H.symlink.delete": true,
   "find.L.symlink.delete": true,
   "find.L.workspace.delete": true,
+  "find.follow.symlink.delete": true,
+  "find.follow.workspace.delete": true,
+  "find.dot.symlink.delete": true,
 };
 
-/** The minimal rows that distinguish every mutation of find's root and -L link handling. */
+/** The minimal rows that distinguish mutations of find's root and link handling. */
 export const FIND_MUTANT_ROWS: readonly PathRow[] = [
   ...FIND_ESCAPE_ROWS.filter((row) => FIND_MUTANT_ROW_NAMES[row.name] === true),
   FIND_LINK_MUTANT_ROW,
+  ...FIND_NONLITERAL_ROWS,
 ];
 
 export const PATH_ROWS: readonly PathRow[] = [
@@ -628,6 +707,7 @@ export const PATH_ROWS: readonly PathRow[] = [
   // --- find follows roots differently from ordinary path operations ---
   ...FIND_ESCAPE_ROWS,
   ...FIND_SAFE_ROWS,
+  ...FIND_NONLITERAL_ROWS,
   FIND_LINK_MUTANT_ROW,
 
   {
