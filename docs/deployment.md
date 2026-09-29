@@ -82,10 +82,12 @@ remedy, rather than treating the command as one with no destination. A `-T` the 
 settles which operand is the destination, so an unreadable word after it is no longer a possible
 destination; it is still judged for the other things it may be, an `-r` or a backup option among
 them. The accepted cost is four shapes that refuse where a person can see they are
-harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln` — so `cp *.txt dir/` and
-`mv *.txt dir/` are refused, because a glob can yield a `-t<link>` pointing out of the roots,
-while `cp -- *.txt dir/` and `./*.txt` are allowed; `xargs` into `cp` or `sed -i` with
-unreadable operands; a glob loop into `cp` with neither a literal prefix nor `--`; and a
+harmless: a bare glob, or an array built inside a loop or an `if`, before `--` with `cp`, `mv`,
+`install` or `ln` — so `cp *.txt dir/`, `mv *.txt dir/` and `cp "${files[@]}" dir/` over a
+loop-built array are refused, because a glob or an element can be a `-t<link>` pointing out of the
+roots, while `cp -- *.txt dir/`, `cp -- "${files[@]}" dir/` and `./*.txt` are allowed; `xargs` into
+`cp` or `sed -i` with unreadable operands; a glob loop into `cp` with neither a literal prefix nor
+`--`; and a
 read-only `sed` whose options come from an array of `-e` and its script built inside a loop, an
 `if`, or an `&&`/`||` list — even one whose condition is known, since the guard merges the
 branches and forgets the elements (a `case` over a literal keeps them) — so it cannot pair each
