@@ -24,8 +24,10 @@ e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which ot
 `/tmp` directory belongs to this pane.
 **Known shapes that still reach outside the roots
 are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
-expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
-`s///e`, which the guard does not read (LEGION-377).**
+expansion slice (LEGION-376), the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
+`s///e`, which the guard does not read (LEGION-377), and a word bash passes no argument for — an
+unquoted empty value, an empty `"${a[@]}"` — read as a command name, a wrapper's or `xargs`'s or
+`find -exec`'s program, or `cd`'s directory (LEGION-378).**
 It parses the command with a bash parser and resolves each
 target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
 assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
@@ -98,10 +100,10 @@ A single glob in a `for` loop retains its expansion only when its first piece is
 literal starting with a character other than `-`, such as `./*.txt` or `src/*.go`. Wildcard-led
 and dash-led loop values stay unknown for every command, including `truncate` and redirections,
 not only copy commands. `dd` writes the path inside its `of=` word, wherever that
-word stands. `ln` writes its last
-operand, or the working directory when given one readable operand, and a hard link (no `-s`)
-also makes its source writable under the new name, which no later command can resolve as it can
-a symlink. `sed` is judged on the files it names with `-i`, including inside a cluster (`-ni`) and
+word stands. `ln` writes its last operand, or the working directory when given one operand the
+guard reads whole, and a hard link (no `-s`) also makes its source writable under the new name,
+which no later command can resolve as it can a symlink. `sed` is judged on the files it names with
+`-i`, including inside a cluster (`-ni`) and
 with a suffix joined to it (`-i.bak`) — **the files its SCRIPT names are not judged at all
 (LEGION-377)**; a word the guard cannot read may itself be that `-i`, and
 the readings are judged together rather than worst-of-each, so a quoted word plays one part at a
