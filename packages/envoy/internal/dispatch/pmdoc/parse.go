@@ -29,7 +29,7 @@ type markdownReader struct {
 var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParser(parser.NewParser(
 		parser.WithBlockParsers(blockParsers()...),
-		parser.WithInlineParsers(inlineParsers()...),
+		parser.WithInlineParsers(inlineParsers(emphasisParser{})...),
 		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
 	)),
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
@@ -211,11 +211,12 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 }
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
-// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's.
-func inlineParserOptions() []parser.Option {
+// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's, its
+// delimiter runs read by emphasis.
+func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
-		parser.WithInlineParsers(inlineParsers()...),
+		parser.WithInlineParsers(inlineParsers(emphasis)...),
 		parser.WithInlineParsers(
 			util.Prioritized(extension.NewStrikethroughParser(), 500),
 			util.Prioritized(extension.NewLinkifyParser(), 999),
@@ -223,19 +224,31 @@ func inlineParserOptions() []parser.Option {
 	}
 }
 
-// inlineMarkdownParser reads inline markdown (inlineParserOptions).
-var inlineMarkdownParser = parser.NewParser(inlineParserOptions()...)
+// inlineReader reads one textblock's inline markdown (inlineParserOptions): run alone, and with
+// footnote definitions after it so that the references in it read as references
+// (parseInlineWithDefinitions).
+type inlineReader struct {
+	run, withDefinitions parser.Parser
+}
 
-// footnoteRunParser reads inline markdown as inlineMarkdownParser does, with footnote definitions
-// after it so that the references in it read as references (parseInlineWithDefinitions).
-var footnoteRunParser = parser.NewParser(append(inlineParserOptions(), footnoteParserOptions()...)...)
+func newInlineReader(emphasis emphasisParser) inlineReader {
+	return inlineReader{
+		run:             parser.NewParser(inlineParserOptions(emphasis)...),
+		withDefinitions: parser.NewParser(append(inlineParserOptions(emphasis), footnoteParserOptions()...)...),
+	}
+}
 
-// parseInlineWithDefinitions reads one textblock's inline markdown as ParseInline does, after a
-// definition for each of labels, the footnote labels it refers to. It is the renderer's read-back
-// of a run it wrote, where a reference is only a reference beside its definition.
-func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, error) {
+// inlineMarkdown reads inline markdown as Parse does; flankingOnlyMarkdown reads it with its
+// delimiter runs judged by CommonMark's flanking rules alone (emphasisParser.flankingOnly).
+var inlineMarkdown, flankingOnlyMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{flankingOnly: true})
+
+// parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
+// does, after a definition for each of labels, the footnote labels it refers to. It is the
+// renderer's read-back of a run it wrote, where a reference is only a reference beside its
+// definition.
+func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) ([]*Node, error) {
 	if len(labels) == 0 {
-		return ParseInline(markdown)
+		return readInline(markdown, reader.run)
 	}
 	var full strings.Builder
 	full.WriteString(markdown)
@@ -243,7 +256,7 @@ func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, erro
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root := withLineStarts(footnoteRunParser, source, parser.NewContext())
+	root := withLineStarts(reader.withDefinitions, source, parser.NewContext())
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
@@ -274,9 +287,14 @@ func referencedLabels(nodes []*Node) []string {
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) (nodes []*Node, err error) {
+	return readInline(markdown, inlineMarkdown.run)
+}
+
+// readInline is ParseInline read with inline, one of an inlineReader's parsers.
+func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
+	root := withLineStarts(inline, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}

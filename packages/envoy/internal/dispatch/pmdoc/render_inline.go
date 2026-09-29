@@ -97,13 +97,23 @@ type lineCandidate struct {
 // Last come those spellings again with the letter beside each such delimiter run written as a
 // character reference, which is punctuation to the flanking rules, as the browser editor writes it
 // (flanking).
+//
+// A spelling is taken first where it reads back by CommonMark's flanking rules as well
+// (flankingOnlyMarkdown), the rules goldmark reads by, and only where none does by the browser
+// editor's alone, which also let a run beside another `*` or `_` open or close (emphasisParser):
+// the writer keeps the bytes it wrote while it read by CommonMark's rules, wherever they read back
+// by the editor's too.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
 	bareURL := textAfterBareURL(nodes, context.tableCell)
 	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
-	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking || r.runReadsBack(from, prefix, nodes) {
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
+		return
+	}
+	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
+	if firstReadsBack && r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
@@ -119,11 +129,17 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		}
 		spellings = append(spellings, flanked...)
 	}
-	for _, spelling := range spellings {
-		r.b.Truncate(from)
-		fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
-		if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes) {
-			return
+	for _, flankingToo := range []bool{true, false} {
+		if !flankingToo && firstReadsBack {
+			break
+		}
+		for _, spelling := range spellings {
+			r.b.Truncate(from)
+			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
+			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes, inlineMarkdown) &&
+				(!flankingToo || r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown)) {
+				return
+			}
 		}
 	}
 	r.b.Truncate(from)
@@ -209,15 +225,16 @@ func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
 	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes)
 }
 
-// runReadsBack reports whether the inline markdown written since from reads back as nodes: the
-// run's own lines, with the prefix its later lines are written behind taken off, read after a
-// definition for each footnote label it refers to, since a reference reads as one only then.
-func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
+// runReadsBack reports whether the inline markdown written since from reads back as nodes by
+// reader: the run's own lines, with the prefix its later lines are written behind taken off, read
+// after a definition for each footnote label it refers to, since a reference reads as one only
+// then.
+func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader inlineReader) bool {
 	source := string(r.b.Bytes()[from:])
 	if prefix != "" {
 		source = strings.ReplaceAll(source, "\n"+prefix, "\n")
 	}
-	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes))
+	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes), reader)
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
 }
 
