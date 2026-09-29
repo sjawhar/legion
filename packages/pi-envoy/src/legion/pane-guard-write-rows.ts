@@ -1,0 +1,581 @@
+/** The shapes LEGION-357 is measured on: commands that write a path they name, where the path is
+ * the operand each verb's own grammar makes the destination. They live here rather than in the
+ * test file so that `scripts/measure-pane-guard-writes.ts` runs the same rows against any guard
+ * build, and the numbers a pull request or a review states are derived from what the test runs.
+ *
+ * Every row is measured twice: what `guard.bash` RETURNS, and what real bash does to a canary
+ * HOME the row's own fixture holds. No row carries an expected verdict for the dangerous
+ * direction — the expectation is what bash did, so a row that stops destroying the canary stops
+ * demanding a refusal rather than silently passing. `must-allow` rows carry the other direction,
+ * which nothing derived from bash can supply: the command a pane is meant to be able to run.
+ */
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import * as path from "node:path";
+
+export interface WriteRow {
+  readonly name: string;
+  /** The verb whose grammar the row is about; a control speaks only for its own family. */
+  readonly family: string;
+  /** `must-refuse` is asserted by what bash did, not by this field. `must-allow` is the cost
+   * side: a command the pane keeps. `residual` is a shape the documented boundary leaves open,
+   * listed by name in the test so closing one is a deliberate edit. */
+  readonly role: "must-allow" | "residual" | "probe";
+  readonly command: string;
+}
+
+/** What the guard is given and what bash is given: one directory per row. `e` and `f` are links
+ * inside the workspace that point out of it (at a directory and at a file); `home/link` is the
+ * mirror, a link outside the roots pointing in, which a verb that replaces its destination
+ * destroys. */
+export interface WriteFixture {
+  readonly base: string;
+  readonly workspace: string;
+  readonly scratch: string;
+  readonly home: string;
+}
+
+const CANARY = "CANARY-ORIGINAL\n";
+
+export function buildWriteFixture(base: string): WriteFixture {
+  const ws = path.join(base, "ws");
+  const scratch = path.join(base, "tmp");
+  const home = path.join(base, "home");
+  for (const dir of [
+    ws,
+    path.join(ws, "dir"),
+    path.join(scratch, "mine"),
+    home,
+    path.join(home, ".ssh"),
+    path.join(home, "bin"),
+  ]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(path.join(ws, "payload"), "PAYLOAD\n");
+  writeFileSync(path.join(ws, "notes.txt"), "NOTES\n");
+  writeFileSync(path.join(ws, "dir", "in"), "WS\n");
+  writeFileSync(path.join(home, ".bashrc"), CANARY);
+  writeFileSync(path.join(home, ".ssh", "id_rsa"), CANARY);
+  writeFileSync(path.join(home, "bin", "tool"), CANARY);
+  // Inside the workspace, pointing out of it: `e` at a directory, `f` at a file. A verb that
+  // descends `e` writes under the home; one that writes through `f` rewrites the profile.
+  symlinkSync(path.join(home, ".ssh"), path.join(ws, "e"));
+  symlinkSync(path.join(home, ".bashrc"), path.join(ws, "f"));
+  // Outside the roots, pointing in: destroying this link destroys a file outside the roots even
+  // though what it points at is inside them.
+  symlinkSync(path.join(ws, "notes.txt"), path.join(home, "link"));
+  return { base, workspace: ws, scratch, home };
+}
+
+/** Every name, mode and content under the canary home, so a removal, an overwrite, a mode change,
+ * a replaced symlink and a new file all change the digest. The entry count is the positive
+ * control: a digest over nothing would make every row look intact. */
+export function canaryDigest(home: string): string {
+  const hash = createHash("md5");
+  let entries = 0;
+  const walk = (dir: string, prefix: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(dir).sort();
+    } catch {
+      hash.update(`${prefix}\u0000UNREADABLE\u0001`);
+      return;
+    }
+    for (const name of names) {
+      const full = path.join(dir, name);
+      const rel = `${prefix}${name}`;
+      entries += 1;
+      try {
+        const info = lstatSync(full);
+        hash.update(`${rel}\u0000${(info.mode & 0o7777).toString(8)}\u0000`);
+        if (info.isSymbolicLink()) hash.update(`L${readlinkSync(full)}`);
+        else if (info.isDirectory()) walk(full, `${rel}/`);
+        else hash.update(createHash("md5").update(readFileSync(full)).digest("hex"));
+      } catch {
+        hash.update(`${rel}\u0000UNREADABLE`);
+      }
+      hash.update("\u0001");
+    }
+  };
+  walk(home, "");
+  return `${entries}:${hash.digest("hex")}`;
+}
+
+/** A value the guard cannot read, so the word carrying it is one it cannot read whole. */
+const HIDDEN = (text: string): string => `$(printf '%s' ${text})`;
+
+export const WRITE_ROWS: readonly WriteRow[] = [
+  // --- The controls the whole battery rests on --------------------------------------------
+  // A verb the guard already judges, in both directions: if either of these two ever changes,
+  // no other row in the file means what it says.
+  {
+    name: "control: rm of the profile",
+    family: "control",
+    role: "probe",
+    command: 'rm -f "$HOME/.bashrc"',
+  },
+  {
+    name: "control: a redirection over the profile",
+    family: "control",
+    role: "probe",
+    command: 'echo pwned > "$HOME/.bashrc"',
+  },
+  {
+    name: "control: a redirection inside the workspace",
+    family: "control",
+    role: "must-allow",
+    command: "echo fine > notes.txt",
+  },
+
+  // --- cp ------------------------------------------------------------------------------------
+  {
+    name: "cp over the profile",
+    family: "cp",
+    role: "probe",
+    command: 'cp payload "$HOME/.bashrc"',
+  },
+  {
+    name: "cp into the home directory, which names the destination file itself",
+    family: "cp",
+    role: "probe",
+    command: 'cp payload "$HOME"',
+  },
+  {
+    name: "cp -t, where every operand is a source and the option carries the destination",
+    family: "cp",
+    role: "probe",
+    command: 'cp -t "$HOME" payload',
+  },
+  {
+    name: "cp --target-directory=, the same destination joined to its option",
+    family: "cp",
+    role: "probe",
+    command: 'cp --target-directory="$HOME" payload',
+  },
+  {
+    name: "cp -r of a directory into the home directory",
+    family: "cp",
+    role: "probe",
+    command: 'cp -r dir "$HOME"',
+  },
+  {
+    name: "cp through a workspace link that points at the profile",
+    family: "cp",
+    role: "probe",
+    command: "cp payload f",
+  },
+  {
+    name: "cp --remove-destination, which unlinks a destination outside the roots",
+    family: "cp",
+    role: "probe",
+    command: 'cp --remove-destination payload "$HOME/link"',
+  },
+  {
+    name: "cp -b, which renames a destination outside the roots to its backup",
+    family: "cp",
+    role: "probe",
+    command: 'cp -b payload "$HOME/link"',
+  },
+  {
+    name: "cp whose destination the guard cannot read",
+    family: "cp",
+    role: "probe",
+    command: `cp payload "${HIDDEN('"$HOME/.bashrc"')}"`,
+  },
+  { name: "cp inside the workspace", family: "cp", role: "must-allow", command: "cp payload copy" },
+  {
+    name: "cp -r into the pane's own /tmp directory",
+    family: "cp",
+    role: "must-allow",
+    command: 'cp -r dir "$TMPDIR/mine/"',
+  },
+  {
+    name: "cp -t into the workspace",
+    family: "cp",
+    role: "must-allow",
+    command: 'cp -t "$LEGION_WORKSPACE/dir" payload',
+  },
+  {
+    name: "cp of a source outside the roots into the workspace, which writes nothing outside",
+    family: "cp",
+    role: "must-allow",
+    command: 'cp "$HOME/.bashrc" theirs',
+  },
+
+  // --- dd --------------------------------------------------------------------------------------
+  {
+    name: "dd of= the profile",
+    family: "dd",
+    role: "probe",
+    command: 'dd if=payload of="$HOME/.bashrc"',
+  },
+  {
+    name: "dd of= before if=, since an operand of dd stands anywhere",
+    family: "dd",
+    role: "probe",
+    command: 'dd of="$HOME/.bashrc" if=payload',
+  },
+  {
+    name: "dd of= with conv=notrunc, which still writes the file",
+    family: "dd",
+    role: "probe",
+    command: 'dd if=payload of="$HOME/.bashrc" conv=notrunc',
+  },
+  {
+    name: "dd of= a workspace link that points at the profile",
+    family: "dd",
+    role: "probe",
+    command: "dd if=payload of=f",
+  },
+  {
+    name: "dd whose of= operand the guard cannot read",
+    family: "dd",
+    role: "probe",
+    command: `dd if=payload "${HIDDEN('"of=$HOME/.bashrc"')}"`,
+  },
+  // bash expands a tilde after the `=` of an assignment-like prefix, so `of=~/…` is the home
+  // directory while `--directory=~/…` and `-d~/…` are the literal text (measured; `tildeAt`).
+  {
+    name: "dd of=~ , where the tilde stands after an operand's own `=`",
+    family: "dd",
+    role: "probe",
+    command: "dd if=payload of=~/.ssh/id_rsa",
+  },
+  {
+    name: "cp to a tilde path, the ordinary position",
+    family: "cp",
+    role: "probe",
+    command: "cp payload ~/.bashrc",
+  },
+  {
+    name: "dd of= inside the workspace",
+    family: "dd",
+    role: "must-allow",
+    command: "dd if=payload of=copy",
+  },
+  {
+    name: "dd of=/dev/null, a device that overwrites nothing",
+    family: "dd",
+    role: "must-allow",
+    command: "dd if=payload of=/dev/null",
+  },
+  {
+    name: "dd reading a file outside the roots, which writes nothing",
+    family: "dd",
+    role: "must-allow",
+    command: 'dd if="$HOME/.bashrc" of=theirs',
+  },
+
+  // --- install ---------------------------------------------------------------------------------
+  {
+    name: "install over the profile",
+    family: "install",
+    role: "probe",
+    command: 'install -m 644 payload "$HOME/.bashrc"',
+  },
+  {
+    name: "install into the home directory",
+    family: "install",
+    role: "probe",
+    command: 'install payload "$HOME"',
+  },
+  {
+    name: "install -t, whose option carries the destination",
+    family: "install",
+    role: "probe",
+    command: 'install -t "$HOME" payload',
+  },
+  {
+    name: "install -m 755 with the mode apart from its option",
+    family: "install",
+    role: "probe",
+    command: 'install -m 755 payload "$HOME/bin/tool"',
+  },
+  {
+    name: "install descending a workspace link that points at a directory outside the roots",
+    family: "install",
+    role: "probe",
+    command: "install payload e",
+  },
+  {
+    name: "install replacing a link outside the roots rather than writing through it",
+    family: "install",
+    role: "probe",
+    command: 'install payload "$HOME/link"',
+  },
+  {
+    name: "install -d over an existing directory outside the roots, which changes its mode",
+    family: "install",
+    role: "probe",
+    command: 'install -d -m 700 "$HOME/.ssh"',
+  },
+  {
+    name: "install inside the workspace",
+    family: "install",
+    role: "must-allow",
+    command: "install -m 755 payload copy",
+  },
+  {
+    name: "install -D inside the workspace, which creates the parents it needs",
+    family: "install",
+    role: "must-allow",
+    command: "install -D payload deep/a/tool",
+  },
+
+  // --- ln ----------------------------------------------------------------------------------------
+  {
+    name: "ln -sf over the profile",
+    family: "ln",
+    role: "probe",
+    command: 'ln -sf payload "$HOME/.bashrc"',
+  },
+  {
+    name: "ln -f, a hard link over the profile",
+    family: "ln",
+    role: "probe",
+    command: 'ln -f payload "$HOME/.bashrc"',
+  },
+  {
+    name: "ln -sf descending a workspace link that points at a directory outside the roots",
+    family: "ln",
+    role: "probe",
+    command: "ln -sf payload e",
+  },
+  {
+    name: "ln -sfn replacing a link outside the roots",
+    family: "ln",
+    role: "probe",
+    command: 'ln -sfn payload "$HOME/link"',
+  },
+  {
+    name: "ln -s -t, whose option carries the destination directory",
+    family: "ln",
+    role: "probe",
+    command: 'ln -s -t "$HOME" payload',
+  },
+  {
+    name: "ln -s with one operand, which writes the working directory, not the operand",
+    family: "ln",
+    role: "probe",
+    command: 'cd "$HOME" && ln -s "$LEGION_WORKSPACE/payload"',
+  },
+  {
+    name: "ln of the profile into the workspace, then a write through the hard link",
+    family: "ln",
+    role: "probe",
+    command: 'ln "$HOME/.bashrc" laundered && echo pwned > laundered',
+  },
+  // The symbolic mirror of the row above. Every later command resolves a link that exists, so
+  // this one leaks only while the same command both makes the link and writes through it, which
+  // the guard reads before either has happened. Closing it needs the guard to model the links a
+  // command makes, beside the files it writes (`modelWrite`) — a second model rather than a
+  // target rule, so it is recorded here rather than claimed.
+  {
+    name: "RESIDUAL a link this command makes, written through by the same command",
+    family: "residual",
+    role: "residual",
+    command: 'ln -s "$HOME/.bashrc" launder-s && echo pwned > launder-s',
+  },
+  {
+    name: "control: a write through a link that already exists, which the guard resolves",
+    family: "ln",
+    role: "probe",
+    command: "echo pwned > f",
+  },
+  {
+    name: "ln -sf inside the workspace",
+    family: "ln",
+    role: "must-allow",
+    command: "ln -sf payload link-here",
+  },
+  {
+    name: "ln -s with one operand in the workspace, which writes the working directory",
+    family: "ln",
+    role: "must-allow",
+    command: 'ln -s "$HOME/.bashrc" link-out',
+  },
+
+  // --- sed -i ------------------------------------------------------------------------------------
+  {
+    name: "sed -i over the profile",
+    family: "sed",
+    role: "probe",
+    command: `sed -i 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -i.bak, whose suffix joins its option",
+    family: "sed",
+    role: "probe",
+    command: `sed -i.bak 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -ni, in-place inside a cluster",
+    family: "sed",
+    role: "probe",
+    command: `sed -ni 's/CANARY/PWNED/p' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -ie, where the letter after -i is its suffix and not another option",
+    family: "sed",
+    role: "probe",
+    command: `sed -ie 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -e ... -i, with the option after the script",
+    family: "sed",
+    role: "probe",
+    command: `sed -e 's/CANARY/PWNED/' -i "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed --in-place, the long spelling",
+    family: "sed",
+    role: "probe",
+    command: `sed --in-place 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -i --follow-symlinks through a workspace link at the profile",
+    family: "sed",
+    role: "probe",
+    command: `sed -i --follow-symlinks 's/CANARY/PWNED/' f`,
+  },
+  {
+    name: "sed -i whose in-place option the guard cannot read",
+    family: "sed",
+    role: "probe",
+    command: `sed "${HIDDEN("-i")}" 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -i of a workspace link, which replaces the link and not the profile",
+    family: "sed",
+    role: "must-allow",
+    command: `sed -i 's/CANARY/PWNED/' f`,
+  },
+  {
+    name: "sed without -i, which writes nothing",
+    family: "sed",
+    role: "must-allow",
+    command: `sed 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+  },
+  {
+    name: "sed -i inside the workspace",
+    family: "sed",
+    role: "must-allow",
+    command: `sed -i 's/NOTES/notes/' notes.txt`,
+  },
+  {
+    name: "sed -i over a file the script names, inside the workspace",
+    family: "sed",
+    role: "must-allow",
+    command: `sed -i -e 's|/etc/passwd|x|' notes.txt`,
+  },
+
+  // --- The documented boundary, which these verbs do not change -----------------------------
+  // A path that does not exist yet overwrites nothing: the rule `>` and `tee` are judged by
+  // (`judgePath`'s `overwrite`). These rows create a file outside the roots and are allowed, as
+  // the redirection beside them is. Closing them is a change to the boundary in
+  // `docs/deployment.md`, not to these verbs, so each is listed by name in the test.
+  {
+    name: "RESIDUAL a redirection creating a file outside the roots",
+    family: "residual",
+    role: "residual",
+    command: 'echo planted > "$HOME/planted"',
+  },
+  {
+    name: "RESIDUAL cp creating a file outside the roots",
+    family: "residual",
+    role: "residual",
+    command: 'cp payload "$HOME/planted"',
+  },
+  {
+    name: "RESIDUAL ln -sf creating a link outside the roots",
+    family: "residual",
+    role: "residual",
+    command: 'ln -sf payload "$HOME/planted"',
+  },
+  {
+    name: "RESIDUAL install creating a file outside the roots",
+    family: "residual",
+    role: "residual",
+    command: 'install payload "$HOME/planted"',
+  },
+];
+
+export interface WriteResult {
+  readonly row: WriteRow;
+  /** What `guard.bash` returned: the refusal text, or undefined for a command it allowed. */
+  readonly refusal: string | undefined;
+  /** Whether real bash changed anything under the canary home. */
+  readonly live: boolean;
+  readonly exit: number | null;
+}
+
+/** The one thing this battery needs of a guard build, so any revision's file satisfies it and
+ * `scripts/measure-pane-guard-writes.ts` can measure a build that is not the one it imports. */
+export type GuardFactory = (options: {
+  workspace: string | undefined;
+  ompPid: number;
+  scratch?: string;
+}) => { bash: (command: string, cwd: string, env: NodeJS.ProcessEnv) => string | undefined };
+
+/** Measures one row twice, in a fixture of its own: what the guard returns for the command, and
+ * whether real bash changed anything under the canary home while running it. */
+export function measureWriteRow(
+  base: string,
+  row: WriteRow,
+  createGuard: GuardFactory
+): WriteResult {
+  const fixture = buildWriteFixture(mkdtempSync(path.join(base, "row-")));
+  const env: NodeJS.ProcessEnv = {
+    HOME: fixture.home,
+    LEGION_WORKSPACE: fixture.workspace,
+    TMPDIR: fixture.scratch,
+    PATH: process.env.PATH,
+  };
+  const refusal = createGuard({
+    workspace: fixture.workspace,
+    ompPid: process.pid,
+    scratch: fixture.scratch,
+  }).bash(row.command, fixture.workspace, env);
+  const before = canaryDigest(fixture.home);
+  const ran = spawnSync("bash", ["-c", row.command], {
+    cwd: fixture.workspace,
+    env,
+    timeout: 20_000,
+  });
+  return { row, refusal, live: canaryDigest(fixture.home) !== before, exit: ran.status };
+}
+
+/** The fixture's own properties, as booleans rather than as prose: a row means nothing if the
+ * links do not point where the file says they do. */
+export function fixtureProperties(base: string): Record<string, boolean> {
+  const fixture = buildWriteFixture(mkdtempSync(path.join(base, "props-")));
+  const digest = canaryDigest(fixture.home);
+  const entries = Number(digest.split(":")[0]);
+  const properties = {
+    e_is_a_link_at_a_directory_outside_the_roots:
+      lstatSync(path.join(fixture.workspace, "e")).isSymbolicLink() &&
+      readlinkSync(path.join(fixture.workspace, "e")) === path.join(fixture.home, ".ssh"),
+    f_is_a_link_at_the_profile:
+      lstatSync(path.join(fixture.workspace, "f")).isSymbolicLink() &&
+      readlinkSync(path.join(fixture.workspace, "f")) === path.join(fixture.home, ".bashrc"),
+    home_link_points_into_the_workspace:
+      readlinkSync(path.join(fixture.home, "link")) === path.join(fixture.workspace, "notes.txt"),
+    home_outside_workspace: !fixture.home.startsWith(`${fixture.workspace}/`),
+    home_outside_scratch: !fixture.home.startsWith(`${fixture.scratch}/`),
+    scratch_is_not_real_tmp: fixture.scratch !== "/tmp",
+    digest_counts_entries: entries > 5,
+  };
+  rmSync(fixture.base, { recursive: true, force: true });
+  return properties;
+}

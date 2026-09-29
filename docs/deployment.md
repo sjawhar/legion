@@ -13,14 +13,17 @@ each phase worker's and root architect's tool calls, and those of any `task` sub
 to a boundary before they run; it refuses the shared jj operation-log rewrites (LEGION-45) and,
 since LEGION-121, destructive commands and signals outside the pane's own work. A `bash` command,
 `eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`, `find -exec rm`,
-`shred`), move (`mv`), truncate (`truncate`), overwrite by redirection or `tee` (an existing file
-only), or recursively change the mode or owner (`chmod -R`, `chown -R`) of paths under the pane's
+`shred`), move (`mv`), truncate (`truncate`), overwrite by redirection, `tee`, `cp`, `dd of=`,
+`install`, `ln` or `sed -i` (an existing file only), or recursively change the mode or owner
+(`chmod -R`, `chown -R`) of paths under the pane's
 issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below `/tmp` except
 `/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp` directory that
 holds the pane's `HOME` or `TMUX_TMPDIR` when either sits there, by that directory's exact name (an
 e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which other permitted
 `/tmp` directory belongs to this pane. It parses the command with a bash parser and resolves each
-target as bash would: through `$HOME`, `~`, variables set earlier in the same command,
+target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
+assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
+command,
 `$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename` and `readlink -f` print,
 pattern replacement and removal of a known ASCII value (`${v//a/b}`, `${v#*:}`), a function's
 output, command substitutions, and the scripts the command runs (`bash <file>`, `sh -c`, `source`,
@@ -57,6 +60,17 @@ permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused o
 a resolved path outside the pane roots. `kill` only reaches a pid that `/proc` shows descending
 from the pane's own Oh My Pi process. Every refusal names the target, where it resolved, and the
 rule, so the agent can rewrite the command.
+
+Which operand a write verb's destination is comes from that verb's own grammar, measured rather
+than assumed: `cp` and `install` write their last operand, or the directory `-t` names, where
+every other operand is a source they read; `dd` writes the path inside its `of=` word, wherever
+that word stands; `ln` writes its last operand, or the working directory when it is given one
+operand, and a hard link (no `-s`) also makes its source writable under the new name, which no
+later command can resolve as it can a symlink; `sed` writes the files it names only with `-i`,
+including inside a cluster (`-ni`) and with a suffix joined to it (`-i.bak`). A verb that
+replaces a symlink rather than writing through it is judged on the link (`sed -i`), one that
+writes through it on what it points at (`cp`, `dd`), and `install` and `ln`, which do one or the
+other depending on whether the link leads to a directory, on both.
 
 A word the guard cannot read whole is not read as harmless. Where a word selects a dangerous
 option or subcommand — an extract mode and `-C` for `tar`, `-d` for `unzip`, `-k` for `fuser`,
