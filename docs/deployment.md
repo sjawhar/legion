@@ -73,12 +73,13 @@ cannot read whole and that may be an option — a glob, a
 command's output, an unquoted expansion — refuses `cp`, `mv`, `install` and `ln`, since one
 reading of it hides a destination; the refusal names the written word and the `--` or `-T`
 remedy, rather than treating the command as one with no destination. A `-T` the guard HAS read
-settles which operand is the destination, so an unreadable word after it is judged as the source
-it can only be. The accepted cost is three shapes that refuse where a person can see they are
+settles which operand is the destination, so an unreadable word after it is no longer a possible
+destination; it is still judged for the other things it may be, an `-r` or a backup option among
+them. The accepted cost is three shapes that refuse where a person can see they are
 harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln`; `xargs` into `cp` or
 `sed -i` with unreadable operands; and a glob loop into `cp` with neither a literal prefix nor
-`--`. So `cp *.txt dir/` and `mv *.txt dir/` are refused where they were once allowed, because a
-glob can yield `-t<link>` pointing out of the roots; `cp -- *.txt dir/` and `./*.txt` are not.
+`--`. So `cp *.txt dir/` and `mv *.txt dir/` are refused, because a glob can yield a
+`-t<link>` pointing out of the roots, while `cp -- *.txt dir/` and `./*.txt` are allowed.
 Help and version options do not write. `cp` judges the source basename as
 written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`
 retains the source path. It inspects only existing destination entries, recursively for a recursive
@@ -87,8 +88,7 @@ an unreadable basename is allowed when the possible destination entries stay ins
 A single glob in a `for` loop retains its expansion only when its first piece is a nonempty
 literal starting with a character other than `-`, such as `./*.txt` or `src/*.go`. Wildcard-led
 and dash-led loop values stay unknown for every command, including `truncate` and redirections,
-not only copy commands. `cp` can still read an unknown source after `--` when its destination is
-safe. `dd` writes the path inside its `of=` word, wherever that
+not only copy commands. `dd` writes the path inside its `of=` word, wherever that
 word stands. `ln` writes its last
 operand, or the working directory when given one readable operand, and a hard link (no `-s`)
 also makes its source writable under the new name, which no later command can resolve as it can

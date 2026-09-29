@@ -274,7 +274,8 @@ both daemons set on every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to cl
 
 A verb that writes a path it names is judged on the operand its own grammar makes the destination,
 which is the whole of what LEGION-357 fixed: `cp` and `install` on their last operand, or on the
-directory `-t` names, where every other operand is a source they read; `dd` on the path inside its
+directory `-t` names, where every other operand is a source they read — except `install -d`,
+which creates directories, so there every operand is judged; `dd` on the path inside its
 `of=` word, wherever that word stands; `ln` on its last operand, or on the working directory when
 it is given one readable operand, plus its source when it makes a hard link, which is a second name for a
 file outside the roots that no later command can resolve; `sed` on the files it names only with
