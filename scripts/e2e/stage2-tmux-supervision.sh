@@ -48,6 +48,8 @@ check=setup
 timeout_hook=
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
+. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # ---- reporting and waiting ------------------------------------------------------------------------
 
@@ -253,6 +255,7 @@ port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the 
 deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed
 # working copy held (a negative control's), and its hash (lib/built-from.sh).
