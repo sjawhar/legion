@@ -793,5 +793,151 @@ run_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"
 check "a run step that does not build is not flagged" "$(contains "$out" 'this check covered 0 image builds')"
 
+echo "case: the net is broad, and a step that builds nothing declares it"
+# extra_step <root> <run body> [env marker yes/no]: appends a run step to the building job,
+# keeping the readable build so the zero-build guard cannot answer for the net.
+extra_step() {
+  local root=$1 body=$2 marker=${3:-no}
+  python3 - "$root/.github/workflows/image.yaml" "$body" "$marker" <<'PYEOF'
+import sys
+path, body, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+env = "        env:\n          IMAGE_TRIGGER_CHECK: not-an-image-build\n" if marker == "yes" else ""
+text = open(path).read()
+open(path, "w").write(text + f"      - name: Extra\n{env}        run: |\n          {body}\n")
+PYEOF
+}
+
+# The four false positives: the broad net catches the word, and the marker is how a step says
+# it builds no image. Refused without it, green with it.
+while IFS='|' read -r label body; do
+  [ -n "$label" ] || continue
+  root=$(fixture "net-marker-$label")
+  extra_step "$root" "$body"
+  run_check "$root"
+  check "$label is refused without the marker" "$(is "$status" 1)"
+  check "  and offers both remedies" "$(contains "$out" 'declare it with the step env IMAGE_TRIGGER_CHECK: not-an-image-build')"
+  root=$(fixture "net-marked-$label")
+  extra_step "$root" "$body" yes
+  run_check "$root"
+  check "$label passes once it is declared" "$(is "$status" 0)"
+done <<'GREEN'
+go-build|docker run --rm golang go build ./...
+compose-run-npm|docker compose run app npm run build
+exec-make|docker exec app make build
+run-echo|docker run alpine echo a b
+GREEN
+
+# The marker excuses a build WORD, never a build.
+root=$(fixture net-marker-cannot-hide-a-build)
+extra_step "$root" 'docker build -f docker/Dockerfile .' yes
+run_check "$root"
+check "a real docker build carrying the marker is still refused" "$(is "$status" 1)"
+
+while IFS='|' read -r label body; do
+  [ -n "$label" ] || continue
+  root=$(fixture "net-red-$label")
+  run_step "$root" "$body"
+  run_check "$root"
+  check "$label is refused" "$(is "$status" 1)"
+  check "  and says how to make it readable" "$(contains "$out" 'build images with docker/build-push-action so this check can read the build')"
+done <<'RED'
+buildctl|buildctl build --frontend dockerfile.v0
+ko|ko build ./cmd/listener
+pack|pack build app --path .
+skaffold|skaffold build --file-output out.json
+earthly|earthly +docker
+crane|crane append -f layer.tar -t app:ci
+jib|mvn compile jib:dockerBuild
+dollar-docker|"$DOCKER" build -f docker/Dockerfile .
+podman-compose-up|podman compose up --build -d
+RED
+
+echo "case: a result comparison is compared case-insensitively, as GitHub does"
+root=$(fixture gate-result-capital-success)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    if: always() && needs.gatekeeper.result == 'Success' && needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "result == 'Success' is read like 'success'" "$(is "$status" 1)"
+
+root=$(fixture gate-result-capital-skipped)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    if: always() && needs.gatekeeper.result != 'FAILURE' && needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "result != 'FAILURE' still admits skipped" "$(is "$status" 0)"
+
+echo "case: a local action is read, not trusted"
+# local_action <root> <action.yml body>: replaces the build step with a ./ action that has it.
+local_action() {
+  local root=$1 body=$2
+  mkdir -p "$root/.github/actions/local"
+  printf '%s\n' "$body" > "$root/.github/actions/local/action.yml"
+  python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+head, _, _ = text.partition("      - uses: docker/build-push-action@v6")
+open(path, "w").write(f"{head}      - name: Local\n        uses: ./.github/actions/local\n")
+PYEOF
+}
+
+root=$(fixture local-action-run-build)
+local_action "$root" "name: Local
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: docker build -f docker/Dockerfile ."
+run_check "$root"
+check "a composite whose run step builds is refused" "$(is "$status" 1)"
+check "  and names the action file" "$(contains "$out" '.github/actions/local/action.yml')"
+
+root=$(fixture local-action-build-push)
+local_action "$root" "name: Local
+runs:
+  using: composite
+  steps:
+    - uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: docker/Dockerfile"
+run_check "$root"
+check "a build-push-action inside a composite is READ as the build" "$(is "$status" 0)"
+check "  and counts as one" "$(contains "$out" '(1 image build(s))')"
+
+root=$(fixture local-action-container)
+local_action "$root" "name: Local
+runs:
+  using: docker
+  image: Dockerfile"
+run_check "$root"
+check "a container action is refused" "$(is "$status" 1)"
+check "  and says why" "$(contains "$out" 'using: docker')"
+
+root=$(fixture local-action-javascript)
+local_action "$root" "name: Local
+runs:
+  using: node20
+  main: index.js"
+run_check "$root"
+check "a JavaScript action is admitted, so zero builds is what fails" "$(contains "$out" 'this check covered 0 image builds')"
+
+echo "case: a job that calls a workflow outside this repository is refused"
+root=$(fixture job-uses-foreign)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text + "  called:\n    uses: acme/ci/.github/workflows/image.yml@v1\n")
+PYEOF
+run_check "$root"
+check "a foreign workflow_call is refused" "$(is "$status" 1)"
+check "  and names it" "$(contains "$out" 'acme/ci/.github/workflows/image.yml@v1')"
+
 
 summary "check-image-trigger-paths.sh"
