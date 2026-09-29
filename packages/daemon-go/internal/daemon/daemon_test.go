@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -30,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -964,6 +966,27 @@ func TestRunRefusesMissingRolePromptBundleAtBoot(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("boot refusal = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestPrepareReadsRoleReferencesFromThePromptSnapshot(t *testing.T) {
+	t.Setenv("LEGION_TEST_PG_DSN", "postgres://legion:legion@127.0.0.1:1/legion")
+	cfg := testConfig(t)
+	snapshotDir := filepath.Join(cfg.StateDir, "prompts", "shared")
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.roleReferences = func(dir string) (promptrefs.Names, error) {
+		if dir != snapshotDir {
+			return promptrefs.Names{}, fmt.Errorf("role references directory = %s, want prompt snapshot %s", dir, snapshotDir)
+		}
+		return promptrefs.Roles(dir)
+	}
+
+	p, err := prepare(cfg, quietLogger(), o)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if p.roleReferences.Zero() {
+		t.Fatal("prepare collected no role prompt references")
 	}
 }
 

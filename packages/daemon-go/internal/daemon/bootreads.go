@@ -22,7 +22,6 @@ type bootReads struct {
 	paneNatsUser                                    string         // the pane seed's user's public key, "" with no pane seed
 	nats                                            natsConnection // the user the daemon's own NATS connection authenticates as
 	instructions                                    []byte         // nil when the configuration names none
-	roleReferences                                  promptrefs.Names
 	tmux                                            tmuxReads    // runtime: tmux
 	sandbox                                         sandboxReads // runtime: kubernetes
 }
@@ -81,9 +80,6 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 	}
 	if r.rolesDir, err = prompts.ResolveRolePromptsDir(os.LookupEnv); err != nil {
 		return bootReads{}, fmt.Errorf("resolve role prompts: %w", err)
-	}
-	if r.roleReferences, err = promptrefs.Roles(r.rolesDir); err != nil {
-		return bootReads{}, err
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":
@@ -174,6 +170,9 @@ func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func
 func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (paneNatsUser, daemonNatsUser string, err error) {
 	r, err := readBoot(cfg, lookup, os.Getenv, true, slog.New(slog.DiscardHandler))
 	if err != nil {
+		return "", "", err
+	}
+	if _, err := promptrefs.Roles(r.rolesDir); err != nil {
 		return "", "", err
 	}
 	if r.nats.source == natsSeedDaemon {

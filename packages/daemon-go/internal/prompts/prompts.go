@@ -153,6 +153,14 @@ func syncPrompt(path string, body []byte, kind string) error {
 	return nil
 }
 
+// SharedRolePromptsDir is the state-local shared bundle that panes and boot probes both consume.
+func (c *Composer) SharedRolePromptsDir() (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("shared role prompts: nil composer")
+	}
+	return c.sharedDir, nil
+}
+
 // ControllerPromptPath is the state-local controller prompt the launcher can pass to Oh My Pi.
 func (c *Composer) ControllerPromptPath() (string, error) {
 	if c == nil {

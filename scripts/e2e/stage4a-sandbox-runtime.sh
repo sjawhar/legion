@@ -89,6 +89,8 @@ fail() {
 }
 # shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
 . "$root/scripts/e2e/lib/namespace-rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
+. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 cleanup() {
   local status=$?
@@ -171,7 +173,7 @@ pass
 
 begin build
 go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
-cp -a "$root/packages/pi-envoy/roles" "$work/role-prompts"
+stage_role_prompts "$root" "$work"
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout, with role-prompts beside the harness"
 
