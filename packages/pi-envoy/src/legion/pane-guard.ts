@@ -1291,16 +1291,19 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
       ? name.slice(0, -suffix.length)
       : name;
   }
-  if (
-    base === "readlink" &&
-    !found.options.some(
-      (option) =>
-        /^-[a-zA-Z]*[fem]/.test(option) ||
-        option === "--canonicalize" ||
-        option.startsWith("--canonicalize-")
-    )
-  )
-    return undefined;
+  if (base === "readlink") {
+    // GNU takes the last of `-f`/`-e`/`-m`. `-e`/`--canonicalize-existing` prints NOTHING and
+    // exits nonzero when any component, including the last, does not exist — unlike `-f`/`-m`,
+    // which always print a path. Modelling a path for `-e` regardless would let
+    // `rm -rf "$(readlink -e nope)$HOME/keep"` read as an in-workspace path while bash, having
+    // printed nothing, actually targets the literal suffix `$HOME/keep`.
+    const mode = lastModeFlag(found.options, "fem", {
+      "--canonicalize": "f",
+      "--canonicalize-existing": "e",
+      "--canonicalize-missing": "m",
+    });
+    if (mode !== "f" && mode !== "m") return undefined;
+  }
   if (base === "realpath") {
     // `--relative-to`/`--relative-base` print a path relative to another directory, which this
     // function does not compute — checked first, since it overrides any `-s`/`-L`/`-P` reading.
@@ -1317,14 +1320,13 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
     // parent of what it found. Both take a relative operand against `getcwd()`, the PHYSICAL
     // directory, where `st.cwd` is bash's LOGICAL PWD, which a `cd` into a symlink leaves
     // pointed at the link's text rather than its target.
+    // `-s` and `-L` are NOT interchangeable: `-s` never follows a symlink, `-L` still follows
+    // the final component's own — `realpath.s.L.final` pins this, and fails if the two
+    // branches below are swapped.
     if (mode === "s" || mode === "L") {
       const here = kernelPath("/", st.cwd);
       if (here === undefined) return undefined;
       const lexical = path.resolve(here, target);
-      // `-s` prints `lexical` unresolved; `-L` walks it physically here. They differ only in
-      // whether a trailing symlink in the printed value is itself expanded, and every site that
-      // consumes this value (`judgePath`, `kernelPath`) re-resolves it physically anyway, so
-      // swapping the two branches has no row that can tell them apart.
       return mode === "s" ? lexical : kernelPath("/", lexical);
     }
   }

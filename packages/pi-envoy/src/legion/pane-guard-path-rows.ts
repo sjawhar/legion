@@ -81,8 +81,9 @@ export function buildPathFixture(base: string): PathFixture {
   symlinkSync(path.join(home, ".ssh"), path.join(ws, "e"));
   symlinkSync(home, path.join(ws, "hs"));
   symlinkSync(path.join(ws, "sub"), path.join(ws, "in"));
-  // `lnk` points at a nested subdirectory two levels below the workspace, so `lnk/..` is a
-  // sibling of the workspace root a lexical reading of `lnk/../unread.sh` would miss.
+  // `lnk` points at a nested subdirectory two levels below the workspace, so `lnk/..` is
+  // `ws/a` — still inside the workspace, but a different directory than `lnk` sits under,
+  // which a lexical reading of `lnk/../unread.sh` would miss.
   symlinkSync(path.join(ws, "a", "b"), path.join(ws, "lnk"));
   // A link in the operator's home pointing back into the workspace: `cd`'s logical and physical
   // modes land in different places through it, which is what `-L`/`-P` precedence decides.
@@ -921,6 +922,42 @@ export const PATH_ROWS: readonly PathRow[] = [
     dotdot: false,
   },
   {
+    name: "realpath.s.trailing.symlink",
+    family: "substitution",
+    role: "must-allow",
+    // The mirror of the probe above: with only `-s` given, swapping the `-s`/`-L` branches
+    // would follow `e`'s own symlink physically instead of printing it unresolved.
+    command: 'rm -f "$(realpath -s e)"',
+    dotdot: false,
+  },
+  {
+    name: "readlink.e.suffix.appended",
+    family: "substitution",
+    role: "probe",
+    // `-e`/`--canonicalize-existing` prints NOTHING and exits nonzero when any component,
+    // including the last, does not exist. Modelling a path for it regardless lets an appended
+    // suffix read as an in-workspace path while bash, having printed nothing, targets the
+    // suffix alone.
+    command: 'rm -rf "$(readlink -e nope)$HOME/keep"',
+    dotdot: false,
+  },
+  {
+    name: "readlink.e.f.wins",
+    family: "substitution",
+    role: "must-allow",
+    // Bash takes the LAST of `-f`/`-e`/`-m`: with `-f` last, the mode is `f`, which always
+    // prints a path, so this is not the `-e` case above.
+    command: 'rm -rf "$(readlink -e -f sub/gone)"',
+    dotdot: false,
+  },
+  {
+    name: "readlink.m.missing.component",
+    family: "substitution",
+    role: "must-allow",
+    command: 'rm -rf "$(readlink -m sub/gone)"',
+    dotdot: false,
+  },
+  {
     name: "realpath.physical.strip.control",
     family: "substitution",
     role: "must-allow",
@@ -1152,9 +1189,9 @@ bash unread.sh`,
     name: "retarget.group.key",
     family: "retarget",
     role: "probe",
-    // `lnk` is a pre-existing symlink into `a/b`, so `lnk/..` is `a`, a sibling of the
-    // workspace root: the write really lands on `a/unread.sh`, a file nothing else reads. A
-    // lexical key collapses `lnk/..` away and plants the benign content on the TOP-LEVEL
+    // `lnk` is a pre-existing symlink into `a/b`, so `lnk/..` is `ws/a` — inside the workspace,
+    // but not `ws` itself: the write really lands on `a/unread.sh`, a file nothing else reads.
+    // A lexical key collapses `lnk/..` away and plants the benign content on the TOP-LEVEL
     // `unread.sh` instead — the file `bash unread.sh` actually runs, still holding its
     // original disk payload in reality.
     command: `{ echo 'echo hi'; } > lnk/../unread.sh; bash unread.sh`,
