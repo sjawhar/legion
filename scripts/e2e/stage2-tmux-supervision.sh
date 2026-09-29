@@ -253,6 +253,7 @@ port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the 
 deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+cp -a "$root/packages/pi-envoy/roles" "$work/role-prompts"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed
 # working copy held (a negative control's), and its hash (lib/built-from.sh).

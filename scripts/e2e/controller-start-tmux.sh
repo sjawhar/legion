@@ -107,6 +107,7 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 pick_port daemon_port
 pick_port envoy_port
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+cp -a "$root/packages/pi-envoy/roles" "$work/role-prompts"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port; listener port $envoy_port"
 

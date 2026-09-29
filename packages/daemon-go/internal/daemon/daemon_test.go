@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -71,6 +72,7 @@ func shortTempDir(t *testing.T) string {
 // Every limit and timeout is the shipped default.
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
+	t.Setenv("LEGION_ROLE_PROMPTS_DIR", daemonTestRolePromptsDir(t))
 	stateDir := shortTempDir(t)
 	tokenFile := filepath.Join(t.TempDir(), "operator-token")
 	if err := os.WriteFile(tokenFile, []byte(testOperatorToken+"\n"), 0o600); err != nil {
@@ -106,6 +108,15 @@ func testConfig(t *testing.T) config.Config {
 		OperatorTokenFile:                       tokenFile,
 		EnvoyURL:                                "http://127.0.0.1:9020",
 	}
+}
+
+func daemonTestRolePromptsDir(t *testing.T) string {
+	t.Helper()
+	_, source, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("locate daemon test source")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(source), "../../../pi-envoy/roles"))
 }
 
 func randomSuffix(t *testing.T) string {

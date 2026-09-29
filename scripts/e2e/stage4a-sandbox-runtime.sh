@@ -171,8 +171,9 @@ pass
 
 begin build
 go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
+cp -a "$root/packages/pi-envoy/roles" "$work/role-prompts"
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
-note "built the e2e harness and agent-secrets from the checkout"
+note "built the e2e harness and agent-secrets from the checkout, with role-prompts beside the harness"
 
 harness_ok=
 if env \
