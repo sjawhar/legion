@@ -880,12 +880,9 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 		case *extensionast.TaskCheckBox:
 			continue
 		case *ast.Image:
-			// The browser editor's reader keeps a link on an image, and a document here holds
-			// marks on text alone: read without it, the image would silently stop being a link,
-			// so a linked image is refused.
-			if containsMark(active, "link") {
-				return nil, nil, fmt.Errorf("%w: an image inside a link, which would be stored without its link", ErrSchema)
-			}
+			// An image is read without the marks around it, a link among them: the browser
+			// editor's store (y-prosemirror) keeps a mark on text alone, so the editor stores a
+			// linked image without its link as well (LEGION-365).
 			image, err := parseImage(current, source, footnotes)
 			if err != nil {
 				return nil, nil, err
