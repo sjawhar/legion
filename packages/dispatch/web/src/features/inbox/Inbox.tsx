@@ -45,6 +45,7 @@ import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
+import { outsideAskCard } from "./ask-card";
 import { type AskOrdinal, askIssueKey, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
@@ -79,8 +80,6 @@ const ROW_ATTRIBUTE = "data-inbox-row";
 const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
-/** An ask card: the question, its options and its answer controls, which own their own keys. */
-const ASK_CARD = "[data-ask-card]";
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
@@ -507,10 +506,6 @@ export function Inbox(): ReactNode {
   // The bar is reached through its own ref: the empty state a pick can leave behind renders it
   // outside the list.
   const bulkPicker = () => bulkBarRef.current?.querySelector<HTMLElement>(BULK_PICKER_SELECTOR);
-  // Whether the reader is outside an ask card: its options are radios and checkboxes, which take
-  // no typed text, so the registry passes single keys through to this scope - and the card's own
-  // keys are the card's. `IssuePage` withholds its two writing keys on the same question.
-  const outsideAskCard = () => document.activeElement?.closest(ASK_CARD) == null;
   // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
   // has no row to fall back through - is one level out rather than a dead end.
   const pickerOrigin = useRef<string | null>(null);

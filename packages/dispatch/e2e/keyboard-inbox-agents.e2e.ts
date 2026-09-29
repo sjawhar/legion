@@ -978,6 +978,73 @@ test.describe("agents page", () => {
     }
   });
 
+  // A pick is what `i` opened the picker for, so committing one hands the reader back to the
+  // message it belongs to rather than dropping them on the document as the select unmounts.
+  test("choosing an issue closes the picker and leaves focus in the composer", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      await expect(row.getByRole("combobox", { name: "Issue" })).toBeFocused();
+
+      // An arrow on a focused native select is the pick itself.
+      await page.keyboard.press("ArrowDown");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle).toContainText("CORE-1");
+      await expect(row.getByRole("textbox", { name: "Comment" })).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The select renders only once the issue list lands, so the whole latency of that read is a
+  // window in which the reader is somewhere else. Focus is the picker's to take only if they
+  // are still where the open left them.
+  test("a slow issue list never pulls the reader off the row they moved to", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/v1/issues?*", async (route) => {
+        await held;
+        return route.fallback();
+      });
+      await openAgents(page);
+      const rows = page.locator("[data-agent-row]");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await page.keyboard.press("j");
+      await expect(rows.nth(1)).toBeFocused();
+
+      release?.();
+      await expect(rows.nth(0).getByRole("combobox", { name: "Issue" })).toBeVisible();
+      await expect(rows.nth(1)).toBeFocused();
+
+      // And the reader's next key is still a rove, not a write on the row they left.
+      await page.keyboard.press("k");
+      await expect(rows.nth(0)).toBeFocused();
+      await expect(rows.nth(0).getByRole("button", { name: "Choose issue" })).toContainText(
+        "No issue"
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
   // The composer calls `onClose` after a successful send as well as on the way out, and only the
   // way out is "one level up". Focus on the row after a send would turn the next letters typed
   // into agent shortcuts.

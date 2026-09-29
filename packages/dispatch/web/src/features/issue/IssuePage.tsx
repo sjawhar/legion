@@ -17,6 +17,7 @@ import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
+import { outsideAskCard } from "../inbox/ask-card";
 import {
   buildReferencePath,
   documentRoute,
@@ -98,9 +99,6 @@ const PIN_TOGGLE = 'button[aria-label="Pin issue"], button[aria-label="Unpin iss
 const PRIORITY_SELECT = 'select[aria-label^="Priority of "]';
 const STATUS_SELECT = 'select[aria-label="Status"]';
 const TITLE_HEADING = 'h1[tabindex="0"]';
-/** An ask card anywhere on the page: its own controls, including its buttons, belong to the ask.
- */
-const ASK_CARD = "[data-ask-card]";
 
 /** The header control `selector` names, or `null` when it is absent or refuses input (a closed
  *  issue, a save in flight): the one fact both the key's `run` and the `when` that offers it read,
@@ -128,12 +126,12 @@ function usableControl(selector: string): HTMLElement | null {
  * disclosure, Copy - focus sits on the button that was clicked, which is where a reader reaching
  * for the next shortcut stands. Withholding these keys there would make them work only from the
  * page's own background. An ask card's buttons are the exception, and that is what `ASK_CARD`
- * covers: inside the card, the card's controls own the keys. `l` and `e` open a control rather
+ * covers (`inbox/ask-card.ts`, the one definition both pages read): inside the card, the
+ * card's controls own the keys. `l` and `e` open a control rather
  * than write, so a stray press is visible and undoable and they are offered throughout.
  */
 function outsideInputsAndAskCards(): boolean {
-  const active = document.activeElement;
-  return !(active instanceof HTMLInputElement) && active?.closest(ASK_CARD) == null;
+  return !(document.activeElement instanceof HTMLInputElement) && outsideAskCard();
 }
 
 /** The tabs the chords reach, each through the tablist button `IssueTabs` renders for it. */

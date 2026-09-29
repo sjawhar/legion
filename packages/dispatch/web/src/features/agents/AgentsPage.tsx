@@ -554,6 +554,15 @@ function AgentMessageComposer({
     watcher.observe(field, { attributeFilter: ["disabled"] });
     refocusWatcher.current = watcher;
   };
+  /** The message this composer is for. A control that ends in the message hands over to it - the
+   *  issue pick, which unmounts the very select the reader is standing on. */
+  const focusComposerField = () => box.current?.querySelector("textarea")?.focus();
+  const pickedIssue = useRef(false);
+  useEffect(() => {
+    if (!pickedIssue.current) return;
+    pickedIssue.current = false;
+    focusComposerField();
+  });
   const issues = useQuery({
     enabled: issuePickerOpen,
     queryFn: () => api.listIssues({ open: true }),
@@ -563,7 +572,12 @@ function AgentMessageComposer({
   // move `MultiSelect` makes with its search box. It is what `i` needs (a key that opened
   // something no keystroke could then reach would be a dead end) and what a pointer wants too,
   // and it waits for the list rather than a frame, since the select renders only once the read
-  // lands. Once per open: a refetch behind the reader must not pull focus back.
+  // lands.
+  //
+  // That wait is the whole latency of `GET /issues`, and a reader who has roved on in the
+  // meantime keeps where they went - `takeBack`'s rule above, widened to the row this composer
+  // belongs to: focus is the picker's to take only while it is still where the open left it.
+  // Once per open, so a refetch behind the reader never pulls them back either.
   const issueSelect = useRef<HTMLSelectElement>(null);
   const pickerTookFocus = useRef(false);
   useEffect(() => {
@@ -575,6 +589,12 @@ function AgentMessageComposer({
     if (issues.data === undefined || pickerTookFocus.current || issueSelect.current === null) {
       return;
     }
+    const active = document.activeElement;
+    const stillHere =
+      active === null ||
+      active === document.body ||
+      box.current?.closest("[data-agent-row]")?.contains(active) === true;
+    if (!stillHere) return;
     pickerTookFocus.current = true;
     issueSelect.current.focus();
   }, [issuePickerOpen, issues.data]);
@@ -614,13 +634,17 @@ function AgentMessageComposer({
               Issue (optional)
               <select
                 aria-label="Issue"
-                data-agent-issue-select=""
-                ref={issueSelect}
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
                 onChange={(event) => {
+                  // The pick unmounts this control - and remounts the composer under it, since
+                  // the message's owner is part of its key - and `i` opened the picker to
+                  // address a message, so the reader goes on to the message rather than to the
+                  // document. The field to focus is the one that render produces, not this one.
+                  pickedIssue.current = true;
                   setIssueKey(event.target.value);
                   setIssuePickerOpen(false);
                 }}
+                ref={issueSelect}
                 value={issueKey}
               >
                 <option value="">No issue</option>
