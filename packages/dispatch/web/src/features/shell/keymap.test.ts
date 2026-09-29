@@ -269,6 +269,24 @@ test("actions() lists each scope below the innermost dialog once, innermost scop
   ]);
 });
 
+test("actions() orders a scope's rows by label, never by when its component registered them", () => {
+  const { keymap } = harness();
+  // Registration order is mount timing: the same page reached by a navigation and by a reload
+  // registers its scopes in a different order, and the highlighted first row must not follow it.
+  keymap.register("issue", [binding("set-p1", [], { label: "Set priority P1" }).definition]);
+  keymap.register("global", [binding("go-inbox", "g i", { label: "Go to Inbox" }).definition]);
+  keymap.register("issue", [binding("close", [], { label: "Close issue" }).definition]);
+  keymap.register("global", [binding("create", "c", { label: "Create issue" }).definition]);
+  keymap.pushScope("issue");
+
+  expect(keymap.actions().map((action) => action.label)).toEqual([
+    "Close issue",
+    "Set priority P1",
+    "Create issue",
+    "Go to Inbox",
+  ]);
+});
+
 test("actions() omits palette:false, multi-key, inEditable and unavailable bindings", () => {
   const { keymap } = harness();
   const next = binding("next", "j", { palette: false });
@@ -307,7 +325,7 @@ test("running an action fires its binding once with a keydown carrying its first
   const { keymap } = harness();
   const fired: string[] = [];
   keymap.register("global", [
-    { id: "snooze", keys: "s", label: "Snooze", run: (event) => fired.push(event.key) },
+    { id: "snooze", keys: "s", label: "Snooze", run: (event) => fired.push(`snooze:${event.key}`) },
     {
       id: "close",
       keys: [],
@@ -320,5 +338,7 @@ test("running an action fires its binding once with a keydown carrying its first
     action.run();
   }
 
-  expect(fired).toEqual(["s", "close:"]);
+  // Sorted, so the assertion is about which key each binding received and that each ran once,
+  // not about the row order `actions()` chose (pinned by its own test above).
+  expect([...fired].sort()).toEqual(["close:", "snooze:s"]);
 });

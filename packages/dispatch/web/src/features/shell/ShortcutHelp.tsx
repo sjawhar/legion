@@ -54,8 +54,8 @@ const SCOPE_ORDER: readonly KeymapScope[] = [
   "project",
   "architecture",
   "board",
-  "inbox",
   "issue",
+  "inbox",
   "dialog",
 ];
 

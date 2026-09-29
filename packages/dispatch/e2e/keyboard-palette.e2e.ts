@@ -85,7 +85,9 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     await expect(actions.getByRole("option", { name: "Close issue" })).toHaveCount(0);
     await expect(actions.getByRole("option", { name: "Set priority P2" })).toHaveCount(0);
 
-    await input.press("Enter");
+    // Named, not positional: which row is highlighted first is `actions()`'s decision, and this
+    // step is about Reopen running, not about where Reopen sits.
+    await actions.getByRole("option", { name: "Reopen issue" }).click();
     await expect(dialog).toHaveCount(0);
     await expect.poll(() => getIssue(issue.key).then((read) => read.status)).toBe("backlog");
 
@@ -252,7 +254,7 @@ test("the rail's Search control shows the same actions as the keyboard palette",
   }
 });
 
-test("the Inbox offers its ask actions and not its movement keys", async ({
+test("a focus-dependent row is offered, survives filtering, and runs on the row that opened the palette", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -287,6 +289,49 @@ test("the Inbox offers its ask actions and not its movement keys", async ({
     ).toHaveCount(1);
     await expect(actions.getByRole("option", { name: "Next ask" })).toHaveCount(0);
     await expect(actions.getByRole("option", { name: "Previous ask" })).toHaveCount(0);
+
+    // Filtering re-renders the palette; the list is the one the opener's focus produced, so a
+    // row a reader can see must still be there once they have typed enough to reach it.
+    const input = page.getByRole("combobox", { name: "Search" });
+    await input.fill("open the ask");
+    const open = actions.getByRole("option", { name: "Open the ask's issue or document" });
+    await expect(open).toHaveCount(1);
+
+    // And it runs against that row, not against the palette input that has focus while it is
+    // shown: `o` on the row goes to the ask, so the palette row must go to the same place.
+    await input.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/asks/`));
+  } finally {
+    await context.close();
+  }
+});
+
+test("a board card's row runs on the card that opened the palette", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Board palette" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await page.goto("/projects/CORE/issues");
+    await page.getByRole("button", { name: "Board" }).click();
+    const card = page.getByRole("article", { name: `${issue.key} Board palette` });
+    await expect(card).toBeVisible();
+    await page.locator("body").focus();
+    await page.keyboard.press("j");
+    await expect(card).toBeFocused();
+
+    await page.keyboard.press("Control+k");
+    const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
+      name: "Actions",
+    });
+    await expect(actions.getByRole("option", { name: "Next card" })).toHaveCount(0);
+    await actions.getByRole("option", { name: "Open issue" }).click();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}`));
   } finally {
     await context.close();
   }

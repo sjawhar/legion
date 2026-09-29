@@ -405,7 +405,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       id: "search",
       inEditable: true,
       keys: "$mod+k",
-      label: "Search",
+      label: "Search and actions",
       palette: false,
       run: () => setPaletteMode((open) => (open === null ? "all" : null)),
     },

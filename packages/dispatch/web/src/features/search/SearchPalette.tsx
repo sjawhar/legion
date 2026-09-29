@@ -265,6 +265,24 @@ export function SearchPalette({
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
+  // The rows this open offers, decided on the render that opened it — while focus is still on
+  // whatever opened the palette, since `useDialog` moves it into the input a frame later. Read
+  // any later and a `when()` that asks what is focused would answer "the palette", withdrawing
+  // every row bound to the card, row or control the reader was actually on.
+  const [opened, setOpened] = useState<{
+    actions: readonly KeymapAction[];
+    mode: PaletteMode | null;
+  }>({
+    actions: emptyActions,
+    mode: null,
+  });
+  if (opened.mode !== mode) {
+    setOpened({ actions: mode === "all" ? appKeymap.actions() : emptyActions, mode });
+  }
+  // A chosen row runs once the palette is gone and `useDialog`'s cleanup has put focus back on
+  // that same element: running it here, with focus in the input, would act on nothing, and a row
+  // that moves focus would have its move undone by that cleanup a moment later.
+  const pendingAction = useRef<(() => void) | null>(null);
   const dialog = useDialog<HTMLDivElement>({ initialFocusRef: inputRef, onClose, open });
   // The global `$mod+k` toggle is masked while any dialog is open; the palette keeps the key as
   // its own close so pressing it twice still opens and closes.
@@ -286,6 +304,17 @@ export function SearchPalette({
   const needle = searchText.toLowerCase();
   const searching = mode !== "projects";
   const queryEnabled = searching && searchText.length >= 2;
+
+  // Declared after `useDialog`, so on the commit that closes the palette React runs that hook's
+  // cleanup — the focus restore — before this effect.
+  useEffect(() => {
+    if (mode !== null) {
+      return;
+    }
+    const run = pendingAction.current;
+    pendingAction.current = null;
+    run?.();
+  }, [mode]);
 
   // Each open starts empty. The palette stays mounted while closed, so a query left behind would
   // come back on the next open and filter the new page's actions down to nothing.
@@ -310,10 +339,7 @@ export function SearchPalette({
   const results = search.data?.results ?? emptyResults;
   const groups = groupResults(results);
   const visibleResults = groups.flatMap(({ results }) => results);
-  // Read live rather than snapshotted, so the rail's Search control and `$mod+k` agree and a
-  // `when()` that changed while the palette was open is honoured.
-  const actions = mode === "all" ? appKeymap.actions() : emptyActions;
-  const actionRows: ActionRow[] = actions
+  const actionRows: ActionRow[] = opened.actions
     .filter((action) => needle === "" || action.label.toLowerCase().includes(needle))
     .map((action) => ({
       action,
@@ -356,7 +382,7 @@ export function SearchPalette({
   const activeRow = rows[activeIndex];
   const selectRow = (row: PaletteRow) => {
     if (row.kind === "action") {
-      row.action.run();
+      pendingAction.current = row.action.run;
     } else {
       navigate(row.kind === "project" ? `/projects/${row.project.key}` : row.result.href);
     }

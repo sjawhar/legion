@@ -317,6 +317,7 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
           continue;
         }
         seen.add(scope);
+        const inScope: KeymapAction[] = [];
         for (const registration of registrations) {
           const { binding } = registration;
           const keys = keysOf(binding);
@@ -329,7 +330,7 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
           ) {
             continue;
           }
-          offered.push({
+          inScope.push({
             id: binding.id,
             keys,
             label: binding.label,
@@ -337,6 +338,11 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
             scope,
           });
         }
+        // Registration order is mount timing — the same page reached by a navigation and by a
+        // reload registers its scopes in a different order — so which row the palette highlights
+        // first would follow the load path. Within a scope the rows read alphabetically instead.
+        inScope.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+        offered.push(...inScope);
       }
       return offered;
     },
