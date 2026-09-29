@@ -51,7 +51,7 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
   // `sed "${args[@]}"` over an array appended in a loop over unknown hosts: quoted, but its
   // element count is unknown, so any element may be the `-i` that makes sed write (LEGION-357).
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:377",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:385",
   // Creates and sets the mode of a directory outside the roots (`install -d /etc/apt/keyrings`):
   // a script that provisions a host, never one a pane runs (LEGION-357).
   "packages/envoy/deploy/scripts/install-docker-debian.sh":
@@ -1097,6 +1097,19 @@ describe("scripts a command runs", () => {
       expect(bash(command), command).toContain(path.join(home, ".ssh"));
     }
     expect(bash(`S="a b"; Y=($S "$HOME/.ssh"); rm -rf "\${Y[2]}"`)).toContain("rm would delete");
+  });
+
+  test("an array this command never assigned may hold any number of arguments", () => {
+    // The pane's shell persists between tool calls, so a name this command never assigned may be an
+    // array an earlier call filled, and `[@]` over it gives an unknown number of arguments — any of
+    // which may be the `-i` that makes sed write, or the file it writes. The write battery cannot
+    // express this: each row and each plant runs in a fresh bash, which has no earlier call.
+    expect(bash(`sed -i "\${args[@]}"`)).toBeDefined();
+    expect(bash(`sed -n "\${args[@]}"`)).toBeDefined();
+    // Quoted, `[*]` joins every element into one argument, so it is one operand however many
+    // elements that shell holds; and after `--` the words can only be files.
+    expect(bash(`sed -n "\${args[*]}" notes.txt`)).toBeUndefined();
+    expect(bash(`sed -n 1p -- "\${args[@]}"`)).toBeUndefined();
   });
 
   test("tests a positional parameter's operator expansion against the argument it holds", () => {

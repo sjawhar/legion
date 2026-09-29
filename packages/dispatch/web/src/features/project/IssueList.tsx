@@ -12,6 +12,7 @@ import {
   borderDefault,
   cardHoverBorder,
   dangerText,
+  focusVisibleRing,
   linkHoverText,
   linkText,
   textMutedOnCanvas,
@@ -23,15 +24,25 @@ import { UnreachableRouteMarker } from "../issue/RouteReach";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeymap } from "../shell/keymap";
+import { closestMatching, reachableRows, roveFocus } from "../shell/roving";
 import { issueStatuses, statusLabel } from "./board-model";
 import { useIssueFilters } from "./issue-filters";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
+/** What each row is marked with, for the keys that rove them. */
+const ROW_SELECTOR = "[data-issue-row]";
+
+/** A row is a keyboard target for the `j`/`k`/`o`/`Enter` this file registers: `tabIndex={-1}` so those
+ *  keys reach it and Tab does not, and `data-issue-row` names it for them, as the board's cards
+ *  do. The focus ring is the row's own, since the row is what focus lands on. */
 function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
   return (
     <li
       aria-label={`${issue.key} ${issue.title}`}
-      className={`border-t py-3 first:border-t-0 ${borderDefault}`}
+      className={`border-t py-3 outline-none first:border-t-0 focus-visible:ring-2 ${borderDefault} ${focusVisibleRing}`}
+      data-issue-row={issue.key}
+      tabIndex={-1}
     >
       {/* One grid, two arrangements. From `sm` the reference and the timestamp share the first
           line and the metadata runs below. On a phone the reference takes the whole first line
@@ -102,6 +113,47 @@ export function IssueList({ project }: { project: string }): ReactNode {
       ),
     [issues.data, matches, state.data, statuses]
   );
+
+  // The keys that rove these rows register with the page's `project` scope, and they live
+  // here because this component mounts only while the List is the view showing: on the Board,
+  // whose own `j`/`k`/`o`/`Enter` act on its cards, `?` would otherwise list each key twice.
+  // `roveFocus` and these `when`s read one rule for which rows count, so a key is offered
+  // exactly while it moves: the rows of a collapsed status band are in the DOM, take no focus,
+  // and are no step.
+  const rows = () => [...document.querySelectorAll<HTMLElement>(ROW_SELECTOR)];
+  const focusedRow = () => closestMatching(document.activeElement, ROW_SELECTOR);
+  const openFocusedRow = () => focusedRow()?.querySelector("a")?.click();
+  useKeymap("project", [
+    {
+      id: "list-next",
+      keys: "j",
+      label: "Next issue",
+      run: () => roveFocus(rows(), focusedRow(), 1),
+      when: () => reachableRows(rows()).length > 0,
+    },
+    {
+      id: "list-previous",
+      keys: "k",
+      label: "Previous issue",
+      run: () => roveFocus(rows(), focusedRow(), -1),
+      when: () => reachableRows(rows()).length > 0,
+    },
+    {
+      id: "list-open",
+      keys: "o",
+      label: "Open issue",
+      run: openFocusedRow,
+      when: () => focusedRow() !== null,
+    },
+    {
+      // Only from the row itself: Enter on its title link is the browser's own navigation.
+      id: "list-open-enter",
+      keys: "Enter",
+      label: "Open the focused issue",
+      run: openFocusedRow,
+      when: () => document.activeElement?.matches(ROW_SELECTOR) === true,
+    },
+  ]);
 
   if (issues.isPending || state.isPending) {
     return <LoadingSkeleton label="Loading issues" />;

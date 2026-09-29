@@ -53,7 +53,7 @@ const (
 const maxArgBytes = 131072
 
 // The Legion pool every pod runs on: its taint, tolerated, and its label, selected
-// (agent-c components/legion: the `legion` NodePool). The gVisor RuntimeClass's own selector also
+// (the cluster's `legion` NodePool). The gVisor RuntimeClass's own selector also
 // matches another pool, so the pool label is what keeps a pod on Legion's nodes.
 const (
 	poolKey   = "legion.dev/pool"
@@ -434,8 +434,8 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 }
 
 // agentSecretsVolumes are the two volumes an enrolled pod carries: the projected token for the
-// broker's audience — one source, alone in its volume, the shape agent-c's legion-sandbox-pods
-// policy admits per token — and the memory-backed key directory. None when the runtime enrolls no
+// broker's audience — one source, alone in its volume, the shape the cluster's admission policy
+// admits per token — and the memory-backed key directory. None when the runtime enrolls no
 // pod.
 func (r *Runtime) agentSecretsVolumes() []corev1.Volume {
 	a := r.agentSecrets

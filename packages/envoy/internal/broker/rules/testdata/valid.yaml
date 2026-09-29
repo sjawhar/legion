@@ -1,7 +1,7 @@
 version: 1
 secrets:
   DEEL_API_KEY:                 # rule keys are UPPER_SNAKE, the name the agent asks for
-    source: production/agent-secrets/deel-api-key   # Secrets Manager names are lowercase-hyphenated
+    source: example/agent-secrets/inject-api-key   # Secrets Manager names are lowercase-hyphenated
     owner: sjawhar
     delivery: inject            # inject | proxy; no proxy block when inject
     max_lifetime_seconds: 43200 # ≤ 43200
@@ -14,7 +14,7 @@ secrets:
         decision: approval
         approver: login:alice
   SLACK_MCP_XOXP_TOKEN:
-    source: production/agent-secrets/slack-mcp-xoxp-token
+    source: example/agent-secrets/proxy-api-token
     owner: sjawhar
     delivery: proxy
     max_lifetime_seconds: 43200

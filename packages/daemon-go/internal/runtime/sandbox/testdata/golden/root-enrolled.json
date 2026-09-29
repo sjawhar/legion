@@ -156,7 +156,7 @@
               },
               {
                 "name": "AGENT_SECRETS_URL",
-                "value": "https://secrets.dev1.internal.trajectorylabs.com"
+                "value": "https://secrets.internal.example"
               },
               {
                 "name": "AGENT_SECRETS_KEY_DIR",

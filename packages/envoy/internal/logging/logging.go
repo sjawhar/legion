@@ -25,6 +25,19 @@ func NewWithWriter(machineID string, w io.Writer) *Logger {
 	return &Logger{machineID: machineID, logger: slog.New(handler)}
 }
 
+// Slog is this logger as a plain *slog.Logger carrying the machine id, to hand to a package that
+// takes one (store.WithLogger). Its records are the JSON the wrapper's own calls produce, so a
+// query keyed on msg or machine_id finds them both. It carries no ts attribute: the JSON handler
+// already stamps every record with time, and only the wrapper's own calls add the duplicate.
+//
+// It is not for slog.SetDefault. That would also route the stdlib log package into this handler,
+// and the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped
+// stream subjects are space-delimited text patterns anchored on that package's date and time
+// prefix.
+func (l *Logger) Slog() *slog.Logger {
+	return l.logger.With(slog.String("machine_id", l.machineID))
+}
+
 // LogEvent logs a structured event with required fields.
 func (l *Logger) LogEvent(level slog.Level, msg string, attrs ...slog.Attr) {
 	attrs = append([]slog.Attr{

@@ -173,8 +173,13 @@ const NO_ELEMENTS: Piece = { kind: "literal", text: "", noElements: true };
  * `x="$@"` assigns from no elements is the empty string, which `"$x"` passes as one argument, so
  * the mark never outlives the word it came from. */
 function stored(value: Expansion): Expansion {
-  if (!value.some((piece) => piece.noElements === true)) return value;
-  return value.map((piece) => (piece.noElements === true ? literal("") : piece));
+  const counted = value.map((piece) => {
+    if (piece.unknownCount !== true) return piece;
+    const { unknownCount: _, ...rest } = piece;
+    return rest;
+  });
+  if (!counted.some((piece) => piece.noElements === true)) return counted;
+  return counted.map((piece) => (piece.noElements === true ? literal("") : piece));
 }
 
 /** The key under which `vars` holds the value of every name it does not list, once the shell ran
@@ -815,7 +820,9 @@ function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): stri
 function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][] {
   if (name === "@" || name === "*") {
     if (st.positional === undefined) {
-      return [[{ ...unknown(`\`$${name}\` (the positional parameters)`), unknownCount: true }]];
+      const piece = unknown(`\`$${name}\` (the positional parameters)`);
+      // Quoted, `"$*"` joins every element into one argument; only `$@` gives one per element.
+      return [[name === "*" && quoted ? piece : { ...piece, unknownCount: true }]];
     }
     return elements(st.positional, name === "*" && quoted);
   }
@@ -907,6 +914,7 @@ function parameterExpansion(
       const unknownElement = array.get(UNKNOWN_ARRAY_INDEX);
       // The array's own elements are unknown, so how many arguments it gives is unknown too.
       if (unknownElement !== undefined) {
+        if (part.index === "*" && quoted) return [[...unknownElement]];
         return [unknownElement.map((piece) => ({ ...piece, unknownCount: true as const }))];
       }
       return elements([...array.values()], part.index === "*" && quoted);
@@ -914,7 +922,7 @@ function parameterExpansion(
     // A name the guard never saw assigned may be an array of any length, so `[@]` over it gives an
     // unknown number of arguments; a scalar it did see gives exactly one, which `parameter` types.
     return parameter(name, quoted, st, ctx).map((alt) =>
-      alt.some((piece) => piece.kind === "unknown")
+      !(part.index === "*" && quoted) && alt.some((piece) => piece.kind === "unknown")
         ? alt.map((piece) => ({ ...piece, unknownCount: true as const }))
         : alt
     );

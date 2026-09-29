@@ -132,7 +132,7 @@ the guard does not read (`perl`, `ruby`, `awk`), commands outside the families a
 `tar -xPf` with absolute members, `patch`, `gzip`, `ex`), a directory reached through a `cd` that
 failed, and the `write` and `edit` tools. The write-verb checks prevent the named overwrites, not
 every shell write: `>>` and `tee -a` appends outside the roots remain unjudged
-([tracked separately](https://dispatch.internal.trajectorylabs.com/issues/LEGION-368)).
+(tracked separately as LEGION-368).
 A `>>` append to a file the guard holds no model
 of — one no redirect or `tee` in the same command named — leaves that file's contents unknown,
 never empty: the append is allowed, and running that file in the same command is refused rather

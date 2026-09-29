@@ -93,9 +93,8 @@ var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 // login at boot, on a background context, and logs the confirmation code once; no file ever
 // carries a launcher credential, since Login wins and holds it only in process memory), the
 // audience of the projected token every pod carries for it, and that token's lifetime. The audience
-// defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s, the most agent-c's
-// admission admits for a Legion worker token (components/identity/model_access.py,
-// LEGION_WORKER_TOKEN_MAX_EXPIRATION_SECONDS); the API server issues none under 600.
+// defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s, the most the cluster's
+// admission policy admits for a Legion worker token; the API server issues none under 600.
 type AgentSecretsConfig struct {
 	URL                string
 	Operator           string
@@ -482,7 +481,9 @@ const minTokenExpiry = 600
 
 // readTokenProjection is a projected ServiceAccount token: the file it is written to, and the
 // audience and lifetime it is issued for when set (the API server's own audience and default
-// lifetime when not).
+// lifetime when not). An audience still holding a ${…} placeholder is refused: nothing in Legion
+// expands one, so the pod would carry a token for the placeholder's text and every call made with
+// it would be refused.
 func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTokenProjection, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
@@ -497,6 +498,9 @@ func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTo
 	}
 	if token.Audience, err = optionalString(fields["audience"], key+".audience"); err != nil {
 		return nil, err
+	}
+	if strings.Contains(token.Audience, "${") {
+		return nil, fmt.Errorf("%s.audience %q is an unfilled placeholder: put the audience the token is for in its place", key, token.Audience)
 	}
 	expiry, err := readInt(fields["expiration_seconds"], key+".expiration_seconds")
 	switch {
@@ -660,7 +664,7 @@ func readNodeSelector(value *yaml.Node, key string) (map[string]string, error) {
 			return nil, refusal
 		}
 		if label == poolLabel {
-			return nil, fmt.Errorf("%s must not set %s: the runtime selects the Legion pool itself, and legion-sandbox-pods requires its value", key, poolLabel)
+			return nil, fmt.Errorf("%s must not set %s: the runtime selects the Legion pool itself, and the cluster's admission policy requires its value", key, poolLabel)
 		}
 		if _, exists := selector[label]; exists {
 			return nil, fmt.Errorf("%s names %s twice", key, label)
