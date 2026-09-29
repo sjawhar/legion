@@ -1044,6 +1044,12 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     command: `s=$(cat list); ln -sf -- $s`,
   },
   {
+    name: "ln -sf over a positional slice, which is one operand the guard cannot read",
+    family: "ln",
+    role: "probe",
+    command: `f() { ln -sf -- "\${@:1}"; }; f notes.txt "$HOME/.bashrc"`,
+  },
+  {
     name: "ln -sf over one readable source still links into the working directory",
     family: "ln",
     role: "must-allow",

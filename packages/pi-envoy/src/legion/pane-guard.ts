@@ -3353,15 +3353,21 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       const found = writeArguments(rest, "St", LN_OPTIONS);
       if (found.flags.has("--help") || found.flags.has("--version")) return;
       // A readable single source uses the working directory; an unreadable word may hide -t.
-      // One word bash may make several arguments of is not a single source either: `ln -sf`
-      // over `"${a[@]}"` of unknown length is given a link name as well, and it replaces an
-      // existing file there. Only a word that is certainly one operand takes this rule.
+      // The rule holds only for a word the guard has READ WHOLE. Anything less carries a link
+      // name as well and `ln -sf` replaces an existing file there: a word bash may make several
+      // arguments of (`"${a[@]}"` of unknown length), and a word of ordinary fields whose value
+      // it cannot read (a positional slice). Reading the word whole covers both, which the
+      // mutation sweep proves: a separate `fields` test here survives every row.
+      const sole = found.operands[0];
       const single =
         found.operands.length === 1 &&
         found.directory === undefined &&
         !found.uncertain &&
-        found.operands[0]?.fields !== "unknown";
-      const destinations = single ? [{ text: ".", exp: [literal(".")] }] : writeDestinations(found, site);
+        sole !== undefined &&
+        readableWord(sole).whole;
+      const destinations = single
+        ? [{ text: ".", exp: [literal(".")] }]
+        : writeDestinations(found, site);
       checkTargets("ln", "overwrite", destinations, WRITES_EITHER, st, ctx, site);
       // A hard link makes its source writable under a name inside the roots that resolves to
       // nothing else — no later command can see where it leads, as it can through a symlink — so

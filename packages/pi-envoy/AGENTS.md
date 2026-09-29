@@ -278,14 +278,18 @@ directory `-t` names, where every other operand is a source they read — except
 which creates directories, so there every operand is judged; `dd` on the path inside its
 `of=` word, wherever that word stands; `ln` on its last operand, or on the working directory when
 it is given one readable operand, plus its source when it makes a hard link, which is a second name for a
-file outside the roots that no later command can resolve; `sed` on the files it names only with
-`-i`, in a cluster (`-ni`) or with a suffix joined to it (`-i.bak`) as well as alone. Which of the
+file outside the roots that no later command can resolve; `sed` on the files it names with
+`-i`, in a cluster (`-ni`) or with a suffix joined to it (`-i.bak`) as well as alone — never on
+the files its script names through `w`, `W`, `s///w`, `e` or `s///e`, which it does not read
+(LEGION-377). Which of the
 link and its target is judged follows what each verb does to a symlink — `sed -i` replaces the
 link, `cp` and `dd` write through it, and `install` and `ln` do one or the other depending on
 whether it leads to a directory, so both are judged (`Reach`). Each of these, like a redirection,
 refuses only where a file is already there: a path that does not exist yet overwrites nothing.
-The one residual of this family is a symlink the same command both creates and writes through:
-it is not on disk when the guard reads the command.
+One residual of this family is a symlink the same command both creates and writes through: it is
+not on disk when the guard reads the command. Others are tracked rather than covered: a value
+re-parsed by `eval` or `bash -c` (LEGION-375), an expansion slice (LEGION-376), and a `sed`
+script's own writes (LEGION-377).
 `src/legion/pane-guard-write-rows.ts` holds the rows this is measured on, and
 `scripts/measure-pane-guard-writes.ts` runs them against any guard build.
 

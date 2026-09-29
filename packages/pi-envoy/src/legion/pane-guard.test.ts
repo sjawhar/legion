@@ -51,8 +51,9 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:140",
   // `sed "${args[@]}"` over an array a loop appends `-e` and its script to: quoted, but its
   // element count is unknown, so the guard cannot pair each `-e` with the element it consumes
-  // and reads them as words that may stand alone. Real sed writes nothing here — `-e` always
-  // takes the next element — so this is a listed cost rather than a leak (LEGION-357).
+  // and reads them as words that may stand alone. `-e` always takes the next element, so no
+  // element of THIS construction turns on `-i`; the elements are sed scripts the guard does not
+  // read, whose own writes are LEGION-377. A listed cost rather than a leak (LEGION-357).
   "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:385",
   // Creates and sets the mode of a directory outside the roots (`install -d /etc/apt/keyrings`):
   // a script that provisions a host, never one a pane runs (LEGION-357).

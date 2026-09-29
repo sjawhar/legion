@@ -15,8 +15,10 @@ since LEGION-121, destructive commands and signals outside the pane's own work. 
 `eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`, `find -exec rm`,
 `shred`), move (`mv`), truncate (`truncate`), overwrite by redirection, `tee`, `cp`, `dd of=`,
 `install`, `ln` or `sed -i` (an existing file only; a symlink the same command creates and then
-writes through is not on disk when the guard reads the command, and is the one documented
-residual of this family), or recursively change the mode or owner
+writes through is not on disk when the guard reads the command). **Known shapes that still reach
+outside the roots are tracked, not covered: a value re-parsed by `eval` or `bash -c` (LEGION-375),
+an expansion slice (LEGION-376), and the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e`
+or `s///e`, which the guard does not read (LEGION-377).**, or recursively change the mode or owner
 (`chmod -R`, `chown -R`) of paths under the pane's
 issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below `/tmp` except
 `/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp` directory that
@@ -75,12 +77,13 @@ reading of it hides a destination; the refusal names the written word and the `-
 remedy, rather than treating the command as one with no destination. A `-T` the guard HAS read
 settles which operand is the destination, so an unreadable word after it is no longer a possible
 destination; it is still judged for the other things it may be, an `-r` or a backup option among
-them. The accepted cost is three shapes that refuse where a person can see they are
+them. The accepted cost is four shapes that refuse where a person can see they are
 harmless: a bare glob before `--` with `cp`, `mv`, `install` or `ln`; `xargs` into `cp` or
 `sed -i` with unreadable operands; and a glob loop into `cp` with neither a literal prefix nor
 `--`; and a read-only `sed` whose options come from an array of `-e` and its script built in a
 loop or an undecidable branch, where the guard cannot pair each `-e` with the element it consumes
-and so reads those elements as words that may stand alone. So `cp *.txt dir/` and
+and so reads those elements — which are sed scripts it does not read — as words that may stand
+alone and turn on `-i`. So `cp *.txt dir/` and
 `mv *.txt dir/` are refused, because a glob can yield a
 `-t<link>` pointing out of the roots, while `cp -- *.txt dir/` and `./*.txt` are allowed.
 Help and version options do not write. `cp` judges the source basename as
@@ -95,8 +98,9 @@ not only copy commands. `dd` writes the path inside its `of=` word, wherever tha
 word stands. `ln` writes its last
 operand, or the working directory when given one readable operand, and a hard link (no `-s`)
 also makes its source writable under the new name, which no later command can resolve as it can
-a symlink. `sed` writes the files it names only with `-i`, including inside a cluster (`-ni`) and
-with a suffix joined to it (`-i.bak`); a word the guard cannot read may itself be that `-i`, and
+a symlink. `sed` is judged on the files it names with `-i`, including inside a cluster (`-ni`) and
+with a suffix joined to it (`-i.bak`) — **the files its SCRIPT names are not judged at all
+(LEGION-377)**; a word the guard cannot read may itself be that `-i`, and
 the readings are judged together rather than worst-of-each, so a quoted word plays one part at a
 time and a read-only `sed -n` over two of them is allowed, while a word bash may make several of —
 one it splits, or a quoted `"$@"` or `"${a[@]}"` whose element count the guard does not know,
