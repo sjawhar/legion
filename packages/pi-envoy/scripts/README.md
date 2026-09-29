@@ -144,3 +144,32 @@ modules, so one written to a temporary directory fails to resolve them. The
 unwaited shapes (a background command, a coprocess, an earlier part of the
 same pipeline, a process substitution) are races, so one trial per row settles
 nothing about them — their live rate comes from repeating the run.
+
+## measure-pane-guard-writes.ts
+
+Runs the LEGION-357 batch — the rows `pane-guard-bash.test.ts` runs, from
+`src/legion/pane-guard-write-rows.ts` — against a guard build: the verbs that
+write a path they name (`cp`, `dd of=`, `install`, `ln`, `sed -i`), each
+through the operand its own grammar makes the destination. Every row is
+measured twice, what `guard.bash` returned and whether real bash changed
+anything under that row's canary `HOME`, so no row carries a written-down
+verdict for the dangerous direction.
+
+A row is a LEAK when the guard allowed it and bash changed the canary, and a
+COST when the guard refused a row a pane is meant to be able to run. Both
+counts come from the same run, because a change that closes leaks by refusing
+everything is not a fix.
+
+```bash
+jj file show -r main@origin packages/pi-envoy/src/legion/pane-guard.ts \
+  > packages/pi-envoy/src/legion/pane-guard.base.ts
+bun packages/pi-envoy/scripts/measure-pane-guard-writes.ts \
+  packages/pi-envoy/src/legion/pane-guard.base.ts base
+bun packages/pi-envoy/scripts/measure-pane-guard-writes.ts \
+  packages/pi-envoy/src/legion/pane-guard.ts head
+```
+
+The copy goes inside the package for the same reason as above. The rows the
+documented boundary leaves open are named `RESIDUAL`, and the test lists them
+by name: a new leak fails there, and a residual that closes is a boundary
+someone moved on purpose.

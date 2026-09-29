@@ -29,7 +29,7 @@ type markdownReader struct {
 var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParser(parser.NewParser(
 		parser.WithBlockParsers(blockParsers()...),
-		parser.WithInlineParsers(inlineParsers()...),
+		parser.WithInlineParsers(inlineParsers(emphasisParser{})...),
 		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
 	)),
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
@@ -211,11 +211,12 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 }
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
-// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's.
-func inlineParserOptions() []parser.Option {
+// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's, its
+// delimiter runs read by emphasis.
+func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
-		parser.WithInlineParsers(inlineParsers()...),
+		parser.WithInlineParsers(inlineParsers(emphasis)...),
 		parser.WithInlineParsers(
 			util.Prioritized(extension.NewStrikethroughParser(), 500),
 			util.Prioritized(extension.NewLinkifyParser(), 999),
@@ -223,19 +224,31 @@ func inlineParserOptions() []parser.Option {
 	}
 }
 
-// inlineMarkdownParser reads inline markdown (inlineParserOptions).
-var inlineMarkdownParser = parser.NewParser(inlineParserOptions()...)
+// inlineReader reads one textblock's inline markdown (inlineParserOptions): run alone, and with
+// footnote definitions after it so that the references in it read as references
+// (parseInlineWithDefinitions).
+type inlineReader struct {
+	run, withDefinitions parser.Parser
+}
 
-// footnoteRunParser reads inline markdown as inlineMarkdownParser does, with footnote definitions
-// after it so that the references in it read as references (parseInlineWithDefinitions).
-var footnoteRunParser = parser.NewParser(append(inlineParserOptions(), footnoteParserOptions()...)...)
+func newInlineReader(emphasis emphasisParser) inlineReader {
+	return inlineReader{
+		run:             parser.NewParser(inlineParserOptions(emphasis)...),
+		withDefinitions: parser.NewParser(append(inlineParserOptions(emphasis), footnoteParserOptions()...)...),
+	}
+}
 
-// parseInlineWithDefinitions reads one textblock's inline markdown as ParseInline does, after a
-// definition for each of labels, the footnote labels it refers to. It is the renderer's read-back
-// of a run it wrote, where a reference is only a reference beside its definition.
-func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, error) {
+// inlineMarkdown reads inline markdown as Parse does; flankingOnlyMarkdown reads it with its
+// delimiter runs judged by CommonMark's flanking rules alone (emphasisParser.flankingOnly).
+var inlineMarkdown, flankingOnlyMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{flankingOnly: true})
+
+// parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
+// does, after a definition for each of labels, the footnote labels it refers to. It is the
+// renderer's read-back of a run it wrote, where a reference is only a reference beside its
+// definition.
+func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) ([]*Node, error) {
 	if len(labels) == 0 {
-		return ParseInline(markdown)
+		return readInline(markdown, reader.run)
 	}
 	var full strings.Builder
 	full.WriteString(markdown)
@@ -243,7 +256,7 @@ func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, erro
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root := withLineStarts(footnoteRunParser, source, parser.NewContext())
+	root := withLineStarts(reader.withDefinitions, source, parser.NewContext())
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
@@ -274,9 +287,14 @@ func referencedLabels(nodes []*Node) []string {
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) (nodes []*Node, err error) {
+	return readInline(markdown, inlineMarkdown.run)
+}
+
+// readInline is ParseInline read with inline, one of an inlineReader's parsers.
+func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
+	root := withLineStarts(inline, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}
@@ -295,9 +313,11 @@ func ParseInline(markdown string) (nodes []*Node, err error) {
 }
 
 // BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back.
+// parser reads it back. A table in it is written spanless (renderSpanless): the cells a span adds
+// are empty, which the parser refuses nowhere, and the header still reaches every cell a row holds,
+// so the verdict is the one its markdown written with the spans gets.
 func BlockReadError(block *Node) error {
-	markdown, err := Render(readAlone(block))
+	markdown, err := renderSpanless(readAlone(block))
 	if err != nil {
 		return err
 	}
@@ -308,10 +328,13 @@ func BlockReadError(block *Node) error {
 // BlockShapeError says what a document-level block's markdown reads back as when that is not
 // blocks of the same kinds nested the same way - the first block that reads back as another - or
 // is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
-// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are.
+// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are. A table in
+// it is written spanless (renderSpanless), so each of its rows reads back as wide as its widest row
+// as it holds cells, where written with its spans a row would read back wider wherever a span
+// covers a cell.
 func BlockShapeError(block *Node) error {
 	doc := readAlone(block)
-	markdown, err := Render(doc)
+	markdown, err := renderSpanless(doc)
 	if err != nil {
 		return err
 	}
@@ -862,6 +885,9 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 		case *extensionast.TaskCheckBox:
 			continue
 		case *ast.Image:
+			// An image is read without the marks around it, a link among them: the browser
+			// editor's store (y-prosemirror) keeps a mark on text alone, so the editor stores a
+			// linked image without its link as well (LEGION-365).
 			image, err := parseImage(current, source, footnotes)
 			if err != nil {
 				return nil, nil, err

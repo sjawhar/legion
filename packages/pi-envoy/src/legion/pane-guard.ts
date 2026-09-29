@@ -20,7 +20,7 @@
  * piped into a shell, a script executed by path, and python/node/bun scripts through
  * `pane-guard-code.ts`). A command the parser reports as malformed is refused, and so is a target
  * the guard cannot resolve (a variable read from input, a command's output): it never guesses.
- * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread, and
+ * A command whose walk takes more than `MAX_WALK_STEPS` steps is refused, never allowed unread, and
  * no value the guard builds is longer than `MAX_VALUE_LENGTH`: past it (a replacement of a
  * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane. A script
  * a command writes is read whole up to `MAX_SCRIPT_BYTES`, as one on disk is, and past it is one
@@ -87,6 +87,7 @@ import {
   closeSync,
   existsSync,
   lstatSync,
+  opendirSync,
   openSync,
   readFileSync,
   readlinkSync,
@@ -142,6 +143,11 @@ interface Piece {
   readonly unset?: true;
   /** Only on `NO_ELEMENTS`'s piece. */
   readonly noElements?: true;
+  /** An `@` expansion whose ELEMENT COUNT the guard does not know: `"$@"` of unknown positional
+   * parameters, or `"${arr[@]}"` of an array it could not read. Quoted, such a word is not one
+   * argument — bash gives one per element — so `args` types it `fields: "unknown"`: a verb
+   * reading its operands positionally must not take the whole expansion as a single operand. */
+  readonly unknownCount?: true;
   /** A value whose name may also be unset: a branch may have unset it, or a write the guard could
    * not read (`forgetVariables`). Whether it is set is unknown, so `-` and `+` cannot decide. */
   readonly maybeUnset?: true;
@@ -164,12 +170,19 @@ function isUnset(value: Expansion | undefined): boolean {
  * (`f "$@" x` gives f one argument). An element that is empty is an ordinary empty piece. */
 const NO_ELEMENTS: Piece = { kind: "literal", text: "", noElements: true };
 
-/** A value as a variable or element holds it. `NO_ELEMENTS` marks a word, not a value: what
- * `x="$@"` assigns from no elements is the empty string, which `"$x"` passes as one argument, so
- * the mark never outlives the word it came from. */
+/** A value as a variable or element holds it. `NO_ELEMENTS` and `unknownCount` mark a word, not
+ * a value: a stored value is one argument however many elements it was assigned from, so what
+ * `x="$@"` assigns from no elements is the empty string, which `"$x"` passes as one argument, and
+ * a value assigned from an expansion of unknown length loses the count with it. Neither mark
+ * outlives the word it came from. */
 function stored(value: Expansion): Expansion {
-  if (!value.some((piece) => piece.noElements === true)) return value;
-  return value.map((piece) => (piece.noElements === true ? literal("") : piece));
+  const counted = value.map((piece) => {
+    if (piece.unknownCount !== true) return piece;
+    const { unknownCount: _, ...rest } = piece;
+    return rest;
+  });
+  if (!counted.some((piece) => piece.noElements === true)) return counted;
+  return counted.map((piece) => (piece.noElements === true ? literal("") : piece));
 }
 
 /** The key under which `vars` holds the value of every name it does not list, once the shell ran
@@ -372,14 +385,17 @@ interface Site {
 }
 
 const MAX_DEPTH = 8;
-/** The syntax nodes one command's walk may visit before the guard refuses it as too large to judge.
- * The repository's largest tracked script, `scripts/e2e/stage4b-sandbox-tree.sh`, reaches its
- * first refusal after about 20,700, in about a third of a second through the guard on a loaded
- * devbox. What a node costs depends on what it does: 100,000 `true;` walk in about 200 ms, while a
- * budget's worth of `rm -rf a;`, each target resolved against the pane's roots, takes about
- * 490 ms. So the budget bounds a walk's size, not its time. */
+/** The steps one command's walk may take before the guard refuses it as too large to judge. A
+ * syntax node is one step, pattern matching charges its work (`PATTERN_WORK_PER_STEP`), and a copy
+ * charges each existing destination entry it inspects (`checkCopyContents`), so a destination tree
+ * cannot stretch a walk past the budget either. The repository's largest tracked script,
+ * `scripts/e2e/stage4b-sandbox-tree.sh`, reaches its first refusal after about 20,700, in about a
+ * third of a second through the guard on a loaded devbox. What a node costs depends on what it
+ * does: 100,000 `true;` walk in about 200 ms, while a budget's worth of `rm -rf a;`, each target
+ * resolved against the pane's roots, takes about 490 ms. So the budget bounds a walk's size, not
+ * its time. */
 const MAX_WALK_STEPS = 100_000;
-const WALK_LIMIT = `the guard reached its walk limit of ${MAX_WALK_STEPS} nodes; run a smaller script`;
+const WALK_LIMIT = `the guard reached its walk limit of ${MAX_WALK_STEPS} steps (syntax nodes, pattern matching, and the destination entries a copy inspects); run a smaller script, or copy into a smaller destination`;
 const MAX_ALTERNATIVES = 64;
 /** The longest value a pattern expansion is evaluated over; `//` matches from every start of it. */
 const MAX_PATTERN_VALUE = 512;
@@ -409,11 +425,16 @@ const DEVICE_TARGETS = ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin",
 // `constructor` or `toString`.
 const SHELLS = new Set(["bash", "sh", "dash", "zsh", "ksh", "mksh", "ash"]);
 /** Commands whose arguments name paths the guard's file rules judge, for `find -exec` and
- * `xargs`. */
+ * `xargs`. `sed` is not one of them: it writes only with `-i` (`sedWrites`), and a read of the
+ * paths a search or a pipe names is the ordinary way it is used. */
 const FILE_COMMANDS = new Set([
   "rm",
   "unlink",
   "mv",
+  "cp",
+  "dd",
+  "install",
+  "ln",
   "shred",
   "truncate",
   "chmod",
@@ -924,7 +945,11 @@ function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): stri
  * as one word when bash would split or glob it. */
 function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][] {
   if (name === "@" || name === "*") {
-    if (st.positional === undefined) return [[unknown(`\`$${name}\` (the positional parameters)`)]];
+    if (st.positional === undefined) {
+      const piece = unknown(`\`$${name}\` (the positional parameters)`);
+      // Quoted, `"$*"` joins every element into one argument; only `$@` gives one per element.
+      return [[name === "*" && quoted ? piece : { ...piece, unknownCount: true }]];
+    }
     return elements(st.positional, name === "*" && quoted);
   }
   if (/^[0-9]+$/.test(name)) {
@@ -1013,10 +1038,20 @@ function parameterExpansion(
   if (part.index === "@" || part.index === "*") {
     if (array !== undefined) {
       const unknownElement = array.get(UNKNOWN_ARRAY_INDEX);
-      if (unknownElement !== undefined) return [[...unknownElement]];
+      // The array's own elements are unknown, so how many arguments it gives is unknown too.
+      if (unknownElement !== undefined) {
+        if (part.index === "*" && quoted) return [[...unknownElement]];
+        return [unknownElement.map((piece) => ({ ...piece, unknownCount: true as const }))];
+      }
       return elements([...array.values()], part.index === "*" && quoted);
     }
-    return parameter(name, quoted, st, ctx);
+    // A name the guard never saw assigned may be an array of any length, so `[@]` over it gives an
+    // unknown number of arguments; a scalar it did see gives exactly one, which `parameter` types.
+    return parameter(name, quoted, st, ctx).map((alt) =>
+      !(part.index === "*" && quoted) && alt.some((piece) => piece.kind === "unknown")
+        ? alt.map((piece) => ({ ...piece, unknownCount: true as const }))
+        : alt
+    );
   }
   if (part.index !== undefined) {
     const index = resolveArrayIndex(part.index, st, ctx);
@@ -1370,10 +1405,23 @@ function braceAlternatives(part: Extract<WordPart, { type: "BraceExpansion" }>):
   return inner.split(",").map((alternative) => [literal(alternative)]);
 }
 
+/** Where bash expands a tilde in the first literal run of an unquoted word: at its start, and
+ * after the `=` of an assignment-like prefix, which is a valid identifier and nothing else.
+ * Measured: `of=~/x` is the home directory, while `--directory=~/d`, `-d~/e` and `1of=~/x` are
+ * each the literal text. A tilde after a `:` in such a word expands too, and is not read here:
+ * the guard's operands are single paths, where a `:` is an ordinary character, so the text it
+ * leaves resolves under the same directory bash's does. */
+function tildeAt(text: string): number | undefined {
+  if (text.startsWith("~")) return 0;
+  const equals = text.indexOf("=");
+  if (equals <= 0 || !IDENTIFIER.test(text.slice(0, equals))) return undefined;
+  return text.charAt(equals + 1) === "~" ? equals + 1 : undefined;
+}
+
 function expandPart(part: WordPart, first: boolean, st: State, ctx: Ctx): Piece[][] {
   switch (part.type) {
     case "Literal":
-      return [unquotedLiteral(part.text, first ? 0 : undefined, st, ctx)];
+      return [unquotedLiteral(part.text, first ? tildeAt(part.text) : undefined, st, ctx)];
     case "SingleQuoted":
     case "AnsiCQuoted":
       return [[literal(part.value)]];
@@ -1458,7 +1506,8 @@ function textLength(pieces: readonly Piece[]): number {
  * unknown here too, whatever quoting it now sits in. */
 function expandWord(word: Word, st: State, ctx: Ctx): Piece[][] {
   let alternatives: Piece[][] = [[]];
-  if (word.parts === undefined) alternatives = [unquotedLiteral(word.text, 0, st, ctx)];
+  if (word.parts === undefined)
+    alternatives = [unquotedLiteral(word.text, tildeAt(word.text), st, ctx)];
   else {
     word.parts.forEach((part, index) => {
       alternatives = product(alternatives, expandPart(part, index === 0, st, ctx));
@@ -1495,6 +1544,12 @@ function args(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
     const onlyExpansions = parts.length > 0 && parts.every((part) => SPLIT_PARTS.has(part.type));
     return expandWord(word, st, ctx).map((exp): Arg => {
       if (exp.some((piece) => piece.kind === "glob")) {
+        return { text: word.text, exp, fields: "unknown" };
+      }
+      // Quoted or not, an `@` expansion whose element count the guard does not know is not one
+      // argument: bash gives one per element, so a verb reading its operands positionally must not
+      // take the whole expansion as a single operand.
+      if (exp.some((piece) => piece.unknownCount === true)) {
         return { text: word.text, exp, fields: "unknown" };
       }
       // Unquoted, an expansion bash splits on whitespace (`$*`, `$(…)`) or that the guard cannot read
@@ -1556,6 +1611,12 @@ function readableWord(arg: Arg): { text: string; whole: boolean } {
 function mayBeOption(arg: Arg, matches: (text: string) => boolean): boolean {
   const { text, whole } = readableWord(arg);
   if (whole) return matches(text);
+  return mayBeSomeOption(text);
+}
+
+/** Whether the prefix the guard read of a word it cannot read whole leaves it able to be some
+ * option, whichever one: the rest of the word may spell any of them. */
+function mayBeSomeOption(text: string): boolean {
   return text === "" || /^--?[a-zA-Z-]*$/.test(text);
 }
 
@@ -2203,6 +2264,32 @@ function outputChanged(
   );
 }
 
+/** What a `for` or `select` variable holds in the one walk of its body that stands for every value
+ * it takes, when the guard does not unroll the loop (a list it cannot read, or one longer than it
+ * unrolls). Words that are each empty or a pid descending from this pane hold a value that is still
+ * such a pid, so the body's `kill "$pid"` stays allowed. One `for` word that is a glob whose first
+ * piece is literal text, neither empty nor led by `-` (`./*.txt`, `src/*.go`), holds the pattern
+ * itself, which a path built from the variable is judged as (`judgePath`: by the directory the
+ * glob matches in). No name it matches can be an option, since every one begins with that text. A
+ * glob led by a wildcard, by nothing, or by `-` can match a name such as `-tsub.txt`, which a verb
+ * reads as an option, so like every other list it leaves the variable a value the guard cannot
+ * know. */
+function loopValue(type: "For" | "Select", name: string, words: readonly Arg[]): Expansion {
+  const pids = words.every((word) => {
+    const text = literalText(word.exp);
+    return text === "" || (word.exp.length > 0 && word.exp.every((piece) => piece.descendantPid));
+  });
+  if (pids) return [unknown(`\`$${name}\`, a loop variable`, true)];
+  return type === "For" &&
+    words.length === 1 &&
+    words[0]?.exp[0]?.kind === "literal" &&
+    words[0].exp[0].text !== "" &&
+    !words[0].exp[0].text.startsWith("-") &&
+    words[0]?.exp.some((piece) => piece.kind === "glob")
+    ? words[0].exp
+    : [unknown(`\`$${name}\`, a loop variable`)];
+}
+
 function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
   if (++ctx.steps.count > MAX_WALK_STEPS) {
     const site = siteOf(node, st);
@@ -2338,19 +2425,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         }
       } else {
         const body = clone(st);
-        const signalSafe = words.every((word) => {
-          const text = literalText(word.exp);
-          return (
-            text === "" || (word.exp.length > 0 && word.exp.every((piece) => piece.descendantPid))
-          );
-        });
-        assignScalar(
-          body,
-          name,
-          signalSafe
-            ? [unknown(`\`$${name}\`, a loop variable`, true)]
-            : [unknown(`\`$${name}\`, a loop variable`)]
-        );
+        assignScalar(body, name, loopValue(node.type, name, words));
         if (node.type === "Select")
           assignScalar(body, "REPLY", [unknown("`$REPLY`, read from input")]);
         uncertainly(ctx, () => walkList(node.body.commands, body, ctx));
@@ -3482,23 +3557,117 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     case "rm":
     case "unlink":
-      checkTargets(base, "delete", operands(rest, "").operands, false, st, ctx, site);
+      checkTargets(base, "delete", operands(rest, "").operands, ACTS_ON_LINK, st, ctx, site);
       return;
     case "mv": {
-      const found = operands(rest, "tS", ["--target-directory", "--suffix"]);
-      const targets = [...found.operands];
-      const at = rest.findIndex((arg) => {
-        const text = literalText(arg.exp);
-        return text === "-t" || text === "--target-directory";
-      });
-      if (at !== -1 && rest[at + 1] !== undefined) targets.push(rest[at + 1] as Arg);
+      const found = writeArguments(rest, "tS", MV_OPTIONS);
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
+      const targets = [...found.operands, ...writeDestinations(found, site)];
+      checkTargets("mv", "move", targets, ACTS_ON_LINK, st, ctx, site);
+      return;
+    }
+    case "cp": {
+      const found = writeArguments(rest, "tS", CP_OPTIONS);
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
+      // `cp` writes its destination through a symlink; with an option that unlinks or renames
+      // that destination first it acts on the link itself instead, so both are judged. Only the
+      // destination: every other operand is a source `cp` reads.
+      const unlinks =
+        found.flags.has("b") ||
+        found.flags.has("--backup") ||
+        found.flags.has("--remove-destination") ||
+        found.uncertain;
+      const destinations = writeDestinations(found, site);
+      checkTargets(
+        "cp",
+        "overwrite",
+        destinations,
+        unlinks ? WRITES_EITHER : WRITES_THROUGH_LINK,
+        st,
+        ctx,
+        site
+      );
+      checkCopyContents(found, destinations, st, ctx, site);
+      return;
+    }
+    case "install": {
+      const found = writeArguments(rest, "mogtS", INSTALL_OPTIONS);
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
+      // `install -d` makes every operand a directory it creates, or chmods when it is there.
+      const directories = found.flags.has("d") || found.flags.has("--directory");
+      checkTargets(
+        "install",
+        directories ? "create or change the mode of" : "overwrite",
+        directories ? found.operands : writeDestinations(found, site),
+        WRITES_EITHER,
+        st,
+        ctx,
+        site
+      );
+      return;
+    }
+    case "dd": {
+      // `dd` carries its destination inside an operand word, which stands anywhere on the line.
+      const targets: Arg[] = [];
       for (const arg of rest) {
-        const text = literalText(arg.exp);
-        if (text?.startsWith("--target-directory=")) {
-          targets.push({ text: arg.text, exp: [literal(text.slice(19))] });
+        const { text, whole } = readableWord(arg);
+        if (whole && longOption(text, ["--help", "--version"]) !== undefined) return;
+        if (text.startsWith("of=")) {
+          const carried = valueInWord(arg, 3);
+          targets.push({
+            text: arg.text,
+            exp: carried ?? [unknown("an `of=` operand the guard cannot read")],
+          });
+          continue;
+        }
+        // A word the guard cannot read whole may still be an `of=` whose value it cannot know.
+        if (!whole && "of=".startsWith(text)) {
+          targets.push({
+            text: arg.text,
+            exp: [unknown("a `dd` operand the guard cannot read, which may name its `of=` file")],
+          });
         }
       }
-      checkTargets("mv", "move", targets, false, st, ctx, site);
+      checkTargets("dd", "write", targets, WRITES_THROUGH_LINK, st, ctx, site);
+      return;
+    }
+    case "ln": {
+      const found = writeArguments(rest, "St", LN_OPTIONS);
+      if (found.flags.has("--help") || found.flags.has("--version")) return;
+      // A readable single source uses the working directory; an unreadable word may hide -t.
+      // The rule holds only for a word the guard has READ WHOLE. Anything less carries a link
+      // name as well and `ln -sf` replaces an existing file there: a word bash may make several
+      // arguments of (`"${a[@]}"` of unknown length), and a word of ordinary fields whose value
+      // it cannot read (a positional slice). Reading the word whole covers both, which the
+      // mutation sweep proves: a separate `fields` test here survives every row.
+      const sole = found.operands[0];
+      const single =
+        found.operands.length === 1 &&
+        found.directory === undefined &&
+        !found.uncertain &&
+        sole !== undefined &&
+        readableWord(sole).whole;
+      const destinations = single
+        ? [{ text: ".", exp: [literal(".")] }]
+        : writeDestinations(found, site);
+      checkTargets("ln", "overwrite", destinations, WRITES_EITHER, st, ctx, site);
+      // A hard link makes its source writable under a name inside the roots that resolves to
+      // nothing else — no later command can see where it leads, as it can through a symlink — so
+      // the source is judged too. A line the guard read as symbolic links no file this way.
+      const symbolic = found.flags.has("s") || found.flags.has("--symbolic");
+      if (!symbolic) {
+        const sources = found.operands.filter((arg) => !destinations.includes(arg));
+        checkTargets("ln", "hard-link", sources, LINKS_TO, st, ctx, site);
+      }
+      return;
+    }
+    case "sed": {
+      const writes = sedWrites(rest);
+      const program = writes.inferred
+        ? "sed, whose option word the guard cannot read and which may be `-i`,"
+        : "sed -i";
+      checkTargets(program, "rewrite in place", writes.replaced, WRITES_LINK, st, ctx, site);
+      checkTargets(program, "rewrite in place", writes.followed, WRITES_EITHER, st, ctx, site);
       return;
     }
 
@@ -3521,9 +3690,19 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         "--remote-option",
         "--rsync-path",
         "--temp-dir",
-      ]).operands.at(-1);
+      ])
+        .operands.filter(passesAnArgument)
+        .at(-1);
       if (destination !== undefined) {
-        checkTargets("rsync", "synchronize and delete into", [destination], true, st, ctx, site);
+        checkTargets(
+          "rsync",
+          "synchronize and delete into",
+          [destination],
+          ACTS_THROUGH_LINK,
+          st,
+          ctx,
+          site
+        );
       }
       return;
     }
@@ -3574,7 +3753,15 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           if (target !== undefined) targetDirectories.push(target);
         }
       }
-      checkTargets(base, "extract and overwrite in", targetDirectories, true, st, ctx, site);
+      checkTargets(
+        base,
+        "extract and overwrite in",
+        targetDirectories,
+        ACTS_THROUGH_LINK,
+        st,
+        ctx,
+        site
+      );
       return;
     }
     case "shred":
@@ -3582,7 +3769,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         "shred",
         "shred",
         operands(rest, "ns", ["--iterations", "--size", "--random-source"]).operands,
-        false,
+        ACTS_ON_BOTH,
         st,
         ctx,
         site
@@ -3593,7 +3780,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         "truncate",
         "truncate",
         operands(rest, "sr", ["--size", "--reference"]).operands,
-        true,
+        ACTS_THROUGH_LINK,
         st,
         ctx,
         site
@@ -3740,10 +3927,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (word === undefined) return false;
         const { text, whole } = readableWord(word);
         const compact = text.replace("-", "");
-        const reachable = commands.filter((command) =>
-          command.replace("-", "").startsWith(compact)
-        );
-        return whole ? reachable.length === 1 : reachable.length > 0;
+        const normalized = commands.map((command) => command.replace("-", ""));
+        return whole
+          ? completeName(compact, normalized) !== undefined
+          : normalized.some((command) => command.startsWith(compact));
       };
       let killing: Arg | undefined;
       for (const segment of segments) {
@@ -4072,24 +4259,89 @@ function nameAndValue(arg: Arg): { name: string | undefined; value: Expansion | 
   return { name, value: undefined };
 }
 
+/** How a command reaches the path it names, and what it leaves there. `followed` is an operation
+ * on what a symlink points at; `unfollowed` is one on the link itself. Some verbs are both,
+ * because which one they do depends on what the link points at: `install` and `ln` descend a link
+ * to a directory and replace a link to a file, so either is a path outside the roots they would
+ * reach (measured in `pane-guard-write-rows.ts`, not read from a manual). `overwrite` is the rule
+ * a redirection and `tee` are judged by — a device, or a path that does not exist yet, overwrites
+ * nothing — which is what makes a write verb's reach the same as `>`'s. */
+interface Reach {
+  readonly followed: boolean;
+  readonly unfollowed: boolean;
+  readonly overwrite: boolean;
+}
+
+/** Removes or renames the path it names, existing or not: `rm`, `mv`, `find -delete`. */
+const ACTS_ON_LINK: Reach = {
+  followed: false,
+  unfollowed: true,
+  overwrite: false,
+};
+/** Acts on what the path points at, existing or not: `truncate`, `rsync`, an extraction's `-C`,
+ * `chmod -R`. */
+const ACTS_THROUGH_LINK: Reach = {
+  followed: true,
+  unfollowed: false,
+  overwrite: false,
+};
+/** Acts on what the path points at and on the path itself, existing or not: `shred`, which
+ * overwrites the file a symlink leads to and, with `-u`, removes the link. */
+const ACTS_ON_BOTH: Reach = {
+  followed: true,
+  unfollowed: true,
+  overwrite: false,
+};
+/** Writes what the path points at, and creates what is not there: `cp`, `dd of=`. */
+const WRITES_THROUGH_LINK: Reach = {
+  followed: true,
+  unfollowed: false,
+  overwrite: true,
+};
+/** Writes the link itself: `sed -i`, which replaces the symlink it names with a regular file. */
+const WRITES_LINK: Reach = {
+  followed: false,
+  unfollowed: true,
+  overwrite: true,
+};
+/** Writes what the path points at, or the path itself: `install` and `ln`, which descend a link to
+ * a directory and replace a link to a file; `cp` with an option that unlinks its destination first;
+ * and `sed -i` where a reading follows links (`--follow-symlinks`), which rewrites what the link
+ * points at, while a reading without it replaces the link. */
+const WRITES_EITHER: Reach = {
+  followed: true,
+  unfollowed: true,
+  overwrite: true,
+};
+/** Makes the path reachable by another name without writing it: a hard link's source, whose
+ * contents the new name can then write. */
+const LINKS_TO: Reach = {
+  followed: true,
+  unfollowed: false,
+  overwrite: true,
+};
+
 function checkTargets(
   program: string,
   verb: string,
   targets: readonly Arg[],
-  follow: boolean,
+  reach: Reach,
   st: State,
   ctx: Ctx,
   site: Site
 ): void {
   for (const target of targets) {
-    const verdict = judgePath(target.exp, st, ctx, { follow, overwrite: false });
-    if (!verdict.ok) {
-      throw refusal(
-        site,
-        `${program} would ${verb} \`${target.text}\` (${verdict.resolution})`,
-        ctx,
-        verdict.unresolved
-      );
+    for (const follow of [true, false]) {
+      if (!(follow ? reach.followed : reach.unfollowed)) continue;
+      const verdict = judgePath(target.exp, st, ctx, { follow, overwrite: reach.overwrite });
+      if (!verdict.ok) {
+        throw refusal(
+          site,
+          `${program} would ${verb} \`${target.text}\` (${verdict.resolution})`,
+          ctx,
+          verdict.unresolved
+        );
+      }
     }
     const text = literalText(target.exp);
     // `kernelPath` may still not resolve here even though `judgePath` above allowed the target:
@@ -4100,6 +4352,441 @@ function checkTargets(
     const file = text === undefined ? undefined : kernelPath(st.cwd, text);
     if (file !== undefined) st.pidFiles.delete(file);
   }
+}
+
+/** The name a GNU long option word spells, read as `getopt_long` reads it: the name it spells in
+ * full, else the one name it abbreviates, and none when it abbreviates several (GNU refuses that
+ * word, and the command runs nothing). A full name wins over the longer names it begins, so
+ * `install --strip` is `--strip` and not `--strip-program`. tmux resolves a subcommand the same
+ * way. The answer is only as right as `names` is complete: a real name missing from it reads as
+ * an abbreviation of the names that remain. */
+function completeName(prefix: string, names: readonly string[]): string | undefined {
+  if (names.includes(prefix)) return prefix;
+  const reachable = names.filter((name) => name.startsWith(prefix));
+  return reachable.length === 1 ? reachable[0] : undefined;
+}
+
+/** A long option's `=` and value are not part of its name. */
+function longOption(text: string, names: readonly string[]): string | undefined {
+  return completeName(text.split("=", 1)[0] as string, names);
+}
+
+/** A command's GNU long options, each mapped to whether it takes a required value: without a value
+ * joined by `=`, the next word is that value. A table lists every name the command's `--help` does
+ * (coreutils 9.4, GNU sed 4.9), not only the names the guard acts on, because `completeName`
+ * resolves an abbreviation against the whole table. */
+type LongOptions = Readonly<Record<string, boolean>>;
+
+const GNU_INFORMATION: LongOptions = { "--help": false, "--version": false };
+
+const MV_OPTIONS: LongOptions = {
+  "--backup": false,
+  "--context": false,
+  "--debug": false,
+  "--force": false,
+  "--interactive": false,
+  "--no-clobber": false,
+  "--no-copy": false,
+  "--no-target-directory": false,
+  "--strip-trailing-slashes": false,
+  "--suffix": true,
+  "--target-directory": true,
+  "--update": false,
+  "--verbose": false,
+  ...GNU_INFORMATION,
+};
+
+const CP_OPTIONS: LongOptions = {
+  "--archive": false,
+  "--attributes-only": false,
+  "--backup": false,
+  "--context": false,
+  "--copy-contents": false,
+  "--debug": false,
+  "--dereference": false,
+  "--force": false,
+  "--interactive": false,
+  "--link": false,
+  "--no-clobber": false,
+  "--no-dereference": false,
+  "--no-preserve": true,
+  "--no-target-directory": false,
+  "--one-file-system": false,
+  "--parents": false,
+  "--preserve": false,
+  "--recursive": false,
+  "--reflink": false,
+  "--remove-destination": false,
+  "--sparse": true,
+  "--strip-trailing-slashes": false,
+  "--suffix": true,
+  "--symbolic-link": false,
+  "--target-directory": true,
+  "--update": false,
+  "--verbose": false,
+  ...GNU_INFORMATION,
+};
+
+const INSTALL_OPTIONS: LongOptions = {
+  "--backup": false,
+  "--compare": false,
+  "--context": false,
+  "--debug": false,
+  "--directory": false,
+  "--group": true,
+  "--mode": true,
+  "--no-target-directory": false,
+  "--owner": true,
+  "--preserve-context": false,
+  "--preserve-timestamps": false,
+  "--strip": false,
+  "--strip-program": true,
+  "--suffix": true,
+  "--target-directory": true,
+  "--verbose": false,
+  ...GNU_INFORMATION,
+};
+
+const LN_OPTIONS: LongOptions = {
+  "--backup": false,
+  "--directory": false,
+  "--force": false,
+  "--interactive": false,
+  "--logical": false,
+  "--no-dereference": false,
+  "--no-target-directory": false,
+  "--physical": false,
+  "--relative": false,
+  "--suffix": true,
+  "--symbolic": false,
+  "--target-directory": true,
+  "--verbose": false,
+  ...GNU_INFORMATION,
+};
+
+interface WriteArguments {
+  readonly operands: Arg[];
+  readonly flags: Set<string>;
+  readonly directory: Arg | undefined;
+  readonly uncertain: Arg | undefined;
+}
+
+/** Whether bash passes this word to the command at all. A word of no fields — an unquoted empty
+ * value, `"${e[@]}"` of an empty array, `"$@"` of no positional parameters — produces NO
+ * argument, so it is not the last operand and cannot be the destination. Counting it made the
+ * real destination a source: `x=; cp payload "$HOME/.bashrc" $x` overwrote the profile. */
+function passesAnArgument(arg: Arg): boolean {
+  return arg.fields !== "none";
+}
+
+/** A write verb's arguments, read by its own grammar: the operands; the flags, from option words
+ * only, never from an option's value or past `--`; and the directory `-t` names. The first
+ * value-taking letter ends a cluster and takes the rest of its word, or the next word, as its
+ * value, even when that value looks like flags. A long option is resolved once, against the verb's
+ * whole table (`completeName`). A word before `--` that the guard cannot read whole and that may be
+ * an option is `uncertain`: it may be `-t` with another directory, or `-T`, so `writeDestinations`
+ * refuses to read a destination past it. */
+function writeArguments(rest: readonly Arg[], valued: string, long: LongOptions): WriteArguments {
+  const names = Object.keys(long);
+  const operands: Arg[] = [];
+  const flags = new Set<string>();
+  let directory: Arg | undefined;
+  let uncertain: Arg | undefined;
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i] as Arg;
+    const { text, whole } = readableWord(arg);
+    if (whole && text === "--") {
+      operands.push(...rest.slice(i + 1).filter(passesAnArgument));
+      break;
+    }
+    if (!whole || !text.startsWith("-") || text === "-") {
+      if (!whole && mayBeSomeOption(text)) uncertain = arg;
+      if (passesAnArgument(arg)) operands.push(arg);
+      continue;
+    }
+    let takesValue = false;
+    let offset: number | undefined;
+    if (text.startsWith("--")) {
+      const option = longOption(text, names);
+      if (option === undefined) continue;
+      flags.add(option);
+      takesValue = long[option] === true && !text.includes("=");
+      if (option === "--target-directory") offset = text.indexOf("=") + 1 || text.length;
+    } else {
+      for (let index = 1; index < text.length; index += 1) {
+        const letter = text.charAt(index);
+        flags.add(letter);
+        if (!valued.includes(letter)) continue;
+        takesValue = index === text.length - 1;
+        if (letter === "t") offset = index + 1;
+        break;
+      }
+    }
+    const next = takesValue ? rest[i + 1] : undefined;
+    if (takesValue) i += 1;
+    if (offset === undefined) continue;
+    const value = valueInWord(arg, offset);
+    directory = value === undefined ? next : { text: arg.text, exp: value };
+  }
+  return { operands, flags, directory, uncertain };
+}
+
+/** Where a write verb writes: its last operand under `-T`, else the directory a readable `-t`
+ * names, else the last of two or more operands. Rather than guess, it refuses a command in which a
+ * word it cannot read may be an option (`uncertain`, which may be `-t` with another directory), or
+ * which has fewer than two operands and no readable `-t`: neither is read as a command that writes
+ * nothing. */
+function writeDestinations(found: WriteArguments, site: Site): Arg[] {
+  if (
+    found.operands.length > 1 &&
+    (found.flags.has("T") || found.flags.has("--no-target-directory"))
+  ) {
+    return [found.operands.at(-1) as Arg];
+  }
+  if (found.directory !== undefined && !found.uncertain) return [found.directory];
+  if (found.operands.length < 2 || found.uncertain) {
+    const word = found.uncertain?.text ?? found.operands.at(-1)?.text ?? "missing destination";
+    throw new Refusal(
+      site.snippet,
+      site.line,
+      `the guard cannot read a write destination from \`${word}\`; put \`--\` before operands, or use \`-T\` to name the last operand as the destination`
+    );
+  }
+  return [found.operands.at(-1) as Arg];
+}
+
+/** Inspect existing destinations, not the source tree: a fresh copy has nothing to overwrite.
+ * Source spelling matters: `src/.` names the contents, and --parents keeps the written path. */
+function checkCopyContents(
+  found: WriteArguments,
+  destinations: readonly Arg[],
+  st: State,
+  ctx: Ctx,
+  site: Site
+): void {
+  // A word the guard cannot read may itself be -r, so the destination tree is walked for it too:
+  // under -T, writeDestinations does not refuse an uncertain word, and skipping the walk there let a
+  // nested link outside the roots be written through.
+  const recursive =
+    found.uncertain ||
+    ["r", "R", "a", "--recursive", "--archive"].some((flag) => found.flags.has(flag));
+  const direct = found.flags.has("T") || found.flags.has("--no-target-directory");
+  for (const destination of destinations) {
+    const text = literalText(destination.exp);
+    if (text === undefined || (!path.isAbsolute(text) && st.cwd === undefined)) continue;
+    const dir = realExisting(path.resolve(st.cwd ?? "/", text));
+    if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) continue;
+    for (const source of found.operands) {
+      if (destinations.includes(source)) continue;
+      const name = literalText(source.exp);
+      const from = name === undefined ? undefined : path.resolve(st.cwd ?? "/", name);
+      const knownTree =
+        from !== undefined && statSync(from, { throwIfNoEntry: false })?.isDirectory();
+      const root =
+        direct || name === undefined
+          ? dir
+          : path.join(dir, found.flags.has("--parents") ? name : path.basename(name));
+      const pending = [root];
+      while (pending.length > 0) {
+        const target = pending.pop() as string;
+        checkTargets(
+          "cp",
+          "overwrite",
+          [{ text: name === undefined ? source.text : target, exp: [literal(target)] }],
+          WRITES_THROUGH_LINK,
+          st,
+          ctx,
+          site
+        );
+        if (!recursive && !(name === undefined && target === root)) continue;
+        if (!lstatSync(target, { throwIfNoEntry: false })?.isDirectory()) continue;
+        const entries = opendirSync(target);
+        try {
+          for (let entry = entries.readSync(); entry !== null; entry = entries.readSync()) {
+            if (++ctx.steps.count > MAX_WALK_STEPS) {
+              throw new Refusal(site.snippet, site.line, WALK_LIMIT);
+            }
+            const child = path.join(target, entry.name);
+            // An existing source tree cannot write an entry absent from it. When the source is
+            // unreadable or not on disk yet, any destination entry may be selected.
+            if (knownTree && !existsSync(path.join(from, path.relative(root, child)))) continue;
+            pending.push(child);
+          }
+        } finally {
+          entries.closeSync();
+        }
+      }
+    }
+  }
+}
+
+/** GNU sed 4.9's long options (`LongOptions`); `--in-place` takes its suffix only joined. */
+const SED_OPTIONS: LongOptions = {
+  "--debug": false,
+  "--expression": true,
+  "--file": true,
+  "--follow-symlinks": false,
+  "--in-place": false,
+  "--line-length": true,
+  "--null-data": false,
+  "--posix": false,
+  "--quiet": false,
+  "--regexp-extended": false,
+  "--sandbox": false,
+  "--separate": false,
+  "--silent": false,
+  "--unbuffered": false,
+  ...GNU_INFORMATION,
+};
+
+/** A word `sed` may take as an operand. */
+interface SedOperand {
+  readonly arg: Arg;
+  /** It may be an option instead: a word the guard cannot read, or one bash may split before `--`. */
+  readonly option: boolean;
+  /** Bash may split it into several words, or none. */
+  readonly several: boolean;
+}
+
+/** What `sed` may rewrite in place: once in place is on, every operand but the script. `-i` takes
+ * an optional suffix joined to it and so ends its cluster (`-ni` is in place, `-ie` is in place
+ * with the suffix `e`); `-e`, `-f` and `-l` take a value, joined or as the next word; and with no
+ * `-e` or `-f` the first operand is the script, which is no path. Without `--follow-symlinks`,
+ * `sed -i` replaces a symlink it names with a regular file and leaves what the link pointed at
+ * alone; with it, it rewrites that file. Both are measured in `pane-guard-write-rows.ts`.
+ *
+ * A word the guard cannot read is one argument, unless bash may split it, so it plays one part: the
+ * in-place option, an option that supplies the script (`-es/a/b/`), `--follow-symlinks`, or an
+ * operand, which is the script when no option supplies one and no operand stands before it. A file
+ * is rewritten when some choice of parts turns in place on and leaves the file an operand that is
+ * not the script, and rewritten through a link when that choice can also follow links. Each part a
+ * word the guard reads does not settle takes an unread word of its own. So `sed -n "$range"
+ * "$file"` rewrites nothing: read as `-i`, the first word leaves the second the script, and read as
+ * the script it leaves in place off. A word bash may split can play every part at once and carry
+ * the file it rewrites, so it is judged itself. An unread word never takes the next word as its
+ * value, since keeping that word as an argument only adds readings, except where the next word is
+ * `--`: a `--` that is a value ends no options, so the words after it are read both ways. */
+function sedWrites(list: readonly Arg[]): {
+  /** Files a reading rewrites, replacing a symlink the file is with a regular file. */
+  replaced: Arg[];
+  /** Files a reading rewrites through a symlink; another reading may replace the link instead. */
+  followed: Arg[];
+  /** Some reading turns in place on, so files a caller appends (`xargs`, `find -exec`) may be
+   * rewritten. */
+  inPlace: boolean;
+  /** No option word the guard reads turns in place on: only a word it cannot read may be `-i`,
+   * which the refusal says rather than claiming the line carries one. */
+  inferred: boolean;
+} {
+  const names = Object.keys(SED_OPTIONS);
+  let inPlace = false;
+  let follow = false;
+  let expression = false;
+  let splitOption = false;
+  // Past a `--` that ends the options, and past one an unread option may have taken as its value.
+  let ended = false;
+  let reopened = false;
+  // The word before may be an unread option whose value is this word.
+  let takesNext = false;
+  const unread: Arg[] = [];
+  const operands: SedOperand[] = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const arg = list[i] as Arg;
+    const { text, whole } = readableWord(arg);
+    const afterUnread = takesNext;
+    takesNext = false;
+    const several = arg.fields === "unknown";
+    if (ended) {
+      operands.push({ arg, option: false, several });
+      continue;
+    }
+    if (whole && text === "--") {
+      if (reopened) operands.push({ arg, option: false, several: false });
+      if (afterUnread) reopened = true;
+      else ended = true;
+      continue;
+    }
+    if (several) {
+      splitOption = true;
+      takesNext = true;
+      operands.push({ arg, option: true, several });
+      continue;
+    }
+    if (!text.startsWith("-") || (whole && text === "-")) {
+      // A word the guard reads none of may be an option; one led by other text is an operand.
+      const option = !whole && text === "";
+      if (option) {
+        unread.push(arg);
+        takesNext = true;
+      }
+      operands.push({ arg, option, several });
+      continue;
+    }
+    // Past a `--` that may have been a value, an option word may instead be an operand.
+    if (reopened) operands.push({ arg, option: false, several });
+    if (text.startsWith("--")) {
+      const option = longOption(text, names);
+      if (whole && !reopened && (option === "--help" || option === "--version")) {
+        return { replaced: [], followed: [], inPlace: false, inferred: false };
+      }
+      if (option === "--in-place") inPlace = true;
+      if (option === "--follow-symlinks") follow = true;
+      if (option === "--expression" || option === "--file") expression = true;
+      // A long word the guard cannot read whole, and cannot name from what it read, may be any.
+      if (option === undefined && !whole) unread.push(arg);
+      if ((option === undefined ? !whole : SED_OPTIONS[option]) && !text.includes("=")) {
+        if (whole && !reopened) i += 1;
+        else takesNext = true;
+      }
+      continue;
+    }
+    let settled = false;
+    for (const [offset, letter] of [...text.slice(1)].entries()) {
+      if (letter === "i") {
+        inPlace = true;
+        settled = true;
+        break;
+      }
+      if ("efl".includes(letter)) {
+        if (letter !== "l") expression = true;
+        // The value is the rest of this word, or the next one when nothing follows the letter.
+        if (offset === text.length - 2) {
+          if (whole && !reopened) i += 1;
+          else takesNext = true;
+        }
+        settled = true;
+        break;
+      }
+    }
+    // A cluster the guard cannot read whole may still gain any option past what it read.
+    if (!settled && !whole) {
+      unread.push(arg);
+      takesNext = true;
+    }
+  }
+  // A part no word the guard reads settles takes an unread word of its own: in place; the file not
+  // being the script, which an option supplying the script or an operand before it settles; and
+  // following links. A word bash may split settles all three, and stands as a file itself.
+  const unsettled = (settled: boolean): number => (settled ? 0 : 1);
+  const replaced: Arg[] = [];
+  const followed: Arg[] = [];
+  let before = false;
+  for (const operand of operands) {
+    const maybe = operand.option && !operand.several;
+    const others = unread.length - (maybe ? 1 : 0);
+    const needed =
+      unsettled(inPlace || splitOption) +
+      unsettled(expression || splitOption || operand.several || before);
+    if (others >= needed + unsettled(follow || splitOption)) followed.push(operand.arg);
+    else if (others >= needed) replaced.push(operand.arg);
+    if (!maybe) before = true;
+  }
+  return {
+    replaced,
+    followed,
+    inPlace: inPlace || splitOption || unread.length > 0,
+    inferred: !inPlace,
+  };
 }
 
 function checkRecursiveMode(
@@ -4141,7 +4828,15 @@ function checkRecursiveMode(
   const verb =
     program === "chmod" ? "recursively change the mode of" : "recursively change the owner of";
   if (recursive) {
-    checkTargets(`${program} -R`, verb, reference ? found : found.slice(1), true, st, ctx, site);
+    checkTargets(
+      `${program} -R`,
+      verb,
+      reference ? found : found.slice(1),
+      ACTS_THROUGH_LINK,
+      st,
+      ctx,
+      site
+    );
     return;
   }
   // No option the guard read is `-R`, but an operand it could not read whole may be one. Under
@@ -4157,7 +4852,7 @@ function checkRecursiveMode(
     const others = arg.fields === "unknown" ? found : found.filter((_, at) => at !== index);
     const targets = reference || arg.fields === "unknown" ? others : others.slice(1);
     if (targets.length === 0) continue;
-    checkTargets(`${program} -R`, verb, targets, true, st, ctx, site);
+    checkTargets(`${program} -R`, verb, targets, ACTS_THROUGH_LINK, st, ctx, site);
   }
 }
 
@@ -4216,7 +4911,15 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
     if (end === -1) continue;
     const inner = unwrap(list.slice(i + index + 1, i + end), st, ctx, site);
     const program = path.basename(literalText(inner.argv[0]?.exp) ?? "");
-    if (FILE_COMMANDS.has(program) || program === "xargs") action = `find ${word} ${program}`;
+    // `sed` counts only where it writes: `find <root> -exec sed -i` rewrites what it finds, and
+    // `find <root> -exec sed -n` reads it.
+    if (
+      FILE_COMMANDS.has(program) ||
+      program === "xargs" ||
+      (program === "sed" && sedWrites(inner.argv.slice(1)).inPlace)
+    ) {
+      action = `find ${word} ${program}`;
+    }
     if (SHELLS.has(program)) {
       action = `find ${word} ${program}`;
       shell = inner.argv;
@@ -4232,14 +4935,22 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
       "find with a root the guard cannot read, which may be a predicate",
       "delete or change what it finds under",
       under,
-      false,
+      ACTS_ON_LINK,
       st,
       ctx,
       site
     );
     return;
   }
-  checkTargets(action, "delete or change what it finds under", targets, false, st, ctx, site);
+  checkTargets(
+    action,
+    "delete or change what it finds under",
+    targets,
+    ACTS_ON_LINK,
+    st,
+    ctx,
+    site
+  );
   if (shell === undefined) return;
   const found = targets.length === 1 ? (targets[0]?.exp ?? []) : [unknown("a path `find` found")];
   const argv = shell.map((arg) =>
@@ -4289,7 +5000,11 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
               };
         });
   const program = path.basename(literalText(argv[0]?.exp) ?? "");
-  if (FILE_COMMANDS.has(program) || SIGNAL_COMMANDS.has(program)) {
+  if (
+    FILE_COMMANDS.has(program) ||
+    SIGNAL_COMMANDS.has(program) ||
+    (program === "sed" && sedWrites(argv.slice(1)).inPlace)
+  ) {
     throw new Refusal(
       site.snippet,
       site.line,

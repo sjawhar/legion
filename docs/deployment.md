@@ -13,14 +13,25 @@ each phase worker's and root architect's tool calls, and those of any `task` sub
 to a boundary before they run; it refuses the shared jj operation-log rewrites (LEGION-45) and,
 since LEGION-121, destructive commands and signals outside the pane's own work. A `bash` command,
 `eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`, `find -exec rm`,
-`shred`), move (`mv`), truncate (`truncate`), overwrite by redirection or `tee` (an existing file
-only), or recursively change the mode or owner (`chmod -R`, `chown -R`) of paths under the pane's
+`shred`), move (`mv`), truncate (`truncate`), overwrite by redirection, `tee`, `cp`, `dd of=`,
+`install`, `ln` or `sed -i` (an existing file only; a symlink the same command creates and then
+writes through is not on disk when the guard reads the command), or recursively change the mode
+or owner (`chmod -R`, `chown -R`) of paths under the pane's
 issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below `/tmp` except
 `/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp` directory that
 holds the pane's `HOME` or `TMUX_TMPDIR` when either sits there, by that directory's exact name (an
 e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which other permitted
-`/tmp` directory belongs to this pane. It parses the command with a bash parser and resolves each
-target as bash would: through `$HOME`, `~`, variables set earlier in the same command,
+`/tmp` directory belongs to this pane.
+**Known shapes that still reach outside the roots
+are tracked rather than covered: a value re-parsed by `eval` or `bash -c` (LEGION-375), an
+expansion slice (LEGION-376), the files a `sed` SCRIPT names through `w`, `W`, `s///w`, `e` or
+`s///e`, which the guard does not read (LEGION-377), and a word bash passes no argument for — an
+unquoted empty value, an empty `"${a[@]}"` — read as a command name, a wrapper's or `xargs`'s or
+`find -exec`'s program, or `cd`'s directory (LEGION-378).**
+It parses the command with a bash parser and resolves each
+target as bash would: through `$HOME`, `~` (at the start of a word and after the `=` of an
+assignment-like prefix, so `dd of=~/x` is the home directory), variables set earlier in the same
+command,
 `$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename` and `readlink -f` print,
 pattern replacement and removal of a known ASCII value (`${v//a/b}`, `${v#*:}`), a function's
 output, command substitutions, and the scripts the command runs (`bash <file>`, `sh -c`, `source`,
@@ -68,6 +79,54 @@ a resolved path outside the pane roots. `kill` only reaches a pid that `/proc` s
 from the pane's own Oh My Pi process. Every refusal names the target, where it resolved, and the
 rule, so the agent can rewrite the command.
 
+Which operand a write verb's destination is comes from that verb's own grammar, measured rather
+than assumed: `cp` and `install` write their last operand, or the directory `-t` names, where
+every other operand is a source they read; `install -d` creates directories, so there every operand
+is judged. `mv` uses the same option reader and also judges the
+sources it moves. The reader stops at `--` and at the first value-taking letter in a cluster,
+and accepts GNU's unambiguous long-option abbreviations. Any word before `--` that the guard
+cannot read whole and that may be an option — a glob, a
+command's output, an unquoted expansion — refuses `cp`, `mv`, `install` and `ln`, since one
+reading of it hides a destination; the refusal names the written word and the `--` or `-T`
+remedy, rather than treating the command as one with no destination. A `-T` the guard HAS read
+settles which operand is the destination, so an unreadable word after it is no longer a possible
+destination; it is still judged for the other things it may be, an `-r` or a backup option among
+them. The accepted cost is four shapes that refuse where a person can see they are
+harmless: a bare glob, or an array built inside a loop or an `if`, before `--` with `cp`, `mv`,
+`install` or `ln` — so `cp *.txt dir/`, `mv *.txt dir/` and `cp "${files[@]}" dir/` over a
+loop-built array are refused, because a glob or an element can be a `-t<link>` pointing out of the
+roots, while `cp -- *.txt dir/`, `cp -- "${files[@]}" dir/` and `./*.txt` are allowed; `xargs` into
+`cp` or `sed -i` with unreadable operands; a glob loop into `cp` with neither a literal prefix nor
+`--`; and a
+read-only `sed` whose options come from an array of `-e` and its script built inside a loop, an
+`if`, or an `&&`/`||` list — even one whose condition is known, since the guard merges the
+branches and forgets the elements (a `case` over a literal keeps them) — so it cannot pair each
+`-e` with the element it consumes and reads those elements, which are sed scripts it does not
+read, as words that may stand alone and turn on `-i`.
+Help and version options do not write. `cp` judges the source basename as
+written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`
+retains the source path. It inspects only existing destination entries, recursively for a recursive
+copy and under the same walk limit as shell syntax, without traversing the source tree. After `--`,
+an unreadable basename is allowed when the possible destination entries stay inside the roots.
+A single glob in a `for` loop retains its expansion only when its first piece is a nonempty
+literal starting with a character other than `-`, such as `./*.txt` or `src/*.go`. Wildcard-led
+and dash-led loop values stay unknown for every command, including `truncate` and redirections,
+not only copy commands. `dd` writes the path inside its `of=` word, wherever that
+word stands. `ln` writes its last operand, or the working directory when given one operand the
+guard reads whole, and a hard link (no `-s`) also makes its source writable under the new name,
+which no later command can resolve as it can a symlink. `sed` is judged on the files it names with
+`-i`, including inside a cluster (`-ni`) and
+with a suffix joined to it (`-i.bak`) — **the files its SCRIPT names are not judged at all
+(LEGION-377)**; a word the guard cannot read may itself be that `-i`, and
+the readings are judged together rather than worst-of-each, so a quoted word plays one part at a
+time and a read-only `sed -n` over two of them is allowed, while a word bash may make several of —
+one it splits, or a quoted `"$@"` or `"${a[@]}"` whose element count the guard does not know,
+which bash expands into one argument per element — plays every part at once and is judged as a
+file as well. A quoted `"${a[*]}"`, and a scalar whatever it was assigned from, stay one
+argument. A refusal says the `-i` was inferred. A verb that replaces a symlink is judged on the link
+(`sed -i`), one that writes through it on what it points at (`cp`, `dd`), and `install` and `ln`,
+which do one or the other depending on whether the link leads to a directory, on both.
+
 A word the guard cannot read whole is not read as harmless. Where a word selects a dangerous
 option or subcommand — an extract mode and `-C` for `tar`, `-d` for `unzip`, `-k` for `fuser`,
 a kill subcommand for `tmux`, `-R` for `chmod` and `chown`, a `find` predicate, `-n` for
@@ -111,12 +170,15 @@ program or anything a command runs without naming it on the command line (a `mak
 runner, `npm run`), a program whose name is itself a variable or a command's output
 (`$cmd`, `eval "$(tool)"`), Python or JavaScript whose paths or pids come from values it cannot
 evaluate (the `eval` tool's kernels included; known prefixes are still judged), and interpreters
-the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above that overwrite
-a destination (`cp`, `dd`, `ln -f`, `install`), an edit in place (`sed -i`), a directory reached
-through a `cd` that failed, and the `write` and `edit` tools. A `>>` append to a file the guard
-holds no model of — one no redirect or `tee` in the same command named — leaves that file's
-contents unknown, never empty: the append is allowed, and running that file in the same command is
-refused rather than read as holding only what was appended. A file the same command wrote is read
+the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above (`tar -cf`,
+`tar -xPf` with absolute members, `patch`, `gzip`, `ex`), a directory reached through a `cd` that
+failed, and the `write` and `edit` tools. The write-verb checks prevent the named overwrites, not
+every shell write: `>>` and `tee -a` appends outside the roots remain unjudged
+(tracked separately as LEGION-368).
+A `>>` append to a file the guard holds no model
+of — one no redirect or `tee` in the same command named — leaves that file's contents unknown,
+never empty: the append is allowed, and running that file in the same command is refused rather
+than read as holding only what was appended. A file the same command wrote is read
 as its model says, so writing a script with `>` and then running it still works. The model is per
 command, and it records a write whose content the guard renders (`echo >`, `printf >`,
 `cat > <<EOF`, `tee f <<EOF`) wherever it read that write, whether or not the shell would run it:

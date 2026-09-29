@@ -748,9 +748,10 @@ for (const [row, clipboard, header, body] of [
   ["last", emptyLastRow, ["a", "b"], ["", ""]],
 ] as const) {
   const rows = tableRows(header, body);
-  // Both readers give back the stored bytes exactly, except in a tight list item: pmdoc writes its
-  // blocks one line apart, so the paragraph after the table reads back as one more table row, in Go
-  // as in the engine (LEGION-290). There only the table's own rows read back.
+  // Both readers give back the stored bytes exactly, except in a tight list item: a paragraph after
+  // a table there is written after a blank line, so it does not read back as one more table row,
+  // and the blank line reads back as a spread item, the canonicalisation markdown has for it, in Go
+  // as in the engine (LEGION-290). There only the table's own rows are compared.
   for (const [context, spec, stored, indent, readsBackExactly] of [
     ["a paragraph", "Intro end.\n", `Intro\n\n${rows}\n&#32;end.\n`, "", true],
     [
@@ -764,7 +765,7 @@ for (const [row, clipboard, header, body] of [
     [
       "a nested list",
       "- top\n  - Intro end\n",
-      `- top\n  - Intro\n${tableRows(header, body, "    ")}    &#32;end\n`,
+      `- top\n  - Intro\n${tableRows(header, body, "    ")}\n    &#32;end\n`,
       "    ",
       false,
     ],

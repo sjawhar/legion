@@ -203,18 +203,19 @@ func TestRenderEscapesOrderedListLookingParagraphs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markdown != "1\\. not a list\n2\\) also not a list\n" {
+	if markdown != "1\\. not a list\\\n2\\) also not a list\n" {
 		t.Fatalf("Render() = %q", markdown)
 	}
 	back, err := Parse(markdown)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The newline inside the text node renders as a soft break, which parses back as a space.
-	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
-		Type: "text",
-		Text: "1. not a list 2) also not a list",
-	}}}}}
+	// The line feed inside the text node is written as the hard break the browser editor draws.
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: "1. not a list"},
+		{Type: "hardbreak", Attrs: Attrs{"isInline": false}},
+		{Type: "text", Text: "2) also not a list"},
+	}}}}
 	if !back.Equal(want) {
 		t.Fatalf("Parse(Render()) = %#v, want %#v", back, want)
 	}

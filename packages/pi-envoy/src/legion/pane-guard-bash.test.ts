@@ -24,6 +24,12 @@ import {
   PATH_ROWS,
   type PathRowResult,
 } from "./pane-guard-path-rows";
+import {
+  fixtureProperties,
+  measureWriteRow,
+  WRITE_ROWS,
+  writeRefusalMatches,
+} from "./pane-guard-write-rows";
 
 // The guard evaluates `${v#…}`, `${v%…}` and `${v/…/…}` itself (pane-guard-bash.ts), decides
 // `${v-…}` and `${v+…}` by whether a parameter is set, and binds a function's arguments. Held to
@@ -346,24 +352,15 @@ test("every write to a variable is bash's own, and never leaves a stale value to
 // directory the guard may not search diverges with no `..` anywhere. These rows are judged by
 // what real bash did to a canary HOME, never by their names (LEGION-355).
 //
-// Two residuals, both allowed here and both with their own controls in the batch:
-//
-// - `cp`, `dd`, `install` and `ln` are not path-matched at all, so their `..` rows are allowed —
-//   and so is their own no-`..` control, which is what says the `..` is not what lets them
-//   through. That is #1551's create-the-target residual (LEGION-357).
-// - The command changing, during its own run, the namespace the guard resolved against: it
-//   retargets a link the guard already followed, or it creates the component that decides where
-//   the path lands (`ln -s .. sub/made; echo <payload> >> sub/made/unread.sh`, which carries no
-//   `..` in the written path at all — the `..` is the link's target). Resolving harder cannot
-//   reach either: the first reading was right when it was taken, and in the second there was
-//   nothing on disk to read. The `prelink.*` rows are the discriminator — the same write through
-//   a link ALREADY on disk is refused here and allowed at base.
+// One residual remains, allowed here and with its own controls in the batch: the command changing,
+// during its own run, the namespace the guard resolved against. It retargets a link the guard
+// already followed, or creates the component that decides where the path lands (`ln -s .. sub/made;
+// echo <payload> >> sub/made/unread.sh`, which carries no `..` in the written path at all — the
+// `..` is the link's target). Resolving harder cannot reach either: the first reading was right
+// when it was taken, and in the second there was nothing on disk to read. The `prelink.*` rows are
+// the discriminator — the same write through a link ALREADY on disk is refused here and allowed at
+// base.
 const PATH_ROW_RESIDUAL = [
-  "cp.dotdot.symlink",
-  "cp.symlink.nodotdot",
-  "dd.dotdot.symlink",
-  "install.dotdot.symlink",
-  "ln.sf.dotdot.symlink",
   "retarget.realdir.dotdot",
   "retarget.script",
   "madelink.append",
@@ -374,9 +371,10 @@ const PATH_ROW_RESIDUAL = [
   "retarget.truncate",
 ];
 
-// The copy family is the one place a control does not fire, and that is the finding rather than a
-// gap: its no-`..` must-refuse leaks identically to its `..` rows.
-const PATH_ROW_CONTROL_EXEMPT = ["cp.symlink.nodotdot"];
+// This row became a current-guard control when the forward merge added destination judgement; its
+// merge-base guard did not inspect `cp` destinations, so it cannot be used to test LEGION-355's
+// invariant across that base.
+const PATH_ROW_BASE_CONTROL_EXEMPT = ["cp.symlink.nodotdot"];
 
 test("the path battery's rows measure the property they name", () => {
   // `path.join` normalises a `..` away, so a row whose property is the `..` and whose fixture was
@@ -463,7 +461,7 @@ test("a must-refuse row is a control, not a probe: refused at the merge base's g
   const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-base-control-"));
   try {
     const mustRefuse = PATH_ROWS.filter(
-      (row) => row.role === "must-refuse" && !PATH_ROW_CONTROL_EXEMPT.includes(row.name)
+      (row) => row.role === "must-refuse" && !PATH_ROW_BASE_CONTROL_EXEMPT.includes(row.name)
     );
     const stillAllowedAtBase = mustRefuse
       .filter((row) => measureRow(row, root, baseCreatePaneGuard).refusal === undefined)
@@ -487,7 +485,7 @@ test("a target is judged as the kernel resolves it, not as the text reads", () =
     expect(live.length).toBeGreaterThan(20);
     expect(
       named(results.filter((r) => r.row.role === "must-refuse" && r.refusal === undefined))
-    ).toEqual([...PATH_ROW_CONTROL_EXEMPT].sort());
+    ).toEqual([]);
 
     // The claim: every command real bash used to damage the canary is refused.
     expect(named(live.filter((result) => result.refusal === undefined))).toEqual(
@@ -706,3 +704,68 @@ test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
   }
   expect(observed).toEqual(expected);
 }, 60_000);
+
+// The verbs that write a path they name (LEGION-357): `cp`, `dd of=`, `install`, `ln` and
+// `sed -i`, each through the operand its own grammar makes the destination. Every row is measured
+// twice — what the guard returns, and whether real bash changed anything under a canary HOME in
+// the row's own fixture — so no row carries a written-down verdict for the dangerous direction.
+// What bash did is the expectation, and a row that stops destroying the canary stops demanding a
+// refusal rather than passing quietly — it fails the probe-is-live check below instead, so a row
+// that has quietly stopped measuring anything is reported rather than counted as a pass.
+test("a command that writes a path it names is judged, whatever grammar names it", () => {
+  const results = WRITE_ROWS.map((row) => measureWriteRow(base, row, createPaneGuard));
+
+  // The fixture, as booleans: no row means anything if its links point elsewhere, and a digest
+  // over an empty home would make every row look intact.
+  expect(Object.entries(fixtureProperties(base)).filter(([, held]) => !held)).toEqual([]);
+  // The measurement discriminates: most rows really do change something outside the roots.
+  expect(results.filter((result) => result.live).length).toBeGreaterThan(WRITE_ROWS.length / 2);
+  expect(results.filter((r) => r.row.role === "probe" && !r.live).map((r) => r.row.name)).toEqual(
+    []
+  );
+  expect(
+    results.filter((r) => r.error !== undefined).map((r) => `${r.row.name}: ${r.error}`)
+  ).toEqual([]);
+  expect(
+    results
+      .filter((r) => r.row.role === "unreadable" && r.refusal === undefined)
+      .map((r) => r.row.name)
+  ).toEqual([]);
+  expect(results.filter((r) => !writeRefusalMatches(r)).map((r) => r.row.name)).toEqual([]);
+
+  // Every row the guard allows while bash changed the canary, by name. The list is the boundary
+  // `docs/deployment.md` documents, not a tolerance: a path that does not exist yet overwrites nothing (`judgePath`'s
+  // `overwrite`), and a link created and written through in the same command is not yet on disk
+  // when the guard reads it. Existing links are covered by the separate-call copy probes.
+  // A new name here is a leak; a name that leaves is a boundary someone moved on purpose.
+  expect(
+    results.filter((result) => result.live && result.refusal === undefined).map((r) => r.row.name)
+  ).toEqual(WRITE_ROWS.filter((row) => row.role === "residual").map((row) => row.name));
+
+  // The cost side, which nothing derived from bash can supply: a command the pane is meant to be
+  // able to run, still allowed.
+  expect(
+    results
+      .filter((result) => result.row.role === "must-allow" && result.refusal !== undefined)
+      .map((result) => `${result.row.name}: ${result.refusal}`)
+  ).toEqual([]);
+}, 180_000);
+
+// `dd` keeps its destination inside an operand word, so its refusal names that word whole, as
+// `tar -C`'s does. That is why it is not in `pane-guard.test.ts`'s family matrix, whose contract
+// is that a refusal names the target as written.
+test("dd's refusal names the operand word that carries the path", () => {
+  const home = path.join(base, "dd-home");
+  const workspace = path.join(base, "dd-ws");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(path.join(home, ".bashrc"), "profile\n");
+  const ddGuard = createPaneGuard({ workspace, ompPid: process.pid, scratch });
+  const reason = ddGuard.bash('dd if=/dev/zero of="$HOME/.bashrc"', workspace, {
+    ...env,
+    HOME: home,
+    LEGION_WORKSPACE: workspace,
+  });
+  expect(reason).toContain('dd would write `of="$HOME/.bashrc"`');
+  expect(reason).toContain(path.join(home, ".bashrc"));
+});

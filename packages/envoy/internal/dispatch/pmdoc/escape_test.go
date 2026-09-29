@@ -473,14 +473,14 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {
 	for _, test := range []struct {
-		text string
-		want string
+		text        string
+		first, next string
 	}{
-		{text: "Title\n===", want: "Title ==="},
-		{text: "Title\n--", want: "Title --"},
-		{text: "a | b\n--- | ---", want: "a | b --- | ---"},
-		{text: "Title\n:--", want: "Title :--"},
-		{text: "Title\n-:", want: "Title -:"},
+		{text: "Title\n===", first: "Title", next: "==="},
+		{text: "Title\n--", first: "Title", next: "--"},
+		{text: "a | b\n--- | ---", first: "a | b", next: "--- | ---"},
+		{text: "Title\n:--", first: "Title", next: ":--"},
+		{text: "Title\n-:", first: "Title", next: "-:"},
 	} {
 		t.Run(test.text, func(t *testing.T) {
 			doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
@@ -495,13 +495,14 @@ func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%q) = %v", markdown, err)
 			}
-			// The newline renders as a soft break, which parses back as a space.
-			want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
-				Type: "text",
-				Text: test.want,
-			}}}}}
+			// The line feed is written as the hard break the browser editor draws it as.
+			want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+				{Type: "text", Text: test.first},
+				{Type: "hardbreak", Attrs: Attrs{"isInline": false}},
+				{Type: "text", Text: test.next},
+			}}}}
 			if !back.Equal(want) {
-				t.Fatalf("Parse(Render()) of %q = %q, want %q", test.text, mustRender(t, back), test.want)
+				t.Fatalf("Parse(Render()) of %q = %q, want %q then %q on its own line", test.text, mustRender(t, back), test.first, test.next)
 			}
 		})
 	}

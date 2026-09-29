@@ -472,13 +472,13 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1") // the file's fixture (`:32-41`): testConfig under runtime: kubernetes
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
-		URL: "https://secrets.dev1.internal.trajectorylabs.com", Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 1800,
+		URL: "https://secrets.internal.example", Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 1800,
 	}
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := &sandbox.AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: 30 * time.Minute}
+	want := &sandbox.AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: 30 * time.Minute}
 	if opts.AgentSecrets == nil || *opts.AgentSecrets != *want {
 		t.Fatalf("AgentSecrets = %+v, want %+v", opts.AgentSecrets, want)
 	}

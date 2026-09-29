@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/yuin/goldmark/util"
 )
 
 // inlineContext is where one run of inline nodes is written.
@@ -78,10 +80,12 @@ type lineCandidate struct {
 // alone can still pair into a mark the text never had, or break one it has: GFM reads a single
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
 // across a hard break, around a reference or inside a link label. Linkify continues a bare URL
-// into the text written right after it, which a backslash escape had stopped as written. A run
-// whose text holds either is read back after it is written, and when it does not come back as
-// written it is written again in each spelling respellings lists, keeping the first that reads
-// back, so a run that fails for another reason keeps the bytes it had.
+// into the text written right after it, which a backslash escape had stopped as written. A mark's
+// delimiter run beside punctuation inside it and a letter outside it opens or closes nothing
+// (`**Which here?**Careful.`). A run whose text holds any of these is read back after it is
+// written, and when it does not come back as written it is written again in each spelling
+// respellings lists, keeping the first that reads back, so a run that fails for another reason
+// keeps the bytes it had.
 //
 // And the marks are written in one order, so a mark the next text still carries is closed and
 // opened again inside that text's other marks wherever the order puts it after them: bold inside
@@ -90,12 +94,26 @@ type lineCandidate struct {
 // is kept, as main writes it, and one that does not is written again in the plain respellings, as
 // main writes it again. Only where none of those reads back is it written with open marks kept
 // open (keepingOpen), each such spelling kept only where it reads back with no delimiter run fused.
+// Last come those spellings again with the letter beside each such delimiter run written as a
+// character reference, which is punctuation to the flanking rules, as the browser editor writes it
+// (flanking).
+//
+// A spelling is taken first where it reads back by CommonMark's flanking rules as well
+// (flankingOnlyMarkdown), the rules goldmark reads by, and only where none does by the browser
+// editor's alone, which also let a run beside another `*` or `_` open or close (emphasisParser):
+// the writer keeps the bytes it wrote while it read by CommonMark's rules, wherever they read back
+// by the editor's too.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
 	bareURL := textAfterBareURL(nodes, context.tableCell)
-	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused || r.runReadsBack(from, prefix, nodes) {
+	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
+		return
+	}
+	firstReadsBack := r.runReadsBack(from, prefix, nodes, inlineMarkdown)
+	if firstReadsBack && r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
@@ -103,11 +121,25 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	if fused {
 		spellings = append(spellings, respellings(held, bareURL, true)...)
 	}
-	for _, spelling := range spellings {
-		r.b.Truncate(from)
-		fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
-		if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes) {
-			return
+	if flanking {
+		flanked := []runSpelling{{flanking: true}}
+		for _, spelling := range spellings {
+			spelling.flanking = true
+			flanked = append(flanked, spelling)
+		}
+		spellings = append(spellings, flanked...)
+	}
+	for _, flankingToo := range []bool{true, false} {
+		if !flankingToo && firstReadsBack {
+			break
+		}
+		for _, spelling := range spellings {
+			r.b.Truncate(from)
+			fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
+			if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes, inlineMarkdown) &&
+				(!flankingToo || r.runReadsBack(from, prefix, nodes, flankingOnlyMarkdown)) {
+				return
+			}
 		}
 	}
 	r.b.Truncate(from)
@@ -115,12 +147,15 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 }
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
-// text it escapes, whether it escapes the character after each bare URL (endsBareURL), and whether
-// a mark the next text still carries stays open around that text's other marks (keepingOpen).
+// text it escapes, whether it escapes the character after each bare URL (endsBareURL), whether
+// a mark the next text still carries stays open around that text's other marks (keepingOpen), and
+// whether a letter beside a delimiter run that punctuation stands inside is a character reference
+// (flanking).
 type runSpelling struct {
 	escapes      delimiterEscapes
 	afterBareURL bool
 	keepOpen     bool
+	flanking     bool
 }
 
 // respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
@@ -190,16 +225,89 @@ func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
 	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes)
 }
 
-// runReadsBack reports whether the inline markdown written since from reads back as nodes: the
-// run's own lines, with the prefix its later lines are written behind taken off, read after a
-// definition for each footnote label it refers to, since a reference reads as one only then.
-func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
+// runReadsBack reports whether the inline markdown written since from reads back as nodes by
+// reader: the run's own lines, with the prefix its later lines are written behind taken off, read
+// after a definition for each footnote label it refers to, since a reference reads as one only
+// then.
+func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader inlineReader) bool {
 	source := string(r.b.Bytes()[from:])
 	if prefix != "" {
 		source = strings.ReplaceAll(source, "\n"+prefix, "\n")
 	}
-	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes))
+	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes), reader)
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
+}
+
+// delimiterBesidePunctuation reports whether nodes write a delimiter run (a strong, emphasis or
+// strikethrough mark's) with punctuation or whitespace just inside it and text just outside it,
+// where the flanking rules can keep the run from opening or closing.
+func delimiterBesidePunctuation(nodes []*Node, escapePipes bool) bool {
+	for index, node := range nodes {
+		if node.Type != "text" || !hasDelimiterMark(writtenMarks(node, escapePipes)) {
+			continue
+		}
+		if index > 0 && nodes[index-1].Type == "text" && flankingNeutral(firstRune(node.Text)) ||
+			index+1 < len(nodes) && nodes[index+1].Type == "text" && flankingNeutral(lastRune(node.Text)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDelimiterMark(marks []Mark) bool {
+	for _, mark := range marks {
+		if markDelimiter(mark) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// flankingNeutral reports whether char is whitespace or punctuation to the flanking rules, as the
+// parser classifies it: a delimiter run beside it inside needs another such character outside.
+func flankingNeutral(char rune) bool {
+	return util.IsPunctRune(char) || util.IsSpaceRune(char)
+}
+
+func firstRune(text string) rune {
+	char, _ := utf8.DecodeRuneInString(text)
+	return char
+}
+
+func lastRune(text string) rune {
+	char, _ := utf8.DecodeLastRuneInString(text)
+	return char
+}
+
+// closesAfterPunctuation reports whether the markdown written so far ends in a delimiter run with
+// whitespace or punctuation before it, or nothing: a run that closes only before one of them.
+func (r *renderer) closesAfterPunctuation() bool {
+	written := r.b.Bytes()
+	start := len(written)
+	for start > 0 && (written[start-1] == '*' || written[start-1] == '~') {
+		start--
+	}
+	if start == len(written) {
+		return false
+	}
+	before, _ := utf8.DecodeLastRune(written[:start])
+	return start == 0 || flankingNeutral(before)
+}
+
+// opensBeforePunctuation reports whether the text after nodes[index], written under next, opens a
+// delimiter run with nothing closed before it and whitespace or punctuation after it - the text's
+// own first character, or a link's or code span's syntax opened inside the run: a run that opens
+// only after one of them.
+func opensBeforePunctuation(nodes []*Node, index int, next, following []Mark) bool {
+	if index+1 >= len(nodes) || nodes[index+1].Type != "text" || sharedMarks(next, following) != len(next) || len(following) == len(next) || markDelimiter(following[len(next)]) == 0 {
+		return false
+	}
+	for _, mark := range following[len(next)+1:] {
+		if markDelimiter(mark) == 0 {
+			return true
+		}
+	}
+	return flankingNeutral(firstRune(nodes[index+1].Text))
 }
 
 // writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
@@ -238,6 +346,9 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			if common < len(active) && common < len(next) && markDelimiter(active[common]) != 0 && markDelimiter(active[common]) == markDelimiter(next[common]) {
 				fused = true
 			}
+			// A delimiter run the marks just closed, with nothing opened after it, stands before
+			// this text's first character.
+			flankFirst := spelling.flanking && len(active) != common && len(next) == common && r.closesAfterPunctuation() && !flankingNeutral(firstRune(n.Text))
 			for _, mark := range next[common:] {
 				r.openInlineMark(mark, nodes, index)
 			}
@@ -245,6 +356,13 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				position.afterMarker = true
 			}
 			active = next
+			if isAngleURLLink(n, visibleMarks(n.Marks), escapePipes) {
+				// An autolink's text is literal to both parsers, so it takes no escape.
+				r.writeSyntax("<" + n.Text + ">")
+				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
+				continue
+			}
+			flankLast := spelling.flanking && opensBeforePunctuation(nodes, index, next, following) && !flankingNeutral(lastRune(n.Text))
 			// The brackets rule follows the marks actually written, not hasLink: a bare URL's
 			// link mark is stripped above, and its text must keep its own brackets so linkify
 			// reads the whole href. The verdict itself was taken when the link opened.
@@ -264,6 +382,8 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				marked:         len(next) > 0,
 				opener:         adjacentDelimiter(next[common:]),
 				closer:         adjacentDelimiter(next[sharedMarks(next, following):]),
+				flankFirst:     flankFirst,
+				flankLast:      flankLast,
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -511,7 +631,14 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 				lineStart = -1
 			}
 		}
-		if escape {
+		flank := byteOffset == 0 && context.flankFirst || byteOffset+width == len(value) && context.flankLast
+		if flank {
+			// A character reference is punctuation to the flanking rules, where the letter or
+			// digit it stands for keeps the delimiter run beside it from opening or closing.
+			r.writeText(value[segmentStart:byteOffset])
+			r.writeSyntax(numericEntity(char))
+			segmentStart = byteOffset + width
+		} else if escape {
 			r.writeText(value[segmentStart:byteOffset])
 			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context)))
 			segmentStart = byteOffset + width

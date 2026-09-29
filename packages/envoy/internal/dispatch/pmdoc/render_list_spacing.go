@@ -256,6 +256,24 @@ func opensAfterParagraph(block *Node) bool {
 	return false
 }
 
+// continuesTable reports whether block's first line, written on the line after a table's last row,
+// would continue the table rather than open block: a paragraph's text, or the text of a heading
+// written setext (a level-one or level-two heading holding a hard break), which both parsers read
+// as a row; another table's header row, a row too; and an ordered list starting past one, which
+// cannot interrupt a paragraph and which Parse refuses there. Every other block is written on that
+// line, as before: a list opening with an empty item opens there too.
+func continuesTable(block *Node) bool {
+	switch block.Type {
+	case "paragraph", "table":
+		return true
+	case "heading":
+		return holdsHardBreak(block.Children) && int(num(block.Attrs["level"], 1)) <= 2
+	case "ordered_list":
+		return int(num(block.Attrs["order"], 1)) != 1
+	}
+	return false
+}
+
 // opensWithListThatCannotInterrupt reports whether block is a quote whose first block, or the
 // first block of a quote it opens with, is a list whose first item cannot interrupt a paragraph
 // (opensAfterParagraph).

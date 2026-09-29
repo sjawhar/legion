@@ -19,12 +19,12 @@ import { expect, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject } from "./api";
 import { documentEditor } from "./editor";
+import { dispatchPort } from "./harness-ports";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const execFileAsync = promisify(execFile);
-const baseUrl =
-  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${process.env.DISPATCH_E2E_PORT || "8777"}`;
+const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
 
 /** The database this probe may write to, resolved as `seed.ts` resolves it: a deployed server's
  * own `PLAYWRIGHT_DATABASE_URL`, else the `DATABASE_URL` this run supplied. It never falls back

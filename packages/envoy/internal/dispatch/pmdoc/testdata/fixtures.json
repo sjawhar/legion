@@ -3682,6 +3682,276 @@
     "rendered_by_milkdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a\\:b and see \\:note\\[value] here, spec lines :176-177.\n\n* retry at 04:20Z\n\nA quote marker opening a line keeps it text:\n\n> spec lines :::: and more\n\n> * see ::leaf here\n"
   },
   {
+    "name": "emphasis-beside-another-marker",
+    "markdown": "A run of asterisks or underscores next to another asterisk or underscore can open toward it and\nclose away from it.\n\nb_*a**\n\n\\_*a**\n\na*_b_*\n\n*_a_*b\n\na**_b_**c\n\na*_b*\n\n- *(c)\\*\\*\\*\\* \\*****x's****x's*\\_\n\nBeside a tilde the flanking rules alone decide, so a link's strong struck text reads as struck.\n\n[**~~**d**~~**](https://e.com/u)\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A run of asterisks or underscores next to another asterisk or underscore can open toward it and close away from it."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "b_*a**"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "_*a**"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "a"
+            },
+            {
+              "type": "text",
+              "text": "b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                },
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "b"
+            },
+            {
+              "type": "text",
+              "text": "c"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "_b"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000009"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "marks": [
+                        {
+                          "type": "emphasis",
+                          "attrs": {
+                            "marker": "*"
+                          }
+                        }
+                      ],
+                      "text": "(c)**** *"
+                    },
+                    {
+                      "type": "text",
+                      "marks": [
+                        {
+                          "type": "emphasis",
+                          "attrs": {
+                            "marker": "*"
+                          }
+                        },
+                        {
+                          "type": "strong",
+                          "attrs": {
+                            "marker": "*"
+                          }
+                        }
+                      ],
+                      "text": "x's"
+                    },
+                    {
+                      "type": "text",
+                      "marks": [
+                        {
+                          "type": "emphasis",
+                          "attrs": {
+                            "marker": "*"
+                          }
+                        }
+                      ],
+                      "text": "**x's"
+                    },
+                    {
+                      "type": "text",
+                      "text": "_"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Beside a tilde the flanking rules alone decide, so a link's strong struck text reads as struck."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                },
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://e.com/u",
+                    "title": null
+                  }
+                },
+                {
+                  "type": "strike_through"
+                }
+              ],
+              "text": "d"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AVABAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQFzQSBydW4gb2YgYXN0ZXJpc2tzIG9yIHVuZGVyc2NvcmVzIG5leHQgdG8gYW5vdGhlciBhc3RlcmlzayBvciB1bmRlcnNjb3JlIGNhbiBvcGVuIHRvd2FyZCBpdCBhbmQgY2xvc2UgYXdheSBmcm9tIGl0LigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAF2BgQAAXcGYl8qYSoqKAABdgdibG9ja0lkAXcIYi0wMDAwMDKHAXYDCXBhcmFncmFwaAcAAX8GBAABgAEFXyphKiooAAF/B2Jsb2NrSWQBdwhiLTAwMDAwM4cBfwMJcGFyYWdyYXBoBwABhwEGBAABiAEBYYYBiQEIZW1waGFzaXMOeyJtYXJrZXIiOiIqIn2EAYoBAWKGAYsBCGVtcGhhc2lzBG51bGwoAAGHAQdibG9ja0lkAXcIYi0wMDAwMDSHAYcBAwlwYXJhZ3JhcGgHAAGOAQYGAAGPAQhlbXBoYXNpcw57Im1hcmtlciI6IioifYQBkAEBYYYBkQEIZW1waGFzaXMEbnVsbIQBkgEBYigAAY4BB2Jsb2NrSWQBdwhiLTAwMDAwNYcBjgEDCXBhcmFncmFwaAcAAZUBBgQAAZYBAWGGAZcBCGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hgGYAQZzdHJvbmcOeyJtYXJrZXIiOiIqIn2EAZkBAWKGAZoBCGVtcGhhc2lzBG51bGyGAZsBBnN0cm9uZwRudWxshAGcAQFjKAABlQEHYmxvY2tJZAF3CGItMDAwMDA2hwGVAQMJcGFyYWdyYXBoBwABnwEGBAABoAEBYYYBoQEIZW1waGFzaXMOeyJtYXJrZXIiOiIqIn2EAaIBAl9ihgGkAQhlbXBoYXNpcwRudWxsKAABnwEHYmxvY2tJZAF3CGItMDAwMDA3hwGfAQMLYnVsbGV0X2xpc3QHAAGnAQMJbGlzdF9pdGVtBwABqAEDCXBhcmFncmFwaAcAAakBBgYAAaoBCGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAGrAQkoYykqKioqICqGAbQBCGVtcGhhc2lzBG51bGyGAbUBCGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hgG2AQZzdHJvbmcOeyJtYXJrZXIiOiIqIn2EAbcBA3gnc4YBugEIZW1waGFzaXMEbnVsbIYBuwEGc3Ryb25nBG51bGyGAbwBCGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAG9AQUqKngnc4YBwgEIZW1waGFzaXMEbnVsbIQBwwEBXygAAakBB2Jsb2NrSWQBdwhiLTAwMDAxMCgAAagBBWxhYmVsAXcD4oCiKAABqAEIbGlzdFR5cGUBdwZidWxsZXQoAAGoAQZzcHJlYWQBeSgAAagBB2Jsb2NrSWQBdwhiLTAwMDAwOSgAAacBBnNwcmVhZAF5KAABpwEHYmxvY2tJZAF3CGItMDAwMDA4hwGnAQMJcGFyYWdyYXBoBwABzAEGBAABzQFfQmVzaWRlIGEgdGlsZGUgdGhlIGZsYW5raW5nIHJ1bGVzIGFsb25lIGRlY2lkZSwgc28gYSBsaW5rJ3Mgc3Ryb25nIHN0cnVjayB0ZXh0IHJlYWRzIGFzIHN0cnVjay4oAAHMAQdibG9ja0lkAXcIYi0wMDAwMTGHAcwBAwlwYXJhZ3JhcGgHAAGuAgYGAAGvAgZzdHJvbmcOeyJtYXJrZXIiOiIqIn2GAbACBGxpbmsneyJocmVmIjoiaHR0cHM6Ly9lLmNvbS91IiwidGl0bGUiOm51bGx9hgGxAg5zdHJpa2VfdGhyb3VnaAJ7fYQBsgIBZIYBswIGc3Ryb25nBG51bGyGAbQCBGxpbmsEbnVsbIYBtQIOc3RyaWtlX3Rocm91Z2gEbnVsbCgAAa4CB2Jsb2NrSWQBdwhiLTAwMDAxMgA=",
+    "rendered_by_milkdown": "A run of asterisks or underscores next to another asterisk or underscore can open toward it and close away from it.\n\nb\\_\\*a\\*\\*\n\n\\_\\*a\\*\\*\n\na*b*\n\n*a*b\n\n&#x61;***b***&#x63;\n\n&#x61;*\\_b*\n\n* *(c)\\*\\*\\*\\* \\***x's**\\*\\*x's*\\_\n\nBeside a tilde the flanking rules alone decide, so a link's strong struck text reads as struck.\n\n**[~~d~~](https://e.com/u)**\n"
+  },
+  {
     "name": "emphasis-rule-of-three",
     "markdown": "A run of four asterisks that can both open and close, after a strong pair has used part of it, is\npaired by what the runs have left.\n\n***a.****&#32;b*\n\n***Note:****&#32;see below*\n\n***a:****.b*\n\nThe same run where one side cannot open or close, and one between letters.\n\n***a****&#32;b*\n\n*x****b***\n",
     "pm_json": {

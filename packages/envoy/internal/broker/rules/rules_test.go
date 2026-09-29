@@ -42,7 +42,7 @@ func TestAmbiguousRequesterRefused(t *testing.T) {
 	data := []byte(`version: 1
 secrets:
   X:
-    source: dev1/agent-secrets/X
+    source: example/agent-secrets/X
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 3600
@@ -75,7 +75,7 @@ func TestEmptyRequestersDeniesEveryone(t *testing.T) {
 	data := []byte(`version: 1
 secrets:
   DEEL_API_KEY:
-    source: production/agent-secrets/deel-api-key
+    source: example/agent-secrets/inject-api-key
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200

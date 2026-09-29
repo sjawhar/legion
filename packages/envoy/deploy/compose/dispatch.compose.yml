@@ -15,9 +15,8 @@ services:
       start_period: 5s
     environment:
       HOME: /home/envoy
-      # The Dispatch database is external (production: the Aurora `dispatch` database,
-      # backed up nightly by agent-c's `dispatch-backup` Fargate task); this compose runs no
-      # Postgres and no backup worker of its own.
+      # The Dispatch database is external, and the production deployment backs it up with its own
+      # scheduled task; this compose runs no Postgres and no backup worker of its own.
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL (the external Dispatch Postgres URL)}
       DISPATCH_LISTEN_HOST: ${DISPATCH_LISTEN_HOST:-127.0.0.1}
       DISPATCH_PORT: ${DISPATCH_PORT:-8766}
