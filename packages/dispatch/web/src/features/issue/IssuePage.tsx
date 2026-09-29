@@ -125,9 +125,9 @@ function usableControl(selector: string): HTMLElement | null {
  * fires from one: a digit has no native meaning on a button, and after any click - a tab, a
  * disclosure, Copy - focus sits on the button that was clicked, which is where a reader reaching
  * for the next shortcut stands. Withholding these keys there would make them work only from the
- * page's own background. An ask card's buttons are the exception, and that is what `ASK_CARD`
- * covers (`inbox/ask-card.ts`, the one definition both pages read): inside the card, the
- * card's controls own the keys. `l` and `e` open a control rather
+ * page's own background. An ask card's buttons are the exception, and that is what
+ * `outsideAskCard` covers (`inbox/ask-card.ts`, the one definition both pages read): inside the
+ * card, the card's controls own the keys. `l` and `e` open a control rather
  * than write, so a stray press is visible and undoable and they are offered throughout.
  */
 function outsideInputsAndAskCards(): boolean {

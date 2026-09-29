@@ -5,8 +5,13 @@ import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { Agent, Comment } from "../../api/types";
-import { type ComposerOwner, MentionComposer, reconcileMentions } from "./MentionComposer";
+import type { Agent, Comment, Message } from "../../api/types";
+import {
+  type CarriedDraft,
+  type ComposerOwner,
+  MentionComposer,
+  reconcileMentions,
+} from "./MentionComposer";
 
 const planner: Agent = {
   capabilities: ["btw"],
@@ -54,7 +59,10 @@ const createdComment: Comment = {
 function renderComposer(
   options: {
     agents?: readonly Agent[];
+    carried?: CarriedDraft;
     edit?: { body: string; id: string };
+    initialMentions?: readonly { target: string; title: string }[];
+    onCarry?: (draft: CarriedDraft) => void;
     onCancelReply?: () => void;
     onSent?: () => void;
     owner?: ComposerOwner;
@@ -76,8 +84,11 @@ function renderComposer(
       <QueryClientProvider client={queryClient}>
         <MentionComposer
           agents={options.agents}
+          carried={options.carried}
           edit={options.edit}
+          initialMentions={options.initialMentions}
           onCancelReply={options.onCancelReply}
+          onCarry={options.onCarry}
           onClose={() => {}}
           onSent={options.onSent ?? (() => {})}
           owner={options.owner ?? { issueKey: "CORE-1", kind: "issue" }}
@@ -752,6 +763,198 @@ test("mentioning two targets that both lack the outbound mode names both in the 
     fireEvent.click(screen.getByRole("option", { name: "Worker" }));
     await waitFor(() => expect(field.value).toBe("@Planner x @Worker"));
     expect(screen.getByText(/Planner and Worker do not advertise Steer/)).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+const plannerMention = { target: "session:A", title: "Planner" };
+const createdMessage: Message = {
+  author: { id: "alice", kind: "user" },
+  body: "sent",
+  created_at: "2026-09-18T00:00:00Z",
+  deliveries: [],
+  id: "message-1",
+  in_reply_to: null,
+  issue_key: null,
+  target: null,
+};
+
+// The carry is the one branch these seven call sites share, so its four cases live here rather
+// than in one host's e2e: what a caller with no carry gets (every other surface), what a carry
+// with prose gets, what a carry that already holds this owner's mention gets, and where a
+// mention accepted afterwards lands. Each asserts the wire as well as the field: the body and
+// the accepted records disagreeing is exactly the defect these cover.
+test("no carry seeds the owner's mention and sends it", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ initialMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    expect(field.value).toBe("@Planner");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", {
+        body: "@Planner hello",
+        delivery: "steer",
+        mentions: [{ target: "session:A" }],
+      })
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("a carry without this owner's mention is seeded in front of it, records and all", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({
+    carried: {
+      body: "hello @Worker",
+      mentions: [{ end: 13, start: 6, target: "session:B", text: "Worker" }],
+    },
+    initialMentions: [plannerMention],
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    expect(field.value).toBe("@Planner hello @Worker");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", {
+        body: "@Planner hello @Worker",
+        delivery: "steer",
+        mentions: [{ target: "session:A" }, { target: "session:B" }],
+      })
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("a carry that already holds this owner's mention is not seeded twice, wherever it sits", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({
+    carried: {
+      body: "y@Planner x",
+      mentions: [{ end: 9, start: 1, target: "session:A", text: "Planner" }],
+    },
+    initialMentions: [plannerMention],
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    expect(field.value).toBe("y@Planner x");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", {
+        body: "y@Planner x",
+        delivery: "steer",
+        mentions: [{ target: "session:A" }],
+      })
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("a mention accepted after a carry lands at its own offset", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({
+    agents: [planner, worker],
+    carried: { body: "hello", mentions: [] },
+    initialMentions: [plannerMention],
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    expect(field.value).toBe("@Planner hello");
+    fireEvent.change(field, { target: { value: "@Planner hello @" } });
+    await screen.findByRole("listbox", { name: "Mention suggestions" });
+    fireEvent.click(screen.getByRole("option", { name: "Worker" }));
+    await waitFor(() => expect(field.value).toBe("@Planner hello @Worker"));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith("CORE-1", {
+        body: "@Planner hello @Worker",
+        delivery: "steer",
+        mentions: [{ target: "session:A" }, { target: "session:B" }],
+      })
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A message this channel already addresses needs no mention of its own recipient: the record
+// proves the reader never touched the text the last channel seeded, so it goes with the channel.
+test("the owner's own untouched mention does not travel into a message addressed to it", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
+  const { view } = renderComposer({
+    carried: {
+      body: "@Planner hello",
+      mentions: [{ end: 8, start: 0, target: "session:A", text: "Planner" }],
+    },
+    owner: { kind: "session", sessionId: "A" },
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    expect(field.value).toBe("hello");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(createAgentMessage).toHaveBeenCalledWith("A", { body: "hello", delivery: "steer" })
+    );
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+test("an owner mention the reader edited is their prose and stays", async () => {
+  const { view } = renderComposer({
+    carried: {
+      body: "@Plannr hello",
+      mentions: [{ end: 8, start: 0, target: "session:A", text: "Planner" }],
+    },
+    owner: { kind: "session", sessionId: "A" },
+  });
+
+  try {
+    // The span no longer reads `@Planner`, so it is no longer a record: it is what they typed.
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("@Plannr hello");
+  } finally {
+    view.unmount();
+  }
+});
+
+// "Discard draft?" means the draft is gone, in every host. Where `onClose` unmounts the composer
+// that was true by accident; on the Agents page it only moves focus, so the reset has to be the
+// composer's own - the same one a successful send runs, carry included.
+test("Discard clears the draft and its records, wherever the host takes focus", () => {
+  const carriedDrafts: CarriedDraft[] = [];
+  const { view } = renderComposer({
+    initialMentions: [plannerMention],
+    onCarry: (draft) => carriedDrafts.push(draft),
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner discard me" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+
+    expect(field.value).toBe("");
+    expect(carriedDrafts.at(-1)).toEqual({ body: "", mentions: [] });
   } finally {
     view.unmount();
   }

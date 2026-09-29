@@ -10,7 +10,7 @@
  */
 
 /** An ask card anywhere on the page, wherever it is rendered. */
-export const ASK_CARD = "[data-ask-card]";
+const ASK_CARD = "[data-ask-card]";
 
 /** Whether the reader is outside every ask card, so a page-level key is the page's to act on. */
 export function outsideAskCard(): boolean {

@@ -53,6 +53,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import type { CarriedDraft } from "../conversation/MentionComposer";
 import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
@@ -559,20 +560,30 @@ function AgentMessageComposer({
     watcher.observe(field, { attributeFilter: ["disabled"] });
     refocusWatcher.current = watcher;
   };
-  /** The message this composer is for. A control that ends in the message hands over to it - the
-   *  issue pick, which unmounts the very select the reader is standing on. */
-  const composerField = () => box.current?.querySelector("textarea") ?? null;
-  /** What the reader had written when a pick remounted the composer under them: their prose is
-   *  theirs, and `MentionComposer` re-seeds this owner's mention in front of it. */
-  const carriedBody = useRef<string | undefined>(undefined);
+  /** The draft as the composer last held it - body and accepted mentions together - so a pick
+   *  that remounts it to change the message's owner hands the reader's work to the new
+   *  instance rather than dropping it. Opaque here: it is handed back as it was given. */
+  const carried = useRef<CarriedDraft | undefined>(undefined);
+  const keepCarry = useCallback((draft: CarriedDraft) => {
+    carried.current = draft;
+  }, []);
   /** The value the reader's pick set, until the render that carries it hands the field back. */
   const pickedIssue = useRef<string | undefined>(undefined);
+  /** What the picker's selection reads while it is open, which is the reader's until they commit
+   *  it: the arrows move it, `Enter` (or a pointer's own pick) takes it. */
+  const [pendingIssue, setPendingIssue] = useState(issueKey);
+  const movedByKeyboard = useRef(false);
+  const commitIssue = (value: string) => {
+    movedByKeyboard.current = false;
+    pickedIssue.current = value;
+    setIssueKey(value);
+    setIssuePickerOpen(false);
+  };
   // A layout effect, so the frame the remount paints already has the field focused rather than
   // the document: the reader's next keystroke is the message, whichever hand made the pick.
   useLayoutEffect(() => {
     if (pickedIssue.current !== issueKey) return;
     pickedIssue.current = undefined;
-    carriedBody.current = undefined;
     box.current?.querySelector("textarea")?.focus();
   }, [issueKey]);
   const issues = useQuery({
@@ -592,6 +603,9 @@ function AgentMessageComposer({
   // Once per open, so a refetch behind the reader never pulls them back either.
   const issueSelect = useRef<HTMLSelectElement>(null);
   const pickerTookFocus = useRef(false);
+  useEffect(() => {
+    if (issuePickerOpen) setPendingIssue(issueKey);
+  }, [issueKey, issuePickerOpen]);
   useEffect(() => {
     if (!issuePickerOpen) {
       pickerTookFocus.current = false;
@@ -652,17 +666,29 @@ function AgentMessageComposer({
                 aria-label="Issue"
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
                 onChange={(event) => {
-                  // The pick can remount the composer under the reader (the key below), so what
-                  // they have written travels with it, and the field that takes focus is the one
-                  // render produces - `i` opened this picker to address a message, not to leave
-                  // the reader on the document.
-                  carriedBody.current = composerField()?.value;
-                  pickedIssue.current = event.target.value;
-                  setIssueKey(event.target.value);
-                  setIssuePickerOpen(false);
+                  setPendingIssue(event.target.value);
+                  // Chromium commits a closed select's value on the first arrow, so a keyboard
+                  // reader who never reaches the second option would have chosen the first by
+                  // trying to pass it. From the keyboard the change only moves the selection;
+                  // `Enter` below is the pick. A pointer has already chosen when it lets go.
+                  if (movedByKeyboard.current) return;
+                  commitIssue(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    // The commit is this key's, and it stops here: left to bubble it would land
+                    // in the message the pick just addressed, as a newline at its top.
+                    event.preventDefault();
+                    commitIssue(event.currentTarget.value);
+                    return;
+                  }
+                  movedByKeyboard.current = true;
+                }}
+                onPointerDown={() => {
+                  movedByKeyboard.current = false;
                 }}
                 ref={issueSelect}
-                value={issueKey}
+                value={pendingIssue}
               >
                 <option value="">No issue</option>
                 {issues.data.map((issue) => (
@@ -681,7 +707,8 @@ function AgentMessageComposer({
             ? undefined
             : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
         }
-        carriedBody={carriedBody.current}
+        carried={carried.current}
+        onCarry={keepCarry}
         // The channel decides which mention the message needs - an issue comment reaches this
         // agent by mentioning it, a direct message does not - so the composer is remounted when
         // the channel changes, and only then; one issue to another keeps the same instance. The

@@ -842,6 +842,9 @@ test.describe("agents page", () => {
   async function seedAgents(): Promise<string> {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", title: "Keyboard issue" });
+    // A second open issue, so the picker has an option past the first: a keyboard reader has to
+    // be able to pass one to reach the other.
+    await createIssue({ project: "CORE", title: "Rollout plan" });
     await createAsk(
       issue.key,
       { question: "Which release?" },
@@ -994,8 +997,10 @@ test.describe("agents page", () => {
       const toggle = row.getByRole("button", { name: "Choose issue" });
       await expect(row.getByRole("combobox", { name: "Issue" })).toBeFocused();
 
-      // An arrow on a focused native select is the pick itself.
+      // The arrows move the selection; Enter is the pick.
       await page.keyboard.press("ArrowDown");
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await page.keyboard.press("Enter");
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(toggle).toContainText("CORE-1");
       await expect(row.getByRole("textbox", { name: "Comment" })).toBeFocused();
@@ -1069,15 +1074,17 @@ test.describe("agents page", () => {
       await toggle.click();
       await expect(row.getByRole("combobox", { name: "Issue" })).toBeFocused();
       await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Enter");
       await expect(toggle).toContainText("CORE-1");
-      await expect(field).toHaveValue(/please look at the migration/);
+      await expect(field).toHaveValue("@Planner please look at the migration");
       await expect(field).toBeFocused();
 
-      // And with the pointer all the way: back to no issue, the prose still the reader's.
+      // And with the pointer all the way: back to no issue, where the mention the channel
+      // seeded goes with the channel and the reader's own words stay exactly as typed.
       await toggle.click();
       await row.getByRole("combobox", { name: "Issue" }).selectOption("");
       await expect(toggle).toContainText("No issue");
-      await expect(field).toHaveValue(/please look at the migration/);
+      await expect(field).toHaveValue("please look at the migration");
     } finally {
       await context.close();
     }
@@ -1168,6 +1175,173 @@ test.describe("agents page", () => {
       await page.keyboard.press("Escape");
       await expect(row).toBeFocused();
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The arrows choose and Enter commits, so a reader can pass the first option to reach the
+  // second - and the Enter that picks is the picker's, not a newline at the top of the message.
+  test("the arrows move the issue selection and Enter commits it", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("ArrowDown");
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(picker).toBeFocused();
+
+      await page.keyboard.press("Enter");
+      await expect(toggle).toContainText("CORE-2");
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("@Planner");
+
+      // Escape after an arrow takes nothing: the selection was never committed. (The field is
+      // emptied first, since Escape over a written composer is its own discard prompt.)
+      await field.fill("");
+      await page.keyboard.press("Escape");
+      await expect(row).toBeFocused();
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("ArrowUp");
+      await page.keyboard.press("Escape");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle).toContainText("CORE-2");
+      await expect(row).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The round trip Rev drove: the mention has to reach the wire, not just the screen, or the
+  // agent is never told about the comment that names them.
+  test("a comment sent after a round trip through the picker still mentions the agent", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const pick = async (value: string) => {
+        await toggle.click();
+        await row.getByRole("combobox", { name: "Issue" }).selectOption(value);
+      };
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("hello");
+
+      await pick("CORE-1");
+      await pick("");
+      await pick("CORE-1");
+      // The reader typed ahead of the mention, which is where the caret lands after a pick.
+      await field.click();
+      await page.keyboard.press("Home");
+      await page.keyboard.type("now ");
+      await expect(field).toHaveValue("now @Planner hello");
+
+      const posted = page.waitForRequest(
+        (request) => request.method() === "POST" && request.url().includes("/comments")
+      );
+      await page.keyboard.press("Control+Enter");
+      const body = (await posted).postDataJSON();
+      expect(body.mentions).toEqual([{ target: `session:${planner.session_id}` }]);
+      expect(body.delivery).toBeTruthy();
+      expect(body.body.match(/@Planner/g)).toHaveLength(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A direct message already reaches the session it is addressed to, so the mention the issue
+  // channel seeded goes with that channel - and a mention the reader accepted themselves does
+  // not: it survives the trip and is on the wire when they come back.
+  test("the channel's own mention leaves with it, and the reader's own survives", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const pick = async (value: string) => {
+        await toggle.click();
+        await row.getByRole("combobox", { name: "Issue" }).selectOption(value);
+      };
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("who owns this");
+      await pick("CORE-1");
+      await expect(field).toHaveValue("@Planner who owns this");
+
+      // The reader mentions the reviewer themselves, inside the issue channel.
+      await field.click();
+      await page.keyboard.press("End");
+      await page.keyboard.type(" @Rev");
+      await page
+        .getByRole("listbox", { name: "Mention suggestions" })
+        .getByRole("option", { exact: true, name: "Reviewer" })
+        .first()
+        .click();
+      await expect(field).toHaveValue("@Planner who owns this @Reviewer");
+
+      // Into the direct channel: the channel's own mention goes, theirs stays.
+      await pick("");
+      await expect(field).toHaveValue("who owns this @Reviewer");
+      const sentMessage = page.waitForRequest(
+        (request) => request.method() === "POST" && request.url().includes("/messages")
+      );
+      await field.click();
+      await page.keyboard.press("Control+Enter");
+      expect((await sentMessage).postDataJSON().body).toBe("who owns this @Reviewer");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // "Discard draft?" means the draft is gone. On this page `onClose` only moves focus, so a
+  // composer that kept the text would hand it to the next channel on the next pick.
+  test("Discard clears the draft, and no pick brings it back", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("discard me");
+      await page.keyboard.press("Escape");
+      await row.getByRole("button", { name: "Discard" }).click();
+      await expect(field).toHaveValue("");
+
+      await toggle.click();
+      await row.getByRole("combobox", { name: "Issue" }).selectOption("CORE-1");
+      await expect(toggle).toContainText("CORE-1");
+      await expect(field).toHaveValue("@Planner");
     } finally {
       await context.close();
     }
