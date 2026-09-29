@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 /**
- * Measures every row of `PATH_ROWS` twice against whatever guard this checkout holds: what
- * `guard.bash` returns, and what real bash does to a canary HOME. Run it at two revisions —
- * swapping `src/legion/pane-guard.ts` is enough — and diff the output.
+ * Measures every row of `PATH_ROWS` twice against the current guard or a supplied guard module:
+ * what `guard.bash` returns, and what real bash does to a canary HOME. Run it at two revisions
+ * and diff the output.
  *
- *   bun scripts/measure-pane-guard-paths.ts            # one line per row, then the counts
- *   bun scripts/measure-pane-guard-paths.ts --summary  # the counts only
+ *   bun scripts/measure-pane-guard-paths.ts <path-to-pane-guard.ts>
+ *   bun scripts/measure-pane-guard-paths.ts <path-to-pane-guard.ts> --summary
  *
- * `src/legion/pane-guard-bash.test.ts` asserts the same measurement, through the same functions.
+ * `src/legion/pane-guard-bash.test.ts` asserts the current-guard measurement through the same
+ * functions.
  */
 import { spawnSync } from "node:child_process";
 import { lstatSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -17,15 +18,25 @@ import {
   buildPathFixture,
   canaryDigest,
   DOTDOT_COMPONENT,
-  measureAllPathRows,
+  measureRow,
   PATH_ROWS,
 } from "../src/legion/pane-guard-path-rows";
+import type { PathGuardFactory } from "../src/legion/pane-guard-path-rows";
+
+interface GuardModule {
+  readonly createPaneGuard: PathGuardFactory;
+}
 
 const summary = process.argv.includes("--summary");
+const modulePath = process.argv.slice(2).find((arg) => arg !== "--summary");
+// The module path is selected at runtime so the same canary rows measure main and this checkout.
+const loaded: GuardModule | undefined =
+  modulePath === undefined ? undefined : ((await import(path.resolve(modulePath))) as GuardModule);
+const guardFactory = loaded?.createPaneGuard;
 // A scratch root of its own: never the real /tmp, and the canary HOME is not under it.
 const root = mkdtempSync(path.join(os.tmpdir(), "pane-guard-paths-"));
 try {
-  const results = measureAllPathRows(root);
+  const results = PATH_ROWS.map((row) => measureRow(row, root, guardFactory));
 
   // The properties the batch turns on, as booleans, once — not as prose.
   const fixture = buildPathFixture(mkdtempSync(path.join(root, "props-")));

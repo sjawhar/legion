@@ -27,6 +27,8 @@ export interface PathRow {
   readonly dotdot: boolean;
 }
 
+export type PathGuardFactory = typeof createPaneGuard;
+
 /** The canary HOME's victims, and the fixture the guard and bash both see. `e` is the symlink
  * whose parent is the operator's home; a `..` after it is the whole subject. Every path below is
  * written as a literal string: `path.join` would normalise the `..` away and the row would
