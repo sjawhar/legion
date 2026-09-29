@@ -158,12 +158,39 @@ function isStrictPrefix(shorter: readonly KeyCombo[], longer: readonly KeyCombo[
   );
 }
 
+/** The `<input>` types that take typed text. Everything else an input can be - checkbox, radio,
+ *  the button family, file, range, color - takes no text, so a letter or digit pressed while one
+ *  has focus is a shortcut, not typing: ticking a checkbox with the pointer must not silence the
+ *  page's keys. `HTMLInputElement.type` normalises a missing or unknown attribute to `text`. */
+const TEXT_INPUT_TYPES: Record<string, true> = {
+  date: true,
+  "datetime-local": true,
+  email: true,
+  month: true,
+  number: true,
+  password: true,
+  search: true,
+  tel: true,
+  text: true,
+  time: true,
+  url: true,
+  week: true,
+};
+
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
   }
+  if (target.isContentEditable) {
+    return true;
+  }
   const tag = target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+  // A `<select>` stays editable: its own keys type-ahead and step through the options, and the
+  // Inbox's `h` hands it focus on purpose.
+  if (tag === "TEXTAREA" || tag === "SELECT") {
+    return true;
+  }
+  return tag === "INPUT" && TEXT_INPUT_TYPES[(target as HTMLInputElement).type] === true;
 }
 
 export interface KeymapOptions {

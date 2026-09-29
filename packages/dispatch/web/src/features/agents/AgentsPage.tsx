@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -520,14 +521,42 @@ function AgentMessageComposer({
   agent: Agent;
   onCancelReply: () => void;
   /** One level out of the composer: the row it belongs to takes focus. The composer calls it on
-   *  Escape from an untouched draft, on Discard, and once a message has been sent - the same
-   *  hand-off the Inbox makes when an answered card's form goes away. */
+   *  Escape from an untouched draft and on Discard - and also right after a successful send,
+   *  which is NOT one level out; that case is filtered below. */
   onClose: () => void;
   replyTo: AgentReply | null;
 }): ReactNode {
   const queryClient = useQueryClient();
   const [issueKey, setIssueKey] = useState("");
   const [issuePickerOpen, setIssuePickerOpen] = useState(false);
+  // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's
+  // `onSuccess`), and a reader who has just sent a message is still writing to this agent: moving
+  // focus to the row would turn their next letters into `x` / `i` / `Shift+P` shortcuts. The flag
+  // is set on the way past `onSent` and consumed by the `onClose` that follows it.
+  const sentJustNow = useRef(false);
+  const box = useRef<HTMLDivElement>(null);
+  // `MentionComposer` disables its textarea while a send is in flight (`MentionComposer.tsx:937`),
+  // and a disabled field hands focus back to the document. The reader is still writing to this
+  // agent, so focus returns the moment React re-enables the field - watched, rather than guessed
+  // at with a frame or a timer, because the write's latency is the server's.
+  const refocusWatcher = useRef<MutationObserver | null>(null);
+  useEffect(() => () => refocusWatcher.current?.disconnect(), []);
+  const refocusComposer = () => {
+    const field = box.current?.querySelector("textarea");
+    if (field === null || field === undefined) return;
+    refocusWatcher.current?.disconnect();
+    if (!field.disabled) {
+      field.focus();
+      return;
+    }
+    const watcher = new MutationObserver(() => {
+      if (field.disabled) return;
+      watcher.disconnect();
+      field.focus();
+    });
+    watcher.observe(field, { attributeFilter: ["disabled"] });
+    refocusWatcher.current = watcher;
+  };
   const issues = useQuery({
     enabled: issuePickerOpen,
     queryFn: () => api.listIssues({ open: true }),
@@ -543,7 +572,7 @@ function AgentMessageComposer({
     : { issueKey: replyIssueKey ?? issueKey, kind: "issue" as const };
 
   return (
-    <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
+    <div className={`mt-3 border-t pt-3 ${borderDefault}`} ref={box}>
       {replyTo === null ? (
         <button
           aria-expanded={issuePickerOpen}
@@ -595,12 +624,21 @@ function AgentMessageComposer({
         }
         key={useDirectChannel ? `session:${agent.session_id}` : `issue:${issueKey}`}
         onCancelReply={onCancelReply}
-        onClose={onClose}
+        onClose={() => {
+          if (sentJustNow.current) {
+            sentJustNow.current = false;
+            return;
+          }
+          onClose();
+        }}
         onSent={() => {
+          sentJustNow.current = true;
           onCancelReply();
           void queryClient.invalidateQueries({
             queryKey: agentMessagesQuery(agent.session_id).queryKey,
           });
+          // Focus went to the document when the field disabled itself; take it back.
+          refocusComposer();
         }}
         owner={composerOwner}
         replyTo={replyTo?.target ?? null}

@@ -78,6 +78,8 @@ function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
 
 const ROW_ATTRIBUTE = "data-inbox-row";
 const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
+/** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
+const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
@@ -141,6 +143,26 @@ function AssignToMe({
   );
 }
 
+/** How much of a question a control's name can carry before it stops being a name. */
+const CONTROL_NAME_QUESTION_CHARS = 48;
+
+/**
+ * What the row's controls are called. Two open asks on one issue are two different questions, so
+ * a name taken from the owner alone says the same thing twice - `Select CORE-12` beside `Select
+ * CORE-12` - and a screen reader gives the reader nothing to choose between. The owner answers
+ * "which issue", the start of the question answers "which ask".
+ */
+function controlName(ask: InboxRow, owner: string | null, title: string): string {
+  const where = owner ?? ask.document?.name ?? title;
+  const question = ask.question.replace(/\s+/g, " ").trim();
+  if (question === "") return where;
+  const short =
+    question.length > CONTROL_NAME_QUESTION_CHARS
+      ? `${question.slice(0, CONTROL_NAME_QUESTION_CHARS).trimEnd()}…`
+      : question;
+  return `${where}: ${short}`;
+}
+
 function InboxItem({
   ask,
   assignLive,
@@ -179,6 +201,7 @@ function InboxItem({
 }): ReactNode {
   const owner = ask.issue?.key ?? ask.issue_key;
   const title = ask.issue?.title ?? owner ?? "Document ask";
+  const name = controlName(ask, owner, title);
   const releaseOnFocusOut =
     onRelease === undefined
       ? undefined
@@ -200,7 +223,7 @@ function InboxItem({
           issue key - and the reply chip truncates rather than squeezing the title away. */}
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
         <input
-          aria-label={`Select ${owner ?? title}`}
+          aria-label={`Select ${name}`}
           checked={marked}
           className={`size-4 shrink-0 ${checkboxAccent}`}
           onChange={() => onMark(ask.id)}
@@ -263,7 +286,7 @@ function InboxItem({
           ) : null}
           <SnoozeControl
             askId={ask.id}
-            label={owner ?? title}
+            label={name}
             onLive={onSnoozeLive}
             snoozedUntil={section === "later" ? ask.snoozed_until : null}
           />
@@ -493,6 +516,10 @@ export function Inbox(): ReactNode {
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
   const step = (delta: 1 | -1) => roveFocus(rows(), rowAround(document.activeElement), delta);
   const inFocusedRow = (selector: string) => focusedRow()?.querySelector<HTMLElement>(selector);
+  const bulkPicker = () => listRef.current?.querySelector<HTMLElement>(BULK_PICKER_SELECTOR);
+  // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
+  // has no row to fall back through - is one level out rather than a dead end.
+  const pickerOrigin = useRef<string | null>(null);
   useKeymapScope("inbox");
   useKeymap("inbox", [
     { id: "next", keys: "j", label: "Next ask", run: () => step(1), when: () => rows().length > 0 },
@@ -572,13 +599,29 @@ export function Inbox(): ReactNode {
       // One key for both: with rows marked it is the whole selection, otherwise the row in hand.
       label: "Snooze the focused ask, or every selected ask",
       run: () => {
-        const picker =
-          selected.length > 0
-            ? listRef.current?.querySelector<HTMLElement>("[data-inbox-bulk-snooze]")
-            : inFocusedRow("[data-inbox-snooze]");
-        picker?.focus();
+        if (selected.length === 0) {
+          inFocusedRow("[data-inbox-snooze]")?.focus();
+          return;
+        }
+        pickerOrigin.current = focusedRow()?.dataset.inboxRow ?? null;
+        bulkPicker()?.focus();
       },
       when: () => selected.length > 0 || inFocusedRow("[data-inbox-snooze]") != null,
+    },
+    {
+      id: "back-from-bulk",
+      inEditable: true,
+      keys: "Escape",
+      label: "Back to the list from the bulk snooze picker",
+      run: () => {
+        const origin = pickerOrigin.current;
+        const row =
+          origin === null
+            ? null
+            : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
+        (row ?? rows()[0])?.focus();
+      },
+      when: () => document.activeElement?.matches(BULK_PICKER_SELECTOR) === true,
     },
     {
       id: "clear-selection",

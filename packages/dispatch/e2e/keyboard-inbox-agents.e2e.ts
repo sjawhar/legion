@@ -21,9 +21,9 @@ async function seedInbox(): Promise<void> {
 
 // The keymap binds only once sign-in resolves (`AuthGate` renders a skeleton until
 // `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
-async function openInbox(page: Page): Promise<void> {
+async function openInbox(page: Page, rows = 3): Promise<void> {
   await page.goto("/");
-  await expect(page.locator("[data-inbox-row]")).toHaveCount(3);
+  await expect(page.locator("[data-inbox-row]")).toHaveCount(rows);
   await page.locator("body").focus();
 }
 
@@ -80,7 +80,7 @@ test.describe("inbox selection", () => {
       await expect(rows.nth(2).getByRole("checkbox")).not.toBeChecked();
       await expect(rows.nth(0).getByRole("checkbox")).toHaveAttribute(
         "aria-label",
-        /^Select CORE-\d$/
+        /^Select CORE-\d: \w+ decision$/
       );
 
       const bar = page.getByRole("group", { name: "Selected asks" });
@@ -169,6 +169,105 @@ test.describe("inbox selection", () => {
       await context.close();
     }
   });
+
+  // Ticking a box with the pointer leaves focus on the `<input>`, and the registry's editable
+  // policy decides whether the next key is a shortcut or typing. A checkbox takes no text.
+  test("keys still work with a pointer-ticked checkbox holding focus", async ({ browser }) => {
+    await seedInbox();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page);
+      const rows = page.locator("[data-inbox-row]");
+      await rows.nth(0).getByRole("checkbox").check();
+      await rows.nth(1).getByRole("checkbox").check();
+      await expect(rows.nth(1).getByRole("checkbox")).toBeFocused();
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await expect(bar).toContainText("2 selected");
+
+      // j roves off the ticked row, and h reaches the bulk picker.
+      await page.keyboard.press("j");
+      await expect(rows.nth(2)).toBeFocused();
+      await page.keyboard.press("h");
+      await expect(bar.getByRole("combobox", { name: "Snooze selected asks" })).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // Escape is always one level out. The per-row picker honours it through `back`; the bulk picker
+  // has no row ancestor, so it needs its own way back to the list.
+  test("Escape leaves the bulk picker for the row it was opened from, keeping the marks", async ({
+    browser,
+  }) => {
+    await seedInbox();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page);
+      const rows = page.locator("[data-inbox-row]");
+
+      // Control: a row's own picker, which already returns to its row.
+      await page.keyboard.press("j");
+      await expect(rows.nth(0)).toBeFocused();
+      await page.keyboard.press("h");
+      await expect(rows.nth(0).locator("[data-inbox-snooze]")).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(rows.nth(0)).toBeFocused();
+
+      // The bulk picker does the same, and leaves the selection alone on the way.
+      await page.keyboard.press("j");
+      await expect(rows.nth(1)).toBeFocused();
+      await page.keyboard.press("x");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await expect(bar).toContainText("1 selected");
+      await page.keyboard.press("h");
+      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(rows.nth(1)).toBeFocused();
+      await expect(bar).toContainText("1 selected");
+
+      // And from the row, Escape is the two levels it always was: off the row, then the marks.
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("Escape");
+      await expect(bar).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // Two asks on one issue are two different questions, and a control named after the issue alone
+  // says the same thing twice.
+  test("each row's controls are named after its own ask", async ({ browser }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Two asks on one issue" });
+    await createAsk(issue.key, { question: "First decision" }, session);
+    await createAsk(issue.key, { question: "Second decision" }, session);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page, 2);
+      const rows = page.locator("[data-inbox-row]");
+      await expect(rows.nth(0).getByRole("checkbox")).toHaveAttribute(
+        "aria-label",
+        /^Select CORE-1: (First|Second) decision$/
+      );
+      await expect(rows.nth(0).locator("[data-inbox-snooze]")).toHaveAttribute(
+        "aria-label",
+        /^Snooze CORE-1: (First|Second) decision$/
+      );
+      const names = await rows.evaluateAll((items) =>
+        items.map(
+          (item) => item.querySelector("input[type=checkbox]")?.getAttribute("aria-label") ?? "none"
+        )
+      );
+      expect(names).toHaveLength(2);
+      expect(new Set(names).size).toBe(names.length);
+    } finally {
+      await context.close();
+    }
+  });
 });
 
 test.describe("agents page", () => {
@@ -194,9 +293,8 @@ test.describe("agents page", () => {
     title: "Reviewer",
   };
 
-  test("j/k rove the agent rows, Enter opens the composer, i the issue picker, x selects and Shift+P pins", async ({
-    browser,
-  }, testInfo) => {
+  /** Both sessions live, both with Dispatch activity, and one issue for the picker to offer. */
+  async function seedAgents(): Promise<void> {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", title: "Keyboard issue" });
     await createAsk(
@@ -210,6 +308,12 @@ test.describe("agents page", () => {
       { actor: { id: reviewer.session_id, kind: "session" }, as: "agent" }
     );
     await setLiveSessions([planner, reviewer]);
+  }
+
+  test("j/k rove the agent rows, Enter opens the composer, i the issue picker, x selects and Shift+P pins", async ({
+    browser,
+  }, testInfo) => {
+    await seedAgents();
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
@@ -284,6 +388,35 @@ test.describe("agents page", () => {
       await expect(
         agentsSection.getByRole("listitem").filter({ hasText: "Pin or unpin the focused agent" })
       ).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The composer calls `onClose` after a successful send as well as on the way out, and only the
+  // way out is "one level up". Focus on the row after a send would turn the next letters typed
+  // into agent shortcuts.
+  test("a sent message leaves focus in the composer, not on the row", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      await page.keyboard.press("j");
+      await expect(row).toBeFocused();
+      await page.keyboard.press("Enter");
+      const composer = row.getByRole("textbox", { name: "Comment" });
+      await expect(composer).toBeFocused();
+
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Control+Enter");
+      // The composer clears only once the server has taken the message.
+      await expect(composer).toHaveValue("");
+      await expect(composer).toBeFocused();
+      await page.keyboard.type("j");
+      await expect(composer).toHaveValue("j");
+      await expect(row).not.toBeFocused();
     } finally {
       await context.close();
     }
