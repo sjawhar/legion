@@ -25,17 +25,19 @@
 #     cannot narrow by path, or it is refused. GitHub compares case-insensitively, so this
 #     check does too.
 #   * A build in a `run:` step gets TWO LAYERS, because shell has no allowlist to be unknown
-#     against. Layer 1 is a BROAD detector (RUN_STEP_BUILD): a container-CLI word followed
-#     later on the command by `build`, `bake` or `b`, the other builders, and `compose
-#     up|run|create` without `--no-build`, since a service carrying `build:` builds implicitly.
-#     Layer 2 is an ANCHORED recogniser (ANCHORED_BUILD) of shapes that are certainly a build.
-#     A detector hit is refused unless the step declares `env: IMAGE_TRIGGER_CHECK:
-#     not-an-image-build` AND the anchored layer missed it, so a build is admitted only when
-#     both layers miss it, or when it carries the marker and the anchored layer missed it.
-#     Every excusal is printed, with its workflow, job, step and matched text. Measured over 61
-#     build shapes and 20 non-builds: 61/61 detected, 57 of them anchored beyond the marker's
-#     reach, every non-build reachable by the marker, and 0 of this repository's 122 run steps
-#     matched - nothing is excused today.
+#     against. Both judge ONE COMMAND at a time. Layer 1 is a BROAD detector (RUN_STEP_BUILD):
+#     a container-CLI word followed later on the command by `build`, `bake` or `b`, the other
+#     builders, and `compose up|run|create|watch` without `--no-build`. Layer 2 is an ANCHORED
+#     recogniser (ANCHORED_BUILD) of shapes that are certainly a build; the detector is a
+#     superset of it by construction. An anchored hit is refused outright unless that same
+#     command is inspecting (`--print`, `--call=check`); any other hit is refused unless the
+#     step declares `env: IMAGE_TRIGGER_CHECK: not-an-image-build`. So a build is admitted when
+#     the detector misses it (a builder it does not name, a variable-named engine, a script
+#     file, a non-shell `shell:`), or when the step carries the marker and the anchored layer
+#     misses it. Every excusal is printed, with its workflow, job, step and matched text.
+#     Measured over 95 build shapes and 27 non-builds: 95/95 detected, 91 of them anchored
+#     beyond the marker's reach, every non-build either unseen or reachable by the marker, and
+#     0 of this repository's 122 run steps matched - nothing is excused today.
 #
 # A trigger that builds an image is, in its workflow and in every workflow that calls that one
 # through `workflow_call`, a `push`, `pull_request`, `pull_request_target` or `merge_group`
@@ -309,87 +311,171 @@ def mount_sources(instruction: str) -> list[str]:
 # A run step gets two layers, because a miss in either direction is real. A DETECTOR hit alone
 # would refuse ordinary steps that merely run a build word; an ANCHORED recogniser alone would
 # admit every shape it failed to recognise. So the detector is drawn broad - it decides what
-# must be answered for - and the anchored layer decides what no answer can excuse. The parser
-# both replaced READ builds - shlex, per-flag arity tables, `working-directory` - and each of
-# those broke, admitting a build every time. Neither layer tokenises: an option generically
-# takes at most one value, and both run on raw text, so a comment, a substitution or an `eval`
-# cannot hide the word.
+# must be answered for - and the anchored layer decides what no answer can excuse. The detector
+# is a superset of the anchored layer by construction (`hit = detector or anchored` below), so
+# a shape only the anchored layer names can never slip past unrefused.
 #
-# Measured over 61 build shapes and 20 non-builds: 61 detected, 57 of those anchored, every
-# non-build either unseen by the detector or reachable by the marker, and 0 of this
-# repository's 122 real run steps matched.
+# Both work on ONE COMMAND at a time, not the whole step: a step is stripped of comments, its
+# backslash continuations joined, its command substitutions taken as commands of their own, and
+# then split on newlines, `;`, `&` and `|`. Judging the whole step let one `df -h` anywhere in
+# it disarm the anchored veto on a real build below.
 #
-# What neither layer can see: a build inside a script file a step calls, behind a name assembled
-# from a variable, or in a step whose `shell:` is not one this reads as a shell (`shell: python`
-# runs a program whose text this check does not interpret).
-# Layer 2, the ANCHORED recogniser: shapes that are certainly a build. Options are atomic, so an
-# option's value is never re-read as the subcommand (`docker --context build pull`), and a command
-# word counts only at a command position, not inside `echo "... docker build ..."`.
-OPT = r"""(?>(\s+-{1,2}[\w-]+(=\S+|\s+("[^"\n]*"|'[^'\n]*'|\$\{\{[^}\n]*\}\}|[^\s-]\S*))?)*)"""
-NAME = r"(docker(-buildx)?|podman|nerdctl|depot)"
+# Neither layer tokenises - an option generically takes at most one value - and both run on raw
+# text, so a comment cannot hide the word (it is stripped, and stripping is what stops a comment
+# saying `--no-build` from excusing the build above it). A build word counts anywhere in its
+# command EXCEPT inside the quoted argument of `echo` or `printf`, whose text is not a command;
+# an `echo` whose unquoted words read as a build is refused, and rewording is the remedy.
+#
+# Measured over 95 build shapes and 27 non-builds: 95 detected, 91 of those anchored, every
+# non-build either unseen by the detector or reachable by the marker, and 0 of this repository's
+# 122 real run steps matched. The four builds the anchored layer leaves excusable are the
+# genuinely ambiguous ones: `earthly +target`, `docker commit`, `docker import` and `buildah
+# commit`, where refusing outright would leave a step no remedy it could take.
+#
+# What neither layer can see: a build inside a SCRIPT FILE a step calls, or behind a TASK RUNNER
+# (`make image`, `npm run build:docker`, `just build`, `bazel run //:push`, `nix build
+# .#dockerImage`) - netting those would refuse most steps in most repositories, so a build
+# behind one is invisible here. Likewise a BUILDER THIS DOES NOT NAME (`packer build`,
+# `s2i build`, `nixpacks build`, `werf build`, `apko build`), an ENGINE NAMED BY A VARIABLE that
+# is not DOCKER-ish (`$CONTAINER_ENGINE build`), and a step whose `shell:` IS NOT ONE THIS READS
+# AS A SHELL (`shell: python` runs a program whose text this check does not interpret).
+#
+# So, exactly: a build is admitted when the detector misses it (a builder it does not name, a
+# variable-named engine, a script file, a non-shell `shell:`), or when the step carries the
+# marker and the anchored layer misses it.
+
+# Options: at most one value each, never crossing a line, and atomic, so an option's value is
+# never re-read as the subcommand (`docker --context build pull`). A flag that takes no value
+# must not swallow the subcommand either, so a bare value is never one of the subcommand words
+# (`pack --quiet build`).
+VERB = r"(build|bake|bud|b|publish|resolve|apply)\b"
+VALUE = r"""("[^"\n]*"|'[^'\n]*'|\$\{\{[^}\n]*\}\}|%s[^\s-]\S*)"""
+# The container CLIs take real values that read like subcommands - `docker --context build` is
+# a context named build - so a value is taken whatever it says, and `docker --debug build .`
+# stays a detector hit rather than an anchored one. Telling those apart needs a per-flag arity
+# table, which is the parser this replaced. The standalone builders below are flagged the other
+# way: their options are boolean in practice, so a value is never one of their subcommands.
+OPT = r"(?>([ \t]+-{1,2}[\w-]+(=\S+|[ \t]+%s)?)*)" % (VALUE % "")
+OPTV = r"(?>([ \t]+-{1,2}[\w-]+(=\S+|[ \t]+%s)?)*)" % (VALUE % ("(?!" + VERB + ")"))
+NAME = r"(docker(-buildx)?|podman|nerdctl|depot|finch)"
 CLI = (
     r"""["']?(\b""" + NAME + r"\b"
     r"|\$[({]?\w*DOCKER\w*[-:}\w)]*"
     r"|\$\([^)\n]*\b" + NAME + r"\b[^)\n]*\))[\"']?"
 )
-POS = r"""(?:^|[\n;&|(`]|\$\(|\beval\s+["']?|\bsudo\s+|\b[A-Z_][A-Z0-9_]*=\S*\s+|-c\s+["'])\s*"""
 SUB = r"(?![\w.:/-])"
-ANCHORED_BUILD = re.compile(
-    rf"{POS}{CLI}{OPT}\s+((image|builder)\s+)?(build|bake|commit|import){SUB}"
-    rf"|{POS}({CLI}{OPT}\s+)?buildx{OPT}\s+b[a-z]*{SUB}"
-    rf"|{POS}(\b(docker|podman|nerdctl)\s+compose|\b(docker|podman|nerdctl)-compose){OPT}\s+"
-    rf"(build{SUB}|(up|run|create)\b[^\n;&|]*\s--build(?![\w-]))"
-    rf"|{POS}(buildah|buildctl[\w.-]*|pack|skaffold|img){OPT}\s+(build|bud){SUB}"
-    rf"|{POS}ko{OPT}\s+(build|publish|resolve|apply)\b|{POS}skaffold{OPT}\s+run\b"
-    rf"|{POS}earthly[^\n;&|]*\s\+\w"
-    rf"|{POS}crane\s+append\b|\bjib:[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
+Q = r"""["']?"""  # a subcommand may be quoted: `docker "build" .`
+# `up|run|create|watch` without `--no-build`: a service carrying `build:` builds implicitly, so
+# this is anchored and its remedy is `--no-build`, which is one clear action and reads no
+# compose file. In `run`, a `--build` after the service name belongs to the service's command.
+COMPOSE = (
+    r"(\b(docker|podman|nerdctl)[ \t]+compose|\b(docker|podman|nerdctl)-compose)\b"
+    r"(?![^\n]*--no-build)[^\n]*[ \t](up|run|create|watch)\b"
 )
-# A command carrying one of these inspects or explains: `buildx bake --print`, `build --check`.
-INSPECT_ONLY = re.compile(r"(^|\s)(--print|--help|-h|--version|--check)(\s|$)")
+ANCHORED_BUILD = re.compile(
+    rf"{CLI}{OPT}[ \t]+((image|builder)[ \t]+)?{Q}(build|bake){Q}{SUB}"
+    rf"|({CLI}{OPT}[ \t]+)?buildx{OPT}[ \t]+b[a-z]*{SUB}"
+    rf"|(\b(docker|podman|nerdctl)[ \t]+compose|\b(docker|podman|nerdctl)-compose){OPT}"
+    rf"[ \t]+build{SUB}"
+    rf"|{COMPOSE}"
+    rf"|\b(buildah|buildctl[\w.-]*|pack|skaffold|img){OPTV}[ \t]+(build|bud){SUB}"
+    rf"|\bko{OPTV}[ \t]+(build|publish|resolve|apply)\b|\bskaffold{OPTV}[ \t]+run\b"
+    rf"|\bcrane[ \t]+append\b|\bjib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
+)
+# Inspecting or explaining, on THIS command: `buildx bake --print`, `buildx build --call=check`,
+# `bake --list=targets`, `compose build --dry-run`. `-h` is left out: it is a host flag as often
+# as a help flag, and reading it as help is how `df -h` once disarmed a build.
+INSPECT_ONLY = re.compile(r"(^|\s)(--print|--help|--version|--check|--call|--list|--dry-run)(=|\s|$)")
 
-# Layer 1, the BROAD detector: anything that might build. A container-CLI word followed later on
-# the same command by `build`, `bake` or `b`, the other builders, and `compose up|run|create`
-# without `--no-build`, since a service carrying `build:` builds implicitly - as both compose
-# files in this repository do.
+# Layer 1, the BROAD detector: anything that might build.
 RUN_STEP_BUILD = re.compile(
-    r"\b(docker|podman|nerdctl|depot)\b[^\n;&|]*[\s-](?<!no-)(build|bake|b)(?![\w-])"
-    r"|\b(docker|podman|nerdctl|depot)\b[^\n;&|]*\s(commit|import)\b"
-    r"|\$[({]?\w*DOCKER\w*[-:}\w)]*[\"']?[^\n;&|]*[\s-](?<!no-)(build|bake|b)(?![\w-])"
-    r"|(\b(docker|podman|nerdctl)\s+compose|\b(docker|podman|nerdctl)-compose)\b"
-    r"(?![^\n;&|]*--no-build)[^\n;&|]*\s(up|run|create|build)\b"
+    r"\b(docker|podman|nerdctl|depot|finch)\b[^\n]*[\s-](?<!no-)[\"']?(build|bake|b)(?![\w-])"
+    r"|\b(docker|podman|nerdctl|depot|finch)\b[^\n]*\s(commit|import)\b"
+    r"|\$[({]?\w*DOCKER\w*[-:}\w)]*[\"']?[^\n]*[\s-](?<!no-)(build|bake|b)(?![\w-])"
+    rf"|{COMPOSE}"
     r"|\bbuildx\s+b[a-z]*(?![\w-])"
     r"|\bbuildah\b"
-    r"|\bbuildctl[\w.-]*\b[^\n;&|]*\bbuild\b"
-    r"|\bko\s+(build|publish|resolve|apply)\b"
-    r"|\bpack\s+build\b|\bskaffold\s+(build|run)\b"
-    r"|\bimg\s+build\b"
-    r"|\bearthly\b[^\n;&|]*\s\+\w"
-    r"|\bcrane\s+append\b|\bjib:[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
+    r"|\bbuildctl[\w.-]*\b[^\n]*\bbuild\b"
+    r"|\bko\b[^\n]*\s(build|publish|resolve|apply)\b"
+    r"|\bpack\b[^\n]*\sbuild\b|\bskaffold\b[^\n]*\s(build|run)\b"
+    r"|\bimg\b[^\n]*\sbuild\b"
+    r"|\bearthly\b[^\n]*\s\+\w"
+    r"|\bcrane\s+append\b|\b[\w./]*jib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
+# A compose hit has a remedy of its own: `--no-build` says the step starts services only.
+COMPOSE_HIT = re.compile(r"compose\b[^\n]*[ \t](up|run|create|watch)\b")
 # The step env that declares a detector hit builds no image. It cannot excuse an anchored hit.
 MARKER = ("IMAGE_TRIGGER_CHECK", "not-an-image-build")
 excused: list[str] = []
 
+COMMENT = re.compile(r"(^|\s)#[^\n]*")
+SUBSTITUTION = re.compile(r"\$\(([^()\n]*)\)|`([^`\n]*)`")
+QUOTED = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
+SAYS = re.compile(r"^\s*(\w+=\S*\s+)*(echo|printf)\b")
+
+
+def strip_comments(script: str) -> str:
+    """Drop `#` comments outside quotes. A comment saying `--no-build` must not excuse the
+
+    build on the line above it, and a commented-out build must not be refused."""
+    out, quote = [], ""
+    for line in script.splitlines():
+        kept = []
+        for index, char in enumerate(line):
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in "\"'":
+                quote = char
+            elif char == "#" and (index == 0 or line[index - 1].isspace()):
+                break
+            kept.append(char)
+        quote = ""
+        out.append("".join(kept))
+    return "\n".join(out)
+
+
+def commands(script: str) -> list[str]:
+    """One entry per command: substitutions become commands of their own, and an `echo` or
+
+    `printf` loses its quoted argument, which is text rather than a command."""
+    text = re.sub(r"\\\s*\n", " ", strip_comments(script))
+    inner = [body for match in SUBSTITUTION.finditer(text) for body in match.groups() if body]
+    found = []
+    for piece in re.split(r"[\n;&|]+", text) + [part for body in inner for part in re.split(r"[\n;&|]+", body)]:
+        found.append(QUOTED.sub(" ", piece) if SAYS.search(piece) else piece)
+    return found
+
+
+def anchored_build(command: str):
+    """The anchored layer's verdict on one command: a shape that is certainly a build, unless
+
+    this same command is inspecting rather than building. An inspecting command is a MISS for
+    the anchored layer, which is what lets the marker reach `buildx bake --print`."""
+    certain = ANCHORED_BUILD.search(command)
+    return None if certain is None or INSPECT_ONLY.search(command) else certain
+
 
 def classify_run_step(step: dict) -> tuple[str, str] | None:
-    """(verdict, matched text) for a run step: `builds` when it is refused, `excused` when the
+    """(verdict, matched text) for a run step: `builds` when it is refused, `excused` when a
 
-    detector hit is declared not a build, None when neither layer sees one. Backslash
-    continuations are joined first: `docker \\` then `buildx build` is one command."""
+    detector hit is declared not a build, None when neither layer sees one."""
     script = step.get("run")
     if not isinstance(script, str):
         return None
-    command = re.sub(r"\\\s*\n", " ", script)
-    hit = RUN_STEP_BUILD.search(command)
-    if not hit:
+    first = None
+    for command in commands(script):
+        hit = RUN_STEP_BUILD.search(command) or ANCHORED_BUILD.search(command)
+        if not hit:
+            continue
+        certain = anchored_build(command)
+        if certain:
+            return "builds", certain.group(0).strip()
+        first = first or hit.group(0).strip()
+    if first is None:
         return None
-    certain = ANCHORED_BUILD.search(command)
-    if certain and not INSPECT_ONLY.search(command):
-        return "builds", certain.group(0).strip()
     declared = str((step.get("env") or {}).get(MARKER[0], "")).strip()
-    if declared == MARKER[1]:
-        return "excused", hit.group(0).strip()
-    return "builds", hit.group(0).strip()
+    return ("excused" if declared == MARKER[1] else "builds"), first
 
 
 NON_BUILDING_ACTIONS = {
@@ -786,13 +872,18 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
         return
     kind, matched = verdict
     if kind == "excused":
-        excused.append(f"{workflow}: {place}: {matched}")
+        origin_note = "" if origin == str(workflow) else f" (in {origin})"
+        excused.append(f"{workflow}: job {job_name}: {where}{origin_note}: {matched}")
         return
+    remedy = (
+        f"add --no-build if the step should not build"
+        if COMPOSE_HIT.search(matched)
+        else f"reword the command so it does not read as a build (`--flag=value`), or, if the "
+        f"step builds no image, declare it with `env: {MARKER[0]}: {MARKER[1]}`"
+    )
     problems.append(
         f"::error file={workflow}::{place} builds an image in a run step ({matched!r}); build "
-        f"it with docker/build-push-action so this check can read it, reword the command so it "
-        f"does not read as a build (`--flag=value`), or, if the step builds no image, declare "
-        f"it with `env: {MARKER[0]}: {MARKER[1]}`"
+        f"it with docker/build-push-action so this check can read it, or {remedy}"
     )
 
 

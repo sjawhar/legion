@@ -356,7 +356,7 @@ run_step() {
   python3 - "$root/.github/workflows/image.yaml" "$body" <<'PYEOF'
 import sys
 path, body = sys.argv[1], sys.argv[2]
-indented = "\n".join("          " + line for line in body.splitlines())
+indented = "\n".join("          " + line for line in body.replace("\\n", "\n").splitlines())
 text = open(path).read()
 head, _, _ = text.partition("      - uses: docker/build-push-action@v6")
 open(path, "w").write(f"{head}      - name: Build\n        run: |\n{indented}\n")
@@ -756,23 +756,24 @@ run_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"
 check "a run step that does not build is not flagged" "$(contains "$out" 'this check covered 0 image builds')"
 
-echo "case: the detector refuses every build shape, and the marker cannot excuse an anchored one"
 extra_step() {
   local root=$1 body=$2 marker=${3:-no}
   python3 - "$root/.github/workflows/image.yaml" "$body" "$marker" <<'PYEOF'
 import sys
 path, body, marker = sys.argv[1], sys.argv[2], sys.argv[3]
 env = "        env:\n          IMAGE_TRIGGER_CHECK: not-an-image-build\n" if marker == "yes" else ""
-indented = "\n".join("          " + line for line in body.splitlines())
+indented = "\n".join("          " + line for line in body.replace("\\n", "\n").splitlines())
 text = open(path).read()
 open(path, "w").write(text + f"      - name: Extra\n{env}        run: |\n{indented}\n")
 PYEOF
 }
 
-# A table, not single literals: every row is a real invocation, each asserting the refusal AND
-# that the step is named, so a row cannot pass on the zero-build guard alone. Every row is then
-# re-run carrying the marker: an anchored shape stays refused, since the marker excuses a
-# detector hit only where the anchored layer missed it.
+echo "case: every build shape is detected, and the marker excuses only the ambiguous ones"
+# A table, not single literals: every row is a real invocation. Each build row asserts the
+# refusal, that the step is named and that the matched text is printed, so no row can pass on
+# the zero-build guard; then re-runs the same command carrying the marker, where an anchored
+# shape must still be refused. `\n` in a body is a newline: a build under a wrapper, or after
+# an inspecting command, is the shape that hid an escape hatch in the layer before this one.
 while IFS='|' read -r label anchored body; do
   [ -n "$label" ] || continue
   root=$(fixture "build-$label")
@@ -792,135 +793,164 @@ while IFS='|' read -r label anchored body; do
     check "  and the excusal is printed" "$(contains "$out" "declared not an image build")"
   fi
 done <<'BUILDS'
-plain|yes|docker build -f docker/Dockerfile .
-buildx|yes|docker buildx build --load -f docker/Dockerfile .
-buildx-b|yes|docker buildx b --load -f docker/Dockerfile .
-buildx-b-bare|yes|docker buildx b .
-buildx-b-tag|yes|docker buildx b -t x .
-buildx-b-spaces|yes|docker  buildx   b .
-bake|yes|docker buildx bake --load listener
-image-build|yes|docker image build -f docker/Dockerfile .
-builder-build|yes|docker builder build -f docker/Dockerfile .
-context-flag|yes|docker --context remote build -f docker/Dockerfile .
-host-flag|yes|docker -H tcp://x:2375 build -f docker/Dockerfile .
-buildx-builder-flag|yes|docker buildx --builder mybuilder build -f docker/Dockerfile .
-sudo|yes|sudo docker build -f docker/Dockerfile .
-env-prefix|yes|DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile .
-substitution|yes|img=$(docker buildx build --load -q -f docker/Dockerfile .)
-backticks|yes|img=`docker buildx build --load -q -f docker/Dockerfile .`
-github-env|yes|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
-eval|yes|eval "docker build -f docker/Dockerfile ."
-bash-c|yes|bash -c "docker buildx build --load -f docker/Dockerfile ."
-subshell|yes|(docker buildx build --load -f docker/Dockerfile .)
-compose-up-build|yes|docker compose up --build -d
-compose-build|yes|docker-compose build listener
-podman-compose-up|yes|podman compose up --build -d
-podman|yes|podman build -f docker/Dockerfile .
-nerdctl|yes|nerdctl build -f docker/Dockerfile .
-depot|yes|depot build -f docker/Dockerfile .
-buildah-bud|yes|buildah bud -f docker/Dockerfile .
-buildctl|yes|buildctl build --frontend dockerfile.v0
-ko|yes|ko build ./cmd/listener
-pack|yes|pack build app --path .
-skaffold|yes|skaffold build --file-output out.json
-earthly|yes|earthly +docker
-crane|yes|crane append -f layer.tar -t app:ci
-jib|yes|mvn compile jib:dockerBuild
-dollar-docker|yes|"$DOCKER" build -f docker/Dockerfile .
-kaniko|yes|/kaniko/executor --dockerfile docker/Dockerfile --context .
-quoted-docker|yes|"docker" build -f docker/Dockerfile .
-which-docker|yes|$(which docker) build -f docker/Dockerfile .
-default-var|yes|${DOCKER:-docker} build -f docker/Dockerfile .
-default-var-quoted|yes|"${DOCKER:-docker}" build -f docker/Dockerfile .
-quoted-flag-value|yes|docker --config "/tmp/a b" build -f docker/Dockerfile .
-expression-context|yes|docker --context ${{ env.X }} build -f docker/Dockerfile .
-expression-builder|yes|docker buildx --builder ${{ steps.buildx.outputs.name }} build -f docker/Dockerfile .
+docker-build-f-docker|yes|docker build -f docker/Dockerfile .
+docker-buildx-build-load|yes|docker buildx build --load -f docker/Dockerfile .
+docker-buildx-b-load|yes|docker buildx b --load -f docker/Dockerfile .
+docker-buildx-b|yes|docker buildx b .
+docker-buildx-b-t|yes|docker buildx b -t x .
+docker-buildx-b-2|yes|docker  buildx   b .
+docker-buildx-bake-load|yes|docker buildx bake --load listener
+docker-image-build-f|yes|docker image build -f docker/Dockerfile .
+docker-builder-build-f|yes|docker builder build -f docker/Dockerfile .
+docker-context-remote-build|yes|docker --context remote build -f docker/Dockerfile .
+docker-h-tcp-x|yes|docker -H tcp://x:2375 build -f docker/Dockerfile .
+docker-buildx-builder-mybuilder|yes|docker buildx --builder mybuilder build -f docker/Dockerfile .
+sudo-docker-build-f|yes|sudo docker build -f docker/Dockerfile .
+docker-buildkit-1-docker|yes|DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile .
+img-docker-buildx-build|yes|img=$(docker buildx build --load -q -f docker/Dockerfile .)
+img-docker-buildx-build-2|yes|img=`docker buildx build --load -q -f docker/Dockerfile .`
+echo-img-docker-buildx|yes|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
+eval-docker-build-f|yes|eval "docker build -f docker/Dockerfile ."
+bash-c-docker-buildx|yes|bash -c "docker buildx build --load -f docker/Dockerfile ."
+docker-buildx-build-load-2|yes|(docker buildx build --load -f docker/Dockerfile .)
+docker-compose-up-build|yes|docker compose up --build -d
+docker-compose-build-listener|yes|docker-compose build listener
+podman-compose-up-build|yes|podman compose up --build -d
+podman-build-f-docker|yes|podman build -f docker/Dockerfile .
+nerdctl-build-f-docker|yes|nerdctl build -f docker/Dockerfile .
+depot-build-f-docker|yes|depot build -f docker/Dockerfile .
+buildah-bud-f-docker|yes|buildah bud -f docker/Dockerfile .
+buildctl-build-frontend-dockerfile|yes|buildctl build --frontend dockerfile.v0
+ko-build-cmd-listener|yes|ko build ./cmd/listener
+pack-build-app-path|yes|pack build app --path .
+skaffold-build-file-output|yes|skaffold build --file-output out.json
+earthly-docker|no|earthly +docker
+crane-append-f-layer|yes|crane append -f layer.tar -t app:ci
+mvn-compile-jib-dockerbuild|yes|mvn compile jib:dockerBuild
+docker-build-f-docker-2|yes|"$DOCKER" build -f docker/Dockerfile .
+kaniko-executor-dockerfile-docker|yes|/kaniko/executor --dockerfile docker/Dockerfile --context .
+docker-build-f-docker-3|yes|"docker" build -f docker/Dockerfile .
+which-docker-build-f|yes|$(which docker) build -f docker/Dockerfile .
+docker-docker-build-f|yes|${DOCKER:-docker} build -f docker/Dockerfile .
+docker-docker-build-f-2|yes|"${DOCKER:-docker}" build -f docker/Dockerfile .
+docker-config-tmp-a|yes|docker --config "/tmp/a b" build -f docker/Dockerfile .
+docker-context-env-x|yes|docker --context ${{ env.X }} build -f docker/Dockerfile .
+docker-buildx-builder-steps|yes|docker buildx --builder ${{ steps.buildx.outputs.name }} build -f docker/Dockerfile .
 nerdctl-compose-build|yes|nerdctl compose build
-nerdctl-compose-up|yes|nerdctl compose up --build
-depot-bake|yes|depot bake listener
-buildctl-addr|yes|buildctl --addr tcp://x:1234 build --frontend dockerfile.v0
-buildctl-daemonless|yes|buildctl-daemonless.sh build --frontend dockerfile.v0
-docker-buildx|yes|docker-buildx build -f docker/Dockerfile .
-buildx-standalone|yes|buildx build -f docker/Dockerfile .
-img|yes|img build -f docker/Dockerfile .
-docker-commit|yes|docker commit working app:ci
-docker-import|yes|docker import rootfs.tar app:ci
-ko-resolve|yes|ko resolve -f config/
-ko-apply|yes|ko apply -f config/
+nerdctl-compose-up-build|yes|nerdctl compose up --build
+depot-bake-listener|yes|depot bake listener
+buildah-from-scratch-buildah|no|buildah from scratch && buildah commit working-container app:ci
+buildctl-addr-tcp-x|yes|buildctl --addr tcp://x:1234 build --frontend dockerfile.v0
+buildctl-daemonless-sh-build|yes|buildctl-daemonless.sh build --frontend dockerfile.v0
+docker-buildx-build-f|yes|docker-buildx build -f docker/Dockerfile .
+buildx-build-f-docker|yes|buildx build -f docker/Dockerfile .
+img-build-f-docker|yes|img build -f docker/Dockerfile .
+docker-commit-working-app|no|docker commit working app:ci
+docker-import-rootfs-tar|no|docker import rootfs.tar app:ci
+ko-resolve-f-config|yes|ko resolve -f config/
+ko-apply-f-config|yes|ko apply -f config/
 skaffold-run|yes|skaffold run
-buildah-from-commit|no|buildah from scratch && buildah commit working-container app:ci
-compose-up-implicit|no|docker compose -f compose/listener.compose.yml up -d
-compose-run-implicit|no|docker compose -f compose/listener.compose.yml run app
-compose-create-implicit|no|docker compose -f compose/listener.compose.yml create
+docker-compose-f-compose|yes|docker compose -f compose/listener.compose.yml up -d
+docker-compose-f-compose-2|yes|docker compose -f compose/listener.compose.yml run app
+docker-compose-f-compose-3|yes|docker compose -f compose/listener.compose.yml create
+docker-compose-f-compose-4|yes|docker compose -f compose/listener.compose.yml watch
+ko-verbose-build-cmd|yes|ko --verbose build ./cmd/listener
+pack-quiet-build-app|yes|pack --quiet build app --path .
+skaffold-default-repo-r|yes|skaffold --default-repo=r build
+img-debug-build-f|yes|img --debug build -f docker/Dockerfile .
+docker-build-f-docker-4|yes|docker "build" -f docker/Dockerfile .
+finch-build-f-docker|yes|finch build -f docker/Dockerfile .
+gradlew-jibdockerbuild|yes|./gradlew jibDockerBuild
+df-h-then-docker|yes|df -h\ndocker buildx build --load -f docker/Dockerfile .
+docker-version-then-docker|yes|docker --version\ndocker buildx build --load -f docker/Dockerfile .
+sha256sum-check-sums-txt|yes|sha256sum --check sums.txt\ndocker build -f docker/Dockerfile .
+kubectl-apply-dry-run|yes|kubectl apply --dry-run=client -f k8s/\ndocker build -f docker/Dockerfile .
+helm-template-help-then|yes|helm template --help\ndocker build -f docker/Dockerfile .
+docker-buildx-bake-print|yes|docker buildx bake --print\ndocker buildx build --load -f docker/Dockerfile .
+docker-build-f-docker-5|yes|docker build -f docker/Dockerfile . && df -h
+timeout-900-docker-build|yes|timeout 900 docker build -f docker/Dockerfile .
+time-docker-build-f|yes|time docker build -f docker/Dockerfile .
+nice-n-10-docker|yes|nice -n 10 docker build -f docker/Dockerfile .
+exec-docker-build-f|yes|exec docker build -f docker/Dockerfile .
+sudo-e-docker-build|yes|sudo -E docker build -f docker/Dockerfile .
+command-docker-build-f|yes|command docker build -f docker/Dockerfile .
+env-foo-1-docker|yes|env FOO=1 docker build -f docker/Dockerfile .
+usr-bin-docker-build|yes|/usr/bin/docker build -f docker/Dockerfile .
+if-docker-build-f|yes|if ! docker build -f docker/Dockerfile .; then exit 1; fi
+for-t-in-a|yes|for t in a b; do docker build -f docker/Dockerfile . ; done
+until-docker-build-f|yes|until docker build -f docker/Dockerfile .; do sleep 1; done
+docker-build-f-docker-6|yes|{ docker build -f docker/Dockerfile . ; }
+sh-euc-docker-build|yes|sh -euc "docker build -f docker/Dockerfile ."
+sleep-5-then-docker|yes|sleep 5\ndocker build -f docker/Dockerfile .
+echo-run-docker-build|yes|echo run docker build now
+docker-compose-up-d|yes|docker compose up -d\n# we pass --no-build in CI
+docker-compose-f-x|yes|docker compose -f x.yml run --rm --build app
+docker-then-buildx-build|yes|docker \\\n  buildx build --load -f docker/Dockerfile .
+docker-buildx-build-load-3|yes|docker buildx build --load -f docker/Dockerfile . # --help
+podman-compose-up|yes|podman-compose up
 BUILDS
 
-# The continuation form cannot go in the table: its body spans two lines.
-root=$(fixture build-continuation)
-run_step "$root" 'docker \
-  buildx build --load -f docker/Dockerfile .'
-run_check "$root"
-check "build shape continuation is refused" "$(is "$status" 1)"
-check "  and names the step" "$(contains "$out" "Build builds an image in a run step")"
-root=$(fixture build-continuation-marked)
-extra_step "$root" 'docker \
-  buildx build --load -f docker/Dockerfile .' yes
-run_check "$root"
-check "  and the marker does not excuse it" "$(is "$status" 1)"
-check "  and still names the step" "$(contains "$out" "Extra builds an image in a run step")"
-
-echo "case: a step the detector hits but builds nothing goes green on the marker"
-# The false-positive set: the detector is broad on purpose, so a step that runs a build word
-# without building an image is refused with its matched text, and the marker is the remedy.
-# Each keeps the readable build-push-action step, so a green is the detector leaving it alone.
-
-while IFS='|' read -r label body; do
+echo "case: a step that runs a build word without building goes green, marked when detected"
+# The detector is broad on purpose, so a step that runs a build word without building an image
+# is refused with its matched text and the marker is the remedy. Each keeps the readable
+# build-push-action step, so a green is the detector leaving the workflow's own build alone.
+while IFS='|' read -r label detected body; do
   [ -n "$label" ] || continue
-  root=$(fixture "fp-$label")
-  extra_step "$root" "$body"
-  run_check "$root"
-  check "false positive $label is refused without the marker" "$(is "$status" 1)"
-  check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ('")"
-  check "  and offers the marker" "$(contains "$out" "IMAGE_TRIGGER_CHECK: not-an-image-build")"
-  root=$(fixture "fp-marked-$label")
-  extra_step "$root" "$body" yes
-  run_check "$root"
-  check "  and goes green with it" "$(is "$status" 0)"
-  check "  and the excused step is logged" "$(contains "$out" "declared not an image build (IMAGE_TRIGGER_CHECK: not-an-image-build): ")"
-  check "  and the log names the step" "$(contains "$out" "Extra")"
+  if [ "$detected" = "yes" ]; then
+    root=$(fixture "fp-$label")
+    extra_step "$root" "$body"
+    run_check "$root"
+    check "non-build $label is refused without the marker" "$(is "$status" 1)"
+    check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ('")"
+    check "  and offers a remedy" "$(contains "$out" "docker/build-push-action")"
+    root=$(fixture "fp-marked-$label")
+    extra_step "$root" "$body" yes
+    run_check "$root"
+    check "  and goes green with the marker" "$(is "$status" 0)"
+    check "  and the excused step is logged" "$(contains "$out" "declared not an image build (IMAGE_TRIGGER_CHECK: not-an-image-build): ")"
+    check "  and the log names the job and step" "$(contains "$out" "job docker: Extra")"
+  else
+    root=$(fixture "unseen-$label")
+    extra_step "$root" "$body"
+    run_check "$root"
+    check "non-build $label needs no marker" "$(is "$status" 0)"
+    check "  and nothing is excused" "$(is "$(printf '%s' "$out" | grep -c 'declared not an image build')" 0)"
+  fi
 done <<'FALSEPOSITIVES'
-host-flag-hostname|docker -H build.example.com:2375 pull alpine
-config-flag-path|docker --config build/.docker pull alpine
-bake-print|docker buildx bake --print
-build-check|docker buildx build --check .
-build-help|docker buildx build --help
-context-named-build|docker --context build pull alpine
-host-flag-corp|docker -H build.corp pull alpine
-echo-mentioning-build|echo "run docker build to make the image"
-run-go-build|docker run --rm golang go build ./...
-exec-make|docker exec app make build
-run-echo|docker run alpine echo a b
-run-mount-go-build|docker run -v "$PWD":/w -w /w golang go build ./...
+docker-h-build-example|yes|docker -H build.example.com:2375 pull alpine
+docker-config-build-docker|yes|docker --config build/.docker pull alpine
+docker-buildx-bake-print-2|yes|docker buildx bake --print
+docker-buildx-build-check|yes|docker buildx build --check .
+docker-buildx-build-help|yes|docker buildx build --help
+docker-buildx-build-call|yes|docker buildx build --call=check .
+docker-buildx-bake-list|yes|docker buildx bake --list=targets
+docker-compose-build-dry|yes|docker compose build --dry-run
+earthly-version|no|earthly --version
+docker-pull-gcr-io|no|docker pull gcr.io/kaniko-project/executor:latest
+docker-context-build-pull|yes|docker --context build pull alpine
+docker-h-build-corp|yes|docker -H build.corp pull alpine
+docker-buildx-builder-buildkit|no|docker buildx --builder buildkit prune
+docker-buildx-builder-buildkit-2|no|docker buildx --builder buildkit ls
+docker-compose-f-compose-5|no|docker compose -f compose/listener.compose.yml up -d --no-build
+docker-run-rm-golang|yes|docker run --rm golang go build ./...
+docker-exec-app-make|yes|docker exec app make build
+docker-run-alpine-echo|yes|docker run alpine echo a b
+docker-run-v-pwd|yes|docker run -v "$PWD":/w -w /w golang go build ./...
+docker-buildx-imagetools-inspect|no|docker buildx imagetools inspect app:ci
+docker-buildx-create-use|no|docker buildx create --use
+docker-pull-x-make|no|docker pull x; make build
+echo-run-docker-build-2|no|echo "run docker build to make the image"
+docker-compose-run-no|yes|docker compose run --no-build app ./test.sh --build
+earthly-test|yes|earthly +test
+df-h|no|df -h
+docker-build-f-docker-7|no|# docker build -f docker/Dockerfile .
 FALSEPOSITIVES
 
-# These the detector does not hit at all, so they are green with no marker and nothing is logged.
-while IFS='|' read -r label body; do
-  [ -n "$label" ] || continue
-  root=$(fixture "unseen-$label")
-  extra_step "$root" "$body"
-  run_check "$root"
-  check "non-build $label needs no marker" "$(is "$status" 0)"
-  check "  and nothing is excused" "$(is "$(printf '%s' "$out" | grep -c 'declared not an image build')" 0)"
-done <<'UNSEEN'
-buildx-builder-prune|docker buildx --builder buildkit prune
-buildx-builder-ls|docker buildx --builder buildkit ls
-earthly-version|earthly --version
-pull-kaniko-image|docker pull gcr.io/kaniko-project/executor:latest
-compose-up-no-build|docker compose -f compose/listener.compose.yml up -d --no-build
-imagetools|docker buildx imagetools inspect app:ci
-buildx-create|docker buildx create --use
-pull-then-make|docker pull x; make build
-UNSEEN
-
+echo "case: an implicit compose build names --no-build as its remedy"
+root=$(fixture compose-remedy)
+extra_step "$root" "docker compose -f compose/listener.compose.yml up -d"
+run_check "$root"
+check "the compose refusal names --no-build" "$(contains "$out" "add --no-build if the step should not build")"
 
 echo "case: a result comparison is compared case-insensitively, as GitHub does"
 root=$(fixture gate-result-capital-success)
