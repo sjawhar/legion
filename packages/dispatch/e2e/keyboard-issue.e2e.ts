@@ -1,8 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { createIssue, createProject, getIssue, patchIssue } from "./api";
+import { createAsk, createComment, createIssue, createProject, getIssue, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
+
+const session = {
+  actor: { kind: "session" as const, id: "e2e-keyboard-inbox" },
+  as: "agent" as const,
+};
 
 /** The keymap is bound only once sign-in resolves (`AuthGate` renders a skeleton until
  *  `/auth/whoami` answers), so a key pressed before the page renders reaches no handler. */
@@ -505,4 +510,129 @@ test("the Board lists its own roving keys once: the List's are not registered wh
   } finally {
     await context.close();
   }
+});
+// The issue page's `0`-`3` write the issue's priority, and an ask card on that page carries option
+// radios. A radio takes no typed text, so this slice's editable policy lets a digit through to the
+// page - which must not turn "pick option 2" into "this issue is P2". The second half of this row
+// is what makes the first mean anything: the same key, off the card, still writes.
+test.describe("issue page", () => {
+  test("a digit on an ask's option writes no priority, while the same digit on the page does", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Priority and options" });
+    await createAsk(
+      issue.key,
+      { options: [{ label: "Ship" }, { label: "Hold" }], question: "Which way?" },
+      session
+    );
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`/issues/${issue.key}`);
+      await expect(
+        page.getByRole("heading", { level: 1, name: "Priority and options" })
+      ).toBeVisible();
+
+      let patched = 0;
+      await page.route(`**/api/v1/issues/${issue.key}`, (route) => {
+        if (route.request().method() === "PATCH") patched += 1;
+        return route.fallback();
+      });
+
+      // Focus an option radio, as a reader answering the ask would, and press a digit.
+      const hold = page.getByRole("radio", { name: "Hold" });
+      await hold.click();
+      await expect(hold).toBeFocused();
+      await page.keyboard.press("2");
+      await page.waitForTimeout(500);
+      expect(patched).toBe(0);
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
+
+      // Off the card, the same key is the header's own: this is what proves the guard is a guard
+      // and not a key that stopped working.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      const patch = page.waitForRequest(
+        (request) =>
+          request.method() === "PATCH" &&
+          new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+      );
+      await page.keyboard.press("2");
+      expect((await patch).postDataJSON()).toEqual({ priority: 2 });
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 2 });
+
+      // `Shift+P` writes without focusing anything either, so it needs the same guard, and the
+      // same two halves prove it: nothing from the card, the pin itself from the page.
+      let pinned = 0;
+      await page.route(`**/api/v1/me/issues/${issue.key}/state`, (route) => {
+        if (route.request().method() === "PUT") pinned += 1;
+        return route.fallback();
+      });
+      await hold.click();
+      await expect(hold).toBeFocused();
+      await page.keyboard.press("Shift+P");
+      await page.waitForTimeout(500);
+      expect(pinned).toBe(0);
+      await expect(page.getByRole("button", { name: "Pin issue" })).toBeVisible();
+
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.keyboard.press("Shift+P");
+      await expect(page.getByRole("button", { name: "Unpin issue" })).toBeVisible();
+      expect(pinned).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The ask card is not the only control a reader's hand rests on. `Show activity` is an ordinary
+  // page checkbox, outside every card, and a digit or `Shift+P` straight after ticking it must
+  // not write the issue's priority or its pin either - the rule is that these two keys write only
+  // from the page itself, not from a control.
+  test("a digit on a page checkbox writes no priority, and neither does Shift+P", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Activity and priority" });
+    await createComment(issue.key, { body: "Looking into it." }, session);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`/issues/${issue.key}/conversation`);
+      const activity = page.getByRole("checkbox", { name: "Show activity" });
+      await expect(activity).toBeVisible();
+
+      let patched = 0;
+      await page.route(`**/api/v1/issues/${issue.key}`, (route) => {
+        if (route.request().method() === "PATCH") patched += 1;
+        return route.fallback();
+      });
+      let pinned = 0;
+      await page.route(`**/api/v1/me/issues/${issue.key}/state`, (route) => {
+        if (route.request().method() === "PUT") pinned += 1;
+        return route.fallback();
+      });
+
+      await activity.focus();
+      await expect(activity).toBeFocused();
+      await page.keyboard.press("1");
+      await page.keyboard.press("Shift+P");
+      await page.waitForTimeout(500);
+      expect({ patched, pinned }).toEqual({ patched: 0, pinned: 0 });
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
+      await expect(page.getByRole("button", { name: "Pin issue" })).toBeVisible();
+
+      // From the page itself both keys still write, which is what makes the first half a guard.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.keyboard.press("1");
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 1 });
+      await page.keyboard.press("Shift+P");
+      await expect(page.getByRole("button", { name: "Unpin issue" })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
 });

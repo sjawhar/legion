@@ -465,7 +465,8 @@ export function Inbox(): ReactNode {
     .map((row) => row.id);
   // One pick, over the ids the bar is counting: the same optimistic move and rollback the per-row
   // control makes, once per ask. The ids the server took leave the selection; the ones it refused
-  // stay marked under its own reason, so a second pick retries exactly those.
+  // are marked again under its own reason, even if Clear ran while the write was in flight, so a
+  // second pick retries exactly those.
   const snoozePick = (until: string) => {
     const ids = [...selected];
     setBulkRefusal(undefined);
@@ -475,7 +476,11 @@ export function Inbox(): ReactNode {
       setBulkRefusal(refusalText(failed, ids.length));
       const refused = new Set(failed.map(({ askId }) => askId));
       const taken = new Set(ids.filter((id) => !refused.has(id)));
-      setMarked((current) => new Set([...current].filter((id) => !taken.has(id))));
+      setMarked((current) => {
+        const next = new Set([...current].filter((id) => !taken.has(id)));
+        for (const id of refused) next.add(id);
+        return next;
+      });
     });
   };
   const listRef = useRef<HTMLElement>(null);
