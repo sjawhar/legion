@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
 import { DESTRUCTIVE, KILL_PID, type Live, MODEL_ROWS, PID_ROWS } from "./pane-guard-model-rows";
 import {
@@ -19,6 +20,7 @@ import {
   DOTDOT_COMPONENT,
   fixtureGuard,
   measureAllPathRows,
+  measureRow,
   PATH_ROWS,
   type PathRowResult,
 } from "./pane-guard-path-rows";
@@ -394,6 +396,49 @@ test("the path battery's rows measure the property they name", () => {
   ).toEqual([]);
   expect(families.length).toBeGreaterThan(10);
 }, 60_000);
+
+test("a must-refuse row is a control, not a probe: refused at main's guard too", async () => {
+  // A row `PATH_ROWS` names `must-refuse` is meant to hold steady across a fix, distinguishing it
+  // from a `probe`, which is meant to flip. The battery only ever measured the CURRENT guard, so
+  // a row could be relabelled `must-refuse` for having reached ALLOW → refused across this PR's
+  // own fixes — exactly a probe's signature — and nothing would catch it. This loads `main`'s own
+  // `pane-guard.ts` (its one local import, `./pane-guard-code`, is unchanged by this PR, so it
+  // resolves against the current file) and asks it too.
+  const legionDir = path.dirname(new URL(import.meta.url).pathname);
+  const repoRoot = path.resolve(legionDir, "..", "..", "..", "..");
+  const source = execSync("jj file show -r main packages/pi-envoy/src/legion/pane-guard.ts", {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 1 << 26,
+  });
+  const tempPath = path.join(legionDir, "pane-guard.main-control-check.generated.ts");
+  writeFileSync(tempPath, source);
+  // Dynamic import, not static: the module's content is `main`'s committed text fetched at test
+  // time, written to a path this run generates — genuinely runtime-selected, not a literal known
+  // at author time.
+  let baseCreatePaneGuard: typeof createPaneGuard;
+  try {
+    const mod = (await import(pathToFileURL(tempPath).href)) as {
+      createPaneGuard: typeof createPaneGuard;
+    };
+    baseCreatePaneGuard = mod.createPaneGuard;
+  } finally {
+    rmSync(tempPath, { force: true });
+  }
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-base-control-"));
+  try {
+    const mustRefuse = PATH_ROWS.filter(
+      (row) => row.role === "must-refuse" && !PATH_ROW_CONTROL_EXEMPT.includes(row.name)
+    );
+    const stillAllowedAtMain = mustRefuse
+      .filter((row) => measureRow(row, root, baseCreatePaneGuard).refusal === undefined)
+      .map((row) => row.name);
+    expect(stillAllowedAtMain).toEqual([]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 120_000);
 
 test("a target is judged as the kernel resolves it, not as the text reads", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-paths-"));

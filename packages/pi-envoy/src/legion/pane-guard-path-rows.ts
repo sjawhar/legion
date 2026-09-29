@@ -721,9 +721,18 @@ export const PATH_ROWS: readonly PathRow[] = [
   {
     name: "readlink.f.dotdot.symlink",
     family: "substitution",
-    role: "must-refuse",
+    role: "probe",
     command: 'rm -f "$(readlink -f e/../.bashrc)"',
     dotdot: true,
+  },
+  {
+    name: "readlink.f.symlink.nodotdot",
+    family: "substitution",
+    role: "must-refuse",
+    // The direct counterpart of `realpath.symlink.nodotdot`: no `..` at all, so lexical and
+    // physical resolution agree at every revision — refused at base and head alike.
+    command: 'rm -f "$(readlink -f hs/.bashrc)"',
+    dotdot: false,
   },
   {
     name: "readlink.nof.letter.f",
@@ -1365,10 +1374,15 @@ export interface PathRowResult {
 }
 
 /** The pane a fixture stands for: the guard rooted on its workspace and scratch, and the
- * environment real bash runs the same command under, with `HOME` on the canary. */
-export function fixtureGuard(fixture: PathFixture): { guard: PaneGuard; env: NodeJS.ProcessEnv } {
+ * environment real bash runs the same command under, with `HOME` on the canary. `guardFactory`
+ * defaults to this file's own `createPaneGuard`; a caller comparing against another revision's
+ * guard passes that revision's own export instead. */
+export function fixtureGuard(
+  fixture: PathFixture,
+  guardFactory: typeof createPaneGuard = createPaneGuard
+): { guard: PaneGuard; env: NodeJS.ProcessEnv } {
   return {
-    guard: createPaneGuard({
+    guard: guardFactory({
       workspace: fixture.workspace,
       ompPid: process.pid,
       scratch: fixture.scratch,
@@ -1384,11 +1398,15 @@ export function fixtureGuard(fixture: PathFixture): { guard: PaneGuard; env: Nod
 
 /** Builds the row its own fixture, asks the guard, then runs the command under real bash in that
  * same fixture, so both columns see one filesystem. */
-export function measureRow(row: PathRow, root: string): PathRowResult {
+export function measureRow(
+  row: PathRow,
+  root: string,
+  guardFactory?: typeof createPaneGuard
+): PathRowResult {
   const base = mkdtempSync(path.join(root, "row-"));
   try {
     const fixture = buildPathFixture(base);
-    const { guard, env } = fixtureGuard(fixture);
+    const { guard, env } = fixtureGuard(fixture, guardFactory);
     const refusal = guard.bash(row.command, fixture.workspace, env);
     const before = canaryDigest(fixture.home);
     const run = spawnSync("bash", ["-c", row.command], {
