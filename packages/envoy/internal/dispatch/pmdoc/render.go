@@ -35,7 +35,8 @@ type renderer struct {
 	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
 	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
-	// spanBudget is how many more empty cells the tables' spans may add (maxSpanCells).
+	// spanBudget is how many more empty cells the tables' spans may add: maxSpanCells, or none in
+	// a spanless render (renderSpanless).
 	spanBudget   int
 	err          error
 	blockOffsets []BlockOffset
@@ -53,7 +54,21 @@ type BlockOffset struct {
 // (renderedMarkTypes) cannot change it: the document is rendered with its anchor marks stripped,
 // which merges the text runs an anchor split, and an escape is decided over a whole run.
 func Render(doc *Node) (string, error) {
-	r, err := render(doc)
+	r, err := render(doc, maxSpanCells)
+	if err != nil {
+		return "", err
+	}
+	return r.b.String(), nil
+}
+
+// renderSpanless is Render writing no cell for a table's spans: each cell once, and the header as
+// wide as the widest row as it holds cells (tableGrid). The checks that read one document-level
+// block at a time (BlockReadError, BlockShapeError) read it so. They run once for each block a
+// write changed, where a budget for each render would let a write across many tables add
+// maxSpanCells cells for every one of them; a render of the whole document, the one a write stores
+// or reads back (NewMisread), spends one budget in all.
+func renderSpanless(doc *Node) (string, error) {
+	r, err := render(doc, 0)
 	if err != nil {
 		return "", err
 	}
@@ -63,14 +78,15 @@ func Render(doc *Node) (string, error) {
 // RenderWithBlockOffsets renders a document and records each identified block's
 // byte range in the returned markdown.
 func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
-	r, err := render(doc)
+	r, err := render(doc, maxSpanCells)
 	if err != nil {
 		return "", nil, err
 	}
 	return r.b.String(), r.blockOffsets, nil
 }
 
-func render(doc *Node) (r *renderer, err error) {
+// render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid).
+func render(doc *Node, spanCells int) (r *renderer, err error) {
 	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
 	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
@@ -91,13 +107,13 @@ func render(doc *Node) (r *renderer, err error) {
 		return &renderer{}, nil
 	}
 	labels := definedFootnoteLabels(doc)
-	r = renderBlocks(doc, labels, false)
+	r = renderBlocks(doc, labels, false, spanCells)
 	// An empty code block in a typed block in a spread list item is written with a line between its
 	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
 	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
 	// written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
-		r = renderBlocks(doc, labels, true)
+		r = renderBlocks(doc, labels, true, spanCells)
 	}
 	if r.err != nil {
 		return nil, r.err
@@ -106,9 +122,9 @@ func render(doc *Node) (r *renderer, err error) {
 }
 
 // renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
-// its fences alone when bareEmptyCode says so.
-func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool) *renderer {
-	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: maxSpanCells}
+// its fences alone when bareEmptyCode says so, its tables' spans adding at most spanCells cells.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCells int) *renderer {
+	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode, spanBudget: spanCells}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return r

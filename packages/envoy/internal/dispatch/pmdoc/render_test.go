@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"html"
 	"regexp"
 	"runtime"
@@ -976,6 +977,54 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The checks that read one document-level block at a time (BlockReadError, BlockShapeError) run
+// once for each block a write changed, and a suggestion accepted across many tables changes each of
+// them, so a check writes a table spanless: were each of its renders to spend a budget of span
+// cells, the checks over four tables of 100 one-character rows under a cell spanning 1,000 columns
+// and every row would allocate some 1,500 MiB, where the document's own render spends one budget.
+func TestBlockChecksSpendNoSpanBudgetForEachBlock(t *testing.T) {
+	var blocks []*Node
+	for range 4 {
+		spans := [][][2]int{{{1000, 100}}}
+		for range 99 {
+			spans = append(spans, [][2]int{{1, 1}})
+		}
+		blocks = append(blocks, spanTable(spans...))
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for _, block := range blocks {
+		if err := BlockReadError(block); err != nil {
+			t.Fatal(err)
+		}
+		if err := BlockShapeError(block); err != nil && !errors.Is(err, ErrSchema) {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 64<<20 {
+		t.Fatalf("the checks over %d tables allocated %d MiB, want at most 64", len(blocks), allocated>>20)
+	}
+}
+
+// spanTable is a table of rows, the first its header, each cell holding `x` and spanning the
+// columns and rows its pair names.
+func spanTable(rows ...[][2]int) *Node {
+	table := &Node{Type: "table"}
+	for index, spans := range rows {
+		kind, rowType := "table_cell", "table_row"
+		if index == 0 {
+			kind, rowType = "table_header", "table_header_row"
+		}
+		row := &Node{Type: rowType}
+		for _, span := range spans {
+			row.Children = append(row.Children, spanCell(kind, span[0], span[1]))
+		}
+		table.Children = append(table.Children, row)
+	}
+	return table
 }
 
 // spanCell is a table cell of kind holding `x`, spanning colspan columns and rowspan rows.

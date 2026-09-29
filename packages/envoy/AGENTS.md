@@ -239,7 +239,10 @@ accept left unchanged whose spread already read back otherwise before it, such a
 markdown never carried, keeps that spread. Every other block, mark and node stays as it was. An empty replacement keeps the paragraph it empties, which is not written beside other
 blocks. Outside an ask it then runs, over every document-level block it changed,
 `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
-(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
+(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). Both write a table without the empty cells its
+colspans and rowspans add, which the read-back of the whole document below writes, so an accept
+across many tables costs no more there than the cells those tables hold. A non-empty replacement
+inside a typed block is
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes

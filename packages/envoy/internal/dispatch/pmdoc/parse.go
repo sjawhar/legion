@@ -313,9 +313,11 @@ func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error
 }
 
 // BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back.
+// parser reads it back. A table in it is written spanless (renderSpanless): the cells a span adds
+// are empty, which the parser refuses nowhere, and the header still reaches every cell a row holds,
+// so the verdict is the one its markdown written with the spans gets.
 func BlockReadError(block *Node) error {
-	markdown, err := Render(readAlone(block))
+	markdown, err := renderSpanless(readAlone(block))
 	if err != nil {
 		return err
 	}
@@ -326,10 +328,13 @@ func BlockReadError(block *Node) error {
 // BlockShapeError says what a document-level block's markdown reads back as when that is not
 // blocks of the same kinds nested the same way - the first block that reads back as another - or
 // is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
-// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are.
+// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are. A table in
+// it is written spanless (renderSpanless), so each of its rows reads back as wide as its widest row
+// as it holds cells, where written with its spans a row would read back wider wherever a span
+// covers a cell.
 func BlockShapeError(block *Node) error {
 	doc := readAlone(block)
-	markdown, err := Render(doc)
+	markdown, err := renderSpanless(doc)
 	if err != nil {
 		return err
 	}
