@@ -425,10 +425,20 @@ the table in place. Row `0` is the header; deleting it promotes the first body r
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
 index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
 partially mutates a table. Parsing pads short rows to their headers' widths, as the browser editor's
-table plugin does on load, only while one write request's Markdown parses and cut-table padding add
-at most 10,000 cells in total; a larger request is refused before its cells are allocated, naming
-the table, cells written, cells its header implies, and the limit. `pmdoc.PadTables` shares that
-cumulative request ceiling when an accept or reject pads cut tables.
+table plugin does on load, only while the markdown one write sends adds at most 10,000 cells in all:
+a spec, an upload or a version; every operation of an edit batch, table-row fragments included; or
+an accepted suggestion's replacement together with the tables its splice cuts, as a reject's cut
+tables (`pmdoc.PadTables`). A larger write is refused before its cells are allocated
+(`pmdoc.ErrTablePadding`), naming the table, cells written, cells its header implies, and the
+limit. A conditional batch runs its operations to check its anchors and preconditions as well as to
+apply them, each run on a budget of its own, so its padding is charged once. A read-back - a check
+that parses the rendering a write would store - pads the tree's own short rows, as a rendering
+leaves them where spans go unwritten, on a budget of its own for each parse: 100,000 cells
+(`maxSpanCells`, as many as one render lets spans add), which a table the browser editor has padded
+reaches only when its spans pass what the renderer writes. A write into a document whose read-back
+would pad more is refused (`INVALID_OP`) rather than stored unchecked. A quote is matched by its
+text, which padded cells do not hold, so a quote's table is read as markdown only while it needs no
+padding.
 Milkdown's gfm preset installs prosemirror-tables' `tableEditing`, whose `fixTables` pads a table a
 transaction brings in (verified on an `EditorState`; that the browser loads by a transaction is
 y-prosemirror's sync, not checked in a browser). The headless engine runs no plugins and keeps the short

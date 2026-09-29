@@ -188,7 +188,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if !joined {
 		return "", errUnjoined
 	}
-	tree, err := parseInputWithTablePaddingBudget(markdown, pmdoc.NewTablePaddingBudget())
+	tree, err := parseInput(markdown)
 	if err != nil {
 		return "", err
 	}
@@ -226,7 +226,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	if err != nil {
 		return "", err
 	}
-	budget := pmdoc.NewTablePaddingBudget()
 	var canonical string
 	var unchanged bool
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
@@ -235,7 +234,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		target, err := parseReplacingWithTablePaddingBudget(current, markdown, budget)
+		target, err := parseReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
@@ -478,7 +477,7 @@ func (s *Service) discardPendingVersion(room string, version model.Version) {
 // prevalidateLiveOperations performs database-backed table-anchor checks
 // before the Yjs transaction, retaining the table-mark snapshots the
 // transaction re-derives before it writes.
-func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID string, ops []model.EditOp, budget *pmdoc.TablePaddingBudget) ([]tableAnchorSnapshot, error) {
+func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID string, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
 	var (
 		snapshots []tableAnchorSnapshot
 		planErr   error
@@ -489,7 +488,7 @@ func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID stri
 			planErr = err
 			return
 		}
-		snapshots, planErr = s.prevalidateOperationsWithTablePaddingBudget(ctx, artifactID, tree, ops, budget)
+		snapshots, planErr = s.prevalidateOperations(ctx, artifactID, tree, ops)
 	})
 	if planErr != nil {
 		return nil, planErr
@@ -672,9 +671,8 @@ func (s *Service) currentToken(ctx context.Context, artifactID string) (string, 
 // and writes the plan inside that transaction, so no live writer can enter the
 // check-to-apply window.
 func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error) {
-	budget := pmdoc.NewTablePaddingBudget()
 	if precondition == nil {
-		return s.applyOpsUnconditional(ctx, artifactID, ops, actor, budget)
+		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -724,7 +722,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		snapshots []tableAnchorSnapshot
 	)
 	if hasTableAnchorMutation(ops) {
-		snapshots, err = s.prevalidateLiveOperations(ctx, artifactID, ops, budget)
+		snapshots, err = s.prevalidateLiveOperations(ctx, artifactID, ops)
 		if err != nil {
 			return EditOutcome{}, fmt.Errorf("prevalidate live document operations: %w", err)
 		}
@@ -748,7 +746,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 				return
 			}
 			if len(snapshots) > 0 {
-				if err := verifyTableAnchorSnapshotsWithTablePaddingBudget(tree, ops, snapshots, budget); err != nil {
+				if err := verifyTableAnchorSnapshots(tree, ops, snapshots); err != nil {
 					mutationErr = err
 					return
 				}
@@ -757,12 +755,12 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			// identified; a browser-authored block the closer has not yet stamped gets its id
 			// here, and the same ids persist through the update below.
 			pmdoc.EnsureBlockIDs(tree)
-			batch, err := s.applyOperations(ctx, artifactID, tree, ops, budget)
+			batch, err := applyOperations(tree, ops)
 			if err != nil {
 				mutationErr = err
 				return
 			}
-			if err := requirePreconditionCoverage(tree, ops, *precondition, budget); err != nil {
+			if err := requirePreconditionCoverage(tree, ops, *precondition); err != nil {
 				mutationErr = err
 				return
 			}
@@ -800,7 +798,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 
 // applyOpsUnconditional preserves the precondition-free edit path's existing
 // validation and live-mutation behavior.
-func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, budget *pmdoc.TablePaddingBudget) (EditOutcome, error) {
+func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (EditOutcome, error) {
 	if len(ops) == 0 {
 		// Nothing to apply: the caller still gets the token of the document as it stands, the
 		// precondition its next edit passes.
@@ -819,7 +817,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 			return err
 		}
 		pmdoc.EnsureBlockIDs(tree)
-		batch, err := s.applyOperations(ctx, artifactID, tree, ops, budget)
+		batch, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {
 			return err
 		}

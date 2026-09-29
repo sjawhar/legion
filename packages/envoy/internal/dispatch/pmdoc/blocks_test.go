@@ -273,12 +273,12 @@ func TestPadTablesBoundsShortRowsBeforeAllocation(t *testing.T) {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	padded, err := PadTables(doc, 0, 0)
+	padded, err := PadTables(doc, 0, 0, NewTablePaddingBudget())
 	runtime.ReadMemStats(&after)
 	allocated := after.TotalAlloc - before.TotalAlloc
 	t.Logf("allocated=%d", allocated)
-	if !errors.Is(err, ErrSchema) {
-		t.Fatalf("PadTables error = %v, want ErrSchema", err)
+	if !errors.Is(err, ErrTablePadding) {
+		t.Fatalf("PadTables error = %v, want ErrTablePadding", err)
 	}
 	if padded != nil {
 		t.Fatalf("PadTables returned a document after refusing excessive padding")
@@ -293,9 +293,9 @@ func TestPadTablesSharesThePaddingBudgetAcrossTables(t *testing.T) {
 	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
 	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
 
-	_, err := PadTables(doc, 0, 2)
-	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 3") {
-		t.Fatalf("PadTables error = %v, want ErrSchema naming table 3", err)
+	_, err := PadTables(doc, 0, 2, NewTablePaddingBudget())
+	if !errors.Is(err, ErrTablePadding) || !strings.Contains(err.Error(), "table 3") {
+		t.Fatalf("PadTables error = %v, want ErrTablePadding naming table 3", err)
 	}
 }
 

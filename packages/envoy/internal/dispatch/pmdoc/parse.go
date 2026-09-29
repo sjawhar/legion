@@ -81,14 +81,19 @@ func blockParsers() []util.PrioritizedValue {
 	return parsers
 }
 
-// Parse converts markdown into the closed Proof ProseMirror tree.
+// Parse converts markdown into the closed Proof ProseMirror tree. Its tables' short rows are
+// padded only while they add at most maxTablePaddingCells cells, as a caller write's markdown.
 func Parse(markdown string) (*Node, error) {
-	return ParseWithTablePaddingBudget(markdown, NewTablePaddingBudget())
+	return parseStamped(markdown, NewTablePaddingBudget())
 }
 
-// ParseWithTablePaddingBudget parses markdown with budget, which may be shared with other parses
-// in one caller write.
-func ParseWithTablePaddingBudget(markdown string, budget *TablePaddingBudget) (*Node, error) {
+// parseRendering is Parse of markdown the renderer wrote, a read-back, whose short rows are the
+// tree's: its padding spends a budget of its own (readBackPaddingBudget).
+func parseRendering(markdown string) (*Node, error) {
+	return parseStamped(markdown, readBackPaddingBudget())
+}
+
+func parseStamped(markdown string, budget *TablePaddingBudget) (*Node, error) {
 	doc, err := parseUnstamped(markdown, true, budget)
 	if err != nil {
 		return nil, err
@@ -105,17 +110,11 @@ func ParseWithTablePaddingBudget(markdown string, budget *TablePaddingBudget) (*
 // whose rendering, the markdown it is stored as, reads back otherwise is refused
 // (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	return ParseForWriteWithTablePaddingBudget(markdown, live, NewTablePaddingBudget())
-}
-
-// ParseForWriteWithTablePaddingBudget parses a whole-document write with budget, which may be
-// shared with other parses and table padding in one caller write.
-func ParseForWriteWithTablePaddingBudget(markdown string, live *Node, budget *TablePaddingBudget) (*Node, error) {
-	doc, err := parseForWrite(markdown, live, true, budget)
+	doc, err := parseForWrite(markdown, live, true, NewTablePaddingBudget())
 	if err != nil {
 		return nil, err
 	}
-	if err := RefuseMisreadDocumentWithTablePaddingBudget(doc, budget); err != nil {
+	if err := RefuseMisreadDocument(doc); err != nil {
 		return nil, err
 	}
 	return doc, nil
@@ -124,14 +123,9 @@ func ParseForWriteWithTablePaddingBudget(markdown string, live *Node, budget *Ta
 // ParseFragment parses markdown a caller writes into a document, rather than one that begins it,
 // as ParseForWrite parses a fragment: a leading `---` line is a horizontal rule, as it is anywhere
 // after a document's start. Written where the document begins (opensDocument), a closed
-// front-matter block opening the markdown is front matter, as Parse reads it.
-func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
-	return ParseFragmentWithTablePaddingBudget(markdown, opensDocument, NewTablePaddingBudget())
-}
-
-// ParseFragmentWithTablePaddingBudget parses a document fragment with budget, which may be shared
-// with other fragments in one caller write.
-func ParseFragmentWithTablePaddingBudget(markdown string, opensDocument bool, budget *TablePaddingBudget) (*Node, error) {
+// front-matter block opening the markdown is front matter, as Parse reads it. Its tables' short
+// rows are padded on budget, the caller write's, which its other fragments share.
+func ParseFragment(markdown string, opensDocument bool, budget *TablePaddingBudget) (*Node, error) {
 	return parseForWrite(markdown, nil, opensDocument, budget)
 }
 
@@ -342,7 +336,7 @@ func BlockReadError(block *Node) error {
 	if err != nil {
 		return err
 	}
-	_, err = Parse(markdown)
+	_, err = parseRendering(markdown)
 	return err
 }
 
@@ -359,7 +353,7 @@ func BlockShapeError(block *Node) error {
 	if err != nil {
 		return err
 	}
-	back, err := Parse(markdown)
+	back, err := parseRendering(markdown)
 	if err != nil {
 		return err
 	}
@@ -415,7 +409,7 @@ func textOutside(paragraph ast.Node, source []byte) string {
 	return rest
 }
 
-func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
+func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*Node, bool, error) {
 	if width == 0 {
 		return nil, false, nil
 	}
@@ -435,7 +429,7 @@ func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
 		}
 	}
 
-	parsed, err := Parse(syntheticTableHeader(width) + fragment + "\n")
+	parsed, err := parseStamped(syntheticTableHeader(width)+fragment+"\n", budget)
 	if err != nil {
 		return nil, false, err
 	}

@@ -265,7 +265,6 @@ func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, a
 }
 
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
-	budget := pmdoc.NewTablePaddingBudget()
 	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
@@ -318,6 +317,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return updateErr
 			})
 		}
+		// The replacement's markdown and the tables its splice cuts are this write's to pad.
+		budget := pmdoc.NewTablePaddingBudget()
 		// A reject is not checked: it removes the text a browser insert added, which gives back
 		// the document the insert started from.
 		if !accept {
@@ -384,7 +385,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err := refuseBrokenAsks(tree, next); err != nil {
 			return err
 		}
-		if err := refuseMisreadAccept(tree, next, with, budget); err != nil {
+		if err := refuseMisreadAccept(tree, next, with); err != nil {
 			return err
 		}
 		return write(next)

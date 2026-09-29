@@ -97,8 +97,8 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 // before it read one block at a time; this one reads the blocks beside each other. The refusal
 // names what reads back and advises rejecting. An error reading the document back that is no
 // refusal, a panic (pmdoc.ErrPanic) among them, is pmdoc's bug, and is its error.
-func refuseMisreadAccept(before, after *pmdoc.Node, with string, budget *pmdoc.TablePaddingBudget) error {
-	misread, err := pmdoc.NewMisreadWithTablePaddingBudget(before, after, budget)
+func refuseMisreadAccept(before, after *pmdoc.Node, with string) error {
+	misread, err := pmdoc.NewMisread(before, after)
 	if err != nil {
 		return err
 	}
@@ -157,13 +157,13 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 
 // padCutTables pads each table in the document-level blocks a splice of r changed, from before to
 // after (changedBlocks), to its width (pmdoc.PadTables), as the browser editor's table plugin pads a
-// table after any change.
+// table after any change, spending budget, the accept's or reject's.
 func padCutTables(before, after *pmdoc.Node, r pmdoc.Range, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
 	first, _, last, err := changedBlocks(before, after, r)
 	if err != nil {
 		return nil, err
 	}
-	return pmdoc.PadTablesWithTablePaddingBudget(after, first, last, budget)
+	return pmdoc.PadTables(after, first, last, budget)
 }
 
 // padsLikeTheBrowser reports whether an accept may pad the tables its splice cut: whether the
@@ -280,9 +280,11 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 // replacementBroke is the index in after of the first document-level block the write changed
 // (changedBlocks) that check fails, and what check says of it, when it said nothing of the blocks
 // the match lay in before: a block that already failed the check, or another block that does, is
-// no reason to refuse this write. Only a refusal (pmdoc.ErrSchema) is check's verdict; any other
-// error from it, a panic (pmdoc.ErrPanic) among them, is no verdict on either side, but pmdoc's
-// bug, and is its error.
+// no reason to refuse this write. A block before that reads back only past a read-back's padding
+// budget (pmdoc.ErrTablePadding) did not fail it, so the write is refused with that, naming the
+// first block it changed, rather than stored unchecked. Only a refusal (pmdoc.ErrSchema) is
+// check's verdict; any other error from it, a panic (pmdoc.ErrPanic) among them, is no verdict on
+// either side, but pmdoc's bug, and is its error.
 func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (block int, broke, err error) {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
@@ -292,6 +294,9 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 		if err := check(before.Children[index]); err != nil {
 			if !errors.Is(err, pmdoc.ErrSchema) {
 				return -1, nil, err
+			}
+			if errors.Is(err, pmdoc.ErrTablePadding) {
+				return first, err, nil
 			}
 			return -1, nil, nil
 		}

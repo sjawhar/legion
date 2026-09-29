@@ -1223,6 +1223,36 @@ func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
 	}
 }
 
+// A batch that deletes a table row under a document precondition runs three times - against the
+// anchors, to verify them, and to apply - so each run reads its markdown once, with a budget of its
+// own: a row deletion beside an insert whose table adds 4,160 cells, under the limit, is stored,
+// and the refusal of a larger one names the table the request wrote and the cells it adds.
+func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Conditional table padding", "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n")
+	var tableID string
+	for _, block := range decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice")) {
+		if block.Type == "table" {
+			tableID = block.ID
+		}
+	}
+	edit := func(width int) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]any{
+				{"op": "delete_row", "block": tableID, "index": 2},
+				{"op": "insert", "after": "end", "markdown": tablePaddingInsert(width)},
+			},
+			"precondition": map[string]string{"document": readDocumentPrecondition(t, handler, issue.PrimaryArtifactID).Token},
+		}, "alice")
+	}
+	if refused := edit(101); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), "table 1 writes 202 cells") || !strings.Contains(refused.Body.String(), "would add 10100 cells (limit 10000)") {
+		t.Fatalf("conditional batch padding 10,100 cells: status=%d body=%s, want table 1 refused at 10,100 cells", refused.Code, refused.Body.String())
+	}
+	if stored := edit(65); stored.Code != http.StatusOK {
+		t.Fatalf("conditional batch padding 4,160 cells: status=%d body=%s, want it stored", stored.Code, stored.Body.String())
+	}
+}
+
 func tablePaddingInsert(width int) string {
 	return strings.Repeat("| header ", width) + "|\n" +
 		strings.Repeat("| --- ", width) + "|\n" +

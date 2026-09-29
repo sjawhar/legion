@@ -29,22 +29,17 @@ func (s skip) has(name string) bool { return s.all || s.names[name] }
 
 // ReadBack is what doc's markdown reads back as.
 func ReadBack(doc *Node) (*Node, error) {
-	return ReadBackWithTablePaddingBudget(doc, NewTablePaddingBudget())
-}
-
-// ReadBackWithTablePaddingBudget reads doc's markdown back with budget.
-func ReadBackWithTablePaddingBudget(doc *Node, budget *TablePaddingBudget) (*Node, error) {
-	return readBack(doc, maxSpanCells, budget)
+	return readBack(doc, maxSpanCells)
 }
 
 // readBack is what doc's markdown, its tables' spans adding at most spanCells cells (render),
-// reads back as.
-func readBack(doc *Node, spanCells int, budget *TablePaddingBudget) (*Node, error) {
+// reads back as (parseRendering).
+func readBack(doc *Node, spanCells int) (*Node, error) {
 	r, err := render(doc, spanCells)
 	if err != nil {
 		return nil, err
 	}
-	return ParseWithTablePaddingBudget(r.b.String(), budget)
+	return parseRendering(r.b.String())
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before
@@ -57,22 +52,18 @@ func readBack(doc *Node, spanCells int, budget *TablePaddingBudget) (*Node, erro
 // another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
 // parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
 // or not after parses: the checks that read each changed block alone still refuse one the write
-// leaves unreadable. Only a refusal (ErrSchema) reading either back is a verdict; any other error,
-// a panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
+// leaves unreadable. A before whose read-back would pad more cells than a read-back's budget is no
+// such document, and is the verdict: its markdown reads, so a write into it is refused rather than
+// stored unjudged. Only a refusal (ErrSchema) reading either back is a verdict; any other error, a
+// panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
 func NewMisread(before, after *Node) (string, error) {
-	return NewMisreadWithTablePaddingBudget(before, after, NewTablePaddingBudget())
-}
-
-// NewMisreadWithTablePaddingBudget compares before and after after reading both markdown
-// renderings with budget.
-func NewMisreadWithTablePaddingBudget(before, after *Node, budget *TablePaddingBudget) (string, error) {
-	return newMisread(before, after, maxSpanCells, budget)
+	return newMisread(before, after, maxSpanCells)
 }
 
 // newMisread is NewMisread reading before and after back with their tables' spans adding at most
 // spanCells cells each.
-func newMisread(before, after *Node, spanCells int, budget *TablePaddingBudget) (string, error) {
-	backAfter, err := readBack(after, spanCells, budget)
+func newMisread(before, after *Node, spanCells int) (string, error) {
+	backAfter, err := readBack(after, spanCells)
 	if err != nil && !errors.Is(err, ErrSchema) {
 		return "", err
 	}
@@ -80,9 +71,12 @@ func newMisread(before, after *Node, spanCells int, budget *TablePaddingBudget) 
 	if err == nil && readDifference(written, backAfter, skip{}) == "" {
 		return "", nil
 	}
-	backBefore, beforeErr := readBack(before, spanCells, budget)
+	backBefore, beforeErr := readBack(before, spanCells)
 	if beforeErr != nil && !errors.Is(beforeErr, ErrSchema) {
 		return "", beforeErr
+	}
+	if errors.Is(beforeErr, ErrTablePadding) {
+		return beforeErr.Error(), nil
 	}
 	if beforeErr != nil {
 		return "", nil
@@ -105,8 +99,8 @@ func newMisread(before, after *Node, spanCells int, budget *TablePaddingBudget) 
 	return "", nil
 }
 
-func documentMisread(doc *Node, budget *TablePaddingBudget) (string, error) {
-	back, err := ReadBackWithTablePaddingBudget(doc, budget)
+func documentMisread(doc *Node) (string, error) {
+	back, err := ReadBack(doc)
 	if err != nil {
 		if errors.Is(err, ErrSchema) {
 			return err.Error(), nil
@@ -132,25 +126,13 @@ func documentMisread(doc *Node, budget *TablePaddingBudget) (string, error) {
 // them reads, and is logged. Any other error reading it back, a panic (ErrPanic) among them, is
 // the error.
 func RefuseMisreadDocument(doc *Node) error {
-	return RefuseMisreadDocumentWithTablePaddingBudget(doc, NewTablePaddingBudget())
-}
-
-// RefuseMisreadDocumentWithTablePaddingBudget refuses a whole-document write that reads back
-// otherwise while charging its read-back parser to budget.
-func RefuseMisreadDocumentWithTablePaddingBudget(doc *Node, budget *TablePaddingBudget) error {
-	return refuseMisread(documentMisread(doc, budget))
+	return refuseMisread(documentMisread(doc))
 }
 
 // RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument. It reads both
 // documents back as renderSpanless writes them.
 func RefuseMisreadWrite(before, after *Node) error {
-	return RefuseMisreadWriteWithTablePaddingBudget(before, after, NewTablePaddingBudget())
-}
-
-// RefuseMisreadWriteWithTablePaddingBudget refuses a write into a document while charging each
-// read-back parser to budget.
-func RefuseMisreadWriteWithTablePaddingBudget(before, after *Node, budget *TablePaddingBudget) error {
-	return refuseMisread(newMisread(before, after, 0, budget))
+	return refuseMisread(newMisread(before, after, 0))
 }
 
 func refuseMisread(misread string, err error) error {

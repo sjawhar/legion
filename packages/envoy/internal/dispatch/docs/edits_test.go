@@ -487,6 +487,78 @@ func wholeBudgetTable() *pmdoc.Node {
 	return table
 }
 
+// An insert reads the document back before and after it with the tables' spans unwritten, so a
+// stored row whose cell spans columns is written short and padded on each read-back. Those cells
+// are the stored document's, not the batch's, so they spend none of the batch's budget: inserts
+// beside a stored table spanning 5,940 cells, or 1,000 cells after six paragraph inserts, are
+// stored, a small table among them included.
+func TestApplyOperationsInsertsBesideAStoredSpanTableSpendNoBatchBudget(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		width, rows       int
+		paragraphsInserts int
+	}{
+		{name: "a header of 100 cells over 60 rows spanning it", width: 100, rows: 60, paragraphsInserts: 1},
+		{name: "a header of 11 cells over 100 rows spanning it", width: 11, rows: 100, paragraphsInserts: 6},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{
+				{Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "Before."}}},
+				spannedTable(test.width, test.rows),
+			}}
+			pmdoc.EnsureBlockIDs(tree)
+			var ops []model.EditOp
+			for range test.paragraphsInserts {
+				ops = append(ops, model.EditOp{Op: "insert", After: "end", Markdown: "New."})
+			}
+			ops = append(ops, model.EditOp{Op: "insert", After: "end", Markdown: "| a | b |\n| - | - |\n| 1 | 2 |"})
+			if _, err := applyOperations(tree, ops); err != nil {
+				t.Fatalf("inserts beside the stored span table: %v, want them stored", err)
+			}
+		})
+	}
+}
+
+// spannedTable is a table under a header of width cells, each of its rows one cell spanning the
+// header.
+func spannedTable(width, rows int) *pmdoc.Node {
+	cell := func(kind string, colspan int) *pmdoc.Node {
+		return &pmdoc.Node{
+			Type:     kind,
+			Attrs:    pmdoc.Attrs{"alignment": nil, "colspan": colspan, "colwidth": nil, "rowspan": 1},
+			Children: []*pmdoc.Node{{Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "x"}}}},
+		}
+	}
+	header := &pmdoc.Node{Type: "table_header_row"}
+	for range width {
+		header.Children = append(header.Children, cell("table_header", 1))
+	}
+	table := &pmdoc.Node{Type: "table", Children: []*pmdoc.Node{header}}
+	for range rows {
+		table.Children = append(table.Children, &pmdoc.Node{Type: "table_row", Children: []*pmdoc.Node{cell("table_cell", width)}})
+	}
+	return table
+}
+
+// A table-row insert is the caller's markdown too, its rows padded to the table's width, so the
+// rows each insert of a batch writes share the batch's budget: two inserts of 60 one-cell rows into
+// a 100-column table, 5,940 cells each, are refused at the second, naming the limit.
+func TestApplyOperationsChargesEveryTableRowInsertToTheBatch(t *testing.T) {
+	tree, err := parseInput(strings.Repeat("| h ", 100) + "|\n" + strings.Repeat("| - ", 100) + "|\n| A10 " + strings.Repeat("| x ", 99) + "|\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Repeat("| y |\n", 60)
+	_, err = applyOperations(tree, []model.EditOp{
+		{Op: "insert", After: "A10", Markdown: rows},
+		{Op: "insert", After: "A10", Markdown: rows},
+	})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "markdown" || !strings.Contains(err.Error(), "operation 1") || !strings.Contains(err.Error(), "limit 10000") {
+		t.Fatalf("two table-row inserts padding 11,880 cells: %v, want operation 1 refused on markdown naming the limit", err)
+	}
+}
+
 func TestApplyOperationInsertsParagraphAfterParagraphContainingAnchor(t *testing.T) {
 	tree, err := parseInput("Before anchor after.\n\nNext.\n")
 	if err != nil {

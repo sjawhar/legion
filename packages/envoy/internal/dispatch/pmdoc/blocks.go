@@ -289,18 +289,9 @@ func marksInNodes(nodes []*Node) []MarkRef {
 // widest row, none where that row's cell has none (a cell read from the live document carries no
 // null attribute), where fixTables gives it left: the renderer writes one alignment per column, so
 // the column reads back as it was.
-// The operation refuses (ErrSchema) before allocating missing cells when the tables it pads would
-// add more than maxTablePaddingCells cells in total.
-func PadTables(doc *Node, first, last int) (*Node, error) {
-	return PadTablesWithTablePaddingBudget(doc, first, last, NewTablePaddingBudget())
-}
-
-// PadTablesWithTablePaddingBudget pads tables with budget, which may be shared with Markdown
-// parses in one caller write.
-func PadTablesWithTablePaddingBudget(doc *Node, first, last int, budget *TablePaddingBudget) (*Node, error) {
-	if budget == nil {
-		budget = NewTablePaddingBudget()
-	}
+// The cells it adds spend budget, the caller write's, which refuses (ErrTablePadding) before they
+// are allocated once they pass its limit.
+func PadTables(doc *Node, first, last int, budget *TablePaddingBudget) (*Node, error) {
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: append([]*Node(nil), doc.Children...)}
 	for index := first; index <= last && index < len(out.Children); index++ {
 		block := cloneNode(out.Children[index])
