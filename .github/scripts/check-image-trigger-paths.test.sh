@@ -868,14 +868,14 @@ docker-buildx-builder-steps|yes|docker buildx --builder ${{ steps.buildx.outputs
 nerdctl-compose-build|yes|nerdctl compose build
 nerdctl-compose-up-build|yes|nerdctl compose up --build
 depot-bake-listener|yes|depot bake listener
-buildah-from-scratch-buildah|no|buildah from scratch && buildah commit working-container app:ci
+buildah-from-scratch-buildah|yes|buildah from scratch && buildah commit working-container app:ci
 buildctl-addr-tcp-x|yes|buildctl --addr tcp://x:1234 build --frontend dockerfile.v0
 buildctl-daemonless-sh-build|yes|buildctl-daemonless.sh build --frontend dockerfile.v0
 docker-buildx-build-f|yes|docker-buildx build -f docker/Dockerfile .
 buildx-build-f-docker|yes|buildx build -f docker/Dockerfile .
 img-build-f-docker|yes|img build -f docker/Dockerfile .
-docker-commit-working-app|no|docker commit working app:ci
-docker-import-rootfs-tar|no|docker import rootfs.tar app:ci
+docker-commit-working-app|yes|docker commit working app:ci
+docker-import-rootfs-tar|yes|docker import rootfs.tar app:ci
 ko-resolve-f-config|yes|ko resolve -f config/
 ko-apply-f-config|yes|ko apply -f config/
 skaffold-run|yes|skaffold run
@@ -939,6 +939,7 @@ docker-compose-p-run|yes|docker compose -p run-tests up -d
 docker-compose-profile-up|yes|docker compose --profile up-stack up -d
 docker-compose-project-directory|yes|docker compose --project-directory=${{ env.COMPOSE_DIR }} -f x.yml up -d
 docker-build-f-docker-7|yes|docker build -f docker/Dockerfile .\ndocker buildx bake --load listener
+docker-compose-up-dry|yes|docker compose up --dry-run
 BUILDS
 
 # The continuation form cannot go in the table: its body spans two lines.
@@ -970,6 +971,12 @@ while IFS='|' read -r label hits body; do
 done <<'FALSEPOSITIVES'
 docker-h-build-example|'docker -H build.example.com:2375 pull alpine'|docker -H build.example.com:2375 pull alpine
 docker-config-build-docker|'docker --config build/.docker pull alpine'|docker --config build/.docker pull alpine
+docker-buildx-bake-print-2|'docker buildx bake --print'|docker buildx bake --print
+docker-buildx-build-check|'docker buildx build --check .'|docker buildx build --check .
+docker-buildx-build-help|'docker buildx build --help'|docker buildx build --help
+docker-buildx-build-call-2|'docker buildx build --call=check .'|docker buildx build --call=check .
+docker-buildx-bake-list|'docker buildx bake --list=targets'|docker buildx bake --list=targets
+docker-compose-build-dry|'docker compose build --dry-run'|docker compose build --dry-run
 docker-context-build-pull|'docker --context build pull alpine'|docker --context build pull alpine
 docker-h-build-corp|'docker -H build.corp pull alpine'|docker -H build.corp pull alpine
 docker-run-rm-golang|'docker run --rm golang go build ./...'|docker run --rm golang go build ./...
@@ -977,9 +984,15 @@ docker-exec-app-make|'docker exec app make build'|docker exec app make build
 docker-run-alpine-echo|'docker run alpine echo a b'|docker run alpine echo a b
 docker-run-v-pwd|'docker run -v $PWD:/w -w /w golang go build ./...'|docker run -v "$PWD":/w -w /w golang go build ./...
 docker-compose-run-no|'docker compose run --no-build app ./test.sh --build'|docker compose run --no-build app ./test.sh --build
+docker-build-help|'docker build --help'|docker build --help
+docker-buildx-build-check-2|'docker buildx build --check -f docker/Dockerfile .'|docker buildx build --check -f docker/Dockerfile .
 FALSEPOSITIVES
 
 echo "case: a false positive the anchored layer calls certain cannot be listed at all"
+# What these build is not in the step: a compose verb builds what its compose file says, and
+# `earthly +target` what the Earthfile's SAVE IMAGE says, so no pinned command text could
+# describe either and the list is not offered. A shape whose own text says it only inspects
+# (`--print`, `--check`, `--dry-run`) is listable instead, and sits in the table above.
 while IFS='|' read -r label hits body; do
   [ -n "$label" ] || continue
   root=$(fixture "unlistable-$label")
@@ -995,12 +1008,6 @@ while IFS='|' read -r label hits body; do
   check "  and an entry for it is refused" "$(is "$status" 1)"
   check "  saying it cannot be listed" "$(contains "$out" "cannot be:")"
 done <<'UNLISTABLE'
-docker-buildx-bake-print-2|'docker buildx bake --print'|docker buildx bake --print
-docker-buildx-build-check|'docker buildx build --check .'|docker buildx build --check .
-docker-buildx-build-help|'docker buildx build --help'|docker buildx build --help
-docker-buildx-build-call-2|'docker buildx build --call=check .'|docker buildx build --call=check .
-docker-buildx-bake-list|'docker buildx bake --list=targets'|docker buildx bake --list=targets
-docker-compose-build-dry|'docker compose build --dry-run'|docker compose build --dry-run
 earthly-test|'earthly +test'|earthly +test
 UNLISTABLE
 
@@ -1152,8 +1159,9 @@ run_check "$root"
 check "the refusal lists both commands" "$(contains "$out" "('docker run --rm golang go build ./...', 'docker buildx build --load -f docker/Dockerfile .')")"
 
 echo "case: P1 - an entry pins the whole command, not the span the regex matched"
-# `docker buildx build --check .` and `docker buildx build --load -t x .` share the matched
-# span `docker buildx build`, so a span-pinned entry for the lint excused the real build.
+# An entry pins the WHOLE command as the detector reads it, so editing any part of a hitting
+# command re-opens the review. The matched span would not: it is `docker buildx build` in both
+# `docker buildx build --check .` and `docker buildx build --load -t x .`.
 root=$(fixture pinned-full-text)
 extra_step "$root" "docker run --rm golang go build ./..."
 step_id "$root" "Extra" "compiles-only"
@@ -1177,19 +1185,19 @@ run_check "$root"
 check "both lines are printed" "$(contains "$out" "('docker run --rm golang go build ./...', 'docker run --rm golang go build ./...')")"
 
 echo "case: P2 - a certain build cannot be listed, whatever its entry says"
-# `--check` is a lint, but the shape is the anchored one, and pinning text cannot vouch for it:
-# swapping `--check` for `--load` is the same shape. The list is not offered for these.
-root=$(fixture unlistable-buildx-check)
-extra_step "$root" "docker buildx build --check --file docker/Dockerfile ."
-step_id "$root" "Extra" "lint-only"
-allowlist "$root" "lint-only" "'docker buildx build --check --file docker/Dockerfile .'" "lints the Dockerfile"
+# A `--load` build is the anchored shape with nothing in its own text to say otherwise, so no
+# entry can vouch for it and the list is not offered.
+root=$(fixture unlistable-buildx-load)
+extra_step "$root" "docker buildx build --load --file docker/Dockerfile ."
+step_id "$root" "Extra" "really-builds"
+allowlist "$root" "really-builds" "'docker buildx build --load --file docker/Dockerfile .'" "the reviewer called it harmless"
 run_check "$root"
 check "the entry is refused" "$(is "$status" 1)"
 check "  and says why it cannot be listed" "$(contains "$out" "cannot be:")"
 check "  and names the shape" "$(contains "$out" "is certainly a build, or a compose verb that builds from a file this step only names")"
 
 root=$(fixture unlistable-not-offered)
-extra_step "$root" "docker buildx build --check --file docker/Dockerfile ."
+extra_step "$root" "docker buildx build --load --file docker/Dockerfile ."
 run_check "$root"
 check "an unlisted certain build is refused" "$(is "$status" 1)"
 check "  and the list is not offered" "$(contains "$out" "This shape cannot be listed in NOT_A_BUILD_STEPS")"
@@ -1266,6 +1274,84 @@ allowlist "$root" "first/compiles-only" "'docker run --rm golang go build ./...'
 run_check "$root"
 check "the second use is still refused" "$(is "$status" 1)"
 check "  while the first is excused" "$(contains "$out" "step first/compiles-only:")"
+
+echo "case: B1 - docker/build-push-action accepts call:, so a lint has a remedy it can take"
+# `docker buildx build --check` is refused and cannot be reworded, so the remedy the check
+# prints has to work: `call` picks the frontend method and names no path.
+root=$(fixture build-action-call-check)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(
+    text
+    + "      - name: Lint\n        uses: docker/build-push-action@v6\n        with:\n"
+    + "          context: .\n          file: docker/Dockerfile\n          call: check\n"
+)
+PYEOF
+run_check "$root"
+check "a call: check step is accepted" "$(is "$status" 0)"
+check "  and is read as a build, not waved through" "$(contains "$out" "2 image build(s)")"
+
+root=$(fixture build-action-call-check-uncovered)
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+text = text.replace('      - "packages/app/**"\n', "")
+open(path, "w").write(
+    text
+    + "      - name: Lint\n        uses: docker/build-push-action@v6\n        with:\n"
+    + "          context: .\n          file: docker/Dockerfile\n          call: build\n"
+)
+PYEOF
+run_check "$root"
+check "a call: build step reads the same context and file" "$(is "$status" 1)"
+check "  so an uncovered input is caught through it" "$(contains "$out" "packages/app")"
+
+echo "case: B2 - a command whose own text says it only inspects can be listed"
+root=$(fixture inspecting-listable)
+extra_step "$root" "docker buildx build --check -f docker/Dockerfile ."
+step_id "$root" "Extra" "lints-only"
+allowlist "$root" "lints-only" "'docker buildx build --check -f docker/Dockerfile .'" "lints the Dockerfile, builds nothing"
+run_check "$root"
+check "the lint is excused once listed" "$(is "$status" 0)"
+
+# The same entry, with --check swapped for --load: the pinned command no longer matches, and
+# the swapped command is certain, so no entry can cover it.
+root=$(fixture inspecting-swapped-to-build)
+extra_step "$root" "docker buildx build --load -f docker/Dockerfile ."
+step_id "$root" "Extra" "lints-only"
+allowlist "$root" "lints-only" "'docker buildx build --check -f docker/Dockerfile .'" "lints the Dockerfile, builds nothing"
+run_check "$root"
+check "swapping --check for --load is refused" "$(is "$status" 1)"
+check "  and cannot be listed either" "$(contains "$out" "cannot be:")"
+
+echo "case: B2 - inspecting does not reach a compose verb or earthly"
+# Their build lives in a file the step only names, so no flag on the step can vouch for it.
+root=$(fixture inspecting-compose-up)
+extra_step "$root" "docker compose up --dry-run"
+step_id "$root" "Extra" "dry-run-only"
+allowlist "$root" "dry-run-only" "'docker compose up --dry-run'" "only a dry run"
+run_check "$root"
+check "compose up --dry-run stays unlistable" "$(is "$status" 1)"
+check "  and says so" "$(contains "$out" "cannot be:")"
+
+echo "case: a container-to-image command is certain, so no entry can excuse it"
+while IFS='|' read -r label hits body; do
+  [ -n "$label" ] || continue
+  root=$(fixture "certain-$label")
+  extra_step "$root" "$body"
+  step_id "$root" "Extra" "makes-an-image"
+  allowlist "$root" "makes-an-image" "$hits" "the reviewer called it harmless"
+  run_check "$root"
+  check "an entry for $label is refused" "$(is "$status" 1)"
+  check "  saying it cannot be listed" "$(contains "$out" "cannot be:")"
+done <<'CERTAIN'
+docker-commit|'docker commit working app:ci'|docker commit working app:ci
+docker-import|'docker import rootfs.tar app:ci'|docker import rootfs.tar app:ci
+buildah-commit|'buildah commit working app:ci'|buildah commit working app:ci
+CERTAIN
 
 echo "case: an entry names one step, and only that step"
 root=$(fixture listed-one-step-only)

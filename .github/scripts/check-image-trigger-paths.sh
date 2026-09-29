@@ -31,10 +31,11 @@
 #     needs an escape hatch for its false positives, and that hatch is DATA, not a shape:
 #     NOT_A_BUILD_STEPS lists steps by (workflow, job, step `id:`) - ids, because a step's name
 #     is neither required nor unique - pinning the FULL TEXT of each command that hit and why
-#     the step builds nothing. It holds only LOOSE-detector false positives: a command the
-#     anchored recogniser calls certain, a compose verb, or `earthly +target` cannot be listed,
-#     because what they build is not in the step: compose's build lives in its compose file and
-#     earthly's in its Earthfile. A hit on a listed step is excused
+#     the step builds nothing. A step can be listed when its own text is the whole story - a
+#     loose hit, or an anchored one carrying an inspecting flag like `--print` or `--check`.
+#     What cannot is a command whose build is not in the step: compose's build lives in its
+#     compose file and earthly's in its Earthfile, and a plain build, `docker commit` or
+#     `docker import` always makes one. A hit on a listed step is excused
 #     and printed while its commands still match exactly; a hit anywhere else, or one the entry
 #     did not describe, is refused. An entry matching no step or several fails the check rather
 #     than rotting. So a build is admitted only when the detector misses it (e.g. a builder it
@@ -357,12 +358,15 @@ def mount_sources(instruction: str) -> list[str]:
 # action is used twice - and an inner step whose CALLER has no id has no key at all, or it
 # would answer to an entry a job-level step of the same id once owned.
 #
-# The list holds only LOOSE-DETECTOR false positives: steps whose OWN TEXT is the whole story,
-# like `docker run --rm golang go build ./...`. A command the anchored recogniser calls certain
-# cannot be listed, because what it builds is not in the step at all: `docker compose ... up`
-# builds what its COMPOSE FILE says, which can grow a `build:` with the step untouched, and
-# `earthly +target` builds what the EARTHFILE's SAVE IMAGE says. Those get `--no-build`, a
-# reword, or docker/build-push-action, and an entry for one fails.
+# The list holds the false positives whose OWN TEXT is the whole story: a loose-detector hit
+# like `docker run --rm golang go build ./...`, and an anchored shape carrying a flag that says
+# it only inspects (`buildx bake --print`, `buildx build --check`, `compose build --dry-run`,
+# `--help`, `--call=check`). What cannot be listed is a command whose build is NOT in the step:
+# `docker compose ... up` builds what its COMPOSE FILE says, which can grow a `build:` with the
+# step untouched, and `earthly +target` builds what the EARTHFILE's SAVE IMAGE says - no flag
+# on the step can vouch for either. Those get `--no-build` or docker/build-push-action, and an
+# entry for one fails. So does one for a plain build, `docker commit` or `docker import`, which
+# always make an image.
 #
 # Each entry pins COMMANDS: the full text of each command that hit, as the detector reads it -
 # not the matched span, which is the same `docker buildx build` in a `--check` lint and a
@@ -407,15 +411,27 @@ COMPOSE_CLI = r"(\b(docker|podman|nerdctl)\b%s[ \t]+compose|\b(docker|podman|ner
 # the remedy named for these is `--no-build`, which reads no compose file.
 COMPOSE = COMPOSE_CLI + OPT + r"[ \t]+(up|run|create|watch)(?![\w-])(?![^\n]*--no-build)"
 ANCHORED_BUILD = re.compile(
-    rf"{CLI}{OPT}[ \t]+((image|builder)[ \t]+)?{Q}(build|bake){Q}{SUB}"
+    rf"{CLI}{OPT}[ \t]+((image|builder)[ \t]+)?{Q}(build|bake|commit|import){Q}{SUB}"
     rf"|({CLI}{OPT}[ \t]+)?buildx{OPT}[ \t]+b[a-z]*{SUB}"
     rf"|{COMPOSE_CLI}{OPT}[ \t]+build{SUB}"
     rf"|{COMPOSE}"
     rf"|\b(buildah|buildctl[\w.-]*|pack|skaffold|img){OPT}[ \t]+(build|bud){SUB}"
+    rf"|\bbuildah{OPT}[ \t]+commit{SUB}"
     rf"|\bko{OPT}[ \t]+(build|publish|resolve|apply)\b|\bskaffold{OPT}[ \t]+run\b"
     rf"|\bearthly\b[^\n]*[ \t]\+\w"
     rf"|\bcrane[ \t]+append\b|\bjib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
+# A command whose own text says it only inspects: `buildx bake --print`, `buildx build
+# --check`, `bake --list=targets`, `compose build --dry-run`, `--help`, and `--call` with a
+# frontend method that only reports. This makes an otherwise-certain shape LISTABLE - what it
+# does is visible in the step - which P1's full-text pin keeps safe, since swapping `--check`
+# for `--load` changes the pinned command and re-opens the review. It does not reach a compose
+# verb or `earthly`, whose build lives in a file the step only names.
+INSPECTING = re.compile(
+    r"(^|\s)(--print|--list|--dry-run|--check|--help)(=|\s|$)"
+    r"|(^|\s)--call(=|[ \t]+)(check|outline|targets)(\s|$)"
+)
+EARTHLY = re.compile(r"\bearthly\b[^\n]*[ \t]\+\w")
 RUN_STEP_BUILD = re.compile(
     r"\b(docker|podman|nerdctl|depot|finch)\b[^\n]*[\s-](?<!no-)[\"']?(build|bake|b)(?![\w-])"
     r"|\b(docker|podman|nerdctl|depot|finch)\b[^\n]*\s(commit|import)\b"
@@ -431,7 +447,8 @@ RUN_STEP_BUILD = re.compile(
     r"|\bcrane\s+append\b|\b[\w./]*jib:?[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
 )
 # A compose hit has a remedy of its own: `--no-build` says the step starts services only.
-COMPOSE_REMEDY = re.compile(COMPOSE)
+COMPOSE_VERB = re.compile(COMPOSE)
+COMPOSE_REMEDY = COMPOSE_VERB
 excused: list[str] = []
 matches: dict[tuple, list[str]] = {}
 
@@ -513,7 +530,10 @@ def classify_run_step(step: dict) -> list[tuple[str, bool]]:
         hit = RUN_STEP_BUILD.search(command) or ANCHORED_BUILD.search(command)
         if not hit:
             continue
-        found.append((" ".join(command.split()), bool(ANCHORED_BUILD.search(command))))
+        certain = bool(ANCHORED_BUILD.search(command))
+        if certain and INSPECTING.search(command) and not (COMPOSE_VERB.search(command) or EARTHLY.search(command)):
+            certain = False
+        found.append((" ".join(command.split()), certain))
     return found
 
 NON_BUILDING_ACTIONS = {
@@ -540,6 +560,7 @@ BUILD_ACTION_INPUTS = {
     "builder",  # which builder runs it
     "cache-from",  # where layers are reused from
     "cache-to",  # where layers are written
+    "call",  # which frontend method runs (build, check, outline, targets); names no path
     "context",  # READ: the tree the build receives
     "file",  # READ: the Dockerfile
     "github-token",  # auth
