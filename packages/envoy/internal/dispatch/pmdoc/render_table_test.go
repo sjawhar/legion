@@ -5,6 +5,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 // A span comes from the live tree unchecked, and each position it covers is written as a cell, so
@@ -228,3 +230,33 @@ func TestRenderWritesAColspanAsWideAsTheEditorDraws(t *testing.T) {
 	}
 }
 
+// A span reaches the renderer as the live Yjs tree holds it, where a peer's update decodes an
+// integer as an int64, so a colspan read from one is written across the columns it spans.
+func TestRenderWritesASpanAsAPeersUpdateCarriesIt(t *testing.T) {
+	source := crdt.New()
+	fragment := source.GetXmlFragment("prosemirror")
+	tree := &Node{Type: "doc", Children: []*Node{spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{2, 1}})}}
+	if err := source.TransactE(func(txn *crdt.Transaction) error {
+		return Update(txn, fragment, tree)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	peer := crdt.New()
+	if err := crdt.ApplyUpdateV1(peer, crdt.EncodeStateAsUpdateV1(source, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	read, err := Read(peer.GetXmlFragment("prosemirror"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if colspan := read.Children[0].Children[1].Children[0].Attrs["colspan"]; colspan != int64(2) {
+		t.Fatalf("the update carries colspan %#v, want int64(2), the type this case is for", colspan)
+	}
+	markdown, err := Render(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "| x | x |\n| --- | --- |\n| x |  |\n"; markdown != want {
+		t.Fatalf("Render() = %q, want %q", markdown, want)
+	}
+}

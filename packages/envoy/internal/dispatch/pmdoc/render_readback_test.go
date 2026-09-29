@@ -140,6 +140,7 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 	}
 	const table = "| h |\n| --- |\n| c |\n"
 	const table2 = "| h1 | h2 |\n| --- | --- |\n| c1 | c2 |\n"
+	const table3 = "| h1 | h2 | h3 |\n| --- | --- | --- |\n| c1 | c2 | c3 |\n| d1 | d2 | d3 |\n"
 	rows := []struct {
 		name string
 		tree *Node
@@ -182,6 +183,7 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		{"header cell spanning two columns", cells(table2, cellChange{row: 0, cell: 0, attrs: Attrs{"colspan": 2}}, cellChange{row: 0, cell: 1, remove: true}), "| h1 |  |\n| --- | --- |\n| c1 | c2 |\n"},
 		{"body cell spanning two columns", cells(table2, cellChange{row: 1, cell: 0, attrs: Attrs{"colspan": 2}}, cellChange{row: 1, cell: 1, remove: true}), "| h1 | h2 |\n| --- | --- |\n| c1 |  |\n"},
 		{"body cell spanning two rows", cells(table2+"| d1 | d2 |\n", cellChange{row: 1, cell: 0, attrs: Attrs{"rowspan": 2}}, cellChange{row: 2, cell: 0, remove: true}), "| h1 | h2 |\n| --- | --- |\n| c1 | c2 |\n|  | d2 |\n"},
+		{"body cell spanning two columns and two rows", cells(table3, cellChange{row: 1, cell: 0, attrs: Attrs{"colspan": 2, "rowspan": 2}}, cellChange{row: 1, cell: 1, remove: true}, cellChange{row: 2, cell: 0, remove: true}, cellChange{row: 2, cell: 1, remove: true}), "| h1 | h2 | h3 |\n| --- | --- | --- |\n| c1 |  | c3 |\n|  |  | d3 |\n"},
 		{"header narrower than a body row", cells(table2, cellChange{row: 0, cell: 1, remove: true}), "| h1 |  |\n| --- | --- |\n| c1 | c2 |\n"},
 		// 6. A line feed in text, which the editor draws as a line break, is written as a hard break.
 		{"line feed in a paragraph", texts("Before after.\n", "Beforeline1\nline2 after."), "Beforeline1\\\nline2 after.\n"},
