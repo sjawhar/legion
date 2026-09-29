@@ -1223,6 +1223,102 @@ test.describe("agents page", () => {
     }
   });
 
+  // Enter commits whether or not it changes the issue, and the select unmounts either way. A
+  // commit that left the reader on the document would hand the message they picked the issue
+  // for to the page's shortcuts: `j` roves to a row and `x` then ticks its broadcast box.
+  test("Enter on the selection already showing still hands the reader to the composer", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const broadcast = row.getByRole("checkbox", { name: "Select Planner for broadcast" });
+
+      // "No issue", the selection the picker opens on, confirmed as it stands.
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("jx");
+      await expect(field).toHaveValue("jx");
+      await expect(broadcast).not.toBeChecked();
+
+      // The control: a pick that does change the issue lands in the composer too. (The field is
+      // emptied first, since Escape over a written composer is its own discard prompt.)
+      await field.fill("");
+      await page.keyboard.press("Escape");
+      await expect(row).toBeFocused();
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Enter");
+      await expect(toggle).toContainText("CORE-1");
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("@Planner");
+
+      // That issue re-confirmed: nothing changes, and the reader is still handed on.
+      await field.fill("");
+      await page.keyboard.press("Escape");
+      await expect(row).toBeFocused();
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle).toContainText("CORE-1");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("jx");
+      await expect(field).toHaveValue("jx");
+      await expect(broadcast).not.toBeChecked();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // Which hand moved the selection is a fact about one open of the picker. An arrow and an
+  // Escape in the last open must not make this one's pointer pick wait for an Enter.
+  test("a pointer pick commits at once after an arrow and Escape in the last open", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Escape");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(row).toBeFocused();
+
+      // Reopened, and picked the way a pointer's choice arrives from the native popup: a change
+      // with no key and no press on the select in front of it.
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await picker.selectOption("CORE-2");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(toggle).toContainText("CORE-2");
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("@Planner");
+    } finally {
+      await context.close();
+    }
+  });
+
   // The round trip Rev drove: the mention has to reach the wire, not just the screen, or the
   // agent is never told about the comment that names them.
   test("a comment sent after a round trip through the picker still mentions the agent", async ({

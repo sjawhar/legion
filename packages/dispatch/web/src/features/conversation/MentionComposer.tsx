@@ -512,19 +512,19 @@ export function MentionComposer({
   saveEdit,
   showKindSwitch = false,
 }: MentionComposerProps): ReactNode {
-  const initial = initialDraft(initialMentions, carried, owner);
-  const initialBody = initial.body;
+  // Only the mount reads it, so it is computed once rather than on every keystroke.
+  const [initial] = useState(() => initialDraft(initialMentions, carried, owner));
   const textarea = useRef<HTMLTextAreaElement>(null);
   const replacementTextarea = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const lastFocusedField = useRef<HTMLElement | null>(null);
   const optionLabelRefs = useRef<Array<HTMLInputElement | null>>([]);
   const focusAddedOption = useRef(false);
-  const previousBody = useRef(edit?.body ?? initialBody);
+  const previousBody = useRef(edit?.body ?? initial.body);
   const pendingTextEdit = useRef<{ before: string; range: TextEditRange } | undefined>(undefined);
   const previousReply = useRef<string | undefined>(undefined);
   const queryClient = useQueryClient();
-  const [body, setBody] = useState(edit?.body ?? initialBody);
+  const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
   const [kind, setKind] = useState<ComposerKind>(initialKind);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
@@ -554,10 +554,12 @@ export function MentionComposer({
     );
   }, [autocomplete, options]);
   const compact = inline || edit !== undefined;
-  /** Everything the reader wrote, gone: what a successful send leaves behind, and what Discard
-   *  means in a host whose `onClose` only moves focus (`AgentsPage`'s rows) as much as in one
-   *  that unmounts the composer. The carry is reported empty with it, so no later remount can
-   *  bring a discarded draft back. */
+  /** The whole draft, gone - the body, its accepted mentions, a suggestion's replacement and an
+   *  ask's options - on a successful send and on Discard alike, in every host: one whose `onClose`
+   *  only moves focus (`AgentsPage`'s rows) keeps the composer mounted and shows it empty, as one
+   *  that unmounts it would. The kind, the urgency and `Allow multiple` are the reader's settings,
+   *  not the draft, and stay. The carry is reported empty with it, so no later remount can bring a
+   *  sent or discarded draft back. */
   const clearDraft = () => {
     setBody("");
     previousBody.current = "";

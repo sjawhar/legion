@@ -567,25 +567,31 @@ function AgentMessageComposer({
   const keepCarry = useCallback((draft: CarriedDraft) => {
     carried.current = draft;
   }, []);
-  /** The value the reader's pick set, until the render that carries it hands the field back. */
-  const pickedIssue = useRef<string | undefined>(undefined);
   /** What the picker's selection reads while it is open, which is the reader's until they commit
    *  it: the arrows move it, `Enter` (or a pointer's own pick) takes it. */
   const [pendingIssue, setPendingIssue] = useState(issueKey);
+  /** Whether the next change on the select comes from its own keys, which only move the
+   *  selection. A fact about one open of the picker: each open starts from the pointer's
+   *  assumption (the effect below that seeds `pendingIssue`), and a press on the select says so
+   *  again. */
   const movedByKeyboard = useRef(false);
+  /** Bumped by every commit, the issue changed or not, since every commit unmounts the select the
+   *  reader is in. The hand-off keys on it rather than on `issueKey`, which re-confirming the
+   *  issue already held leaves alone. */
+  const [commits, setCommits] = useState(0);
   const commitIssue = (value: string) => {
-    movedByKeyboard.current = false;
-    pickedIssue.current = value;
     setIssueKey(value);
     setIssuePickerOpen(false);
+    setCommits((count) => count + 1);
   };
-  // A layout effect, so the frame the remount paints already has the field focused rather than
-  // the document: the reader's next keystroke is the message, whichever hand made the pick.
+  // A layout effect, so the frame the commit paints already has the field focused rather than
+  // the document: the reader's next keystroke is the message, whichever hand made the pick. When
+  // the pick changes the channel the composer remounts in that same commit, and the field this
+  // finds is the new instance's.
   useLayoutEffect(() => {
-    if (pickedIssue.current !== issueKey) return;
-    pickedIssue.current = undefined;
+    if (commits === 0) return;
     box.current?.querySelector("textarea")?.focus();
-  }, [issueKey]);
+  }, [commits]);
   const issues = useQuery({
     enabled: issuePickerOpen,
     queryFn: () => api.listIssues({ open: true }),
@@ -604,7 +610,9 @@ function AgentMessageComposer({
   const issueSelect = useRef<HTMLSelectElement>(null);
   const pickerTookFocus = useRef(false);
   useEffect(() => {
-    if (issuePickerOpen) setPendingIssue(issueKey);
+    if (!issuePickerOpen) return;
+    setPendingIssue(issueKey);
+    movedByKeyboard.current = false;
   }, [issueKey, issuePickerOpen]);
   useEffect(() => {
     if (!issuePickerOpen) {
@@ -712,7 +720,7 @@ function AgentMessageComposer({
         // The channel decides which mention the message needs - an issue comment reaches this
         // agent by mentioning it, a direct message does not - so the composer is remounted when
         // the channel changes, and only then; one issue to another keeps the same instance. The
-        // pick carries the reader's prose across that remount (`carriedBody`).
+        // pick carries the reader's draft across that remount (`carried`).
         key={useDirectChannel ? "session" : "issue"}
         onCancelReply={onCancelReply}
         onClose={() => {
