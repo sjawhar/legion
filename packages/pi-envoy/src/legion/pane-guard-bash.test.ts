@@ -408,17 +408,19 @@ test("a must-refuse row is a control, not a probe: refused at the merge base's g
   // guard, so comparing against the branch name would compare the guard to itself. The CI job
   // fetches `origin/main` and checks out full history for exactly this.
   //
-  // All three of `pane-guard.ts`'s own local imports — `./pane-guard-bash` and
-  // `./pane-guard-code`, neither changed by this PR — are read from that SAME base commit and
-  // written together into one generated directory, so the loaded module resolves its relative
-  // imports to siblings that actually existed on that commit, not a hybrid of the base's
-  // `pane-guard.ts` against a sibling only the current change carries. `git show`, not a
-  // working-copy checkout, so nothing here mutates or snapshots the workspace a concurrent `jj`,
-  // `biome`, or `tsc` run might be reading; the generated directory is a fresh one from
-  // `mkdtempSync` inside the package (so `@legion/envoy-client/errors` and `unbash` still resolve
-  // through its `node_modules` chain) rather than a fixed name two concurrent runs would race on,
-  // and it lives beside `package.json`, not under `src/`, so a glob scoped to tracked source never
-  // sees it even for the moment before cleanup.
+  // Three files are read from that same base commit: `pane-guard.ts` itself, plus its two local
+  // imports, `./pane-guard-bash` and `./pane-guard-code` (both unchanged by this PR today, but
+  // not asserted so). All three are written together into one generated directory, so the loaded
+  // module resolves its relative imports to siblings that actually existed on that commit, not a
+  // hybrid of the base's `pane-guard.ts` against a sibling only the current change carries.
+  // `git show` writes no working-copy state, but the generated directory itself is real files on
+  // disk for the length of this test, and `packages/pi-envoy/.gitignore` keeps a concurrent
+  // `jj`/`git status` from recording it — without that, a `jj new`/`jj commit` racing this test
+  // could carry the base guard's own files into a finished change. The name is a fresh
+  // `mkdtempSync` one inside the package (so `@legion/envoy-client/errors` and `unbash` still
+  // resolve through its `node_modules` chain) rather than a fixed name two concurrent runs would
+  // race on, and it lives beside `package.json`, not under `src/`, so a glob scoped to tracked
+  // source never sees it even for the moment before cleanup.
   const legionDir = path.dirname(new URL(import.meta.url).pathname);
   const pkgDir = path.resolve(legionDir, "..", "..");
   const repoRoot = path.resolve(legionDir, "..", "..", "..", "..");
