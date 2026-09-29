@@ -12,13 +12,18 @@ async function openIssue(page: Page, key: string, title: string): Promise<void> 
   await page.locator("body").focus();
 }
 
+/** Whether the page itself holds focus, which is where every row below starts from. */
+function onBody(page: Page): Promise<boolean> {
+  return page.evaluate(() => document.activeElement === document.body);
+}
+
 /** Leaves the control a shortcut just focused: a single letter never fires while an `INPUT`,
  *  `TEXTAREA` or `SELECT` holds focus, so each row starts from the page itself. `body.focus()`
  *  would not do it - `body` takes no focus, so the control keeps it - and the page is asserted
  *  back on `body` because that state is what the row after it tests. */
 async function leaveFocus(page: Page): Promise<void> {
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-  await expect.poll(() => page.evaluate(() => document.activeElement === document.body)).toBe(true);
+  await expect.poll(() => onBody(page)).toBe(true);
 }
 
 test.beforeEach(async () => {
@@ -245,7 +250,7 @@ test("j and k cross a collapsed band instead of dead-ending in it, and reach its
     await expect(zulu).toBeHidden();
     await page.getByRole("group", { name: "Todo (1)" }).locator("summary").click();
     await expect(bravo).toBeHidden();
-    await page.locator("body").focus();
+    await leaveFocus(page);
 
     await page.keyboard.press("j");
     await expect(alpha).toBeFocused();
@@ -384,7 +389,7 @@ test("with every band collapsed j and k do nothing and ? greys them, and opening
     // Nothing the reader can see is a step, so the keys move nothing …
     await page.keyboard.press("j");
     await page.keyboard.press("k");
-    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+    expect(await onBody(page)).toBe(true);
 
     // … and `?` says so, as it does for the issue scope's disabled controls.
     await page.keyboard.press("?");
@@ -433,7 +438,6 @@ test("Escape leaves a focused header select, so the next chord is a chord and no
         patched.push(new URL(request.url()).pathname);
       }
     });
-    const onBody = () => page.evaluate(() => document.activeElement === document.body);
 
     // Three of the status labels begin with `t` (Triage, Todo, Testing), so a `t` that reached
     // the Status select would write one of them instead of starting the tab chord.
@@ -444,7 +448,7 @@ test("Escape leaves a focused header select, so the next chord is a chord and no
       await page.keyboard.press(key);
       await expect(control).toBeFocused();
       await page.keyboard.press("Escape");
-      await expect.poll(onBody).toBe(true);
+      await expect.poll(() => onBody(page)).toBe(true);
       await page.keyboard.press("t");
       await expect(page.getByTestId("chord-indicator")).toHaveText(/t/);
       await page.keyboard.press("c");
@@ -453,7 +457,7 @@ test("Escape leaves a focused header select, so the next chord is a chord and no
         "true"
       );
       await page.getByRole("tab", { name: "Spec" }).click();
-      await page.locator("body").focus();
+      await leaveFocus(page);
     }
 
     expect(patched).toEqual([]);
@@ -483,7 +487,7 @@ test("the Board lists its own roving keys once: the List's are not registered wh
     await expect(page.locator("[data-issue-row]")).toHaveCount(1);
     await page.getByRole("button", { name: "Board" }).click();
     await expect(page.getByRole("region", { name: "Todo" }).getByRole("article")).toHaveCount(1);
-    await page.locator("body").focus();
+    await leaveFocus(page);
 
     // The List's rows are gone, so its keys are not the reader's here and `?` must not list
     // them: `o` and `Enter` would otherwise appear twice over, once per scope.

@@ -33,7 +33,7 @@ import { issueIsUnread, UnreadDot } from "./UnreadDot";
 /** What each row is marked with, for the keys that rove them. */
 const ROW_SELECTOR = "[data-issue-row]";
 
-/** A row is a keyboard target for `ProjectPage`'s `j`/`k`/`o`/`Enter`: `tabIndex={-1}` so those
+/** A row is a keyboard target for the `j`/`k`/`o`/`Enter` this file registers: `tabIndex={-1}` so those
  *  keys reach it and Tab does not, and `data-issue-row` names it for them, as the board's cards
  *  do. The focus ring is the row's own, since the row is what focus lands on. */
 function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
