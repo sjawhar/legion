@@ -11,9 +11,12 @@
 # `working-directory`. A trigger that builds it is, in its workflow and in every workflow
 # that calls that one through `workflow_call`, a `push`, `pull_request`, `pull_request_target` or
 # `merge_group` event. An event with no `paths` covers everything; `paths-ignore` covers whatever
-# it does not name. A calling job whose `if:` tests `needs.<job>.outputs.<name> == 'true'` for
-# several outputs joined by `||` runs only when one of them is set, so an input is covered only if
-# the caller's event covers it AND one of those `dorny/paths-filter` filters does.
+# it does not name. A job whose `if:` tests `needs.<job>.outputs.<name> == 'true'` for several
+# outputs joined by `||` runs only when one of them is set, so an input is covered only if the
+# event covers it AND one of those `dorny/paths-filter` filters does. That holds for the job
+# that builds, for a job that calls a workflow which builds, and for every job either of them
+# transitively `needs:` — GitHub skips a job whose needed job was skipped — so the gates of
+# different jobs AND while the filters inside one `if:` OR.
 #
 # A directory source is covered when every file under it that the context keeps (the
 # `.dockerignore` drops the rest) matches, so a new file outside a partial filter fails here on
@@ -24,9 +27,10 @@
 #   2a. a `docker … build` in a run step it cannot read — a subshell, a wrapper, `docker compose
 #      build`, an unknown flag, a `working-directory` holding a variable — since skipping one
 #      leaves an image whose inputs no trigger owes, which is what this check exists to catch,
-#   3. a gate it cannot evaluate — a calling job's `if:` in any other shape, an output that is
-#      not a `dorny/paths-filter` filter, a `predicate-quantifier` other than `some`, a GitHub
-#      path pattern using `?`, `+` or `\` — since misreading one could pass wrongly,
+#   3. a gate it cannot evaluate — an `if:` in any other shape, one narrowed by a top-level
+#      `&&` term naming a `github.` context, an output that is not a `dorny/paths-filter`
+#      filter, a `predicate-quantifier` other than `some`, a GitHub path pattern using `?`, `+`
+#      or `\` — since misreading one could pass wrongly,
 #   4. no image build found at all, since that checks nothing.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
@@ -246,6 +250,9 @@ BUILDX_BOOLEAN_FLAGS = {
     "--quiet", "-q", "--rm",
 }
 SEPARATOR = re.compile(r"[;|&]+")
+# A `bash -c` / `sh -c` argument whose program invokes a docker build: the whole command is one
+# shlex word, so it is matched on the word's contents rather than parsed.
+SHELL_STRING_BUILD = re.compile(r"(^|[^\w/-])docker\s+(buildx\s+)?build(\s|$)")
 EXPRESSION = re.compile(r"\$\{\{[^}]*\}\}")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 SUDO_BOOLEAN_FLAGS = {"-E", "-H", "-n", "-S", "-b", "-i", "-s", "--preserve-env"}
@@ -288,8 +295,16 @@ def build_arguments(command: list[str]) -> list[str] | None:
     write the same build. Anything else that reaches a `docker … build` — a subshell, a retry
     wrapper, `docker compose build` — is Unreadable rather than None: a build this check skips
     is a build whose inputs nothing owes, which is the failure the check exists to prevent."""
+    # shlex keeps `(docker` as one word, so strip a leading grouping character before asking
+    # whether a word names docker — otherwise `(docker buildx build …)` reads as neither a build
+    # nor an unreadable one and passes unseen. `bash -c "docker …"` hides the whole command
+    # inside one quoted word, so it is matched on the word's contents instead.
     shaped = any(
-        posixpath.basename(word) == "docker" and "build" in command[index + 1 :]
+        posixpath.basename(word.lstrip("({")) == "docker" and "build" in command[index + 1 :]
+        for index, word in enumerate(command)
+    ) or any(
+        posixpath.basename(word) in {"bash", "sh", "zsh"}
+        and any(SHELL_STRING_BUILD.search(later) for later in command[index + 1 :])
         for index, word in enumerate(command)
     )
     if shaped and any(word in GROUPING for word in command):
@@ -484,14 +499,24 @@ def unwrap(expression: str) -> str:
 
 
 def gate_outputs(condition: str) -> list[tuple[str, str]]:
-    """(job, output) for each paths-filter output a calling job's `if:` is gated on. Read only in
-    the one shape whose meaning is "runs when any of these filters matched": every output tested
-    as `needs.<job>.outputs.<name> == 'true'`, those tests joined by `||` in a single clause, and
+    """(job, output) for each paths-filter output a job's `if:` is gated on. Read only in the one
+    shape whose meaning is "runs when any of these filters matched": every output tested as
+    `needs.<job>.outputs.<name> == 'true'`, those tests joined by `||` in a single clause, and
     that clause joined to the rest of the condition by `&&`. Other `||` terms in the clause can
     only widen when the job runs, so they are allowed. Anything else — an output in two `&&`
     clauses, a negation, a comparison with another value — is refused as Unreadable."""
     conjuncts = [unwrap(part) for part in split_top(unwrap(condition), "&&")]
     clauses = [part for part in conjuncts if NEEDS_OUTPUT.search(part)]
+    # A top-level &&-joined term naming a `github.` context narrows the gate on something other
+    # than a path — an event name, a ref — so a trigger this check pairs the gate with may never
+    # reach the job. Refuse it. `always()`, `success()` and `needs.<job>.result` do not narrow
+    # by path, so they stay ignorable.
+    narrowing = [p for p in conjuncts if p not in clauses and "github." in p]
+    if narrowing:
+        raise Unreadable(
+            f"is narrowed by `{' '.join(narrowing[0].split())}`, which this check cannot "
+            f"evaluate against a path filter"
+        )
     if not clauses:
         return []
     if len(clauses) > 1:
@@ -673,17 +698,34 @@ for workflow, job_name, context, dockerfile in builds:
         except Unreadable as error:
             problems.append(f"::error file={dockerfile},line={line}::{dockerfile}:{line}: {error}")
 
-    # A trigger that starts the workflow is not enough: the building job's own `if:` can skip it
-    # on a change the trigger let through, and the image is then not built for that change
-    # either. AND the job's gate into every trigger.
+    # A trigger that starts the workflow is not enough: a gate can skip the building job on a
+    # change the trigger let through, and the image is then not built for that change either.
+    # GitHub skips a job whose needed job was skipped, unless its own `if:` says always(), so a
+    # build is gated by every job it transitively needs as well as by its own `if:`.
     document = documents[workflow]
-    own = gating_filters(document, job_name, document["jobs"][job_name])
+    groups, seen, queue = [], set(), [job_name]
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        gated = document["jobs"].get(name) or {}
+        found = gating_filters(document, name, gated)
+        if found:
+            groups.append((name, found))
+        condition = str(gated.get("if", ""))
+        if name != job_name and ("always()" in condition or "cancelled()" in condition):
+            continue
+        needs = gated.get("needs") or []
+        queue += [needs] if isinstance(needs, str) else list(needs)
     triggers = triggers_for(workflow)
-    if own:
-        names = " or ".join(name for name, _ in own)
-        gate = AnyOf([f for _, f in own])
+    # Filters inside one job's `if:` are ||-joined and widen, but two jobs' gates must both
+    # hold, so they AND: one AnyOf per job, all of them in the filter list.
+    for name, found in groups:
+        names = " or ".join(label for label, _ in found)
+        gate = AnyOf([f for _, f in found])
         triggers = [
-            (f"{label} + jobs.{job_name}.if ({names})", filters + [gate])
+            (f"{label} + jobs.{name}.if ({names})", filters + [gate])
             for label, filters in triggers
         ]
     for label, filters in triggers:

@@ -534,5 +534,134 @@ run_check "$root"
 check "a gate missing one input fails, though the trigger covers it" "$(is "$status" 1)"
 check "names that input" "$(contains "$out" 'does not cover .dockerignore')"
 
+echo "case: a gate reaches the build however it is written"
+# gate_probe <root> <docker job header> [extra job yaml]: a changes job exposing img (covers
+# every input) and narrow (covers docker/** only), with the build job's header supplied.
+gate_probe() {
+  local root=$1 header=$2 extra=${3:-}
+  python3 - "$root/.github/workflows/image.yaml" "$header" "$extra" <<'PY'
+import sys
+path, header, extra = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path).read()
+head, marker, tail = text.partition("jobs:\n")
+changes = (
+    "  changes:\n"
+    "    runs-on: ubuntu-24.04\n"
+    "    outputs:\n"
+    "      img: ${{ steps.filter.outputs.img }}\n"
+    "      narrow: ${{ steps.filter.outputs.narrow }}\n"
+    "    steps:\n"
+    "      - uses: dorny/paths-filter@v3\n"
+    "        id: filter\n"
+    "        with:\n"
+    "          filters: |\n"
+    "            img:\n"
+    "              - 'package.json'\n"
+    "              - 'packages/app/**'\n"
+    "              - 'docker/**'\n"
+    "              - '.dockerignore'\n"
+    "              - '.github/workflows/image.yaml'\n"
+    "            narrow:\n"
+    "              - 'docker/**'\n"
+)
+tail = tail.replace("  docker:\n    runs-on: ubuntu-24.04\n", header)
+open(path, "w").write(head + marker + changes + (extra + "\n" if extra else "") + tail)
+PY
+}
+gatekeeper="  gatekeeper:
+    needs: changes
+    if: needs.changes.outputs.narrow == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo gate"
+
+# Controls, so a green below means the gate was read rather than the harness misfiring.
+root=$(fixture gate-control-complete)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+"
+run_check "$root"
+check "a complete gate on the builder passes" "$(is "$status" 0)"
+check "and is named" "$(contains "$out" 'jobs.docker.if (jobs.changes filter img)')"
+
+root=$(fixture gate-control-narrow)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.narrow == 'true'
+    runs-on: ubuntu-24.04
+"
+run_check "$root"
+check "a narrow gate on the builder fails" "$(is "$status" 1)"
+check "names an input it drops" "$(contains "$out" 'does not cover package.json')"
+
+# (a) GitHub skips a job whose needed job was skipped, so a gate reaches the build through
+# `needs:` even when the build job carries no `if:` of its own.
+root=$(fixture gate-transitive-needs)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "a gate inherited through needs: fails" "$(is "$status" 1)"
+check "names the job it was inherited from" "$(contains "$out" 'jobs.gatekeeper.if (jobs.changes filter narrow)')"
+
+# Two jobs' gates must both hold, so they AND; filters inside one if: are ||-joined and widen.
+root=$(fixture gate-own-plus-transitive)
+gate_probe "$root" "  docker:
+    needs: [changes, gatekeeper]
+    if: needs.changes.outputs.img == 'true'
+    runs-on: ubuntu-24.04
+" "$gatekeeper"
+run_check "$root"
+check "a complete own gate does not excuse a narrow inherited one" "$(is "$status" 1)"
+
+# (b) A top-level && term naming a github. context narrows the gate on something that is not a
+# path, so a trigger this check pairs it with may never reach the job.
+root=$(fixture gate-and-event-term)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: needs.changes.outputs.img == 'true' && github.event_name != 'merge_group'
+    runs-on: ubuntu-24.04
+"
+run_check "$root"
+check "an && term on a github. context is refused" "$(is "$status" 1)"
+check "quotes the term" "$(contains "$out" "is narrowed by \`github.event_name != 'merge_group'\`")"
+
+# (c) An if: naming no needs.*.outputs is a gate this check cannot evaluate, not an absent one.
+root=$(fixture gate-no-needs-if)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+"
+run_check "$root"
+check "an if: with no paths-filter output is refused" "$(is "$status" 1)"
+check "quotes the term" "$(contains "$out" "is narrowed by \`github.event_name == 'push'\`")"
+
+# always() does not narrow by path, so it stays ungated.
+root=$(fixture gate-always)
+gate_probe "$root" "  docker:
+    needs: changes
+    if: always()
+    runs-on: ubuntu-24.04
+"
+run_check "$root"
+check "always() is read as ungated" "$(is "$status" 0)"
+
+echo "case: a subshell or bash -c does not slip past on spacing"
+root=$(fixture buildx-run-subshell-unspaced)
+buildx_step "$root" '(docker buildx build --load --file docker/Dockerfile .)'
+run_check "$root"
+check "an unspaced subshell fails" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
+root=$(fixture buildx-run-bash-c)
+buildx_step "$root" 'bash -c "docker buildx build --load --file docker/Dockerfile ."'
+run_check "$root"
+check "a bash -c build fails" "$(is "$status" 1)"
+check "says it cannot read the invocation" "$(contains "$out" 'a docker build this check cannot read')"
+
 
 summary "check-image-trigger-paths.sh"
