@@ -25,6 +25,16 @@ func NewWithWriter(machineID string, w io.Writer) *Logger {
 	return &Logger{machineID: machineID, logger: slog.New(handler)}
 }
 
+// AsDefault is this logger as a plain *slog.Logger carrying the machine id, for slog.SetDefault.
+// The packages the listener calls into log through the default logger (internal/store's role
+// restore and reaper cycles, internal/bus's connection lines), and without this they would come
+// out in Go's text format beside the listener's JSON, which no JSON-keyed log query can read. It
+// carries no ts attribute: the JSON handler already stamps every record with time, and only the
+// wrapper's own calls add the duplicate.
+func (l *Logger) AsDefault() *slog.Logger {
+	return l.logger.With(slog.String("machine_id", l.machineID))
+}
+
 // LogEvent logs a structured event with required fields.
 func (l *Logger) LogEvent(level slog.Level, msg string, attrs ...slog.Attr) {
 	attrs = append([]slog.Attr{

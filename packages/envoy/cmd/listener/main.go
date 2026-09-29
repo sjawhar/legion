@@ -531,6 +531,11 @@ func main() {
 		log.Fatal(err)
 	}
 	logger := logging.New(cfg.MachineID)
+	// Every package the listener calls into logs through the default logger, so point it at the
+	// logger's handler before anything else runs: the role restore's count, the reapers' cycles and
+	// the bus's connection lines then come out as JSON with this machine's id, like the listener's
+	// own lines, instead of Go's text format beside them.
+	slog.SetDefault(logger.AsDefault())
 	apiToken := os.Getenv("ENVOY_API_TOKEN")
 	oidcIssuer, oidcAudience, err := resolveListenerOIDCConfig(os.Getenv)
 	if err != nil {

@@ -325,3 +325,53 @@ func do(t *testing.T, request *http.Request) (int, string) {
 	}
 	return response.StatusCode, string(answer)
 }
+
+// The packages the listener calls into log through the default slog logger, and the SRE reads
+// restarts with JSON-keyed queries. So a line from internal/store has to arrive in the listener's
+// own format, carrying this machine's id, not in Go's text format beside it: a text line is one
+// no query keyed on msg or machine_id can see. The role restore's count is the line that made
+// this matter (it exists so a restart can be read at all), and the same default carries
+// internal/bus and the reapers.
+func TestListenerLogsFromOtherPackagesAreJSONWithTheMachineID(t *testing.T) {
+	const machineID = "default-logger-json"
+	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registry: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	if _, err := registry.SetRole("ses_"+machineID, machineID, "role-"+machineID, false); err != nil {
+		t.Fatalf("claim a role for the restart to restore: %v", err)
+	}
+
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), machineID)
+	listener.waitHealthy(t)
+
+	var restored map[string]any
+	for line := range strings.SplitSeq(listener.output.String(), "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		if record["msg"] == "restored role claims" {
+			restored = record
+			break
+		}
+	}
+	if restored == nil {
+		t.Fatalf("internal/store's role-restore line is not a JSON record in the listener's output:\n%s", listener.output.String())
+	}
+	if restored["machine_id"] != machineID {
+		t.Fatalf("the role-restore record's machine_id = %v, want %q; a query keyed on it cannot find this restart", restored["machine_id"], machineID)
+	}
+	if _, ok := restored["restored"].(float64); !ok {
+		t.Fatalf("the role-restore record has no numeric restored field: %v", restored)
+	}
+	if _, ok := restored["keys"].(float64); !ok {
+		t.Fatalf("the role-restore record has no numeric keys field: %v", restored)
+	}
+}
