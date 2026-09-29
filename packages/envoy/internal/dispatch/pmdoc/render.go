@@ -621,21 +621,21 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // Parse pads a short row. A table with no span and no row wider than its header is its own rows.
 // A span comes from the live tree unchecked, so the empty cells spans add are bounded per render,
 // across every table of the document (renderer.spanBudget): each column a colspan adds, each
-// position a rowspan covers below and each gap filled up to one is charged, and a span past the
-// budget adds no more cells. A span also covers no column past the wider of maxColspan and the
-// table's widest row as it holds cells. Every cell the table holds is still written with its text.
+// position a rowspan covers below, each gap filled up to one and each header cell added past the
+// last cell holding text is charged, and a span past the budget adds no more cells. Every cell the
+// table holds is still written with its text, and the header reaches the last of them, so a table
+// past the budget loses columns, never text.
 func (r *renderer) tableGrid(table *Node) [][]*Node {
 	covered := map[[2]int]*Node{}
 	// lastCovered is, for each row, the last column a span from a row above covers, or -1, kept so
 	// that no row scans every covered position: with that scan, 20,000 rows took 24.7 s.
 	lastCovered := make([]int, len(table.Children))
-	limit := maxColspan
-	for index, row := range table.Children {
+	for index := range lastCovered {
 		lastCovered[index] = -1
-		limit = max(limit, len(row.Children))
 	}
 	grid := make([][]*Node, len(table.Children))
-	width := 0
+	// width is the widest row, and held the columns up to the last cell holding text in any row.
+	width, held := 0, 0
 	for rowIndex, row := range table.Children {
 		kind := "table_cell"
 		if row.Type == "table_header_row" {
@@ -659,12 +659,13 @@ func (r *renderer) tableGrid(table *Node) [][]*Node {
 		for _, cell := range row.Children {
 			fill(0)
 			column := len(cells)
-			columns := max(1, min(tableSpan(cell.Attrs["colspan"]), maxColspan, limit-column))
+			columns := min(tableSpan(cell.Attrs["colspan"]), maxColspan)
 			// A rowspan past the last row covers nothing more, and without this clamp it indexes
 			// lastCovered past its end: the panic is recovered, so every render of the table fails
 			// and its document gets no version.
 			rows := min(tableSpan(cell.Attrs["rowspan"]), len(table.Children)-rowIndex)
 			cells = append(cells, cell)
+			held = max(held, len(cells))
 			tail := min(columns-1, r.spanBudget)
 			r.spanBudget -= tail
 			for range tail {
@@ -683,15 +684,22 @@ func (r *renderer) tableGrid(table *Node) [][]*Node {
 		grid[rowIndex] = cells
 		width = max(width, len(cells))
 	}
+	// under is, for each column, the first cell below the header there, whose alignment a header
+	// cell added over it takes, found in one pass over the rows.
+	var under []*Node
+	for _, row := range grid[1:] {
+		for column := len(under); column < len(row); column++ {
+			under = append(under, row[column])
+		}
+	}
 	for column := len(grid[0]); column < width; column++ {
-		var under *Node
-		for _, row := range grid[1:] {
-			if column < len(row) {
-				under = row[column]
+		if column >= held {
+			if r.spanBudget == 0 {
 				break
 			}
+			r.spanBudget--
 		}
-		grid[0] = append(grid[0], emptyTableCell("table_header", under))
+		grid[0] = append(grid[0], emptyTableCell("table_header", under[column]))
 	}
 	return grid
 }
@@ -701,9 +709,8 @@ func tableSpan(value any) int {
 	return max(1, int(num(value, 1)))
 }
 
-// maxColspan is the most columns a cell is written across, as HTML caps colspan, so the markdown
-// holds no more of a span than the browser editor draws, where a row as wide as the span would let
-// the grid's width limit reach past it.
+// maxColspan is the most columns a cell is written across: the browser caps a cell's colspan at
+// 1000, as HTML does, and draws it across no more, so the markdown holds what the editor draws.
 const maxColspan = 1000
 
 // maxSpanCells is how many empty cells the spans of a document's tables add in all (tableGrid): a

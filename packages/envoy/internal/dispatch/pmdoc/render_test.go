@@ -1004,3 +1004,64 @@ func TestRenderWritesAColspanAsWideAsTheEditorDraws(t *testing.T) {
 		t.Fatalf("the body row is written %d cells wide, want %d", cells, maxColspan)
 	}
 }
+
+// headerWidth is how many cells the first line of markdown, a table's header row, is written with.
+func headerWidth(markdown string) int {
+	first, _, _ := strings.Cut(markdown, "\n")
+	return strings.Count(first, "|") - 1
+}
+
+// The browser caps a cell's colspan, not the table's width: `c` claiming 999 columns after two
+// cells is drawn across columns 3 to 1001.
+func TestRenderWritesAColspanAcrossItsOwnColumnsWhereverItStarts(t *testing.T) {
+	for _, test := range []struct{ colspan, width int }{{999, 1001}, {1000, 1002}, {1500, 1002}} {
+		header := &Node{Type: "table_header_row", Children: []*Node{
+			spanCell("table_header", 1, 1), spanCell("table_header", 1, 1), spanCell("table_header", test.colspan, 1),
+		}}
+		body := &Node{Type: "table_row", Children: []*Node{spanCell("table_cell", 1, 1)}}
+		markdown, err := Render(&Node{Type: "doc", Children: []*Node{{Type: "table", Children: []*Node{header, body}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := headerWidth(markdown); got != test.width {
+			t.Errorf("colspan %d after two cells: the header is written %d cells wide, want %d", test.colspan, got, test.width)
+		}
+	}
+}
+
+// The header is widened to its table's widest row, each cell past the last cell holding text
+// charged to the render's span budget. Under a one-cell header, 20,000 one-cell rows and a row of
+// 100 cells each claiming 1000 columns, the row's spans spend all but 100 of the budget, so the
+// header reaches the last cell's column, 99,001, and 100 cells past it, and every cell's text reads
+// back.
+func TestRenderWidensAHeaderToItsTextAndThenAsFarAsTheBudgetLasts(t *testing.T) {
+	table := &Node{Type: "table", Children: []*Node{{Type: "table_header_row", Children: []*Node{spanCell("table_header", 1, 1)}}}}
+	for range 20_000 {
+		table.Children = append(table.Children, &Node{Type: "table_row", Children: []*Node{spanCell("table_cell", 1, 1)}})
+	}
+	wide := &Node{Type: "table_row"}
+	for range 100 {
+		wide.Children = append(wide.Children, spanCell("table_cell", 1000, 1))
+	}
+	table.Children = append(table.Children, wide)
+	markdown, err := Render(&Node{Type: "doc", Children: []*Node{table}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := headerWidth(markdown); got != 99_101 {
+		t.Fatalf("the header is written %d cells wide, want 99101", got)
+	}
+	back, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := back.Children[0].Children[len(back.Children[0].Children)-1]
+	text := 0
+	Walk(last, func(node *Node) bool {
+		text += strings.Count(node.Text, "x")
+		return true
+	})
+	if text != 100 {
+		t.Fatalf("the wide row reads back holding %d of its 100 cells' text", text)
+	}
+}
