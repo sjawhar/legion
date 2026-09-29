@@ -1,10 +1,12 @@
 //go:build smoke
 
 // Package smoke contains container-level smoke tests for the Envoy listener.
-// Builds the Docker image from the local Dockerfile and verifies critical
-// endpoints work end-to-end with a real NATS server via testcontainers.
+// Verifies critical endpoints work end-to-end with a real NATS server via testcontainers.
 //
-// Run: go test -tags smoke -v -timeout 5m ./internal/smoke/
+// ENVOY_SMOKE_IMAGE names the already-built listener image to run. This test never builds one:
+// a build inside `go test` spends the test's deadline, which is what LEGION-361 removed. Unset,
+// the test fails immediately and prints the build command, so a lane that loses its build step
+// — a rename, a typo, a new workflow — goes red instead of quietly building again.
 package smoke
 
 import (
@@ -13,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +28,20 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
+	image := os.Getenv("ENVOY_SMOKE_IMAGE")
+	if image == "" {
+		t.Fatal("ENVOY_SMOKE_IMAGE is unset, and this test never builds the image itself.\n" +
+			"From the repository root:\n" +
+			"  img=$(docker buildx build --load -q " +
+			"-f packages/envoy/docker/Dockerfile .)\n" +
+			"then, in packages/envoy:\n" +
+			"  ENVOY_SMOKE_IMAGE=$img go test -tags smoke -v ./internal/smoke/\n" +
+			"`-q` prints the image id, and go's test cache keys on the value of this variable, " +
+			"so rebuilding re-runs the test. A fixed tag would replay a cached PASS against an " +
+			"image that had since changed. In CI the build is a step of its own; see " +
+			".github/workflows/envoy-and-contracts.yaml.")
+	}
+
 	ctx := context.Background()
 
 	// Shared Docker network for container-to-container communication.
@@ -43,15 +60,7 @@ func TestSmoke(t *testing.T) {
 		t.Fatalf("start NATS: %v", err)
 	}
 
-	listenerC, err := testcontainers.Run(ctx, "",
-		testcontainers.WithDockerfile(testcontainers.FromDockerfile{
-			// The shared Dockerfile builds from the repo root: its bun stage needs
-			// the whole workspace to bake the dispatch SPA and regenerate contracts.
-			Context:       "../../../../",
-			Dockerfile:    "packages/envoy/docker/Dockerfile",
-			PrintBuildLog: true,
-			KeepImage:     true,
-		}),
+	listenerC, err := testcontainers.Run(ctx, image,
 		network.WithNetwork([]string{"listener"}, net),
 		testcontainers.WithEnv(map[string]string{
 			"NATS_URLS": "nats://nats:4222",
