@@ -84,6 +84,28 @@ function focusedAgentRow(): HTMLElement | null {
   return active instanceof HTMLElement && active.matches(AGENT_ROW_SELECTOR) ? active : null;
 }
 
+const AGENT_COMPOSER_SELECTOR = "[data-agent-composer]";
+
+/**
+ * One level out of a row's composer: the row that contains the focused element takes focus back.
+ * Two callers run it, and they are the same act. `MentionComposer` owns Escape on its own form
+ * and stops it before the window dispatcher sees it (`MentionComposer.tsx:551`), so the composer
+ * calls this through its `onClose`; the `agents` scope registers the same key over the same
+ * function so `?` describes what Escape does there - and so the binding takes over if the
+ * composer ever stops swallowing it.
+ */
+function focusOwningAgentRow(): void {
+  closestMatching(document.activeElement, AGENT_ROW_SELECTOR)?.focus();
+}
+
+/** Whether focus is inside a row's message composer, which is where that Escape applies. */
+function inAgentComposer(): boolean {
+  return (
+    closestMatching(document.activeElement, AGENT_COMPOSER_SELECTOR) !== null &&
+    closestMatching(document.activeElement, AGENT_ROW_SELECTOR) !== null
+  );
+}
+
 /** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at
  *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
  *  mode and Send on a narrow screen, adding no height, and the third and last row on a short one. */
@@ -711,7 +733,6 @@ function AgentRow({
   const [expanded, setExpanded] = useState(false);
   const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
   const detailsId = useId();
-  const rowRef = useRef<HTMLElement>(null);
 
   return (
     <article
@@ -720,7 +741,6 @@ function AgentRow({
       // The issue picker renders only while this row is not answering a message, and a collapsed
       // row has no picker in the DOM at all, so the row itself carries whether `i` can act.
       data-agent-can-pick-issue={replyTo === null ? "" : undefined}
-      ref={rowRef}
       tabIndex={-1}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
@@ -841,7 +861,7 @@ function AgentRow({
             <AgentMessageComposer
               agent={agent}
               onCancelReply={() => setReplyTo(null)}
-              onClose={() => rowRef.current?.focus()}
+              onClose={focusOwningAgentRow}
               replyTo={replyTo}
             />
           </div>
@@ -1348,6 +1368,14 @@ export function AgentsPage(): ReactNode {
       label: "Select or deselect the focused agent",
       run: () => focusedAgentRow()?.querySelector<HTMLElement>("[data-agent-select]")?.click(),
       when: () => focusedAgentRow() !== null,
+    },
+    {
+      id: "back",
+      inEditable: true,
+      keys: "Escape",
+      label: "Back to the agent row from its composer",
+      run: focusOwningAgentRow,
+      when: inAgentComposer,
     },
   ]);
 

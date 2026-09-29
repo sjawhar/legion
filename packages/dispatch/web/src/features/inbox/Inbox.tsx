@@ -60,7 +60,7 @@ import {
   sectionOf,
 } from "./sections";
 import { SNOOZE_PRESETS } from "./snooze";
-import { useAskSnoozeMany } from "./useAskSnooze";
+import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
 
 function ReplyChip({ children }: { children: ReactNode }): ReactNode {
   return <LabelPill>{children}</LabelPill>;
@@ -400,6 +400,21 @@ function heldRow(
 }
 
 /**
+ * What the bar says after a pick the server refused in part. The count alone cannot tell a
+ * sign-out from `snoozed_until must be in the future`, so the reason travels with it: one reason
+ * when every refusal gave the same one, otherwise the first and how many others there are.
+ */
+function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | undefined {
+  const first = failed[0];
+  if (first === undefined) return undefined;
+  const reasons = new Set(failed.map(({ reason }) => reason));
+  const head = `Could not snooze ${failed.length} of ${of}: ${first.reason}`;
+  if (reasons.size === 1) return `${head}.`;
+  const others = reasons.size - 1;
+  return `${head}, and ${others} other reason${others === 1 ? "" : "s"}.`;
+}
+
+/**
  * The bar above the bands while rows are marked: how many, one snooze for all of them, and the
  * way out. A pick writes every marked ask through `useAskSnoozeMany`, so the whole set folds into
  * `Later` in one step, with the same optimistic move and rollback the per-row control makes. The
@@ -421,13 +436,14 @@ function BulkSnoozeBar({
   selected: readonly string[];
 }): ReactNode {
   const write = useAskSnoozeMany();
-  const [refused, setRefused] = useState<{ count: number; of: number } | undefined>(undefined);
+  const [refused, setRefused] = useState<string | undefined>(undefined);
   const snooze = (until: string) => {
     const ids = [...selected];
     setRefused(undefined);
     void write.submit(ids, until).then(({ failed }) => {
-      setRefused(failed.length === 0 ? undefined : { count: failed.length, of: ids.length });
-      onSnoozed(ids.filter((id) => !failed.includes(id)));
+      setRefused(refusalText(failed, ids.length));
+      const refusedIds = new Set(failed.map(({ askId }) => askId));
+      onSnoozed(ids.filter((id) => !refusedIds.has(id)));
     });
   };
   return (
@@ -472,7 +488,7 @@ function BulkSnoozeBar({
       </button>
       {refused === undefined ? null : (
         <p className={`basis-full text-sm ${dangerText}`} role="alert">
-          Could not snooze {refused.count} of {refused.of}.
+          {refused}
         </p>
       )}
     </fieldset>

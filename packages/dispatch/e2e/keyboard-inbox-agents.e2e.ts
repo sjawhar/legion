@@ -162,7 +162,9 @@ test.describe("inbox selection", () => {
       const bar = page.getByRole("group", { name: "Selected asks" });
       await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
 
-      await expect(bar).toContainText("Could not snooze 1 of 2.");
+      // The reason is the server's own, as the per-row control shows it - a refusal a reader
+      // cannot tell from a sign-out is not a report.
+      await expect(bar).toContainText("Could not snooze 1 of 2: snoozed_until must be a moment");
       // The refused row keeps its mark and its place; the one that landed left both.
       await expect(bar).toContainText("1 selected");
       await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", first);
@@ -173,6 +175,50 @@ test.describe("inbox selection", () => {
       await bar.getByRole("button", { name: "Clear selection" }).click();
       await expect(bar).toHaveCount(0);
       await expect(rows.nth(0).getByRole("checkbox")).not.toBeChecked();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // Two rows can fail for two reasons; the bar names the first and says there are others rather
+  // than flattening a sign-out and a validation refusal into one sentence.
+  test("a bulk snooze refused two different ways names the first reason and says so", async ({
+    browser,
+  }) => {
+    await seedInbox();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page);
+      const first = await askIdOf(page, 0);
+      const second = await askIdOf(page, 1);
+
+      await page.route(`**/api/v1/me/asks/${first}/snooze`, (route) =>
+        route.fulfill({
+          body: JSON.stringify({ code: "INVALID_SNOOZE", error: "snoozed_until must be a moment" }),
+          contentType: "application/json",
+          status: 400,
+        })
+      );
+      await page.route(`**/api/v1/me/asks/${second}/snooze`, (route) =>
+        route.fulfill({
+          body: JSON.stringify({ code: "UNAUTHENTICATED", error: "sign in again" }),
+          contentType: "application/json",
+          status: 401,
+        })
+      );
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
+
+      await expect(bar).toContainText(
+        "Could not snooze 2 of 2: snoozed_until must be a moment, and 1 other reason."
+      );
+      await expect(bar).toContainText("2 selected");
     } finally {
       await context.close();
     }
@@ -336,6 +382,47 @@ test.describe("inbox selection", () => {
       await page.keyboard.press("h");
       await expect(rows.nth(0).locator("[data-inbox-snooze]")).toBeFocused();
       expect(wrote).toBe(false);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The `?agent=` chip narrows the list the same way the view switch does, and the Inbox stays
+  // mounted across it: the chip's clear link and the browser's own Back are client-side moves.
+  test("a mark made outside the agent filter does not count inside it", async ({ browser }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Two agents, one issue" });
+    await patchIssue(issue.key, { assignee: "alice" });
+    const other = {
+      actor: { id: "e2e-other-agent", kind: "session" as const },
+      as: "agent" as const,
+    };
+    const fromOther = await createAsk(issue.key, { question: "From another agent?" }, other);
+    const fromSession = await createAsk(issue.key, { question: "Ship it?" }, session);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await page.goto(`/?agent=${other.actor.id}`);
+      const rows = page.locator("[data-inbox-row]");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await expect(rows).toHaveCount(1);
+      await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", fromOther.id);
+
+      await page.getByRole("link", { name: "Clear agent filter" }).click();
+      await expect(rows).toHaveCount(2);
+      await page.locator(`[data-inbox-row="${fromSession.id}"]`).getByRole("checkbox").check();
+      await expect(bar).toContainText("1 selected");
+
+      // Let go of the row first: a row under the reader's hand is held on screen even when the
+      // list stops carrying it, which is the Inbox's own rule and not what this test is about.
+      await page.mouse.move(0, 0);
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+      // Back into the filter: the marked ask is not one of its rows, so nothing counts here.
+      await page.goBack();
+      await expect(rows).toHaveCount(1);
+      await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", fromOther.id);
+      await expect(bar).toHaveCount(0);
     } finally {
       await context.close();
     }
@@ -568,6 +655,12 @@ test.describe("agents page", () => {
       await expect(agentsSection).toBeVisible();
       await expect(
         agentsSection.getByRole("listitem").filter({ hasText: "Pin or unpin the focused agent" })
+      ).toBeVisible();
+      // Escape out of a row's composer is real behaviour, so `?` says so: the Inbox, Board and
+      // Architecture all list theirs, and a help screen that omits one is a help screen a reader
+      // cannot trust.
+      await expect(
+        agentsSection.getByRole("listitem").filter({ hasText: "Back to the agent row" })
       ).toBeVisible();
     } finally {
       await context.close();

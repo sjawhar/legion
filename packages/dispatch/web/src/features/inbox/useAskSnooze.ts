@@ -62,11 +62,21 @@ export function useAskSnooze(askId: string): AskSnoozeWrite {
   };
 }
 
+/** One ask the server refused, with the reason it gave - the same message the per-row control
+ *  shows, so a sign-out never reads like a validation refusal. */
+export interface AskSnoozeFailure {
+  askId: string;
+  reason: string;
+}
+
 export interface AskSnoozeManyWrite {
   /** True while a bulk save is in flight. */
   pending: boolean;
-  /** Snoozes every id until `until` (RFC3339); resolves with the ids the server refused. */
-  submit: (ids: readonly string[], until: string) => Promise<{ failed: string[] }>;
+  /** Snoozes every id until `until` (RFC3339); resolves with the asks the server refused. */
+  submit: (
+    ids: readonly string[],
+    until: string
+  ) => Promise<{ failed: readonly AskSnoozeFailure[] }>;
 }
 
 /**
@@ -82,7 +92,12 @@ export function useAskSnoozeMany(): AskSnoozeManyWrite {
   const mutation = useMutation({
     mutationFn: async ({ ids, until }: { ids: readonly string[]; until: string }) => {
       const results = await Promise.allSettled(ids.map((id) => api.snoozeAsk(id, until)));
-      return ids.filter((_id, index) => results[index]?.status === "rejected");
+      return ids.flatMap((askId, index) => {
+        const result = results[index];
+        if (result === undefined || result.status !== "rejected") return [];
+        const reason: unknown = result.reason;
+        return [{ askId, reason: reason instanceof Error ? reason.message : String(reason) }];
+      });
     },
     onMutate: async ({ ids, until }) => {
       await queryClient.cancelQueries({ queryKey: inboxKey });
@@ -95,7 +110,7 @@ export function useAskSnoozeMany(): AskSnoozeManyWrite {
     },
     onSuccess: (failed, _variables, previous) => {
       if (failed.length === 0) return;
-      const refused = new Set(failed);
+      const refused = new Set(failed.map(({ askId }) => askId));
       for (const [key, data] of previous ?? []) {
         const before = new Map((data ?? []).map((row) => [row.id, row.snoozed_until]));
         queryClient.setQueryData<InboxRow[]>(key, (current) =>
