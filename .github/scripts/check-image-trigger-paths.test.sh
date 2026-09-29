@@ -660,35 +660,6 @@ step_if "$root" "false"
 run_check "$root"
 check "a step gate of false is refused too" "$(is "$status" 1)"
 
-echo "case: a run step that builds an image is refused, whatever shape it takes"
-while IFS='|' read -r label body; do
-  [ -n "$label" ] || continue
-  root=$(fixture "tripwire-$label")
-  run_step "$root" "$body"
-  run_check "$root"
-  check "$label is refused" "$(is "$status" 1)"
-  check "  and says how to make it readable" "$(contains "$out" 'build images with docker/build-push-action so this check can read the build')"
-done <<'SHAPES'
-plain|docker build -f docker/Dockerfile .
-buildx|docker buildx build --load -f docker/Dockerfile .
-V1-abbreviated|docker buildx b --load -f docker/Dockerfile .
-V2-bake|docker buildx bake --load listener
-V3-compose-up|docker compose up --build -d
-V4-compose-build|docker-compose build listener
-eval|eval "docker build -f docker/Dockerfile ."
-github-env|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
-buildah|buildah bud -f docker/Dockerfile .
-B1-image-build|docker image build -f docker/Dockerfile .
-B2-builder-build|docker builder build -f docker/Dockerfile .
-B3-context-flag|docker --context remote build -f docker/Dockerfile .
-B4-buildx-builder-flag|docker buildx --builder mybuilder build -f docker/Dockerfile .
-podman|podman build -f docker/Dockerfile .
-B5-host-flag|docker -H tcp://x:2375 build -f docker/Dockerfile .
-nerdctl|nerdctl build -f docker/Dockerfile .
-depot|depot build -f docker/Dockerfile .
-kaniko|/kaniko/executor --dockerfile docker/Dockerfile --context .
-SHAPES
-
 # V5: an action that builds an image and is not the one this check reads.
 root=$(fixture tripwire-bake-action)
 python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
@@ -780,99 +751,175 @@ PYEOF
 run_check "$root"
 check "an action known to build nothing passes" "$(is "$status" 0)"
 
-echo "case: a build split across a backslash continuation is still caught"
-root=$(fixture tripwire-continuation)
-run_step "$root" 'docker \
-  buildx build --load -f docker/Dockerfile .'
-run_check "$root"
-check "the continuation form is refused" "$(is "$status" 1)"
-check "  and says how to make it readable" "$(contains "$out" 'build images with docker/build-push-action so this check can read the build')"
-
 root=$(fixture tripwire-not-a-build)
 run_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"
 check "a run step that does not build is not flagged" "$(contains "$out" 'this check covered 0 image builds')"
 
-echo "case: the recogniser refuses every build shape and no non-build"
+echo "case: the detector refuses every build shape, and the marker cannot excuse an anchored one"
+extra_step() {
+  local root=$1 body=$2 marker=${3:-no}
+  python3 - "$root/.github/workflows/image.yaml" "$body" "$marker" <<'PYEOF'
+import sys
+path, body, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+env = "        env:\n          IMAGE_TRIGGER_CHECK: not-an-image-build\n" if marker == "yes" else ""
+indented = "\n".join("          " + line for line in body.splitlines())
+text = open(path).read()
+open(path, "w").write(text + f"      - name: Extra\n{env}        run: |\n{indented}\n")
+PYEOF
+}
+
 # A table, not single literals: every row is a real invocation, each asserting the refusal AND
-# that the step is named, so a row cannot pass on the zero-build guard alone.
-while IFS='|' read -r label body; do
+# that the step is named, so a row cannot pass on the zero-build guard alone. Every row is then
+# re-run carrying the marker: an anchored shape stays refused, since the marker excuses a
+# detector hit only where the anchored layer missed it.
+while IFS='|' read -r label anchored body; do
   [ -n "$label" ] || continue
-  root=$(fixture "net-build-$label")
+  root=$(fixture "build-$label")
   run_step "$root" "$body"
   run_check "$root"
   check "build shape $label is refused" "$(is "$status" 1)"
   check "  and names the step" "$(contains "$out" "Build builds an image in a run step")"
+  check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ('")"
+  root=$(fixture "build-marked-$label")
+  extra_step "$root" "$body" yes
+  run_check "$root"
+  if [ "$anchored" = "yes" ]; then
+    check "  and the marker does not excuse $label" "$(is "$status" 1)"
+    check "  and still names the step" "$(contains "$out" "Extra builds an image in a run step")"
+  else
+    check "  and the marker excuses $label" "$(is "$status" 0)"
+    check "  and the excusal is printed" "$(contains "$out" "declared not an image build")"
+  fi
 done <<'BUILDS'
-plain|docker build -f docker/Dockerfile .
-buildx|docker buildx build --load -f docker/Dockerfile .
-buildx-b|docker buildx b --load -f docker/Dockerfile .
-buildx-b-bare|docker buildx b .
-buildx-b-tag|docker buildx b -t x .
-buildx-b-spaces|docker  buildx   b .
-bake|docker buildx bake --load listener
-image-build|docker image build -f docker/Dockerfile .
-builder-build|docker builder build -f docker/Dockerfile .
-context-flag|docker --context remote build -f docker/Dockerfile .
-host-flag|docker -H tcp://x:2375 build -f docker/Dockerfile .
-buildx-builder-flag|docker buildx --builder mybuilder build -f docker/Dockerfile .
-sudo|sudo docker build -f docker/Dockerfile .
-env-prefix|DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile .
-substitution|img=$(docker buildx build --load -q -f docker/Dockerfile .)
-backticks|img=`docker buildx build --load -q -f docker/Dockerfile .`
-github-env|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
-eval|eval "docker build -f docker/Dockerfile ."
-bash-c|bash -c "docker buildx build --load -f docker/Dockerfile ."
-subshell|(docker buildx build --load -f docker/Dockerfile .)
-compose-up|docker compose up --build -d
-compose-build|docker-compose build listener
-podman-compose-up|podman compose up --build -d
-podman|podman build -f docker/Dockerfile .
-nerdctl|nerdctl build -f docker/Dockerfile .
-depot|depot build -f docker/Dockerfile .
-buildah|buildah bud -f docker/Dockerfile .
-buildctl|buildctl build --frontend dockerfile.v0
-ko|ko build ./cmd/listener
-pack|pack build app --path .
-skaffold|skaffold build --file-output out.json
-earthly|earthly +docker
-crane|crane append -f layer.tar -t app:ci
-jib|mvn compile jib:dockerBuild
-dollar-docker|"$DOCKER" build -f docker/Dockerfile .
-kaniko|/kaniko/executor --dockerfile docker/Dockerfile --context .
+plain|yes|docker build -f docker/Dockerfile .
+buildx|yes|docker buildx build --load -f docker/Dockerfile .
+buildx-b|yes|docker buildx b --load -f docker/Dockerfile .
+buildx-b-bare|yes|docker buildx b .
+buildx-b-tag|yes|docker buildx b -t x .
+buildx-b-spaces|yes|docker  buildx   b .
+bake|yes|docker buildx bake --load listener
+image-build|yes|docker image build -f docker/Dockerfile .
+builder-build|yes|docker builder build -f docker/Dockerfile .
+context-flag|yes|docker --context remote build -f docker/Dockerfile .
+host-flag|yes|docker -H tcp://x:2375 build -f docker/Dockerfile .
+buildx-builder-flag|yes|docker buildx --builder mybuilder build -f docker/Dockerfile .
+sudo|yes|sudo docker build -f docker/Dockerfile .
+env-prefix|yes|DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile .
+substitution|yes|img=$(docker buildx build --load -q -f docker/Dockerfile .)
+backticks|yes|img=`docker buildx build --load -q -f docker/Dockerfile .`
+github-env|yes|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
+eval|yes|eval "docker build -f docker/Dockerfile ."
+bash-c|yes|bash -c "docker buildx build --load -f docker/Dockerfile ."
+subshell|yes|(docker buildx build --load -f docker/Dockerfile .)
+compose-up-build|yes|docker compose up --build -d
+compose-build|yes|docker-compose build listener
+podman-compose-up|yes|podman compose up --build -d
+podman|yes|podman build -f docker/Dockerfile .
+nerdctl|yes|nerdctl build -f docker/Dockerfile .
+depot|yes|depot build -f docker/Dockerfile .
+buildah-bud|yes|buildah bud -f docker/Dockerfile .
+buildctl|yes|buildctl build --frontend dockerfile.v0
+ko|yes|ko build ./cmd/listener
+pack|yes|pack build app --path .
+skaffold|yes|skaffold build --file-output out.json
+earthly|yes|earthly +docker
+crane|yes|crane append -f layer.tar -t app:ci
+jib|yes|mvn compile jib:dockerBuild
+dollar-docker|yes|"$DOCKER" build -f docker/Dockerfile .
+kaniko|yes|/kaniko/executor --dockerfile docker/Dockerfile --context .
+quoted-docker|yes|"docker" build -f docker/Dockerfile .
+which-docker|yes|$(which docker) build -f docker/Dockerfile .
+default-var|yes|${DOCKER:-docker} build -f docker/Dockerfile .
+default-var-quoted|yes|"${DOCKER:-docker}" build -f docker/Dockerfile .
+quoted-flag-value|yes|docker --config "/tmp/a b" build -f docker/Dockerfile .
+expression-context|yes|docker --context ${{ env.X }} build -f docker/Dockerfile .
+expression-builder|yes|docker buildx --builder ${{ steps.buildx.outputs.name }} build -f docker/Dockerfile .
+nerdctl-compose-build|yes|nerdctl compose build
+nerdctl-compose-up|yes|nerdctl compose up --build
+depot-bake|yes|depot bake listener
+buildctl-addr|yes|buildctl --addr tcp://x:1234 build --frontend dockerfile.v0
+buildctl-daemonless|yes|buildctl-daemonless.sh build --frontend dockerfile.v0
+docker-buildx|yes|docker-buildx build -f docker/Dockerfile .
+buildx-standalone|yes|buildx build -f docker/Dockerfile .
+img|yes|img build -f docker/Dockerfile .
+docker-commit|yes|docker commit working app:ci
+docker-import|yes|docker import rootfs.tar app:ci
+ko-resolve|yes|ko resolve -f config/
+ko-apply|yes|ko apply -f config/
+skaffold-run|yes|skaffold run
+buildah-from-commit|no|buildah from scratch && buildah commit working-container app:ci
+compose-up-implicit|no|docker compose -f compose/listener.compose.yml up -d
+compose-run-implicit|no|docker compose -f compose/listener.compose.yml run app
+compose-create-implicit|no|docker compose -f compose/listener.compose.yml create
 BUILDS
 
 # The continuation form cannot go in the table: its body spans two lines.
-root=$(fixture net-build-continuation)
+root=$(fixture build-continuation)
 run_step "$root" 'docker \
   buildx build --load -f docker/Dockerfile .'
 run_check "$root"
 check "build shape continuation is refused" "$(is "$status" 1)"
 check "  and names the step" "$(contains "$out" "Build builds an image in a run step")"
+root=$(fixture build-continuation-marked)
+extra_step "$root" 'docker \
+  buildx build --load -f docker/Dockerfile .' yes
+run_check "$root"
+check "  and the marker does not excuse it" "$(is "$status" 1)"
+check "  and still names the step" "$(contains "$out" "Extra builds an image in a run step")"
 
-# Non-builds: the step runs a build word, or a build tool, without building an image. Each keeps
-# the readable build-push-action step, so a green here means the recogniser left it alone.
+echo "case: a step the detector hits but builds nothing goes green on the marker"
+# The false-positive set: the detector is broad on purpose, so a step that runs a build word
+# without building an image is refused with its matched text, and the marker is the remedy.
+# Each keeps the readable build-push-action step, so a green is the detector leaving it alone.
+
 while IFS='|' read -r label body; do
   [ -n "$label" ] || continue
-  root=$(fixture "net-nonbuild-$label")
-  python3 - "$root/.github/workflows/image.yaml" "$body" <<'PYEOF'
-import sys
-path, body = sys.argv[1], sys.argv[2]
-text = open(path).read()
-open(path, "w").write(text + f"      - name: Extra\n        run: |\n          {body}\n")
-PYEOF
+  root=$(fixture "fp-$label")
+  extra_step "$root" "$body"
   run_check "$root"
-  check "non-build $label is left alone" "$(is "$status" 0)"
-done <<'NONBUILDS'
+  check "false positive $label is refused without the marker" "$(is "$status" 1)"
+  check "  and prints the matched text" "$(contains "$out" "builds an image in a run step ('")"
+  check "  and offers the marker" "$(contains "$out" "IMAGE_TRIGGER_CHECK: not-an-image-build")"
+  root=$(fixture "fp-marked-$label")
+  extra_step "$root" "$body" yes
+  run_check "$root"
+  check "  and goes green with it" "$(is "$status" 0)"
+  check "  and the excused step is logged" "$(contains "$out" "declared not an image build (IMAGE_TRIGGER_CHECK: not-an-image-build): ")"
+  check "  and the log names the step" "$(contains "$out" "Extra")"
+done <<'FALSEPOSITIVES'
+host-flag-hostname|docker -H build.example.com:2375 pull alpine
+config-flag-path|docker --config build/.docker pull alpine
+bake-print|docker buildx bake --print
+build-check|docker buildx build --check .
+build-help|docker buildx build --help
+context-named-build|docker --context build pull alpine
+host-flag-corp|docker -H build.corp pull alpine
+echo-mentioning-build|echo "run docker build to make the image"
 run-go-build|docker run --rm golang go build ./...
-compose-run-npm|docker compose run app npm run build
 exec-make|docker exec app make build
 run-echo|docker run alpine echo a b
 run-mount-go-build|docker run -v "$PWD":/w -w /w golang go build ./...
+FALSEPOSITIVES
+
+# These the detector does not hit at all, so they are green with no marker and nothing is logged.
+while IFS='|' read -r label body; do
+  [ -n "$label" ] || continue
+  root=$(fixture "unseen-$label")
+  extra_step "$root" "$body"
+  run_check "$root"
+  check "non-build $label needs no marker" "$(is "$status" 0)"
+  check "  and nothing is excused" "$(is "$(printf '%s' "$out" | grep -c 'declared not an image build')" 0)"
+done <<'UNSEEN'
+buildx-builder-prune|docker buildx --builder buildkit prune
+buildx-builder-ls|docker buildx --builder buildkit ls
+earthly-version|earthly --version
+pull-kaniko-image|docker pull gcr.io/kaniko-project/executor:latest
+compose-up-no-build|docker compose -f compose/listener.compose.yml up -d --no-build
 imagetools|docker buildx imagetools inspect app:ci
 buildx-create|docker buildx create --use
 pull-then-make|docker pull x; make build
-NONBUILDS
+UNSEEN
 
 
 echo "case: a result comparison is compared case-insensitively, as GitHub does"

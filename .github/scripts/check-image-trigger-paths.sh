@@ -24,11 +24,18 @@
 #     `dorny/paths-filter` outputs tested `== 'true'` and joined by `||`, or to terms that
 #     cannot narrow by path, or it is refused. GitHub compares case-insensitively, so this
 #     check does too.
-#   * A build in a `run:` step is RECOGNISED (RUN_STEP_BUILD), not read. A recogniser's miss
-#     fails safe — it refuses nothing it should have read — where the parser this replaced
-#     admitted a build on every miss. It is anchored, so it refuses no non-build and needs no
-#     escape hatch: measured at 37 build shapes caught, 0 of 8 non-builds refused, 0 of this
-#     repository's 122 run steps matched.
+#   * A build in a `run:` step gets TWO LAYERS, because shell has no allowlist to be unknown
+#     against. Layer 1 is a BROAD detector (RUN_STEP_BUILD): a container-CLI word followed
+#     later on the command by `build`, `bake` or `b`, the other builders, and `compose
+#     up|run|create` without `--no-build`, since a service carrying `build:` builds implicitly.
+#     Layer 2 is an ANCHORED recogniser (ANCHORED_BUILD) of shapes that are certainly a build.
+#     A detector hit is refused unless the step declares `env: IMAGE_TRIGGER_CHECK:
+#     not-an-image-build` AND the anchored layer missed it, so a build is admitted only when
+#     both layers miss it, or when it carries the marker and the anchored layer missed it.
+#     Every excusal is printed, with its workflow, job, step and matched text. Measured over 61
+#     build shapes and 20 non-builds: 61/61 detected, 57 of them anchored beyond the marker's
+#     reach, every non-build reachable by the marker, and 0 of this repository's 122 run steps
+#     matched - nothing is excused today.
 #
 # A trigger that builds an image is, in its workflow and in every workflow that calls that one
 # through `workflow_call`, a `push`, `pull_request`, `pull_request_target` or `merge_group`
@@ -299,41 +306,90 @@ def mount_sources(instruction: str) -> list[str]:
     return sources
 
 
-# For BUILDS in a run step this check RECOGNISES the command rather than reading it, and the
-# difference is which way a miss fails. The parser this replaced READ builds — it tokenised
-# with shlex, looked each flag's arity up in tables to find the context and `--file`, and
-# resolved `working-directory` — and each of those broke, admitting a build every time. This
-# recognises: no tokenizer, no flag table (an option generically takes at most one value), no
-# context and no file. It runs on raw text, so a comment, a substitution or an `eval` cannot
-# hide the word, and a miss refuses nothing it should have read — it only fails to refuse, and
-# is anchored tightly enough that it refuses no non-build.
+# A run step gets two layers, because a miss in either direction is real. A DETECTOR hit alone
+# would refuse ordinary steps that merely run a build word; an ANCHORED recogniser alone would
+# admit every shape it failed to recognise. So the detector is drawn broad - it decides what
+# must be answered for - and the anchored layer decides what no answer can excuse. The parser
+# both replaced READ builds - shlex, per-flag arity tables, `working-directory` - and each of
+# those broke, admitting a build every time. Neither layer tokenises: an option generically
+# takes at most one value, and both run on raw text, so a comment, a substitution or an `eval`
+# cannot hide the word.
 #
-# Measured over 37 build shapes and 8 non-builds: 37 caught, 0 wrongly refused, and 0 of this
+# Measured over 61 build shapes and 20 non-builds: 61 detected, 57 of those anchored, every
+# non-build either unseen by the detector or reachable by the marker, and 0 of this
 # repository's 122 real run steps matched.
 #
-# What it still cannot see: a build inside a script file a step calls, behind a name assembled
+# What neither layer can see: a build inside a script file a step calls, behind a name assembled
 # from a variable, or in a step whose `shell:` is not one this reads as a shell (`shell: python`
 # runs a program whose text this check does not interpret).
-OPT = r"(\s+-{1,2}[\w-]+(=\S+|\s+[^\s-]\S*)?)*"
-CLI = r"(\b(docker|podman|nerdctl|depot)\b|\"?\$[{(]?\w*DOCKER\w*[})]?\"?)"
-RUN_STEP_BUILD = re.compile(
-    rf"{CLI}{OPT}\s+((image|builder)\s+)?build(?![\w-])"
-    rf"|{CLI}{OPT}\s+buildx{OPT}\s+b[a-z]*(?![\w-])"
-    rf"|(\b(docker|podman)\s+compose|\b(docker|podman)-compose){OPT}\s+"
-    rf"(build(?![\w-])|(up|run|create)\b[^\n;&|]*\s--build(?![\w-]))"
-    r"|\b(buildah|buildctl|kaniko|pack|skaffold)\s+(build|bud)\b|\bko\s+(build|publish)\b"
-    r"|\bearthly\b|\bcrane\s+append\b|\bjib:[a-zA-Z]*[Bb]uild\b"
-    r"|gcr\.io/kaniko-project|/kaniko/executor"
+# Layer 2, the ANCHORED recogniser: shapes that are certainly a build. Options are atomic, so an
+# option's value is never re-read as the subcommand (`docker --context build pull`), and a command
+# word counts only at a command position, not inside `echo "... docker build ..."`.
+OPT = r"""(?>(\s+-{1,2}[\w-]+(=\S+|\s+("[^"\n]*"|'[^'\n]*'|\$\{\{[^}\n]*\}\}|[^\s-]\S*))?)*)"""
+NAME = r"(docker(-buildx)?|podman|nerdctl|depot)"
+CLI = (
+    r"""["']?(\b""" + NAME + r"\b"
+    r"|\$[({]?\w*DOCKER\w*[-:}\w)]*"
+    r"|\$\([^)\n]*\b" + NAME + r"\b[^)\n]*\))[\"']?"
 )
+POS = r"""(?:^|[\n;&|(`]|\$\(|\beval\s+["']?|\bsudo\s+|\b[A-Z_][A-Z0-9_]*=\S*\s+|-c\s+["'])\s*"""
+SUB = r"(?![\w.:/-])"
+ANCHORED_BUILD = re.compile(
+    rf"{POS}{CLI}{OPT}\s+((image|builder)\s+)?(build|bake|commit|import){SUB}"
+    rf"|{POS}({CLI}{OPT}\s+)?buildx{OPT}\s+b[a-z]*{SUB}"
+    rf"|{POS}(\b(docker|podman|nerdctl)\s+compose|\b(docker|podman|nerdctl)-compose){OPT}\s+"
+    rf"(build{SUB}|(up|run|create)\b[^\n;&|]*\s--build(?![\w-]))"
+    rf"|{POS}(buildah|buildctl[\w.-]*|pack|skaffold|img){OPT}\s+(build|bud){SUB}"
+    rf"|{POS}ko{OPT}\s+(build|publish|resolve|apply)\b|{POS}skaffold{OPT}\s+run\b"
+    rf"|{POS}earthly[^\n;&|]*\s\+\w"
+    rf"|{POS}crane\s+append\b|\bjib:[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
+)
+# A command carrying one of these inspects or explains: `buildx bake --print`, `build --check`.
+INSPECT_ONLY = re.compile(r"(^|\s)(--print|--help|-h|--version|--check)(\s|$)")
+
+# Layer 1, the BROAD detector: anything that might build. A container-CLI word followed later on
+# the same command by `build`, `bake` or `b`, the other builders, and `compose up|run|create`
+# without `--no-build`, since a service carrying `build:` builds implicitly - as both compose
+# files in this repository do.
+RUN_STEP_BUILD = re.compile(
+    r"\b(docker|podman|nerdctl|depot)\b[^\n;&|]*[\s-](?<!no-)(build|bake|b)(?![\w-])"
+    r"|\b(docker|podman|nerdctl|depot)\b[^\n;&|]*\s(commit|import)\b"
+    r"|\$[({]?\w*DOCKER\w*[-:}\w)]*[\"']?[^\n;&|]*[\s-](?<!no-)(build|bake|b)(?![\w-])"
+    r"|(\b(docker|podman|nerdctl)\s+compose|\b(docker|podman|nerdctl)-compose)\b"
+    r"(?![^\n;&|]*--no-build)[^\n;&|]*\s(up|run|create|build)\b"
+    r"|\bbuildx\s+b[a-z]*(?![\w-])"
+    r"|\bbuildah\b"
+    r"|\bbuildctl[\w.-]*\b[^\n;&|]*\bbuild\b"
+    r"|\bko\s+(build|publish|resolve|apply)\b"
+    r"|\bpack\s+build\b|\bskaffold\s+(build|run)\b"
+    r"|\bimg\s+build\b"
+    r"|\bearthly\b[^\n;&|]*\s\+\w"
+    r"|\bcrane\s+append\b|\bjib:[a-zA-Z]*[Bb]uild\b|/kaniko/executor"
+)
+# The step env that declares a detector hit builds no image. It cannot excuse an anchored hit.
+MARKER = ("IMAGE_TRIGGER_CHECK", "not-an-image-build")
+excused: list[str] = []
 
 
-def builds_an_image(step: dict) -> bool:
-    """True when a run step's shell builds a container image, by the recogniser above."""
+def classify_run_step(step: dict) -> tuple[str, str] | None:
+    """(verdict, matched text) for a run step: `builds` when it is refused, `excused` when the
+
+    detector hit is declared not a build, None when neither layer sees one. Backslash
+    continuations are joined first: `docker \\` then `buildx build` is one command."""
     script = step.get("run")
     if not isinstance(script, str):
-        return False
-    # Join backslash continuations first: `docker \` then `buildx build` is one command.
-    return bool(RUN_STEP_BUILD.search(re.sub(r"\\\s*\n", " ", script)))
+        return None
+    command = re.sub(r"\\\s*\n", " ", script)
+    hit = RUN_STEP_BUILD.search(command)
+    if not hit:
+        return None
+    certain = ANCHORED_BUILD.search(command)
+    if certain and not INSPECT_ONLY.search(command):
+        return "builds", certain.group(0).strip()
+    declared = str((step.get("env") or {}).get(MARKER[0], "")).strip()
+    if declared == MARKER[1]:
+        return "excused", hit.group(0).strip()
+    return "builds", hit.group(0).strip()
 
 
 NON_BUILDING_ACTIONS = {
@@ -725,11 +781,19 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
             f"action to NON_BUILDING_ACTIONS in this script if it builds none"
         )
         return
-    if builds_an_image(step):
-        problems.append(
-            f"::error file={workflow}::{place} builds an image in a run step; build images "
-            f"with docker/build-push-action so this check can read the build"
-        )
+    verdict = classify_run_step(step)
+    if verdict is None:
+        return
+    kind, matched = verdict
+    if kind == "excused":
+        excused.append(f"{workflow}: {place}: {matched}")
+        return
+    problems.append(
+        f"::error file={workflow}::{place} builds an image in a run step ({matched!r}); build "
+        f"it with docker/build-push-action so this check can read it, reword the command so it "
+        f"does not read as a build (`--flag=value`), or, if the step builds no image, declare "
+        f"it with `env: {MARKER[0]}: {MARKER[1]}`"
+    )
 
 
 def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: str, depth: int) -> None:
@@ -851,6 +915,10 @@ for workflow, job_name, step, context, dockerfile in builds:
         )
     if not triggers:
         print(f"{dockerfile}: {workflow} has no path-triggered event; nothing to check")
+
+# Every excusal is printed: a marker is a human's claim, and a reader can audit each one.
+for excusal in dict.fromkeys(excused):
+    print(f"declared not an image build ({MARKER[0]}: {MARKER[1]}): {excusal}")
 
 problems = list(dict.fromkeys(problems))
 for problem in problems:
