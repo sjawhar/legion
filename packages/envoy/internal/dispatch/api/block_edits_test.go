@@ -1190,9 +1190,8 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 	}
 }
 
-const maximumCumulativeTablePaddingAllocation = 128 << 20
-
 func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
+	const maximumAllocation = 128 << 20
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Cumulative table padding", "Before.\n")
 	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
@@ -1211,8 +1210,8 @@ func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
 	runtime.ReadMemStats(&afterAlloc)
 	allocated := afterAlloc.TotalAlloc - beforeAlloc.TotalAlloc
 	t.Logf("allocated=%d", allocated)
-	if allocated > maximumCumulativeTablePaddingAllocation {
-		t.Fatalf("allocated %d bytes, want at most %d", allocated, maximumCumulativeTablePaddingAllocation)
+	if allocated > maximumAllocation {
+		t.Fatalf("allocated %d bytes, want at most %d", allocated, maximumAllocation)
 	}
 	if rejected.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) ||
 		!strings.Contains(body, `field \"markdown\"`) || !strings.Contains(body, "table ") || !strings.Contains(body, "limit 10000") {

@@ -117,7 +117,7 @@ type lazyTableRows struct{ table parser.ParagraphTransformer }
 func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
 	source := reader.Source()
 	lazy := lazyLines(node.Lines(), source)
-	if padding, header, found := tablePaddingForLines(tabExpandedLines(node.Lines(), source), source); found {
+	if padding, header, found := tablePaddingForLines(node.Lines(), source); found {
 		line := node.Lines().At(header)
 		if lazy != nil && (lazy[header] || lazy[header+1]) || lonePipe(source[line.Start:line.Stop]) {
 			return
@@ -161,20 +161,21 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 }
 
 // tablePaddingForLines reports the table Goldmark's paragraph transformer will form from lines,
-// before that transformer creates cells for its short rows.
+// read with their indentation expanded where it holds a tab (tabExpandedLine), as transform hands
+// them to that transformer, before it creates cells for their short rows.
 func tablePaddingForLines(lines *gmtext.Segments, source []byte) (tablePadding, int, bool) {
 	for delimiter := 1; delimiter < lines.Len(); delimiter++ {
-		width, ok := tableDelimiterWidth(lines.At(delimiter), source)
+		width, ok := tableDelimiterWidth(tabExpandedLine(lines.At(delimiter), source), source)
 		if !ok {
 			continue
 		}
-		header := tableRowWidth(lines.At(delimiter-1), source)
+		header := tableRowWidth(tabExpandedLine(lines.At(delimiter-1), source), source)
 		if header != width {
 			return tablePadding{}, 0, false
 		}
 		padding := tablePadding{written: header, implied: width}
 		for row := delimiter + 1; row < lines.Len(); row++ {
-			written := min(tableRowWidth(lines.At(row), source), width)
+			written := min(tableRowWidth(tabExpandedLine(lines.At(row), source), source), width)
 			padding.written += written
 			padding.implied += width
 		}

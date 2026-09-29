@@ -99,6 +99,10 @@ func newMisread(before, after *Node, spanCells int) (string, error) {
 	return "", nil
 }
 
+// documentMisread names how doc, a whole document a write makes, reads back otherwise, or is ""
+// when it does not: every block that reads back otherwise is the write's, the first named as far
+// down as its markdown still pairs (misreads), and a doc whose markdown the parser refuses is named
+// by that refusal. Only a refusal (ErrSchema) is a verdict; any other error is the error.
 func documentMisread(doc *Node) (string, error) {
 	back, err := ReadBack(doc)
 	if err != nil {
@@ -130,7 +134,15 @@ func RefuseMisreadDocument(doc *Node) error {
 }
 
 // RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument. It reads both
-// documents back as renderSpanless writes them.
+// documents back as renderSpanless writes them. An insert checks its write with it once for each
+// operation of a batch, and a batch holds as many as a request carries, where a budget of span
+// cells for each read-back would let one batch spend two for every operation. An insert writes
+// markdown, which carries no span, between document-level blocks, so it changes no table, and every
+// table reads back the same way before and after it under the same block ids: a table that reads
+// back otherwise does so in both, and NewMisread's filter of misreads before already held, which
+// keys on the block id, sets it aside either way. Spanless, a render writes no more than the cells
+// the tables hold, and its parse pads the rows a span leaves short on the read-back's own budget
+// (parseRendering).
 func RefuseMisreadWrite(before, after *Node) error {
 	return refuseMisread(newMisread(before, after, 0))
 }
