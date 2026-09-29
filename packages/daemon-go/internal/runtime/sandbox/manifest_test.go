@@ -72,7 +72,7 @@ func manifestCases(t *testing.T) map[string]struct {
 		"resume":             {resume, true, nil},
 		"recovered":          {recovered, true, nil},
 		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
-			URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour,
+			URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour,
 		}},
 	}
 }
@@ -515,7 +515,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
-	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -609,7 +609,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 	}{
 		"not enrolled, the operator's account": {nil, "operator-worker"},
 		"not enrolled, no account":             {nil, ""},
-		"enrolled":                             {&AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}, "legion-worker"},
+		"enrolled":                             {&AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}, "legion-worker"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := goldenOptions()
@@ -691,7 +691,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 }
 
 // New refuses an agent-secrets configuration no pod could run: no broker URL, no token audience,
-// an expiry outside the API server's floor (10m) and agent-c's admission cap (1h), or the image's
+// an expiry outside the API server's floor (10m) and the cluster's admission cap (1h), or the image's
 // agent-secrets binary missing.
 func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -946,7 +946,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
-	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

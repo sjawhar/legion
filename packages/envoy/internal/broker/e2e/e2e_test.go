@@ -135,7 +135,7 @@ func newE2EServer(t *testing.T, ca *webauthntest.CA, seedKey approvers.KeyEntry)
 	}
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: current, Secrets: secrets.Fake{"dev1/agent-secrets/DEEL_API_KEY": "deel-v1"},
+		Store: st, Rules: current, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1"},
 		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
@@ -200,49 +200,49 @@ func renderRulesYAML(keys []approvers.KeyEntry) string {
 	return `version: 1
 secrets:
   DEEL_API_KEY:
-    source: dev1/agent-secrets/DEEL_API_KEY
+    source: example/agent-secrets/DEEL_API_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
   SLACK_MCP_XOXP_TOKEN:
-    source: dev1/agent-secrets/SLACK_MCP_XOXP_TOKEN
+    source: example/agent-secrets/SLACK_MCP_XOXP_TOKEN
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
   GITHUB_TOKEN:
-    source: dev1/agent-secrets/GITHUB_TOKEN
+    source: example/agent-secrets/GITHUB_TOKEN
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
   NOTION_API_KEY:
-    source: dev1/agent-secrets/NOTION_API_KEY
+    source: example/agent-secrets/NOTION_API_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
   LINEAR_API_KEY:
-    source: dev1/agent-secrets/LINEAR_API_KEY
+    source: example/agent-secrets/LINEAR_API_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
   FIGMA_API_KEY:
-    source: dev1/agent-secrets/FIGMA_API_KEY
+    source: example/agent-secrets/FIGMA_API_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
   AUTO_TOKEN:
-    source: dev1/agent-secrets/AUTO_TOKEN
+    source: example/agent-secrets/AUTO_TOKEN
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200

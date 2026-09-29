@@ -90,7 +90,7 @@ this means a container restart). This is acceptable for rare config changes.
 Use `--target` with `--target-dependents` to deploy one machine at a time:
 
 ```bash
-pulumi up --target 'urn:pulumi:prod::envoy::pulumi:providers:docker::docker-sami' --target-dependents
+pulumi up --target 'urn:pulumi:prod::envoy::pulumi:providers:docker::docker-example-host-laptop' --target-dependents
 ```
 
 For NATS clusters, migrate one peer at a time and verify quorum between each step.
