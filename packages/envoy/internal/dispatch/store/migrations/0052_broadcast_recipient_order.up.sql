@@ -12,7 +12,7 @@
 -- The migration builds no index, so it takes no write lock for the length of an index build: the
 -- runner applies each file in one transaction, and an ordinary index build on the hot messages
 -- table would hold writes until that transaction commits. The ADD COLUMN is metadata-only, but it
--- still takes a brief ACCESS EXCLUSIVE lock on messages. Nothing sets lock_timeout, so that lock
--- waits behind any long-running transaction on messages, and everything queued behind it waits
--- too, as with every migration here.
+-- still takes a brief ACCESS EXCLUSIVE lock on messages. Nothing in this repository sets
+-- lock_timeout, so that lock waits behind any long-running transaction on messages, and everything
+-- queued behind it waits too, as with every migration here.
 alter table messages add column broadcast_position integer;

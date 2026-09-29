@@ -1651,8 +1651,9 @@ export interface BroadcastSummary extends Broadcast {
 }
 
 /** One session's copy of a broadcast: the message it was sent, with its delivery attempts,
- *  and the replies threaded under it. Delivery runs behind the create response, so a recipient
- *  starts with no attempt; a recipient still carrying none has not been sent to. */
+ *  and the replies threaded under it. Attempt 1 is opened pending in the same transaction as
+ *  the message; delivery runs behind the create response and settles it. A broadcast read lists
+ *  its recipients in the order the send named them. */
 export interface BroadcastRecipient {
   readonly session_id: string;
   readonly message: Message;
