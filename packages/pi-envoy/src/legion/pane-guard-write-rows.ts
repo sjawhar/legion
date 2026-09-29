@@ -31,8 +31,10 @@ export interface WriteRow {
   /** `must-refuse` is asserted by what bash did, not by this field. `must-allow` is the cost
    * side: a command the pane keeps. `residual` is a shape the documented boundary leaves open,
    * listed by name in the test so closing one is a deliberate edit. */
-  readonly role: "must-allow" | "residual" | "probe";
+  readonly role: "must-allow" | "residual" | "probe" | "unreadable";
   readonly command: string;
+  /** A separate, earlier tool call, judged and run before the command under test. */
+  readonly plant?: string;
 }
 
 /** What the guard is given and what bash is given: one directory per row. `e` and `f` are links
@@ -376,11 +378,8 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     role: "probe",
     command: 'ln "$HOME/.bashrc" laundered && echo pwned > laundered',
   },
-  // The symbolic mirror of the row above. Every later command resolves a link that exists, so
-  // this one leaks only while the same command both makes the link and writes through it, which
-  // the guard reads before either has happened. Closing it needs the guard to model the links a
-  // command makes, beside the files it writes (`modelWrite`) — a second model rather than a
-  // target rule, so it is recorded here rather than claimed.
+  // The guard reads the whole command before this link exists. The separate-call directory
+  // copy probes below cover links that already exist; this row needs a same-command link model.
   {
     name: "RESIDUAL a link this command makes, written through by the same command",
     family: "residual",
@@ -480,6 +479,160 @@ export const WRITE_ROWS: readonly WriteRow[] = [
     command: `sed -i -e 's|/etc/passwd|x|' notes.txt`,
   },
 
+  // Round-two review pairs. Each control/probe differs by one token; both must protect HOME.
+  ...[
+    'cp -S.mp payload "$HOME/.bashrc"',
+    'cp -S.tmp payload "$HOME/.bashrc"',
+    'install -m644 payload "$HOME/.bashrc"',
+    'install -oroot payload "$HOME/.bashrc"',
+    'install -mo+t payload "$HOME/.bashrc"',
+    'ln -sf payload "$HOME/.bashrc"',
+    'ln -sfS.tmp payload "$HOME/.bashrc"',
+    'cp payload .bashrc; cp -S.x -t "$HOME" .bashrc',
+    'cp payload .bashrc; cp -S.t -t "$HOME" .bashrc',
+    'cp payload .bashrc; install -S.x -t "$HOME" .bashrc',
+    'cp payload .bashrc; install -S.d -t "$HOME" .bashrc',
+    'cp payload .bashrc; cp --target-directory="$HOME" .bashrc',
+    'cp payload .bashrc; cp --target="$HOME" .bashrc',
+    'cp payload .bashrc; install --target="$HOME" .bashrc',
+    `sed --in-place 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+    `sed --in-pl 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+    `sed -i --expression='s/CANARY/PWNED/' "$HOME/.bashrc"`,
+    `sed -i --exp='s/CANARY/PWNED/' "$HOME/.bashrc"`,
+    'install -d -m 700 "$HOME/.ssh"',
+    'install --dir -m 700 "$HOME/.ssh"',
+    'cp --remove-destination payload "$HOME/link"',
+    'cp --remove-dest payload "$HOME/link"',
+    "cp payload f",
+    'ln "$HOME/.bashrc" laundered; echo pwned > laundered',
+    'ln -- "$HOME/.bashrc" -s; echo pwned > ./-s',
+  ].map((command): WriteRow => ({
+    name: `review pair: ${command}`,
+    family: "review",
+    role: "probe",
+    command,
+  })),
+  ...["cp payload dir/", "cp payload dir", "cp -t dir payload"].map(
+    (command): WriteRow => ({
+      name: `earlier link: ${command}`,
+      family: "cp",
+      role: "probe",
+      plant: 'ln -s "$HOME/.bashrc" dir/payload',
+      command,
+    })
+  ),
+  {
+    name: "earlier nested link: cp -r sub dir/",
+    family: "cp",
+    role: "probe",
+    plant: 'mkdir -p sub dir/sub && echo SUB > sub/in && ln -s "$HOME/.bashrc" dir/sub/in',
+    command: "cp -r sub dir/",
+  },
+  ...[
+    'cp "$HOME/.bashrc" theirs',
+    'cp -t "$LEGION_WORKSPACE/dir" "$HOME/.bashrc"',
+    "cp -S.tmp -b payload copy",
+    "install -m 755 payload copy",
+    "cp payload dir/",
+    'cp -r dir "$TMPDIR/mine/"',
+    'ln -s "$HOME/.bashrc" link-out',
+    `sed -i --expression='s/NOTES/n/' notes.txt`,
+    `sed -n 1p "$HOME/.bashrc"`,
+  ].map((command): WriteRow => ({
+    name: `review keep: ${command}`,
+    family: "review",
+    role: "must-allow",
+    command,
+  })),
+  ...[
+    'cp -S -tX payload "$HOME/.bashrc"',
+    'install -b -S -t payload "$HOME/.bashrc"',
+    'touch -- -tX; cp -- -tX "$HOME/.bashrc"',
+    'cp payload .bashrc; cp --t="$HOME" .bashrc',
+    'cp payload .bashrc; mv -ft "$HOME" .bashrc',
+    'cp payload .bashrc; mv -t"$HOME" .bashrc',
+    'cp payload .bashrc; mv --target-dir="$HOME" .bashrc',
+    'ln -b -S -s "$HOME/.bashrc" hl; echo pwned > hl',
+    'touch -- -s; mkdir -p d; ln -- -s "$HOME/.bashrc" d; echo pwned > d/.bashrc',
+    `sed --in-pl=bak 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+    `sed -i --fol 's/CANARY/PWNED/' f`,
+    `echo 's/CANARY/PWNED/' > script; sed -i --fi=script "$HOME/.bashrc"`,
+    `sed -i --exp 's/CANARY/PWNED/' "$HOME/.bashrc"`,
+    `cp payload .bashrc; cp "${HIDDEN('"--target-directory=$HOME"')}" .bashrc`,
+    `cp payload .bashrc; install "${HIDDEN('"--target-directory=$HOME"')}" .bashrc`,
+    `cp payload .bashrc; ln -sf "${HIDDEN('"--target-directory=$HOME"')}" .bashrc`,
+  ].map((command): WriteRow => ({
+    name: `reader boundary: ${command}`,
+    family: "reader",
+    role: "probe",
+    command,
+  })),
+  ...[
+    'cp --target dir "$HOME/.bashrc"',
+    'cp --target=dir "$HOME/.bashrc"',
+    'ln --sym "$HOME/.bashrc" link-out',
+    `sed --in-pl --exp='s/NOTES/n/' notes.txt`,
+    `sed -i --line-l 80 's/NOTES/n/' notes.txt`,
+    `sed -i --line-l=80 's/NOTES/n/' notes.txt`,
+    'cp -S -t"$HOME" payload notes.txt',
+    'cp -T "$(printf %s payload)" copy',
+    'ln -sfT "$(printf %s payload)" link-here',
+  ].map((command): WriteRow => ({
+    name: `reader keep: ${command}`,
+    family: "reader",
+    role: "must-allow",
+    command,
+  })),
+  ...[
+    'cp --suff -tX payload "$HOME/.bashrc"',
+    'install -d -m700 "$HOME/.ssh" localdir',
+  ].map((command): WriteRow => ({
+    name: `value consumption: ${command}`, family: "reader", role: "probe", command,
+  })),
+  ...[
+    "install -d localdir",
+    'ln -s "$HOME/.bashrc"',
+    `sed -i --line-l 80 "$(printf %s s/NOTES/notes/)" notes.txt`,
+  ].map((command): WriteRow => ({
+    name: `value keep: ${command}`, family: "reader", role: "must-allow", command,
+  })),
+  {
+    name: "copy does not treat its destination as another source",
+    family: "cp",
+    role: "must-allow",
+    plant: 'cp payload dir; mkdir dir/dir; ln -s "$HOME/.bashrc" dir/dir/payload',
+    command: "cp payload dir",
+  },
+  {
+    name: "copy cannot resolve an unreadable source basename after --",
+    family: "cp",
+    role: "probe",
+    plant: 'ln -s "$HOME/.bashrc" dir/payload',
+    command: `cp -- "$(printf %s payload)" dir`,
+  },
+  {
+    name: "copy resolves deep destination descendants",
+    family: "cp",
+    role: "probe",
+    plant: 'mkdir -p sub/deep dir/sub/deep; echo SUB > sub/deep/in; ln -s "$HOME/.bashrc" dir/sub/deep/in',
+    command: "cp -r sub dir",
+  },
+  ...["cp payload", "install payload", "ln"].map((command): WriteRow => ({
+    name: `missing destination: ${command}`, family: "reader", role: "unreadable", command,
+  })),
+  {
+    name: "cp unknown replacement option with explicit last destination",
+    family: "cp",
+    role: "probe",
+    command: `cp -T "$(printf %s --remove-destination)" payload "$HOME/link"`,
+  },
+  {
+    name: "cp abbreviated backup replaces the destination link",
+    family: "cp",
+    role: "probe",
+    command: 'cp --back payload "$HOME/link"',
+  },
+
   // --- The documented boundary, which these verbs do not change -----------------------------
   // A path that does not exist yet overwrites nothing: the rule `>` and `tee` are judged by
   // (`judgePath`'s `overwrite`). These rows create a file outside the roots and are allowed, as
@@ -542,11 +695,25 @@ export function measureWriteRow(
     TMPDIR: fixture.scratch,
     PATH: process.env.PATH,
   };
-  const refusal = createGuard({
+  const guard = createGuard({
     workspace: fixture.workspace,
     ompPid: process.pid,
     scratch: fixture.scratch,
-  }).bash(row.command, fixture.workspace, env);
+  });
+  if (row.plant !== undefined) {
+    const beforePlant = canaryDigest(fixture.home);
+    const denied = guard.bash(row.plant, fixture.workspace, env);
+    if (denied !== undefined) throw new Error(`fixture plant refused: ${denied}`);
+    const planted = spawnSync("bash", ["-c", row.plant], {
+      cwd: fixture.workspace,
+      env,
+      timeout: 20_000,
+    });
+    if (planted.status !== 0 || canaryDigest(fixture.home) !== beforePlant) {
+      throw new Error(`fixture plant failed or changed HOME: ${row.plant}`);
+    }
+  }
+  const refusal = guard.bash(row.command, fixture.workspace, env);
   const before = canaryDigest(fixture.home);
   const ran = spawnSync("bash", ["-c", row.command], {
     cwd: fixture.workspace,

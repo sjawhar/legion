@@ -443,12 +443,17 @@ test("a command that writes a path it names is judged, whatever grammar names it
   expect(Object.entries(fixtureProperties(base)).filter(([, held]) => !held)).toEqual([]);
   // The measurement discriminates: most rows really do change something outside the roots.
   expect(results.filter((result) => result.live).length).toBeGreaterThan(WRITE_ROWS.length / 2);
+  expect(results.filter((r) => r.row.role === "probe" && !r.live).map((r) => r.row.name)).toEqual([]);
+  expect(
+    results.filter((r) => r.row.role === "unreadable" && !r.refusal?.includes("UNREADABLE"))
+      .map((r) => r.row.name)
+  ).toEqual([]);
 
   // Every row the guard allows while bash changed the canary, by name. The list is the documented
   // boundary, not a tolerance: a path that does not exist yet overwrites nothing (`judgePath`'s
-  // `overwrite`, the rule `>` is judged by), and a link a command makes and writes through in the
-  // same command is resolved by every later command but not by the one that makes it. A new name
-  // here is a leak; a name that leaves is a boundary someone moved on purpose.
+  // `overwrite`), and a link created and written through in the same command is not yet on disk
+  // when the guard reads it. Existing links are covered by the separate-call copy probes.
+  // A new name here is a leak; a name that leaves is a boundary someone moved on purpose.
   expect(
     results.filter((result) => result.live && result.refusal === undefined).map((r) => r.row.name)
   ).toEqual(WRITE_ROWS.filter((row) => row.role === "residual").map((row) => row.name));

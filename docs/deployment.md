@@ -63,14 +63,19 @@ rule, so the agent can rewrite the command.
 
 Which operand a write verb's destination is comes from that verb's own grammar, measured rather
 than assumed: `cp` and `install` write their last operand, or the directory `-t` names, where
-every other operand is a source they read; `dd` writes the path inside its `of=` word, wherever
-that word stands; `ln` writes its last operand, or the working directory when it is given one
-operand, and a hard link (no `-s`) also makes its source writable under the new name, which no
-later command can resolve as it can a symlink; `sed` writes the files it names only with `-i`,
-including inside a cluster (`-ni`) and with a suffix joined to it (`-i.bak`). A verb that
-replaces a symlink rather than writing through it is judged on the link (`sed -i`), one that
-writes through it on what it points at (`cp`, `dd`), and `install` and `ln`, which do one or the
-other depending on whether the link leads to a directory, on both.
+every other operand is a source they read. `mv` uses the same option reader and also judges the
+sources it moves. The reader stops at `--` and at the first value-taking letter in a cluster,
+and accepts GNU's unambiguous long-option abbreviations. An unreadable option that may hide a
+destination is refused as `UNREADABLE`, not treated as a command with no destination; `-T`
+explicitly makes the last operand the destination. `cp` also judges the source basename under
+an existing destination directory and its recursive descendants, including symlinks already
+there. `dd` writes the path inside its `of=` word, wherever that word stands. `ln` writes its last
+operand, or the working directory when given one readable operand, and a hard link (no `-s`)
+also makes its source writable under the new name, which no later command can resolve as it can
+a symlink. `sed` writes the files it names only with `-i`, including inside a cluster (`-ni`) and
+with a suffix joined to it (`-i.bak`). A verb that replaces a symlink is judged on the link
+(`sed -i`), one that writes through it on what it points at (`cp`, `dd`), and `install` and `ln`,
+which do one or the other depending on whether the link leads to a directory, on both.
 
 A word the guard cannot read whole is not read as harmless. Where a word selects a dangerous
 option or subcommand — an extract mode and `-C` for `tar`, `-d` for `unzip`, `-k` for `fuser`,
@@ -115,12 +120,13 @@ program or anything a command runs without naming it on the command line (a `mak
 runner, `npm run`), a program whose name is itself a variable or a command's output
 (`$cmd`, `eval "$(tool)"`), Python or JavaScript whose paths or pids come from values it cannot
 evaluate (the `eval` tool's kernels included; known prefixes are still judged), and interpreters
-the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above that overwrite
-a destination (`cp`, `dd`, `ln -f`, `install`), an edit in place (`sed -i`), a directory reached
-through a `cd` that failed, and the `write` and `edit` tools. A `>>` append to a file the guard
-holds no model of — one no redirect or `tee` in the same command named — leaves that file's
-contents unknown, never empty: the append is allowed, and running that file in the same command is
-refused rather than read as holding only what was appended. A file the same command wrote is read
+the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above (`tar -cf`,
+`patch`, `gzip`, `ex`), a directory reached through a `cd` that failed, and the `write` and `edit`
+tools. The write-verb checks prevent the named overwrites, not every shell write: `>>` and
+`tee -a` appends outside the roots remain unjudged. A `>>` append to a file the guard holds no model
+of — one no redirect or `tee` in the same command named — leaves that file's contents unknown,
+never empty: the append is allowed, and running that file in the same command is refused rather
+than read as holding only what was appended. A file the same command wrote is read
 as its model says, so writing a script with `>` and then running it still works. The model is per
 command, and it records a write whose content the guard renders (`echo >`, `printf >`,
 `cat > <<EOF`, `tee f <<EOF`) wherever it read that write, whether or not the shell would run it:

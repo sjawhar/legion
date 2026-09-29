@@ -88,6 +88,7 @@ import {
   existsSync,
   openSync,
   readFileSync,
+  readdirSync,
   readSync,
   realpathSync,
   statSync,
@@ -2593,7 +2594,8 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
 function operands(
   list: readonly Arg[],
   valued: string,
-  longValued: readonly string[] = []
+  longValued: readonly string[] = [],
+  inspect?: (arg: Arg) => void
 ): { options: string[]; operands: Arg[] } {
   const options: string[] = [];
   const found: Arg[] = [];
@@ -2601,6 +2603,7 @@ function operands(
   for (let i = 0; i < list.length; i += 1) {
     const arg = list[i] as Arg;
     const text = literalText(arg.exp);
+    if (!rest && text !== "--") inspect?.(arg);
     if (rest || text === undefined || !text.startsWith("-") || text === "-") {
       found.push(arg);
       continue;
@@ -2611,7 +2614,8 @@ function operands(
     }
     options.push(text);
     if (text.startsWith("--")) {
-      if (!text.includes("=") && longValued.includes(text)) i += 1;
+      const name = inspect === undefined ? text : longOption(text, longValued);
+      if (!text.includes("=") && name !== undefined && longValued.includes(name)) i += 1;
       continue;
     }
     const last = text.charAt(text.length - 1);
@@ -3221,43 +3225,33 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       checkTargets(base, "delete", operands(rest, "").operands, ACTS_ON_LINK, st, ctx, site);
       return;
     case "mv": {
-      const found = operands(rest, "tS", ["--target-directory", "--suffix"]);
-      const targets = [...found.operands];
-      const at = rest.findIndex((arg) => {
-        const text = literalText(arg.exp);
-        return text === "-t" || text === "--target-directory";
-      });
-      if (at !== -1 && rest[at + 1] !== undefined) targets.push(rest[at + 1] as Arg);
-      for (const arg of rest) {
-        const text = literalText(arg.exp);
-        if (text?.startsWith("--target-directory=")) {
-          targets.push({ text: arg.text, exp: [literal(text.slice(19))] });
-        }
-      }
+      const found = writeArguments(rest, "tS", ["--target-directory", "--suffix"]);
+      const targets = [...found.operands, ...writeDestinations(found)];
       checkTargets("mv", "move", targets, ACTS_ON_LINK, st, ctx, site);
       return;
     }
     case "cp": {
-      const found = operands(rest, "tS", ["--target-directory", "--suffix"]);
+      const found = writeArguments(rest, "tS", ["--target-directory", "--suffix"]);
       // `cp` writes its destination through a symlink; with an option that unlinks or renames
       // that destination first it acts on the link itself instead, so both are judged. Only the
       // destination: every other operand is a source `cp` reads.
-      const unlinks = rest.some((arg) =>
-        mayCarryFlag(arg, "b", ["--backup", "--remove-destination"])
-      );
+      const unlinks = found.flags.has("b") || found.flags.has("--backup") ||
+        found.flags.has("--remove-destination") || found.uncertain;
+      const destinations = writeDestinations(found);
       checkTargets(
         "cp",
         "overwrite",
-        writeDestinations(found.operands, rest),
+        destinations,
         unlinks ? WRITES_EITHER : WRITES_THROUGH_LINK,
         st,
         ctx,
         site
       );
+      checkCopyContents(found.operands, destinations, st, ctx, site);
       return;
     }
     case "install": {
-      const found = operands(rest, "mogtS", [
+      const found = writeArguments(rest, "mogtS", [
         "--mode",
         "--owner",
         "--group",
@@ -3266,11 +3260,11 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         "--strip-program",
       ]);
       // `install -d` makes every operand a directory it creates, or chmods when it is there.
-      const directories = rest.some((arg) => mayCarryFlag(arg, "d", ["--directory"]));
+      const directories = found.flags.has("d") || found.flags.has("--directory");
       checkTargets(
         "install",
         directories ? "create or change the mode of" : "overwrite",
-        directories ? found.operands : writeDestinations(found.operands, rest),
+        directories ? found.operands : writeDestinations(found),
         WRITES_EITHER,
         st,
         ctx,
@@ -3303,25 +3297,17 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "ln": {
-      const found = operands(rest, "St", ["--suffix", "--target-directory"]);
-      const destinations = writeDestinations(found.operands, rest);
-      // `ln TARGET` alone makes a link named after TARGET in the working directory, so the
-      // operand it names is a source there too and the path it writes is the directory.
-      if (destinations.length === 0 && found.operands.length === 1) {
-        destinations.push({ text: ".", exp: [literal(".")] });
-      }
+      const found = writeArguments(rest, "St", ["--suffix", "--target-directory"]);
+      // A readable single source uses the working directory; an unreadable word may hide -t.
+      const destinations =
+        found.operands.length === 1 && found.directory === undefined && !found.uncertain
+          ? [{ text: ".", exp: [literal(".")] }]
+          : writeDestinations(found);
       checkTargets("ln", "overwrite", destinations, WRITES_EITHER, st, ctx, site);
       // A hard link makes its source writable under a name inside the roots that resolves to
       // nothing else — no later command can see where it leads, as it can through a symlink — so
       // the source is judged too. A line the guard read as symbolic links no file this way.
-      const symbolic = rest.some((arg) => {
-        const text = literalText(arg.exp);
-        if (text === undefined) return false;
-        return (
-          text === "--symbolic" ||
-          (text.startsWith("-") && !text.startsWith("--") && text.includes("s"))
-        );
-      });
+      const symbolic = found.flags.has("s") || found.flags.has("--symbolic");
       if (!symbolic) {
         const sources = found.operands.filter((arg) => !destinations.includes(arg));
         checkTargets("ln", "hard-link", sources, LINKS_TO, st, ctx, site);
@@ -3591,10 +3577,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (word === undefined) return false;
         const { text, whole } = readableWord(word);
         const compact = text.replace("-", "");
-        const reachable = commands.filter((command) =>
-          command.replace("-", "").startsWith(compact)
-        );
-        return whole ? reachable.length === 1 : reachable.length > 0;
+        const normalized = commands.map((command) => command.replace("-", ""));
+        return whole
+          ? completeName(compact, normalized) !== undefined
+          : normalized.some((command) => command.startsWith(compact));
       };
       let killing: Arg | undefined;
       for (const segment of segments) {
@@ -3990,56 +3976,102 @@ function checkTargets(
   }
 }
 
-/** The directory a `-t` / `--target-directory` option names, wherever it stands and however it
- * carries its value (`-t dir`, `-tdir`, `-rt dir`, `--target-directory dir`,
- * `--target-directory=dir`). Every operand of a line that has one is a source, so the directory
- * is the whole destination — `certain` says the guard read the option rather than inferring it
- * from a word it could not read, where the line's last operand may be the destination instead. */
-function targetDirectory(rest: readonly Arg[]): { arg: Arg; certain: boolean } | undefined {
-  for (const [index, arg] of rest.entries()) {
+/** Unique-prefix completion shared by tmux subcommands and GNU long options. */
+function completeName(prefix: string, names: readonly string[]): string | undefined {
+  const reachable = names.filter((name) => name.startsWith(prefix));
+  return reachable.length === 1 ? reachable[0] : undefined;
+}
+
+/** A long option's `=` and value are not part of its name. */
+function longOption(text: string, names: readonly string[]): string | undefined {
+  return completeName(text.split("=", 1)[0] as string, names);
+}
+
+interface WriteArguments {
+  readonly operands: Arg[];
+  readonly flags: Set<string>;
+  readonly directory: Arg | undefined;
+  readonly uncertain: boolean;
+}
+
+/** Read flags and -t only where `operands` sees an option, never in a consumed value or after
+ * `--`. The first value-taking letter ends a cluster, even when its value contains flags. */
+function writeArguments(rest: readonly Arg[], valued: string, longValued: readonly string[]): WriteArguments {
+  const flags = new Set<string>();
+  let directory: Arg | undefined;
+  let uncertain = false;
+  const names = [...longValued, "--backup", "--remove-destination", "--directory", "--symbolic", "--no-target-directory"];
+  const found = operands(rest, valued, longValued, (arg) => {
     const { text, whole } = readableWord(arg);
-    const long = "--target-directory=";
-    if (text.startsWith(long)) {
-      const carried = valueInWord(arg, long.length);
-      if (carried !== undefined) return { arg: { text: arg.text, exp: carried }, certain: whole };
+    if (!whole && mayBeOption(arg, () => false)) uncertain = true;
+    if (!text.startsWith("-") || text === "-") return;
+    let offset: number | undefined;
+    let option: string | undefined;
+    if (text.startsWith("--")) {
+      option = longOption(text, names);
+      if (option !== undefined) flags.add(option);
+      if (option === "--target-directory") offset = text.indexOf("=") + 1 || text.length;
+    } else {
+      for (let index = 1; index < text.length; index += 1) {
+        const letter = text.charAt(index);
+        flags.add(letter);
+        if (!valued.includes(letter)) continue;
+        if (letter === "t") offset = index + 1;
+        break;
+      }
     }
-    const clusterAt = text.startsWith("-") && !text.startsWith("--") ? text.indexOf("t", 1) : -1;
-    if (clusterAt !== -1 && (!whole || text.length > clusterAt + 1)) {
-      const carried = valueInWord(arg, clusterAt + 1);
-      if (carried !== undefined) return { arg: { text: arg.text, exp: carried }, certain: whole };
-    }
-    if (clusterAt !== -1 || mayBeOption(arg, (o) => o === "-t" || o === "--target-directory")) {
-      const next = rest[index + 1];
-      if (next !== undefined) return { arg: next, certain: whole };
+    if (offset === undefined) return;
+    const value = valueInWord(arg, offset);
+    directory = value === undefined ? rest[rest.indexOf(arg) + 1] : { text: arg.text, exp: value };
+  });
+  return { ...found, flags, directory, uncertain };
+}
+
+/** No readable -t and too few operands is unreadable, not a command that writes nothing. */
+function writeDestinations(found: WriteArguments): Arg[] {
+  if (found.operands.length > 1 && (found.flags.has("T") || found.flags.has("--no-target-directory"))) {
+    return [found.operands.at(-1) as Arg];
+  }
+  if (found.directory !== undefined && !found.uncertain) return [found.directory];
+  if (found.operands.length < 2 || found.uncertain) {
+    return [{ text: "destination", exp: [unknown("UNREADABLE write destination")] }];
+  }
+  return [found.operands.at(-1) as Arg];
+}
+
+/** `cp source dir` also writes `dir/basename(source)`, and a recursive copy writes descendants.
+ * Check those existing entries too: an earlier tool call may have put a symlink there. */
+function checkCopyContents(
+  sources: readonly Arg[],
+  destinations: readonly Arg[],
+  st: State,
+  ctx: Ctx,
+  site: Site
+): void {
+  for (const destination of destinations) {
+    const text = literalText(destination.exp);
+    if (text === undefined || (!path.isAbsolute(text) && st.cwd === undefined)) continue;
+    const dir = path.resolve(st.cwd ?? "/", text);
+    if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) continue;
+    for (const source of sources) {
+      if (destinations.includes(source)) continue;
+      const name = literalText(source.exp);
+      if (name === undefined) {
+        checkTargets("cp", "overwrite", [{ text: source.text, exp: [unknown("UNREADABLE copy source basename")] }], WRITES_THROUGH_LINK, st, ctx, site);
+        continue;
+      }
+      const from = path.resolve(st.cwd ?? "/", name);
+      const to = path.join(dir, path.basename(from));
+      const targets = [{ text: to, exp: [literal(to)] }];
+      if (statSync(from, { throwIfNoEntry: false })?.isDirectory()) {
+        for (const entry of readdirSync(from, { recursive: true })) {
+          const target = path.join(to, entry);
+          targets.push({ text: target, exp: [literal(target)] });
+        }
+      }
+      checkTargets("cp", "overwrite", targets, WRITES_THROUGH_LINK, st, ctx, site);
     }
   }
-  return undefined;
-}
-
-/** Where a `cp`, `install` or `ln` line writes: the `-t` directory when the guard read one, since
- * every operand is then a source; otherwise the last operand, which is the destination whenever
- * the line names more than one path. Both when a word the guard could not read may be the `-t`,
- * since each reading has a destination of its own and neither may be taken as harmless. */
-function writeDestinations(operandList: readonly Arg[], rest: readonly Arg[]): Arg[] {
-  const directory = targetDirectory(rest);
-  if (directory?.certain === true) return [directory.arg];
-  const last = operandList.length > 1 ? operandList.at(-1) : undefined;
-  return [
-    ...(directory === undefined ? [] : [directory.arg]),
-    ...(last === undefined ? [] : [last]),
-  ];
-}
-
-/** Whether a short option word may carry `letter` in its cluster: `-b`, `-rb`, `-b --`, and any
- * word the guard cannot read whole, which may be one. Long spellings are matched by name. */
-function mayCarryFlag(arg: Arg, letter: string, long: readonly string[]): boolean {
-  return mayBeOption(
-    arg,
-    (option) =>
-      long.includes(option) ||
-      long.some((name) => option.startsWith(`${name}=`)) ||
-      (option.startsWith("-") && !option.startsWith("--") && option.includes(letter))
-  );
 }
 
 /** `sed`'s in-place option and the files it rewrites. `-i` takes an optional suffix joined to it
@@ -4088,15 +4120,17 @@ function sedWrites(list: readonly Arg[]): {
       continue;
     }
     if (text.startsWith("--")) {
-      if (text === "--in-place" || text.startsWith("--in-place=")) inPlace = true;
-      if (text === "--follow-symlinks") follow = true;
-      if (text === "--expression" || text === "--file") {
+      const option = longOption(text, [
+        "--in-place", "--follow-symlinks", "--expression", "--file", "--line-length",
+      ]);
+      if (option === "--in-place") inPlace = true;
+      if (option === "--follow-symlinks") follow = true;
+      if (option === "--expression" || option === "--file") {
         expression = true;
-        index += 1;
+        if (!text.includes("=")) index += 1;
         continue;
       }
-      if (text.startsWith("--expression=") || text.startsWith("--file=")) expression = true;
-      if (text === "--line-length") index += 1;
+      if (option === "--line-length" && !text.includes("=")) index += 1;
       if (!whole) {
         inferred ||= !inPlace;
         inPlace = true;
