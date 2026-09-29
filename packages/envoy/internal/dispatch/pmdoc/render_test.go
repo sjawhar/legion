@@ -915,26 +915,29 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 }
 
 // A span comes from the live tree unchecked, and each position it covers is written as a cell, so
-// the grid is bounded, not the span alone: a colspan covers at most maxColspan columns and no
-// column past the grid's width limit, and a rowspan the rows below it. Each case allocates hundreds
-// of megabytes or more without its bound; the staircase is a hundred rows each under the per-cell
-// bound whose spans stack.
+// the work is bounded per table, not the span alone: a colspan covers at most maxColspan columns, a
+// rowspan the rows below it, and every table's spans add at most maxSpanCells empty cells. Each
+// case allocates hundreds of megabytes or more without that: the staircases stack rowspans, and
+// the flat table repeats a colspan under the per-cell cap on every row.
 func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
-	staircase := func() *Node {
-		table := &Node{Type: "table"}
-		for index := range 100 {
-			kind, row := "table_cell", "table_row"
-			if index == 0 {
-				kind, row = "table_header", "table_header_row"
+	oneCellRows := func(rows, colspan int, rowspan func(index int) int) func() *Node {
+		return func() *Node {
+			table := &Node{Type: "table"}
+			for index := range rows {
+				kind, row := "table_cell", "table_row"
+				if index == 0 {
+					kind, row = "table_header", "table_header_row"
+				}
+				table.Children = append(table.Children, &Node{Type: row, Children: []*Node{{
+					Type:     kind,
+					Attrs:    Attrs{"alignment": nil, "colspan": colspan, "colwidth": nil, "rowspan": rowspan(index)},
+					Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}},
+				}}})
 			}
-			table.Children = append(table.Children, &Node{Type: row, Children: []*Node{{
-				Type:     kind,
-				Attrs:    Attrs{"alignment": nil, "colspan": 1000, "colwidth": nil, "rowspan": 100},
-				Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}},
-			}}})
+			return &Node{Type: "doc", Children: []*Node{table}}
 		}
-		return &Node{Type: "doc", Children: []*Node{table}}
 	}
+	toTheEnd := func(rows int) func(int) int { return func(index int) int { return rows - index } }
 	spanned := func(attr string) func() *Node {
 		return func() *Node {
 			doc, err := Parse("| h1 | h2 |\n| --- | --- |\n| c1 | c2 |\n")
@@ -951,7 +954,9 @@ func TestRenderBoundsAbsurdTableSpans(t *testing.T) {
 	}{
 		{"colspan", spanned("colspan")},
 		{"rowspan", spanned("rowspan")},
-		{"staircase", staircase},
+		{"staircase", oneCellRows(100, 1000, toTheEnd(100))},
+		{"colspan-1 staircase", oneCellRows(4000, 1, toTheEnd(4000))},
+		{"flat table", oneCellRows(4000, 1000, func(int) int { return 1 })},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			doc := test.doc()

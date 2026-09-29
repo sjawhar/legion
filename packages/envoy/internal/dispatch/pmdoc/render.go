@@ -617,9 +617,11 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // table's to Go's parser, is as wide as the widest row, its added cells taking the alignment of the
 // first cell under them, so that no cell past it is lost. A body row keeps its own width, since
 // Parse pads a short row. A table with no span and no row wider than its header is its own rows.
-// A span covers no column past the grid's width limit, the wider of maxColspan and the table's
-// widest row as it holds cells, so a cell's text is written though a span before it runs out, and
-// the grid grows with the cells the table holds rather than with the spans it claims.
+// A span comes from the live tree unchecked, so the empty cells spans add are bounded per table
+// (maxSpanCells): each column a colspan adds, each position a rowspan covers below and each gap
+// filled up to one is charged, and a span past the budget adds no more cells. A span also covers
+// no column past the wider of maxColspan and the table's widest row as it holds cells. Every cell
+// the table holds is still written with its text.
 func tableGrid(table *Node) [][]*Node {
 	covered := map[[2]int]*Node{}
 	// lastCovered is, for each row, the last column a span from a row above covers, or -1.
@@ -629,6 +631,7 @@ func tableGrid(table *Node) [][]*Node {
 		lastCovered[index] = -1
 		limit = max(limit, len(row.Children))
 	}
+	budget := maxSpanCells
 	grid := make([][]*Node, len(table.Children))
 	width := 0
 	for rowIndex, row := range table.Children {
@@ -638,12 +641,15 @@ func tableGrid(table *Node) [][]*Node {
 		}
 		var cells []*Node
 		// fill adds the empty cells a span from a row above covers at the next position, and past
-		// it every position up to until.
+		// it every position up to until, while the budget lasts.
 		fill := func(until int) {
 			for {
 				spanning, spanned := covered[[2]int{rowIndex, len(cells)}]
-				if !spanned && len(cells) >= until {
+				if !spanned && (len(cells) >= until || budget == 0) {
 					return
+				}
+				if !spanned {
+					budget--
 				}
 				cells = append(cells, emptyTableCell(kind, spanning))
 			}
@@ -654,14 +660,18 @@ func tableGrid(table *Node) [][]*Node {
 			columns := max(1, min(tableSpan(cell.Attrs["colspan"]), maxColspan, limit-column))
 			rows := min(tableSpan(cell.Attrs["rowspan"]), len(table.Children)-rowIndex)
 			cells = append(cells, cell)
-			for range columns - 1 {
+			tail := min(columns-1, budget)
+			budget -= tail
+			for range tail {
 				cells = append(cells, emptyTableCell(kind, cell))
 			}
-			for below := 1; below < rows; below++ {
-				for offset := range columns {
+			for below := 1; below < rows && budget > 0; below++ {
+				covers := min(1+tail, budget)
+				budget -= covers
+				for offset := range covers {
 					covered[[2]int{rowIndex + below, column + offset}] = cell
 				}
-				lastCovered[rowIndex+below] = max(lastCovered[rowIndex+below], column+columns-1)
+				lastCovered[rowIndex+below] = max(lastCovered[rowIndex+below], column+covers-1)
 			}
 		}
 		fill(lastCovered[rowIndex] + 1)
@@ -686,10 +696,13 @@ func tableSpan(value any) int {
 	return max(1, int(num(value, 1)))
 }
 
-// maxColspan is the most columns a cell is written across, as HTML caps colspan. A span comes from
-// the live tree unchecked, and each column it covers is written as a cell; a rowspan is bounded by
-// the rows below it instead, which loses nothing.
+// maxColspan is the most columns a cell is written across, as HTML caps colspan, so the markdown
+// holds no more of a span than the browser editor draws.
 const maxColspan = 1000
+
+// maxSpanCells is how many empty cells the spans of one table add in all (tableGrid): a render
+// reached from a peer's update writes at most that many cells no one wrote.
+const maxSpanCells = 100_000
 
 // emptyTableCell is an empty cell of kind with like's alignment, or none when like is nil.
 func emptyTableCell(kind string, like *Node) *Node {
