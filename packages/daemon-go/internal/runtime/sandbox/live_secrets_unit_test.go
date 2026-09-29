@@ -32,7 +32,7 @@ func TestShellJoin(t *testing.T) {
 }
 
 func TestAgentSecretsBlockReason(t *testing.T) {
-	const url, operator, sha, bin = "https://secrets.internal.trajectorylabs.com", "sami", "deadbeef", "/bin/agent-secrets"
+	const url, operator, sha, bin = "https://secrets.internal.example", "sami", "deadbeef", "/bin/agent-secrets"
 	for name, tc := range map[string]struct {
 		url, operator, sha, bin string
 		wantBlocked             bool

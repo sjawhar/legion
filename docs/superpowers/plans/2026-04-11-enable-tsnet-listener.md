@@ -15,7 +15,7 @@
 ## Assumptions
 
 1. Tailscale mesh and ACLs already permit intended callers to reach the listener's new tsnet identity (all machines are already connected via Tailscale SSH for Docker provider transport)
-2. Scope is strictly `example-host-mx` — other machines (`sami`, `sami-claude`, `ghost-wispr`) are NOT in scope
+2. Scope is strictly `example-host-mx` — other machines (`example-host-laptop`, `example-host-claude`, `example-host-gw`) are NOT in scope
 3. No external clients depend on public `http://<public-ip>:9020/v1/*` — all legitimate Envoy callers are on the Tailscale mesh
 4. The `envoy:tsnetAuthKey` Pulumi secret will either already be set, or the implementer will set it from SOPS before deploying (SOPS key: `TS_AUTHKEY`)
 
@@ -54,9 +54,9 @@ To:
 - State dir: `/var/lib/envoy-tsnet/{service}-{machineName}` → `/var/lib/envoy-tsnet/listener-example-host-mx`
 
 **CRITICAL:** Only change `example-host-mx`. Do NOT touch:
-- `sami` (line 19: `listener: {}`)
-- `sami-claude` (line 25: `listener: {}`)
-- `ghost-wispr` (line 29: `listener: {}`)
+- `example-host-laptop` (line 19: `listener: {}`)
+- `example-host-claude` (line 25: `listener: {}`)
+- `example-host-gw` (line 29: `listener: {}`)
 
 The full `example-host-mx` entry should now read:
 
@@ -174,7 +174,7 @@ curl -s -o /dev/null -w "%{http_code}" -X POST http://<public-ip>:9020/v1/messag
 cd packages/envoy/infra
 pulumi preview --stack prod --diff
 # Verify: changes only to example-host-mx listener container + new tsnet volume
-# No changes to sami, sami-claude, ghost-wispr, or any receiver containers
+# No changes to example-host-laptop, example-host-claude, example-host-gw, or any receiver containers
 
 pulumi up --stack prod
 ```
@@ -202,7 +202,7 @@ pulumi up --stack prod
    - Note: Replace `<tailnet>` with the actual tailnet name
 
 4. **Other machines unaffected**
-   - Action: Verify sami, sami-claude, ghost-wispr listeners still serve `/v1/*` on port 9020
+   - Action: Verify example-host-laptop, example-host-claude, example-host-gw listeners still serve `/v1/*` on port 9020
    - Expected: No changes — their `listener: {}` config is untouched
 
 ### Failure Scenarios

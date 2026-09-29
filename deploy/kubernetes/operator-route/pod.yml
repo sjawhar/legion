@@ -1,7 +1,8 @@
 # The operator's `runtime.kubernetes.pod`: the pieces an operator supplies so every Legion pod's
 # Oh My Pi reaches its model. Legion knows none of it; it delivers these pieces to every worker pod
 # and the image probe's pod (docs/kubernetes.md, "Operator configuration"; README.md beside this
-# file lists what each piece is). The values below are the ones the Go live harnesses run on.
+# file lists what each piece is). The Go live harnesses run on these values, with the token audience
+# they are given in place of its placeholder.
 #
 # The ConfigMap named here, legion-operator-route, holds a models.yml and an overlay.yml; apply.sh
 # creates it. A live harness run creates its own copy instead, legion-operator-route-<run>, points
@@ -22,7 +23,9 @@ volumes:
   - name: operator-token
     projected:
       sources:
-        - service_account_token: {audience: middleman-legion, expiration_seconds: 3600, path: token}
+        # The audience the operator's model gateway accepts: the operator, and each live harness run,
+        # puts it in place of the placeholder, so the repository holds no audience.
+        - service_account_token: {audience: "${MODEL_TOKEN_AUDIENCE}", expiration_seconds: 3600, path: token}
 volume_mounts:
   # models.yml where the image's Oh My Pi profile (OMP_PROFILE=legion, HOME=/home/legion) reads it.
   - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}

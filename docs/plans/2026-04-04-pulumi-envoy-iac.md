@@ -16,12 +16,12 @@
 
 ## Assumptions
 
-1. SSH user@host values from architect spec: `ubuntu@example-host-mx`, `sami@sami`, `claude@sami-claude`, `ghost-wispr@ghost-wispr`
-2. ghost-wispr is listener-only (no NATS peer) — 3-node NATS cluster: example-host-mx, sami, sami-claude
+1. SSH user@host values from architect spec: `ubuntu@example-host-mx`, `sami@example-host-laptop`, `claude@example-host-claude`, `example-host-gw@example-host-gw`
+2. example-host-gw is listener-only (no NATS peer) — 3-node NATS cluster: example-host-mx, example-host-laptop, example-host-claude
 3. GHCR images are public — no `registryAuth` needed for pull on remote hosts
 4. Pulumi state backend: default (Pulumi Cloud or local file — operator chooses at `pulumi login`)
 5. All machines reachable over Tailscale MagicDNS hostnames via SSH
-6. ghost-wispr architecture TBD — multi-arch images (amd64+arm64) handle either case
+6. example-host-gw architecture TBD — multi-arch images (amd64+arm64) handle either case
 7. Existing NATS data volume is named `nats_nats_data` (Docker Compose project-prefixed from `compose/nats/peer.compose.yml`). **Verify per-machine during preflight.**
 
 ---
@@ -191,34 +191,34 @@ import { computeNatsRoutes, renderNatsConf } from "../nats";
 describe("computeNatsRoutes", () => {
   const machines = [
     { name: "example-host-mx", nats: true },
-    { name: "sami", nats: true },
-    { name: "sami-claude", nats: true },
-    { name: "ghost-wispr", nats: false },
+    { name: "example-host-laptop", nats: true },
+    { name: "example-host-claude", nats: true },
+    { name: "example-host-gw", nats: false },
   ];
 
   test("returns routes to all OTHER peers", () => {
     const routes = computeNatsRoutes("example-host-mx", machines);
     expect(routes).toEqual([
-      "nats://sami:6222",
-      "nats://sami-claude:6222",
+      "nats://example-host-laptop:6222",
+      "nats://example-host-claude:6222",
     ]);
   });
 
   test("excludes non-NATS machines", () => {
-    const routes = computeNatsRoutes("sami", machines);
+    const routes = computeNatsRoutes("example-host-laptop", machines);
     expect(routes).toEqual([
       "nats://example-host-mx:6222",
-      "nats://sami-claude:6222",
+      "nats://example-host-claude:6222",
     ]);
-    expect(routes.some((r) => r.includes("ghost-wispr"))).toBe(false);
+    expect(routes.some((r) => r.includes("example-host-gw"))).toBe(false);
   });
 
   test("returns all peer routes for a non-peer machine", () => {
-    const routes = computeNatsRoutes("ghost-wispr", machines);
+    const routes = computeNatsRoutes("example-host-gw", machines);
     expect(routes).toEqual([
       "nats://example-host-mx:6222",
-      "nats://sami:6222",
-      "nats://sami-claude:6222",
+      "nats://example-host-laptop:6222",
+      "nats://example-host-claude:6222",
     ]);
   });
 });
@@ -226,8 +226,8 @@ describe("computeNatsRoutes", () => {
 describe("renderNatsConf", () => {
   test("renders valid nats.conf matching deploy/scripts/render-nats-peer.sh output", () => {
     const conf = renderNatsConf("example-host-mx", [
-      "nats://sami:6222",
-      "nats://sami-claude:6222",
+      "nats://example-host-laptop:6222",
+      "nats://example-host-claude:6222",
     ]);
 
     expect(conf).toContain("server_name=example-host-mx");
@@ -235,8 +235,8 @@ describe("renderNatsConf", () => {
     expect(conf).toContain("store_dir=/data");
     expect(conf).toContain("name: envoy");
     expect(conf).toContain("listen: 0.0.0.0:6222");
-    expect(conf).toContain("nats://sami:6222");
-    expect(conf).toContain("nats://sami-claude:6222");
+    expect(conf).toContain("nats://example-host-laptop:6222");
+    expect(conf).toContain("nats://example-host-claude:6222");
     expect(conf).not.toContain("example-host-mx:6222");
   });
 
@@ -523,22 +523,22 @@ import { computeNatsUrls } from "../services";
 describe("computeNatsUrls", () => {
   const machines = [
     { name: "example-host-mx", nats: true },
-    { name: "sami", nats: true },
-    { name: "sami-claude", nats: true },
-    { name: "ghost-wispr", nats: false },
+    { name: "example-host-laptop", nats: true },
+    { name: "example-host-claude", nats: true },
+    { name: "example-host-gw", nats: false },
   ];
 
   test("machine with local NATS peer gets 127.0.0.1 first, then remote peers", () => {
     const urls = computeNatsUrls("example-host-mx", true, machines);
     expect(urls).toBe(
-      "nats://127.0.0.1:4222,nats://sami:4222,nats://sami-claude:4222",
+      "nats://127.0.0.1:4222,nats://example-host-laptop:4222,nats://example-host-claude:4222",
     );
   });
 
   test("machine without local NATS peer gets all remote peers", () => {
-    const urls = computeNatsUrls("ghost-wispr", false, machines);
+    const urls = computeNatsUrls("example-host-gw", false, machines);
     expect(urls).toBe(
-      "nats://example-host-mx:4222,nats://sami:4222,nats://sami-claude:4222",
+      "nats://example-host-mx:4222,nats://example-host-laptop:4222,nats://example-host-claude:4222",
     );
   });
 });
@@ -852,25 +852,25 @@ config:
       receivers:
         github: true
         slack: true
-    - name: sami
-      sshHost: "ssh://sami@sami"
-      machineId: sami
+    - name: example-host-laptop
+      sshHost: "ssh://sami@example-host-laptop"
+      machineId: example-host-laptop
       nats:
-        serverName: sami
+        serverName: example-host-laptop
       listener:
         registryDir: /home/sami/.local/state/opencode/registry
-    - name: sami-claude
-      sshHost: "ssh://claude@sami-claude"
-      machineId: sami-claude
+    - name: example-host-claude
+      sshHost: "ssh://claude@example-host-claude"
+      machineId: example-host-claude
       nats:
-        serverName: sami-claude
+        serverName: example-host-claude
       listener:
         registryDir: /home/claude/.local/state/opencode/registry
-    - name: ghost-wispr
-      sshHost: "ssh://ghost-wispr@ghost-wispr"
-      machineId: ghost-wispr
+    - name: example-host-gw
+      sshHost: "ssh://example-host-gw@example-host-gw"
+      machineId: example-host-gw
       listener:
-        registryDir: /home/ghost-wispr/.local/state/opencode/registry
+        registryDir: /home/example-host-gw/.local/state/opencode/registry
 ```
 
 > **Note:** `envoy:imageTag` is a placeholder. Set to actual git SHA before deploy: `pulumi config set envoy:imageTag <sha>`.
@@ -977,7 +977,7 @@ Preview should complete without TypeScript errors. It may fail to connect to rem
 Before any migration, run this preflight on each host:
 
 ```bash
-for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
+for host in ubuntu@example-host-mx sami@example-host-laptop claude@example-host-claude example-host-gw@example-host-gw; do
   echo "=== $host ==="
   echo -n "  Docker: "
   ssh -o ConnectTimeout=5 "$host" docker version --format '{{.Server.Version}}' 2>&1 || echo "UNREACHABLE"
@@ -1020,56 +1020,56 @@ curl -sf http://example-host-mx:9010/healthz && echo "GitHub OK" || echo "GitHub
 curl -sf http://example-host-mx:9011/healthz && echo "Slack OK" || echo "Slack FAIL"
 ```
 
-**Machine 2 (sami):**
+**Machine 2 (example-host-laptop):**
 ```bash
-ssh sami@sami 'cd ~/legion/default/packages/envoy/deploy && \
+ssh sami@example-host-laptop 'cd ~/legion/default/packages/envoy/deploy && \
   docker compose -f compose/nats/peer.compose.yml down && \
   docker compose -f compose/listener.compose.yml down'
 
 pulumi up --stack prod \
-  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-sami' \
+  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-example-host-laptop' \
   --target-dependents \
   --yes
 
-curl -sf http://sami:8222/healthz && echo "NATS OK" || echo "NATS FAIL"
-curl -sf http://sami:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
+curl -sf http://example-host-laptop:8222/healthz && echo "NATS OK" || echo "NATS FAIL"
+curl -sf http://example-host-laptop:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
 ```
 
 **Verify 2-peer NATS cluster after machines 1+2:**
 ```bash
-for host in example-host-mx sami; do
+for host in example-host-mx example-host-laptop; do
   echo -n "$host routes: "
   curl -sf "http://$host:8222/routez" | jq '.routes | length'
 done
 ```
 Expected: Each returns `1` (connected to the other peer).
 
-**Machine 3 (sami-claude):**
+**Machine 3 (example-host-claude):**
 ```bash
-ssh claude@sami-claude 'cd ~/legion/default/packages/envoy/deploy && \
+ssh claude@example-host-claude 'cd ~/legion/default/packages/envoy/deploy && \
   docker compose -f compose/nats/peer.compose.yml down && \
   docker compose -f compose/listener.compose.yml down'
 
 pulumi up --stack prod \
-  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-sami-claude' \
+  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-example-host-claude' \
   --target-dependents \
   --yes
 
-curl -sf http://sami-claude:8222/healthz && echo "NATS OK" || echo "NATS FAIL"
-curl -sf http://sami-claude:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
+curl -sf http://example-host-claude:8222/healthz && echo "NATS OK" || echo "NATS FAIL"
+curl -sf http://example-host-claude:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
 ```
 
-**Machine 4 (ghost-wispr — listener only, no NATS):**
+**Machine 4 (example-host-gw — listener only, no NATS):**
 ```bash
-ssh ghost-wispr@ghost-wispr 'cd ~/legion/default/packages/envoy/deploy && \
+ssh example-host-gw@example-host-gw 'cd ~/legion/default/packages/envoy/deploy && \
   docker compose -f compose/listener.compose.yml down'
 
 pulumi up --stack prod \
-  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-ghost-wispr' \
+  --target 'urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-example-host-gw' \
   --target-dependents \
   --yes
 
-curl -sf http://ghost-wispr:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
+curl -sf http://example-host-gw:9020/healthz && echo "Listener OK" || echo "Listener FAIL"
 ```
 
 > **Note on `--target` URNs:** The exact URN for each provider is deterministic from the resource name in the code: `urn:pulumi:prod::envoy::docker:index/provider:Provider::docker-{machine-name}`. Using `--target-dependents` deploys all resources that depend on that provider (images, volumes, containers for that machine).
@@ -1078,14 +1078,14 @@ curl -sf http://ghost-wispr:9020/healthz && echo "Listener OK" || echo "Listener
 
 ```bash
 # Full NATS cluster — all 3 peers show 2 routes each
-for host in example-host-mx sami sami-claude; do
+for host in example-host-mx example-host-laptop example-host-claude; do
   echo -n "$host routes: "
   curl -sf "http://$host:8222/routez" | jq '.routes | length'
 done
 # Expected: each returns 2
 
 # All health checks
-for host in example-host-mx sami sami-claude ghost-wispr; do
+for host in example-host-mx example-host-laptop example-host-claude example-host-gw; do
   echo -n "$host listener: "
   curl -sf "http://$host:9020/healthz" && echo "OK" || echo "FAIL"
 done
@@ -1096,7 +1096,7 @@ curl -sf "http://example-host-mx:9011/healthz" && echo "OK" || echo "FAIL"
 # Expected: all OK
 
 # Image digest consistency
-for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
+for host in ubuntu@example-host-mx sami@example-host-laptop claude@example-host-claude example-host-gw@example-host-gw; do
   echo -n "$host envoy-listener: "
   ssh "$host" docker inspect envoy-listener --format '{{.Image}}' 2>&1
 done
@@ -1108,7 +1108,7 @@ curl -sf http://example-host-mx:8222/jsz?streams=true | jq '.streams[] | {name: 
 
 # NATS cluster replication verification (cross-peer connectivity)
 # Use wget from inside a NATS container to query another peer's monitoring
-ssh ubuntu@example-host-mx 'docker exec envoy-nats wget -qO- http://sami:8222/routez' | jq '.routes | length'
+ssh ubuntu@example-host-mx 'docker exec envoy-nats wget -qO- http://example-host-laptop:8222/routez' | jq '.routes | length'
 # Expected: 2 (proves cross-peer NATS monitoring is reachable)
 
 # Idempotency check
@@ -1158,7 +1158,7 @@ cd infra && pulumi config set envoy:imageTag "$TAG"
 ### Health Check
 
 ```bash
-for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do
+for host in ubuntu@example-host-mx sami@example-host-laptop claude@example-host-claude example-host-gw@example-host-gw; do
   echo -n "$host: "
   ssh -o ConnectTimeout=5 "$host" docker version --format '{{.Server.Version}}' 2>&1 || echo "UNREACHABLE"
 done
@@ -1169,17 +1169,17 @@ Expected: All 4 return Docker version. Timeout: retry up to 30s per host.
 ### Verification Steps
 
 **1. NATS cluster health** — All 3 peers show 2 routes each:
-- Action: `for host in example-host-mx sami sami-claude; do curl -sf "http://$host:8222/routez" | jq '.routes | length'; done`
+- Action: `for host in example-host-mx example-host-laptop example-host-claude; do curl -sf "http://$host:8222/routez" | jq '.routes | length'; done`
 - Expected: `2` for each peer
 - Tool: curl + jq
 
 **2. All service health checks pass:**
-- Action: `for host in example-host-mx sami sami-claude ghost-wispr; do curl -sf "http://$host:9020/healthz"; done && curl -sf http://example-host-mx:9010/healthz && curl -sf http://example-host-mx:9011/healthz`
+- Action: `for host in example-host-mx example-host-laptop example-host-claude example-host-gw; do curl -sf "http://$host:9020/healthz"; done && curl -sf http://example-host-mx:9010/healthz && curl -sf http://example-host-mx:9011/healthz`
 - Expected: All return HTTP 200
 - Tool: curl
 
 **3. Image digest consistency across machines:**
-- Action: `for host in ubuntu@example-host-mx sami@sami claude@sami-claude ghost-wispr@ghost-wispr; do ssh "$host" docker inspect envoy-listener --format '{{.Image}}'; done`
+- Action: `for host in ubuntu@example-host-mx sami@example-host-laptop claude@example-host-claude example-host-gw@example-host-gw; do ssh "$host" docker inspect envoy-listener --format '{{.Image}}'; done`
 - Expected: All 4 return identical SHA digest
 - Tool: ssh + docker inspect
 
@@ -1189,8 +1189,8 @@ Expected: All 4 return Docker version. Timeout: retry up to 30s per host.
 - Tool: curl + jq
 
 **5. Cross-peer NATS replication (e2e remote test):**
-- Action: `ssh ubuntu@example-host-mx 'docker exec envoy-nats wget -qO- http://sami:8222/routez' | jq '.routes | length'`
-- Expected: `2` (proves NATS container on example-host-mx can reach sami's NATS monitoring)
+- Action: `ssh ubuntu@example-host-mx 'docker exec envoy-nats wget -qO- http://example-host-laptop:8222/routez' | jq '.routes | length'`
+- Expected: `2` (proves NATS container on example-host-mx can reach example-host-laptop's NATS monitoring)
 - Tool: ssh + wget (via NATS container) + jq
 
 **6. Idempotency:**

@@ -16,8 +16,8 @@ func env(m map[string]string) func(string) string {
 func validEnv() map[string]string {
 	return map[string]string{
 		"BROKER_DATABASE_URL": "postgres://x",
-		"BROKER_PUBLIC_URL":   "https://secrets.dev1.internal.trajectorylabs.com",
-		"BROKER_UI_ORIGIN":    "https://secrets-ui.dev1.internal.trajectorylabs.com",
+		"BROKER_PUBLIC_URL":   "https://secrets.internal.example",
+		"BROKER_UI_ORIGIN":    "https://secrets-ui.internal.example",
 		"BROKER_UI_TOKEN":     "ui-token",
 		"BROKER_RULES_FILE":   "/r.yaml",
 	}
@@ -37,7 +37,7 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 // deployment env still setting one must refuse to start.
 func TestLoadRefusesDispatchVariables(t *testing.T) {
 	e := validEnv()
-	e["BROKER_DISPATCH_URL"] = "https://dispatch.dev1.internal.trajectorylabs.com"
+	e["BROKER_DISPATCH_URL"] = "https://dispatch.internal.example"
 	_, err := Load(env(e))
 	want := "BROKER_DISPATCH_URL is removed; the broker holds no Dispatch credential (AGENTC-393 v9)"
 	if err == nil || err.Error() != want {
@@ -109,7 +109,7 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 
 func TestLoadRefusesBothRulesSources(t *testing.T) {
 	e := validEnv()
-	e["BROKER_RULES_S3_URI"] = "s3://dev1-agent-secrets-rules/rules.yaml"
+	e["BROKER_RULES_S3_URI"] = "s3://bucket/agent-secret-rules.yaml"
 	_, err := Load(env(e))
 	if err == nil || !strings.Contains(err.Error(), "exactly one of") {
 		t.Fatalf("expected exactly-one refusal, got %v", err)
