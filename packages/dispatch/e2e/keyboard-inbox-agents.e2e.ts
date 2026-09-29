@@ -8,6 +8,7 @@ import {
   createMessage,
   createProject,
   getInbox,
+  getIssue,
   patchIssue,
 } from "./api";
 import { resetDatabase } from "./seed";
@@ -830,6 +831,63 @@ test.describe("agents page", () => {
       await expect(
         help.getByRole("listitem").filter({ hasText: "Pick an issue for the message" })
       ).toHaveAttribute("data-enabled", "false");
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+// The issue page's `0`-`3` write the issue's priority, and an ask card on that page carries option
+// radios. A radio takes no typed text, so this slice's editable policy lets a digit through to the
+// page - which must not turn "pick option 2" into "this issue is P2". The second half of this row
+// is what makes the first mean anything: the same key, off the card, still writes.
+test.describe("issue page", () => {
+  test("a digit on an ask's option writes no priority, while the same digit on the page does", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Priority and options" });
+    await createAsk(
+      issue.key,
+      { options: [{ label: "Ship" }, { label: "Hold" }], question: "Which way?" },
+      session
+    );
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`/issues/${issue.key}`);
+      await expect(
+        page.getByRole("heading", { level: 1, name: "Priority and options" })
+      ).toBeVisible();
+
+      let patched = 0;
+      await page.route(`**/api/v1/issues/${issue.key}`, (route) => {
+        if (route.request().method() === "PATCH") patched += 1;
+        return route.fallback();
+      });
+
+      // Focus an option radio, as a reader answering the ask would, and press a digit.
+      const hold = page.getByRole("radio", { name: "Hold" });
+      await hold.click();
+      await expect(hold).toBeFocused();
+      await page.keyboard.press("2");
+      await page.waitForTimeout(500);
+      expect(patched).toBe(0);
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
+
+      // Off the card, the same key is the header's own: this is what proves the guard is a guard
+      // and not a key that stopped working.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      const patch = page.waitForRequest(
+        (request) =>
+          request.method() === "PATCH" &&
+          new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+      );
+      await page.keyboard.press("2");
+      expect((await patch).postDataJSON()).toEqual({ priority: 2 });
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 2 });
     } finally {
       await context.close();
     }

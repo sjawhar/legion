@@ -98,6 +98,10 @@ const PIN_TOGGLE = 'button[aria-label="Pin issue"], button[aria-label="Unpin iss
 const PRIORITY_SELECT = 'select[aria-label^="Priority of "]';
 const STATUS_SELECT = 'select[aria-label="Status"]';
 const TITLE_HEADING = 'h1[tabindex="0"]';
+/** An ask card anywhere on the page. Its options are radios and checkboxes, which take no typed
+ *  text, so the registry lets a digit through to this scope - and "pick option 2" must not become
+ *  "this issue is P2". */
+const ASK_CARD = "[data-ask-card]";
 
 /** The header control `selector` names, or `null` when it is absent or refuses input (a closed
  *  issue, a save in flight): the one fact both the key's `run` and the `when` that offers it read,
@@ -180,7 +184,11 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       keys: ["0", "1", "2", "3"],
       label: "Set priority P0–P3",
       run: (event) => priorityWrite.submit(Number(event.key) as IssuePriority),
-      when: () => usableControl(PRIORITY_SELECT) !== null,
+      // Every other header key names a control; this one writes without focusing anything, so it
+      // is the one that has to say where the reader is not.
+      when: () =>
+        usableControl(PRIORITY_SELECT) !== null &&
+        document.activeElement?.closest(ASK_CARD) == null,
     },
     {
       id: "labels",

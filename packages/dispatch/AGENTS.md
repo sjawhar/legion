@@ -387,6 +387,8 @@ scenario and never falls back to `dispatch_c`. It uses trusted
 `X-Dispatch-User` identity for `alice` and `bob`; do not replace it with a
 fixture server.
 
+A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
+
 Two rules keep an assertion honest. First, name the state the fixture puts the system in and ask whether the
 assertion would still pass with the change reverted; if it would, the fixture satisfies it for another reason
 (an empty message box, every session advertising `btw`, a sibling route unmounting the page before a
