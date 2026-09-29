@@ -2243,9 +2243,10 @@ func putRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder string) uint64 
 
 // A restart's own log says how much of the role bucket it read. The SRE reading a staging restart
 // (listener ready 84 s after the update began) could not tell from the logs whether the revision
-// scan had completed, because nothing recorded its size. The two counts differ for a reason worth
-// seeing: restored is the claims that got their grace back, keys is everything the bucket made the
-// listener stream to find them, delete markers included, which is what grows without bound.
+// scan had completed, because nothing recorded its size. The two counts are disjoint on purpose:
+// restored is the claims that got their grace back, delete_markers is what the scan streamed past
+// to find them and is what grows without bound. A single total of both would read as claims the
+// restart failed to restore, which is the misreading this whole issue was filed on.
 func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -2279,7 +2280,7 @@ func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
 	}
 	t.Cleanup(registry.StopWatch)
 
-	want := fmt.Sprintf(`msg="restored role claims" restored=%d keys=%d`, claims, claims+markers)
+	want := fmt.Sprintf(`msg="restored role claims" restored=%d delete_markers=%d`, claims, markers)
 	if got := logs.String(); !strings.Contains(got, want) {
 		t.Fatalf("the restart logged no line saying how much of the role bucket it read.\nwant: %s\ngot:\n%s", want, got)
 	}
@@ -2359,12 +2360,12 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 		fault error
 		want  string
 	}{
-		{name: "the subscription ends mid-scan", want: "ended after 1 keys"},
-		{name: "the idle timer gives up mid-scan", fault: natsgo.ErrKeyWatcherTimeout, want: "stopped after 1 keys"},
+		{name: "the subscription ends mid-scan", want: "ended after 1 entries"},
+		{name: "the idle timer gives up mid-scan", fault: natsgo.ErrKeyWatcherTimeout, want: "stopped after 1 entries"},
 	} {
 		t.Run(ending.name, func(t *testing.T) {
 			handle := bus.KeyValue{KeyValue: earlyEndKV{KeyValue: rawRoles, after: 1, fault: ending.fault}}
-			revisions, err := roleRevisions(handle)
+			revisions, err := roleRevisions(handle, slog.Default())
 			if err == nil {
 				t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
 			}
@@ -2372,7 +2373,7 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 				t.Fatalf("a failed scan returned %d revisions; a partial snapshot must not reach the registry", len(revisions))
 			}
 			if !strings.Contains(err.Error(), ending.want) {
-				t.Fatalf("error = %q, want it to say %q: how the scan ended and how many keys it read", err, ending.want)
+				t.Fatalf("error = %q, want it to say %q: how the scan ended and how many entries it read", err, ending.want)
 			}
 			if ending.fault != nil && !errors.Is(err, ending.fault) {
 				t.Fatalf("error = %q, want it to carry %v", err, ending.fault)
@@ -2496,10 +2497,13 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // The stall shape is load-bearing and a weaker one hides the defect, so do not simplify it to a
 // link that stays down. stallingProxy holds the server's bytes past Open's JetStream MaxWait, so
 // the timer fires, and then sends them on, so the reader is free to carry on and succeed with part
-// of the bucket instead of failing on a later request. That recovery is asserted, not assumed: the
-// stalled.Flush below has to answer before Open's outcome is judged, so a hold that never releases
-// — whether edited in or produced by load ending the run early — reds this test instead of passing
-// it. Held against three builds of this package:
+// of the bucket instead of failing on a later request. The stalled.Flush below has to answer
+// before Open's outcome is judged, so a hold that never releases — whether edited in or produced
+// by load ending the run early — reds this test instead of passing it. That catches a PERMANENT
+// hold and nothing subtler: with budget 0 the consumer-create reply is held too, so the watch
+// fails on its own request deadline, the link still comes back, the Flush still answers and this
+// test passes on every build ("came back: context deadline exceeded", measured here; the review
+// measured the same at 88f9fbaa and 3fa4774d). Held against three builds of this package:
 //
 //	88f9fbaa  Keys() plus a Get per key             FAIL  "restoring 232 of 400 claims", err=nil
 //	3fa4774d  one watch, closed-channel check only  FAIL  "restoring 232 of 400 claims", err=nil
@@ -2519,10 +2523,9 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // Those FAIL rows can flip to PASS under load, and do: this test's review saw 2 false passes at
 // 88f9fbaa in 45 iterations, both "context deadline exceeded", and 3fa4774d passed 1 of 3 runs
 // here the same way. A run whose requests time out before the release never reaches the shape
-// being measured. It has never gone red on correct code, so this is a demonstration rather than
-// the regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
-// which is deterministic and failed on both of those builds in every run, plus the Flush here
-// against anyone weakening the hold.
+// being measured. It has never gone red on correct code, so this is a demonstration, and it is
+// not the regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
+// which is deterministic, cannot pass vacuously, and failed on both of those builds in every run.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	names := testBuckets(t)
 	direct, cleanup := connectNATS(t)
