@@ -67,7 +67,12 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { deliveryAttempts } from "./attempts";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
-import { leaveAgentComposer, useAgentsKeymap } from "./keyboard";
+import {
+  AGENT_ROW_SELECTOR,
+  ISSUE_PICKER_SELECTOR,
+  leaveAgentComposer,
+  useAgentsKeymap,
+} from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
@@ -556,13 +561,20 @@ function AgentMessageComposer({
   };
   /** The message this composer is for. A control that ends in the message hands over to it - the
    *  issue pick, which unmounts the very select the reader is standing on. */
-  const focusComposerField = () => box.current?.querySelector("textarea")?.focus();
-  const pickedIssue = useRef(false);
-  useEffect(() => {
-    if (!pickedIssue.current) return;
-    pickedIssue.current = false;
-    focusComposerField();
-  });
+  const composerField = () => box.current?.querySelector("textarea") ?? null;
+  /** What the reader had written when a pick remounted the composer under them: their prose is
+   *  theirs, and `MentionComposer` re-seeds this owner's mention in front of it. */
+  const carriedBody = useRef<string | undefined>(undefined);
+  /** The value the reader's pick set, until the render that carries it hands the field back. */
+  const pickedIssue = useRef<string | undefined>(undefined);
+  // A layout effect, so the frame the remount paints already has the field focused rather than
+  // the document: the reader's next keystroke is the message, whichever hand made the pick.
+  useLayoutEffect(() => {
+    if (pickedIssue.current !== issueKey) return;
+    pickedIssue.current = undefined;
+    carriedBody.current = undefined;
+    box.current?.querySelector("textarea")?.focus();
+  }, [issueKey]);
   const issues = useQuery({
     enabled: issuePickerOpen,
     queryFn: () => api.listIssues({ open: true }),
@@ -589,12 +601,16 @@ function AgentMessageComposer({
     if (issues.data === undefined || pickerTookFocus.current || issueSelect.current === null) {
       return;
     }
+    // Where the open can have left focus, named: the row `i` was pressed on, the toggle a
+    // pointer clicked, or nothing at all. A reader who has gone on - to another row, or into
+    // this composer's own field - keeps where they went.
     const active = document.activeElement;
-    const stillHere =
+    const openedOn =
       active === null ||
       active === document.body ||
-      box.current?.closest("[data-agent-row]")?.contains(active) === true;
-    if (!stillHere) return;
+      active === box.current?.closest(AGENT_ROW_SELECTOR) ||
+      (active instanceof Element && active.matches(ISSUE_PICKER_SELECTOR));
+    if (!openedOn) return;
     pickerTookFocus.current = true;
     issueSelect.current.focus();
   }, [issuePickerOpen, issues.data]);
@@ -636,11 +652,12 @@ function AgentMessageComposer({
                 aria-label="Issue"
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
                 onChange={(event) => {
-                  // The pick unmounts this control - and remounts the composer under it, since
-                  // the message's owner is part of its key - and `i` opened the picker to
-                  // address a message, so the reader goes on to the message rather than to the
-                  // document. The field to focus is the one that render produces, not this one.
-                  pickedIssue.current = true;
+                  // The pick can remount the composer under the reader (the key below), so what
+                  // they have written travels with it, and the field that takes focus is the one
+                  // render produces - `i` opened this picker to address a message, not to leave
+                  // the reader on the document.
+                  carriedBody.current = composerField()?.value;
+                  pickedIssue.current = event.target.value;
                   setIssueKey(event.target.value);
                   setIssuePickerOpen(false);
                 }}
@@ -664,7 +681,12 @@ function AgentMessageComposer({
             ? undefined
             : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
         }
-        key={useDirectChannel ? `session:${agent.session_id}` : `issue:${issueKey}`}
+        carriedBody={carriedBody.current}
+        // The channel decides which mention the message needs - an issue comment reaches this
+        // agent by mentioning it, a direct message does not - so the composer is remounted when
+        // the channel changes, and only then; one issue to another keeps the same instance. The
+        // pick carries the reader's prose across that remount (`carriedBody`).
+        key={useDirectChannel ? "session" : "issue"}
         onCancelReply={onCancelReply}
         onClose={() => {
           if (sentJustNow.current) {

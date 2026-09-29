@@ -386,6 +386,11 @@ interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
   readonly autoFocus?: boolean;
+  /** The body a previous instance of this composer held, when the caller has remounted it to
+   *  change the message's owner (`AgentsPage`'s issue pick, where the owner decides which
+   *  mention the message needs). The reader's prose is theirs and survives; this instance seeds
+   *  its own mentions in front of it, skipping one the carried text already opens with. */
+  readonly carriedBody?: string;
   readonly docked?: boolean;
   readonly edit?: { readonly body: string; readonly id: string };
   readonly initialMentions?: readonly { readonly target: string; readonly title: string }[];
@@ -405,6 +410,7 @@ export function MentionComposer({
   agents: suppliedAgents,
   anchor,
   autoFocus = false,
+  carriedBody,
   docked = false,
   edit,
   initialMentions = [],
@@ -418,8 +424,17 @@ export function MentionComposer({
   saveEdit,
   showKindSwitch = false,
 }: MentionComposerProps): ReactNode {
-  const initialBody = initialMentions
-    .map((mention) => mentionText(mentionDisplay(mention.title, mention.target)))
+  // The mentions this instance owes its owner, in front of whatever the reader has already
+  // written - carried from the instance the caller has just replaced, or nothing on a fresh one.
+  const carried = carriedBody?.trimStart() ?? "";
+  const seeded = initialMentions.filter(
+    (mention) => !carried.startsWith(mentionText(mentionDisplay(mention.title, mention.target)))
+  );
+  const initialBody = [
+    ...seeded.map((mention) => mentionText(mentionDisplay(mention.title, mention.target))),
+    carried,
+  ]
+    .filter((part) => part !== "")
     .join(" ");
   const textarea = useRef<HTMLTextAreaElement>(null);
   const replacementTextarea = useRef<HTMLTextAreaElement>(null);
@@ -436,7 +451,7 @@ export function MentionComposer({
   const [kind, setKind] = useState<ComposerKind>(initialKind);
   const [mentions, setMentions] = useState<AcceptedMention[]>(() => {
     let offset = 0;
-    return initialMentions.map((mention) => {
+    return seeded.map((mention) => {
       const text = mentionDisplay(mention.title, mention.target);
       const start = offset;
       offset += mentionText(text).length;

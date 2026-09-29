@@ -8,10 +8,12 @@ import type { RefObject } from "react";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 
+/** The page renders these handles and this module acts on them; one spelling of each, so a
+ *  reader who moves one knows where it is read. */
 const AGENT_ROW_ATTRIBUTE = "data-agent-row";
-const AGENT_ROW_SELECTOR = `[${AGENT_ROW_ATTRIBUTE}]`;
+export const AGENT_ROW_SELECTOR = `[${AGENT_ROW_ATTRIBUTE}]`;
 const AGENT_COMPOSER_SELECTOR = "[data-agent-composer]";
-const ISSUE_PICKER_SELECTOR = "[data-agent-issue-picker]";
+export const ISSUE_PICKER_SELECTOR = "[data-agent-issue-picker]";
 
 /** The agent row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedAgentRow(): HTMLElement | null {
@@ -34,6 +36,15 @@ export function leaveAgentComposer(): void {
   const row = closestMatching(document.activeElement, AGENT_ROW_SELECTOR);
   row?.querySelector<HTMLElement>(`${ISSUE_PICKER_SELECTOR}[aria-expanded="true"]`)?.click();
   row?.focus();
+}
+
+/** The open issue picker of the row that holds focus itself, or `null`. */
+function openPickerOfFocusedRow(): HTMLElement | null {
+  return (
+    focusedAgentRow()?.querySelector<HTMLElement>(
+      `${ISSUE_PICKER_SELECTOR}[aria-expanded="true"]`
+    ) ?? null
+  );
 }
 
 /** Whether focus is inside a row's message composer, which is where that Escape applies. The
@@ -110,9 +121,12 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       id: "back",
       inEditable: true,
       keys: "Escape",
-      label: "Back to the agent row from its composer",
+      label: "Close the issue picker, or go back to the agent row",
       run: leaveAgentComposer,
-      when: inAgentComposer,
+      // From inside the composer, and from the row itself while its picker is open - a read
+      // that fails or is still out renders no select, so the row is where `i` leaves the
+      // reader, and Escape has to close what it opened from there too.
+      when: () => inAgentComposer() || openPickerOfFocusedRow() !== null,
     },
   ]);
 }

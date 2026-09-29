@@ -1045,6 +1045,134 @@ test.describe("agents page", () => {
     }
   });
 
+  // A typed message is the reader's work: choosing which issue it belongs to must not throw it
+  // away, by either hand. The composer is remounted to reseed the agent mention that an
+  // issue-owned comment needs, and the prose travels across that remount.
+  test("a draft survives the issue pick, by keyboard and by pointer", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("please look at the migration");
+
+      // The picker is reached with the pointer while a draft is open - Escape out of a written
+      // composer is its own discard prompt, which is not this path - and the pick itself is made
+      // from the keyboard the open hands over to.
+      await toggle.click();
+      await expect(row.getByRole("combobox", { name: "Issue" })).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await expect(toggle).toContainText("CORE-1");
+      await expect(field).toHaveValue(/please look at the migration/);
+      await expect(field).toBeFocused();
+
+      // And with the pointer all the way: back to no issue, the prose still the reader's.
+      await toggle.click();
+      await row.getByRole("combobox", { name: "Issue" }).selectOption("");
+      await expect(toggle).toContainText("No issue");
+      await expect(field).toHaveValue(/please look at the migration/);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The same slow read, but the reader has gone into the composer rather than to another row:
+  // the picker's focus belongs to the open, and typing is not where the open left them.
+  test("a slow issue list never takes focus out of the message being typed", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/v1/issues?*", async (route) => {
+        await held;
+        return route.fallback();
+      });
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("still typing");
+
+      release?.();
+      await expect(row.getByRole("combobox", { name: "Issue" })).toBeVisible();
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("still typing");
+      await expect(row.getByRole("button", { name: "Choose issue" })).toContainText("No issue");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // What `i` opens, Escape closes - including when the list never arrives. A failed or slow read
+  // renders no select, so focus stays on the row, which is exactly where the key has to work.
+  test("Escape closes the issue picker from the row when the list fails or is still out", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/v1/issues?*", async (route) => {
+        await held;
+        return route.fulfill({
+          body: JSON.stringify({ code: "INTERNAL", error: "issue store unavailable" }),
+          contentType: "application/json",
+          status: 500,
+        });
+      });
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+
+      // While the read is still out: no select, focus on the row, Escape closes what it opened.
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(row).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(row).toBeFocused();
+
+      // And once it has failed: the picker says so, and Escape still leaves.
+      release?.();
+      await page.keyboard.press("i");
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(row.getByText(/Could not load issues/i)).toBeVisible();
+      await expect(row).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(row).toBeFocused();
+
+      // Escape on a row with nothing open is the row's own key, as before: it leaves the row.
+      await page.keyboard.press("Escape");
+      await expect(row).toBeFocused();
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    } finally {
+      await context.close();
+    }
+  });
+
   // The composer calls `onClose` after a successful send as well as on the way out, and only the
   // way out is "one level up". Focus on the row after a send would turn the next letters typed
   // into agent shortcuts.
