@@ -144,8 +144,8 @@ interface Piece {
   readonly noElements?: true;
   /** An `@` expansion whose ELEMENT COUNT the guard does not know: `"$@"` of unknown positional
    * parameters, or `"${arr[@]}"` of an array it could not read. Quoted, such a word is not one
-   * argument — bash gives one per element — so `args` types it `fields: "unknown"`. Without it a
-   * verb reading its operands positionally took the whole expansion as a single operand. */
+   * argument — bash gives one per element — so `args` types it `fields: "unknown"`: a verb
+   * reading its operands positionally must not take the whole expansion as a single operand. */
   readonly unknownCount?: true;
   /** A value whose name may also be unset: a branch may have unset it, or a write the guard could
    * not read (`forgetVariables`). Whether it is set is unknown, so `-` and `+` cannot decide. */
@@ -169,9 +169,11 @@ function isUnset(value: Expansion | undefined): boolean {
  * (`f "$@" x` gives f one argument). An element that is empty is an ordinary empty piece. */
 const NO_ELEMENTS: Piece = { kind: "literal", text: "", noElements: true };
 
-/** A value as a variable or element holds it. `NO_ELEMENTS` marks a word, not a value: what
- * `x="$@"` assigns from no elements is the empty string, which `"$x"` passes as one argument, so
- * the mark never outlives the word it came from. */
+/** A value as a variable or element holds it. `NO_ELEMENTS` and `unknownCount` mark a word, not
+ * a value: a stored value is one argument however many elements it was assigned from, so what
+ * `x="$@"` assigns from no elements is the empty string, which `"$x"` passes as one argument, and
+ * a value assigned from an expansion of unknown length loses the count with it. Neither mark
+ * outlives the word it came from. */
 function stored(value: Expansion): Expansion {
   const counted = value.map((piece) => {
     if (piece.unknownCount !== true) return piece;
@@ -1398,6 +1400,12 @@ function readableWord(arg: Arg): { text: string; whole: boolean } {
 function mayBeOption(arg: Arg, matches: (text: string) => boolean): boolean {
   const { text, whole } = readableWord(arg);
   if (whole) return matches(text);
+  return mayBeSomeOption(text);
+}
+
+/** Whether the prefix the guard read of a word it cannot read whole leaves it able to be some
+ * option, whichever one: the rest of the word may spell any of them. */
+function mayBeSomeOption(text: string): boolean {
   return text === "" || /^--?[a-zA-Z-]*$/.test(text);
 }
 
@@ -4162,7 +4170,7 @@ function writeArguments(rest: readonly Arg[], valued: string, long: LongOptions)
       break;
     }
     if (!whole || !text.startsWith("-") || text === "-") {
-      if (!whole && mayBeOption(arg, () => false)) uncertain = arg;
+      if (!whole && mayBeSomeOption(text)) uncertain = arg;
       operands.push(arg);
       continue;
     }

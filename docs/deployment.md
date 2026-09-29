@@ -14,7 +14,9 @@ to a boundary before they run; it refuses the shared jj operation-log rewrites (
 since LEGION-121, destructive commands and signals outside the pane's own work. A `bash` command,
 `eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`, `find -exec rm`,
 `shred`), move (`mv`), truncate (`truncate`), overwrite by redirection, `tee`, `cp`, `dd of=`,
-`install`, `ln` or `sed -i` (an existing file only), or recursively change the mode or owner
+`install`, `ln` or `sed -i` (an existing file only; a symlink the same command creates and then
+writes through is not on disk when the guard reads the command, and is the one documented
+residual of this family), or recursively change the mode or owner
 (`chmod -R`, `chown -R`) of paths under the pane's
 issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below `/tmp` except
 `/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp` directory that
@@ -65,9 +67,13 @@ Which operand a write verb's destination is comes from that verb's own grammar, 
 than assumed: `cp` and `install` write their last operand, or the directory `-t` names, where
 every other operand is a source they read. `mv` uses the same option reader and also judges the
 sources it moves. The reader stops at `--` and at the first value-taking letter in a cluster,
-and accepts GNU's unambiguous long-option abbreviations. An unreadable option that may hide a
-destination is refused with its written word and the `--` or `-T` remedy, not treated as a command
-with no destination. Help and version options do not write. `cp` judges the source basename as
+and accepts GNU's unambiguous long-option abbreviations. Any word before `--` that the guard cannot read whole and that may be an option — a glob, a
+command's output, an unquoted expansion — refuses `cp`, `mv`, `install` and `ln`, since one
+reading of it hides a destination; the refusal names the written word and the `--` or `-T`
+remedy, rather than treating the command as one with no destination. The accepted cost is three
+shapes that refuse where a person can see they are harmless: a bare glob before `--` with `cp` or
+`mv`, `xargs` into `cp` or `sed -i` with unreadable operands, and a glob loop into `cp` with
+neither a literal prefix nor `--`. Help and version options do not write. `cp` judges the source basename as
 written under the destination; `src/.` and `-T` write the directory's contents, and `--parents`
 retains the source path. It inspects only existing destination entries, recursively for a recursive
 copy and under the same walk limit as shell syntax, without traversing the source tree. After `--`,
@@ -81,7 +87,10 @@ word stands. `ln` writes its last
 operand, or the working directory when given one readable operand, and a hard link (no `-s`)
 also makes its source writable under the new name, which no later command can resolve as it can
 a symlink. `sed` writes the files it names only with `-i`, including inside a cluster (`-ni`) and
-with a suffix joined to it (`-i.bak`). A verb that replaces a symlink is judged on the link
+with a suffix joined to it (`-i.bak`); a word the guard cannot read may itself be that `-i`, and
+the readings are judged together rather than worst-of-each, so a quoted word plays one part at a
+time and a read-only `sed -n` over two of them is allowed, while a word bash may split plays
+every part at once and is judged as a file as well. A refusal says the `-i` was inferred. A verb that replaces a symlink is judged on the link
 (`sed -i`), one that writes through it on what it points at (`cp`, `dd`), and `install` and `ln`,
 which do one or the other depending on whether the link leads to a directory, on both.
 

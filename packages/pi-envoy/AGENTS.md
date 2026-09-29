@@ -276,13 +276,15 @@ A verb that writes a path it names is judged on the operand its own grammar make
 which is the whole of what LEGION-357 fixed: `cp` and `install` on their last operand, or on the
 directory `-t` names, where every other operand is a source they read; `dd` on the path inside its
 `of=` word, wherever that word stands; `ln` on its last operand, or on the working directory when
-it is given one operand, plus its source when it makes a hard link, which is a second name for a
+it is given one readable operand, plus its source when it makes a hard link, which is a second name for a
 file outside the roots that no later command can resolve; `sed` on the files it names only with
 `-i`, in a cluster (`-ni`) or with a suffix joined to it (`-i.bak`) as well as alone. Which of the
 link and its target is judged follows what each verb does to a symlink — `sed -i` replaces the
 link, `cp` and `dd` write through it, and `install` and `ln` do one or the other depending on
 whether it leads to a directory, so both are judged (`Reach`). Each of these, like a redirection,
 refuses only where a file is already there: a path that does not exist yet overwrites nothing.
+The one residual of this family is a symlink the same command both creates and writes through:
+it is not on disk when the guard reads the command.
 `src/legion/pane-guard-write-rows.ts` holds the rows this is measured on, and
 `scripts/measure-pane-guard-writes.ts` runs them against any guard build.
 

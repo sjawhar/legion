@@ -67,7 +67,7 @@ const mutants: readonly (readonly [string, string, string, string?])[] = [
   ["unique completion", "reachable.length === 1 ? reachable[0] : undefined", "undefined"],
   [
     "unknown option",
-    "if (!whole && mayBeOption(arg, () => false)) uncertain = arg;",
+    "if (!whole && mayBeSomeOption(text)) uncertain = arg;",
     "void whole;",
   ],
   [

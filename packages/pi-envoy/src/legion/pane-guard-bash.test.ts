@@ -439,7 +439,8 @@ test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
 // twice — what the guard returns, and whether real bash changed anything under a canary HOME in
 // the row's own fixture — so no row carries a written-down verdict for the dangerous direction.
 // What bash did is the expectation, and a row that stops destroying the canary stops demanding a
-// refusal rather than passing quietly.
+// refusal rather than passing quietly — it fails the probe-is-live check below instead, so a row
+// that has quietly stopped measuring anything is reported rather than counted as a pass.
 test("a command that writes a path it names is judged, whatever grammar names it", () => {
   const results = WRITE_ROWS.map((row) => measureWriteRow(base, row, createPaneGuard));
 
@@ -461,8 +462,8 @@ test("a command that writes a path it names is judged, whatever grammar names it
   ).toEqual([]);
   expect(results.filter((r) => !writeRefusalMatches(r)).map((r) => r.row.name)).toEqual([]);
 
-  // Every row the guard allows while bash changed the canary, by name. The list is the documented
-  // boundary, not a tolerance: a path that does not exist yet overwrites nothing (`judgePath`'s
+  // Every row the guard allows while bash changed the canary, by name. The list is the boundary
+  // `docs/deployment.md` documents, not a tolerance: a path that does not exist yet overwrites nothing (`judgePath`'s
   // `overwrite`), and a link created and written through in the same command is not yet on disk
   // when the guard reads it. Existing links are covered by the separate-call copy probes.
   // A new name here is a leak; a name that leaves is a boundary someone moved on purpose.
