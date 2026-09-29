@@ -63,46 +63,15 @@ import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { useKeymap, useKeymapScope } from "../shell/keymap";
-import { closestMatching, roveFocus } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
-
 import { deliveryAttempts } from "./attempts";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
+import { focusOwningAgentRow, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
-
-const AGENT_ROW_ATTRIBUTE = "data-agent-row";
-const AGENT_ROW_SELECTOR = `[${AGENT_ROW_ATTRIBUTE}]`;
-
-/** The agent row that holds keyboard focus itself — not one merely containing a focused control. */
-function focusedAgentRow(): HTMLElement | null {
-  const active = document.activeElement;
-  return active instanceof HTMLElement && active.matches(AGENT_ROW_SELECTOR) ? active : null;
-}
-
-const AGENT_COMPOSER_SELECTOR = "[data-agent-composer]";
-
-/**
- * One level out of a row's composer: the row that contains the focused element takes focus back.
- * Two callers run it, and they are the same act. `MentionComposer` owns Escape on its own form
- * and stops it before the window dispatcher sees it (`MentionComposer.tsx:551`), so the composer
- * calls this through its `onClose`; the `agents` scope registers the same key over the same
- * function so `?` describes what Escape does there - and so the binding takes over if the
- * composer ever stops swallowing it.
- */
-function focusOwningAgentRow(): void {
-  closestMatching(document.activeElement, AGENT_ROW_SELECTOR)?.focus();
-}
-
-/** Whether focus is inside a row's message composer, which is where that Escape applies. The
- *  composer renders only inside a row, so its own ancestor is the whole question. */
-function inAgentComposer(): boolean {
-  return closestMatching(document.activeElement, AGENT_COMPOSER_SELECTOR) !== null;
-}
 
 /** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at
  *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
@@ -1311,75 +1280,7 @@ export function AgentsPage(): ReactNode {
     });
   };
   const listRef = useRef<HTMLElement>(null);
-  const rows = () => [
-    ...(listRef.current?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? []),
-  ];
-  // Both actions that live inside a row's details open it first; the details render in the click's
-  // own commit, so the control they want exists on the next frame.
-  const inOpenRow = (act: (row: HTMLElement) => void) => {
-    const row = focusedAgentRow();
-    if (row === null) return;
-    const toggle = row.querySelector<HTMLElement>("[data-agent-toggle]");
-    if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
-    requestAnimationFrame(() => act(row));
-  };
-  useKeymapScope("agents");
-  useKeymap("agents", [
-    {
-      id: "next",
-      keys: "j",
-      label: "Next agent",
-      run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), 1),
-      when: () => rows().length > 0,
-    },
-    {
-      id: "previous",
-      keys: "k",
-      label: "Previous agent",
-      run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), -1),
-      when: () => rows().length > 0,
-    },
-    {
-      id: "compose",
-      keys: "Enter",
-      label: "Message the focused agent",
-      run: () =>
-        inOpenRow((row) =>
-          row.querySelector<HTMLTextAreaElement>("[data-agent-composer] textarea")?.focus()
-        ),
-      when: () => focusedAgentRow() !== null,
-    },
-    {
-      id: "issue-picker",
-      keys: "i",
-      label: "Pick an issue for the message",
-      run: () =>
-        inOpenRow((row) => row.querySelector<HTMLElement>("[data-agent-issue-picker]")?.click()),
-      when: () => focusedAgentRow()?.hasAttribute("data-agent-can-pick-issue") === true,
-    },
-    {
-      id: "pin",
-      keys: "Shift+P",
-      label: "Pin or unpin the focused agent",
-      run: () => focusedAgentRow()?.querySelector<HTMLElement>("[data-agent-pin] button")?.click(),
-      when: () => focusedAgentRow() !== null,
-    },
-    {
-      id: "select",
-      keys: "x",
-      label: "Select or deselect the focused agent",
-      run: () => focusedAgentRow()?.querySelector<HTMLElement>("[data-agent-select]")?.click(),
-      when: () => focusedAgentRow() !== null,
-    },
-    {
-      id: "back",
-      inEditable: true,
-      keys: "Escape",
-      label: "Back to the agent row from its composer",
-      run: focusOwningAgentRow,
-      when: inAgentComposer,
-    },
-  ]);
+  useAgentsKeymap(listRef);
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;

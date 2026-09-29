@@ -279,14 +279,8 @@ test.describe("inbox selection", () => {
       await expect(bar).toContainText("Snoozing 2…");
       await expect(bar).not.toContainText("0 selected");
 
-      // With no row rendered anywhere, Escape from the picker still has somewhere to go: the bar
-      // itself. It is the only thing left of the list, and it holds the count and the way out.
-      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
-      await picker.focus();
-      await expect(picker).toBeFocused();
-      await page.keyboard.press("Escape");
-      await expect(picker).not.toBeFocused();
-      await expect(bar).toBeFocused();
+      // The pick is the one thing in the air: the picker takes no second one while it settles.
+      await expect(bar.getByRole("combobox", { name: "Snooze selected asks" })).toBeDisabled();
 
       refuse?.();
 
@@ -503,8 +497,12 @@ test.describe("inbox selection", () => {
     }
   });
 
-  // Escape is one level out even when the level below has nothing rendered in it.
-  test("Escape leaves the bulk picker when the marked row is folded away", async ({ browser }) => {
+  // A mark is the reader's, and outlives the fold that takes its row off the page; what it does
+  // not do while it is folded away is count or be written. Opening the band brings both back,
+  // and once a refusal is up with nothing rendered under it, Escape still has somewhere to go.
+  test("a folded mark stops counting, comes back with its band, and leaves Escape a way out", async ({
+    browser,
+  }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", title: "The only ask" });
     await createAsk(issue.key, { question: "Ship it?" }, session);
@@ -514,22 +512,205 @@ test.describe("inbox selection", () => {
       await openInbox(page, 1);
       const rows = page.locator("[data-inbox-row]");
       const bar = page.getByRole("group", { name: "Selected asks" });
+      const later = page.getByRole("button", { name: /^Later \(1\)/ });
 
-      // Mark it, then snooze it from its own row control: it folds into Later, still marked.
+      // Mark it, then snooze it from its own row control: it folds into Later.
       await page.keyboard.press("j");
       await page.keyboard.press("x");
       await expect(bar).toContainText("1 selected");
       await rows.nth(0).locator("[data-inbox-snooze]").selectOption("tomorrow");
-      await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
+      await expect(later).toBeVisible();
       await expect(rows).toHaveCount(0);
+      await expect(bar).toHaveCount(0);
+
+      // The mark itself is still made: the band opens on the row the reader ticked.
+      await later.click();
+      await expect(rows).toHaveCount(1);
+      await expect(rows.nth(0).getByRole("checkbox")).toBeChecked();
       await expect(bar).toContainText("1 selected");
 
-      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
+      // A pick the server refuses leaves the row where it was, marked, with the reason up.
+      await page.route("**/api/v1/me/asks/*/snooze", (route) =>
+        route.fulfill({
+          body: JSON.stringify({ code: "INVALID_SNOOZE", error: "snoozed_until must be a moment" }),
+          contentType: "application/json",
+          status: 400,
+        })
+      );
+      await rows.nth(0).focus();
       await page.keyboard.press("h");
+      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
       await expect(picker).toBeFocused();
+      await picker.selectOption("next-week");
+      await expect(bar).toContainText("Could not snooze 1 of 1: snoozed_until must be a moment.");
+
+      // Fold the band again: nothing of the list is rendered, and the bar is all that is left.
+      await later.click();
+      await expect(rows).toHaveCount(0);
+      await expect(bar).toContainText("0 selected");
+      await picker.focus();
       await page.keyboard.press("Escape");
-      await expect(picker).not.toBeFocused();
+      await expect(bar).toBeFocused();
+
+      // And the keyboard that raised the refusal dismisses it.
+      await page.keyboard.press("Escape");
+      await expect(bar).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A folded band is off the page: the reader has no checkbox to untick there, and may well have
+  // set that row's moment by hand since marking it. A pick must not write it.
+  test("a bulk pick leaves a folded row's own snooze alone", async ({ browser }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const first = await createIssue({ project: "CORE", title: "Deferred by hand" });
+    const deferred = await createAsk(first.key, { question: "Which release?" }, session);
+    const second = await createIssue({ project: "CORE", title: "Still open" });
+    const live = await createAsk(second.key, { question: "Ship it?" }, session);
+    const moment = async (askId: string) =>
+      (await getInbox()).find((row) => row.id === askId)?.snoozed_until ?? null;
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page, 2);
+      const rows = page.locator("[data-inbox-row]");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      const writes: string[] = [];
+      await page.route("**/api/v1/me/asks/*/snooze", (route) => {
+        writes.push(new URL(route.request().url()).pathname);
+        return route.fallback();
+      });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await expect(bar).toContainText("2 selected");
+
+      // The reader defers one row themselves; it folds into Later, out of sight but still marked.
+      await page
+        .locator(`[data-inbox-row="${deferred.id}"] [data-inbox-snooze]`)
+        .selectOption("tomorrow");
+      await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
+      await expect(rows).toHaveCount(1);
+      await expect(rows.nth(0)).toHaveAttribute("data-inbox-row", live.id);
       await expect(bar).toContainText("1 selected");
+      await expect.poll(() => moment(deferred.id)).toBeTruthy();
+      const byHand = await moment(deferred.id);
+
+      // The bar picks a different moment for what is left on the page. The folded row took its
+      // own picker with it, so focus is back on the page and `h` is the bar's.
+      await page.mouse.move(0, 0);
+      await page.keyboard.press("h");
+      await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("next-week");
+      await expect.poll(() => moment(live.id)).toBeTruthy();
+
+      expect(await moment(deferred.id)).toBe(byHand);
+      expect(writes.length).toBe(2);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // One pick at a time: a second while the first is in the air re-sends every id and lets the
+  // stale answer overwrite the live one's.
+  test("the bulk picker is inert while its pick is in flight", async ({ browser }) => {
+    await seedInbox();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page);
+      let release: (() => void) | undefined;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route("**/api/v1/me/asks/*/snooze", async (route) => {
+        await held;
+        return route.fallback();
+      });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      const picker = bar.getByRole("combobox", { name: "Snooze selected asks" });
+      await picker.selectOption("tomorrow");
+
+      await expect(bar).toContainText("Snoozing 2…");
+      await expect(picker).toBeDisabled();
+      release?.();
+      await expect(bar).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The keyboard raised the refusal, so the keyboard dismisses it - even once the reader has
+  // unticked the rows it named and the bar is counting nothing.
+  test("Escape dismisses a refusal the reader has already unticked", async ({ browser }) => {
+    await seedInbox();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page);
+      await page.route("**/api/v1/me/asks/*/snooze", (route) =>
+        route.fulfill({
+          body: JSON.stringify({ code: "INVALID_SNOOZE", error: "snoozed_until must be a moment" }),
+          contentType: "application/json",
+          status: 400,
+        })
+      );
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await bar.getByRole("combobox", { name: "Snooze selected asks" }).selectOption("tomorrow");
+      await expect(bar).toContainText("Could not snooze 2 of 2");
+
+      const rows = page.locator("[data-inbox-row]");
+      await rows.nth(0).getByRole("checkbox").uncheck();
+      await rows.nth(1).getByRole("checkbox").uncheck();
+      await expect(bar).toContainText("0 selected");
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.mouse.move(0, 0);
+
+      await page.keyboard.press("Escape");
+      await expect(bar).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // `h` with a selection live still starts from the list: a reader answering an ask is not in it.
+  test("h does not pull the reader out of an ask they are answering", async ({ browser }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const marked = await createIssue({ project: "CORE", title: "Marked" });
+    await createAsk(marked.key, { question: "Which release?" }, session);
+    const answering = await createIssue({ project: "CORE", title: "Answering" });
+    await createAsk(
+      answering.key,
+      { options: [{ label: "Ship" }, { label: "Hold" }], question: "Which way?" },
+      session
+    );
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page, 2);
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await expect(bar).toContainText("1 selected");
+
+      const hold = page.getByRole("radio", { name: "Hold" });
+      await hold.click();
+      await expect(hold).toBeFocused();
+      await page.keyboard.press("h");
+      await expect(hold).toBeFocused();
+      await expect(bar.getByRole("combobox", { name: "Snooze selected asks" })).not.toBeFocused();
     } finally {
       await context.close();
     }
@@ -742,6 +923,32 @@ test.describe("agents page", () => {
     }
   });
 
+  // Escape is one level out of what the reader opened. On the issue picker's own `<select>` it
+  // is the only dismissal that control has, so leaving the picker expanded behind them would
+  // make the key a move rather than a way back.
+  test("Escape on the issue picker closes it on the way back to the row", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      await picker.focus();
+
+      await page.keyboard.press("Escape");
+      await expect(toggle).toHaveAttribute("aria-expanded", "false");
+      await expect(picker).toHaveCount(0);
+      await expect(row).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  });
+
   // The composer calls `onClose` after a successful send as well as on the way out, and only the
   // way out is "one level up". Focus on the row after a send would turn the next letters typed
   // into agent shortcuts.
@@ -920,6 +1127,56 @@ test.describe("issue page", () => {
       await page.keyboard.press("Shift+P");
       await expect(page.getByRole("button", { name: "Unpin issue" })).toBeVisible();
       expect(pinned).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The ask card is not the only control a reader's hand rests on. `Show activity` is an ordinary
+  // page checkbox, outside every card, and a digit or `Shift+P` straight after ticking it must
+  // not write the issue's priority or its pin either - the rule is that these two keys write only
+  // from the page itself, not from a control.
+  test("a digit on a page checkbox writes no priority, and neither does Shift+P", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Activity and priority" });
+    await createComment(issue.key, { body: "Looking into it." }, session);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.goto(`/issues/${issue.key}/conversation`);
+      const activity = page.getByRole("checkbox", { name: "Show activity" });
+      await expect(activity).toBeVisible();
+
+      let patched = 0;
+      await page.route(`**/api/v1/issues/${issue.key}`, (route) => {
+        if (route.request().method() === "PATCH") patched += 1;
+        return route.fallback();
+      });
+      let pinned = 0;
+      await page.route(`**/api/v1/me/issues/${issue.key}/state`, (route) => {
+        if (route.request().method() === "PUT") pinned += 1;
+        return route.fallback();
+      });
+
+      await activity.focus();
+      await expect(activity).toBeFocused();
+      await page.keyboard.press("1");
+      await page.keyboard.press("Shift+P");
+      await page.waitForTimeout(500);
+      expect({ patched, pinned }).toEqual({ patched: 0, pinned: 0 });
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
+      await expect(page.getByRole("button", { name: "Pin issue" })).toBeVisible();
+
+      // From the page itself both keys still write, which is what makes the first half a guard.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.keyboard.press("1");
+      await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 1 });
+      await page.keyboard.press("Shift+P");
+      await expect(page.getByRole("button", { name: "Unpin issue" })).toBeVisible();
     } finally {
       await context.close();
     }

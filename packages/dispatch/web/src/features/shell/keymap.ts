@@ -186,13 +186,15 @@ function isEditableTarget(target: EventTarget | null): boolean {
   if (target.isContentEditable) {
     return true;
   }
+  // An `<input>` takes typed text only in the text-entry types; a checkbox, radio or button
+  // takes none, so a page's single-key shortcuts keep working while one has focus.
+  if (target instanceof HTMLInputElement) {
+    return TEXT_INPUT_TYPES[target.type] === true;
+  }
   const tag = target.tagName;
   // A `<select>` stays editable: its own keys type-ahead and step through the options, and the
   // Inbox's `h` hands it focus on purpose.
-  if (tag === "TEXTAREA" || tag === "SELECT") {
-    return true;
-  }
-  return tag === "INPUT" && TEXT_INPUT_TYPES[(target as HTMLInputElement).type] === true;
+  return tag === "TEXTAREA" || tag === "SELECT";
 }
 
 export interface KeymapOptions {

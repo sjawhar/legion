@@ -98,9 +98,8 @@ const PIN_TOGGLE = 'button[aria-label="Pin issue"], button[aria-label="Unpin iss
 const PRIORITY_SELECT = 'select[aria-label^="Priority of "]';
 const STATUS_SELECT = 'select[aria-label="Status"]';
 const TITLE_HEADING = 'h1[tabindex="0"]';
-/** An ask card anywhere on the page. Its options are radios and checkboxes, which take no typed
- *  text, so the registry lets a digit through to this scope - and "pick option 2" must not become
- *  "this issue is P2". */
+/** An ask card anywhere on the page: its own controls, including its buttons, belong to the ask.
+ */
 const ASK_CARD = "[data-ask-card]";
 
 /** The header control `selector` names, or `null` when it is absent or refuses input (a closed
@@ -114,6 +113,21 @@ function usableControl(selector: string): HTMLElement | null {
   const disabled =
     (node instanceof HTMLButtonElement || node instanceof HTMLSelectElement) && node.disabled;
   return disabled ? null : node;
+}
+
+/**
+ * Whether the reader is on the page itself rather than on something on it. `0`-`3` and `Shift+P`
+ * are the two keys that write the issue without focusing a control, so they are the two that have
+ * to say where the reader is not: a digit typed straight after ticking `Show activity` or picking
+ * an ask's option belongs to that control's own surface, not to the issue's priority. The
+ * registry passes single keys through every control that takes no typed text (a checkbox, a
+ * radio, a button), which is why this is the page's own question to answer. `l` and `e` open a
+ * control rather than write, so a stray press there is visible and undoable and they are offered
+ * throughout.
+ */
+function focusIsOnThePage(): boolean {
+  const active = document.activeElement;
+  return !(active instanceof HTMLInputElement) && active?.closest(ASK_CARD) == null;
 }
 
 /** The tabs the chords reach, each through the tablist button `IssueTabs` renders for it. */
@@ -184,14 +198,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       keys: ["0", "1", "2", "3"],
       label: "Set priority P0–P3",
       run: (event) => priorityWrite.submit(Number(event.key) as IssuePriority),
-      // `set-priority` and `pin` are the two keys that write without focusing a control, so they
-      // are the two that have to say where the reader is not: a digit or `Shift+P` pressed while
-      // an ask's options have focus belongs to the ask, not to the issue. `l` and `e` open a
-      // control instead of writing, so a stray press there is visible and undoable, and they are
-      // offered as before.
-      when: () =>
-        usableControl(PRIORITY_SELECT) !== null &&
-        document.activeElement?.closest(ASK_CARD) == null,
+      when: () => usableControl(PRIORITY_SELECT) !== null && focusIsOnThePage(),
     },
     {
       id: "labels",
@@ -214,8 +221,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       keys: "Shift+P",
       label: "Pin or unpin the issue",
       run: () => usableControl(PIN_TOGGLE)?.click(),
-      when: () =>
-        usableControl(PIN_TOGGLE) !== null && document.activeElement?.closest(ASK_CARD) == null,
+      when: () => usableControl(PIN_TOGGLE) !== null && focusIsOnThePage(),
     },
     {
       // `s` and `p` put focus in a native select, where every single-key binding is suspended
