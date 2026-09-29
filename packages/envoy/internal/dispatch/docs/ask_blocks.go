@@ -322,13 +322,24 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
-// askMarkdown is what an uploaded version can say of an ask: its rendering alone, taken as an
-// upload is (asUploaded) - without anchor marks, and with its server-owned attributes (`state`,
-// the answer, `invalid`) at their defaults, since an upload's are discarded for the ask row's. The
-// attributes a reader's browser derives are never rendered. A new version is markdown, so this is
-// how a version says it carries an ask unchanged.
-func askMarkdown(ask *pmdoc.Node) (string, error) {
-	return pmdoc.Render(asUploaded(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}}))
+// newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its
+// rendering alone, taken as an upload is (asUploaded) - without anchor marks, and with its
+// server-owned attributes (`state`, the answer, `invalid`) at their defaults, since an upload's are
+// discarded for the ask row's. The attributes a reader's browser derives are never rendered. A new
+// version is markdown, so this is how a version says it carries an ask unchanged.
+//
+// An ask can hold a table. A document's render writes its tables' spans out under one budget for
+// the whole document (pmdoc.Render), and a version uploaded from that markdown holds them as the
+// cells they were written as. So the asks one call renders share one budget (pmdoc.SpanBudget),
+// spent in document order as the document's render spent it, which writes each ask as that render
+// did unless a table outside the asks ran the budget out first. A budget for each ask would write
+// an ask past the first budget's end with cells the document never wrote, refusing an upload of the
+// document's own markdown, and would spend a budget for every ask the document holds.
+func newAskMarkdown() func(ask *pmdoc.Node) (string, error) {
+	budget := pmdoc.NewSpanBudget()
+	return func(ask *pmdoc.Node) (string, error) {
+		return budget.Render(asUploaded(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}}))
+	}
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {

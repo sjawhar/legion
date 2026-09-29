@@ -75,6 +75,26 @@ func renderSpanless(doc *Node) (string, error) {
 	return r.b.String(), nil
 }
 
+// SpanBudget is one budget of the empty cells tables' spans add (maxSpanCells) that several renders
+// share, where together they write what one render of a document writes: each spends what its
+// tables' spans add, and the next has what is left.
+type SpanBudget struct{ cells int }
+
+// NewSpanBudget is a whole budget.
+func NewSpanBudget() *SpanBudget {
+	return &SpanBudget{cells: maxSpanCells}
+}
+
+// Render is Render spending b.
+func (b *SpanBudget) Render(doc *Node) (string, error) {
+	r, err := render(doc, b.cells)
+	if err != nil {
+		return "", err
+	}
+	b.cells = r.spanBudget
+	return r.b.String(), nil
+}
+
 // RenderWithBlockOffsets renders a document and records each identified block's
 // byte range in the returned markdown.
 func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
@@ -104,7 +124,7 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	// breaks the browser editor holds that markdown has no form for are written as it draws them.
 	doc = asWritten(doc)
 	if holdsOnlyAnEmptyParagraph(doc) {
-		return &renderer{}, nil
+		return &renderer{spanBudget: spanCells}, nil
 	}
 	labels := definedFootnoteLabels(doc)
 	r = renderBlocks(doc, labels, false, spanCells)
