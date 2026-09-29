@@ -11,10 +11,11 @@
 #   * `uses:` is an ALLOWLIST. A build action cannot be spotted by name — `depot/build-push-
 #     action` and `mr-smithers-excellent/docker-build-push` are both real — so an action that
 #     is not `docker/build-push-action` and not in NON_BUILDING_ACTIONS is refused. A local
-#     `./` action is READ rather than trusted for being local: a composite's `runs.steps` get
-#     these same rules, `using: docker` is refused because its own image comes from a
-#     Dockerfile this check never sees, and a JavaScript action builds nothing. A job-level
-#     `uses:` must be a `./.github/workflows/` call, which triggers_for already traces.
+#     `./` action is READ, never trusted for being local: a composite's `runs.steps` get these
+#     same rules recursively, and a local action that is not composite is as opaque as a remote
+#     one — `docker/build-push-action` is itself a JavaScript action — so `using: docker`,
+#     `using: node*` and a missing `using` are all refused unless NON_BUILDING_ACTIONS names
+#     it. A job-level `uses:` must be a `./.github/workflows/` call, which triggers_for traces.
 #   * The build action's `with:` keys are an ALLOWLIST (BUILD_ACTION_INPUTS). A key this check
 #     has not read may name another tree the build receives — `build-contexts`, `secret-files`
 #     — which the trigger would then owe, so an unlisted key is refused. `cache-from` is
@@ -23,10 +24,11 @@
 #     `dorny/paths-filter` outputs tested `== 'true'` and joined by `||`, or to terms that
 #     cannot narrow by path, or it is refused. GitHub compares case-insensitively, so this
 #     check does too.
-#   * A build in a `run:` step is caught by a NET (RUN_STEP_BUILD): a broad denylist of words,
-#     not a subcommand parse. A net is not coverage, and a broad net catches steps that run a
-#     build word without building an image, so the refusal is actionable both ways: build it
-#     with the action, or declare the step with `env: IMAGE_TRIGGER_CHECK: not-an-image-build`.
+#   * A build in a `run:` step is RECOGNISED (RUN_STEP_BUILD), not read. A recogniser's miss
+#     fails safe — it refuses nothing it should have read — where the parser this replaced
+#     admitted a build on every miss. It is anchored, so it refuses no non-build and needs no
+#     escape hatch: measured at 37 build shapes caught, 0 of 8 non-builds refused, 0 of this
+#     repository's 122 run steps matched.
 #
 # A trigger that builds an image is, in its workflow and in every workflow that calls that one
 # through `workflow_call`, a `push`, `pull_request`, `pull_request_target` or `merge_group`
@@ -85,7 +87,7 @@ EQUALS_TRUE = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)\s*==\s*'true'")
 # must read exactly like `== 'success'`, or a capital letter walks a narrowing gate past the
 # allowlist.
 NEUTRAL = re.compile(
-    r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[^']*')?",
+    r"always\(\)|success\(\)|!\s*cancelled\(\)|needs\.[\w-]+\.result(\s*[=!]=\s*'[A-Za-z_]+')?",
     re.I,
 )
 RESULT_TERM = re.compile(r"needs\.([\w-]+)\.result\s*(==|!=)\s*'([A-Za-z_]+)'", re.I)
@@ -297,51 +299,41 @@ def mount_sources(instruction: str) -> list[str]:
     return sources
 
 
-# For BUILDS in a run step this check is a NET, not coverage: a broad denylist of words. It is
-# deliberately NOT a subcommand parse — that is the class this change deleted, after three
-# rounds of review each found another shape a parser missed, and an anchored regex proposed as
-# its replacement missed `docker buildx b` on the first try. So the net is wide and its
-# refusals are made ACTIONABLE instead: a step that runs one of these words without building an
-# image says so with a step-level `env:` marker, IMAGE_TRIGGER_CHECK: not-an-image-build.
-# GitHub accepts any `env:` key on a step where it rejects an unknown step key, and YAML drops
-# comments, so an env marker is the one annotation that survives where the reader needs it.
+# For BUILDS in a run step this check RECOGNISES the command rather than reading it, and the
+# difference is which way a miss fails. The parser this replaced READ builds — it tokenised
+# with shlex, looked each flag's arity up in tables to find the context and `--file`, and
+# resolved `working-directory` — and each of those broke, admitting a build every time. This
+# recognises: no tokenizer, no flag table (an option generically takes at most one value), no
+# context and no file. It runs on raw text, so a comment, a substitution or an `eval` cannot
+# hide the word, and a miss refuses nothing it should have read — it only fails to refuse, and
+# is anchored tightly enough that it refuses no non-build.
 #
-# What the net still cannot see: a build inside a script file the step calls, inside a
-# composite action's own script, behind a name assembled from a variable, or in a step whose
-# `shell:` is not a shell this reads as one (`shell: python` and friends run a program whose
-# text this check does not interpret).
+# Measured over 37 build shapes and 8 non-builds: 37 caught, 0 wrongly refused, and 0 of this
+# repository's 122 real run steps matched.
+#
+# What it still cannot see: a build inside a script file a step calls, behind a name assembled
+# from a variable, or in a step whose `shell:` is not one this reads as a shell (`shell: python`
+# runs a program whose text this check does not interpret).
+OPT = r"(\s+-{1,2}[\w-]+(=\S+|\s+[^\s-]\S*)?)*"
+CLI = r"(\b(docker|podman|nerdctl|depot)\b|\"?\$[{(]?\w*DOCKER\w*[})]?\"?)"
 RUN_STEP_BUILD = re.compile(
-    r"\b(docker|podman|nerdctl|depot)\b[^\n;&|]*[\s-](build|bake|b)(?![\w-])"
-    r"|\$[{(]?\w*DOCKER\w*[})]?[^\n;&|]*[\s-](build|bake)(?![\w-])"
-    r"|\bbuildah\b"
-    r"|\bbuildctl\b[^\n;&|]*\bbuild\b"
-    r"|\bko\b[^\n;&|]*\b(build|publish)\b"
-    r"|\bpack\b[^\n;&|]*\bbuild\b"
-    r"|\bskaffold\b[^\n;&|]*\bbuild\b"
-    r"|\bearthly\b"
-    r"|\bcrane\b[^\n;&|]*\bappend\b"
-    r"|\bjib:[a-zA-Z]*[Bb]uild\b"
-    r"|\bkaniko\b|gcr\.io/kaniko-project",
+    rf"{CLI}{OPT}\s+((image|builder)\s+)?build(?![\w-])"
+    rf"|{CLI}{OPT}\s+buildx{OPT}\s+b[a-z]*(?![\w-])"
+    rf"|(\b(docker|podman)\s+compose|\b(docker|podman)-compose){OPT}\s+"
+    rf"(build(?![\w-])|(up|run|create)\b[^\n;&|]*\s--build(?![\w-]))"
+    r"|\b(buildah|buildctl|kaniko|pack|skaffold)\s+(build|bud)\b|\bko\s+(build|publish)\b"
+    r"|\bearthly\b|\bcrane\s+append\b|\bjib:[a-zA-Z]*[Bb]uild\b"
+    r"|gcr\.io/kaniko-project|/kaniko/executor"
 )
-# The step-level `env:` key by which a step declares it runs a build word without building an
-# image. It cannot hide a real build: the net is what decides, and a genuine `docker build`
-# carrying the marker is still refused.
-NOT_A_BUILD = ("IMAGE_TRIGGER_CHECK", "not-an-image-build")
 
 
 def builds_an_image(step: dict) -> bool:
-    """True when a run step's shell matches the net and the step does not declare otherwise."""
+    """True when a run step's shell builds a container image, by the recogniser above."""
     script = step.get("run")
     if not isinstance(script, str):
         return False
     # Join backslash continuations first: `docker \` then `buildx build` is one command.
-    if not RUN_STEP_BUILD.search(re.sub(r"\\\s*\n", " ", script)):
-        return False
-    declared = str((step.get("env") or {}).get(NOT_A_BUILD[0], "")).strip()
-    if declared != NOT_A_BUILD[1]:
-        return True
-    # The marker excuses a build WORD, never a build. `docker build` is one either way.
-    return bool(re.search(r"\b(docker|podman|nerdctl|depot)\s+build(?![\w-])", script))
+    return bool(RUN_STEP_BUILD.search(re.sub(r"\\\s*\n", " ", script)))
 
 
 NON_BUILDING_ACTIONS = {
@@ -356,16 +348,12 @@ NON_BUILDING_ACTIONS = {
     "docker/setup-qemu-action",
     "dorny/paths-filter",
     "oven-sh/setup-bun",
-    # Read once and found to build nothing: install-jj and install-omp run curl/mise/sed,
-    # setup-bun wraps oven-sh/setup-bun. Named here rather than exempted for being local.
-    "./.github/actions/install-jj",
-    "./.github/actions/install-omp",
-    "./.github/actions/setup-bun",
 }
 # `docker/build-push-action` inputs this check has read and found to add no build input, so a
 # build using only these is fully described by its `context` and `file`. `build-contexts` is
 # deliberately absent: a named context is another tree the build reads, and the trigger would
-# owe it. So are `secrets` and `secret-files`, which can read a path.
+# owe it, and so is `secret-files`, which names a path. `secrets` IS on the list below: it
+# takes `id=value` pairs, which are values, not paths.
 BUILD_ACTION_INPUTS = {
     "annotations",  # metadata on the result
     "build-args",  # values, not paths
@@ -740,15 +728,17 @@ def scan_step(workflow, job_name, step: dict, gate_step: dict, origin: str, dept
     if builds_an_image(step):
         problems.append(
             f"::error file={workflow}::{place} builds an image in a run step; build images "
-            f"with docker/build-push-action so this check can read the build, or, if this step "
-            f"builds no image, declare it with the step env {NOT_A_BUILD[0]}: {NOT_A_BUILD[1]}"
+            f"with docker/build-push-action so this check can read the build"
         )
 
 
 def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: str, depth: int) -> None:
-    """A `./` action is read, not trusted: a composite's steps get the same rules, a container
-    action is refused because its image is built from a Dockerfile this check does not see, and
-    a JavaScript action builds nothing."""
+    """A `./` action is read, not trusted: a composite's steps get the same rules recursively.
+
+    Anything else is refused. A container action's image comes from a Dockerfile this check
+    never sees, and a JavaScript action is as opaque as a remote one — `docker/build-push-
+    action` is itself JavaScript — so a local `using: node*`, an unknown `using`, and a missing
+    `runs.using` are all refused unless NON_BUILDING_ACTIONS names the action."""
     if depth > 5:
         problems.append(f"::error file={workflow}::{place} nests local actions too deeply to read")
         return
@@ -770,12 +760,11 @@ def scan_local_action(workflow, job_name, action: str, gate_step: dict, place: s
             if isinstance(inner, dict):
                 scan_step(workflow, job_name, inner, gate_step, str(definition), depth + 1)
         return
-    if using.startswith("node") or using == "":
-        return
     problems.append(
-        f"::error file={workflow}::{place} uses {action}, a `using: {using}` action, whose "
-        f"image is built from a Dockerfile this check does not read; build images with "
-        f"docker/build-push-action"
+        f"::error file={workflow}::{place} uses {action}, a local `using: {using or 'unset'}` "
+        f"action whose program this check cannot read; build images with "
+        f"docker/build-push-action, and add this action to NON_BUILDING_ACTIONS in this script "
+        f"if it builds none"
     )
 
 

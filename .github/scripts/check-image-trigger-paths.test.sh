@@ -793,54 +793,44 @@ run_step "$root" 'docker pull debian:trixie-slim'
 run_check "$root"
 check "a run step that does not build is not flagged" "$(contains "$out" 'this check covered 0 image builds')"
 
-echo "case: the net is broad, and a step that builds nothing declares it"
-# extra_step <root> <run body> [env marker yes/no]: appends a run step to the building job,
-# keeping the readable build so the zero-build guard cannot answer for the net.
-extra_step() {
-  local root=$1 body=$2 marker=${3:-no}
-  python3 - "$root/.github/workflows/image.yaml" "$body" "$marker" <<'PYEOF'
-import sys
-path, body, marker = sys.argv[1], sys.argv[2], sys.argv[3]
-env = "        env:\n          IMAGE_TRIGGER_CHECK: not-an-image-build\n" if marker == "yes" else ""
-text = open(path).read()
-open(path, "w").write(text + f"      - name: Extra\n{env}        run: |\n          {body}\n")
-PYEOF
-}
-
-# The four false positives: the broad net catches the word, and the marker is how a step says
-# it builds no image. Refused without it, green with it.
+echo "case: the recogniser refuses every build shape and no non-build"
+# A table, not single literals: every row is a real invocation, each asserting the refusal AND
+# that the step is named, so a row cannot pass on the zero-build guard alone.
 while IFS='|' read -r label body; do
   [ -n "$label" ] || continue
-  root=$(fixture "net-marker-$label")
-  extra_step "$root" "$body"
-  run_check "$root"
-  check "$label is refused without the marker" "$(is "$status" 1)"
-  check "  and offers both remedies" "$(contains "$out" 'declare it with the step env IMAGE_TRIGGER_CHECK: not-an-image-build')"
-  root=$(fixture "net-marked-$label")
-  extra_step "$root" "$body" yes
-  run_check "$root"
-  check "$label passes once it is declared" "$(is "$status" 0)"
-done <<'GREEN'
-go-build|docker run --rm golang go build ./...
-compose-run-npm|docker compose run app npm run build
-exec-make|docker exec app make build
-run-echo|docker run alpine echo a b
-GREEN
-
-# The marker excuses a build WORD, never a build.
-root=$(fixture net-marker-cannot-hide-a-build)
-extra_step "$root" 'docker build -f docker/Dockerfile .' yes
-run_check "$root"
-check "a real docker build carrying the marker is still refused" "$(is "$status" 1)"
-
-while IFS='|' read -r label body; do
-  [ -n "$label" ] || continue
-  root=$(fixture "net-red-$label")
+  root=$(fixture "net-build-$label")
   run_step "$root" "$body"
   run_check "$root"
-  check "$label is refused" "$(is "$status" 1)"
-  check "  and says how to make it readable" "$(contains "$out" 'build images with docker/build-push-action so this check can read the build')"
-done <<'RED'
+  check "build shape $label is refused" "$(is "$status" 1)"
+  check "  and names the step" "$(contains "$out" "Build builds an image in a run step")"
+done <<'BUILDS'
+plain|docker build -f docker/Dockerfile .
+buildx|docker buildx build --load -f docker/Dockerfile .
+buildx-b|docker buildx b --load -f docker/Dockerfile .
+buildx-b-bare|docker buildx b .
+buildx-b-tag|docker buildx b -t x .
+buildx-b-spaces|docker  buildx   b .
+bake|docker buildx bake --load listener
+image-build|docker image build -f docker/Dockerfile .
+builder-build|docker builder build -f docker/Dockerfile .
+context-flag|docker --context remote build -f docker/Dockerfile .
+host-flag|docker -H tcp://x:2375 build -f docker/Dockerfile .
+buildx-builder-flag|docker buildx --builder mybuilder build -f docker/Dockerfile .
+sudo|sudo docker build -f docker/Dockerfile .
+env-prefix|DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile .
+substitution|img=$(docker buildx build --load -q -f docker/Dockerfile .)
+backticks|img=`docker buildx build --load -q -f docker/Dockerfile .`
+github-env|echo "IMG=$(docker buildx build --load -q -f docker/Dockerfile .)" >> $GITHUB_ENV
+eval|eval "docker build -f docker/Dockerfile ."
+bash-c|bash -c "docker buildx build --load -f docker/Dockerfile ."
+subshell|(docker buildx build --load -f docker/Dockerfile .)
+compose-up|docker compose up --build -d
+compose-build|docker-compose build listener
+podman-compose-up|podman compose up --build -d
+podman|podman build -f docker/Dockerfile .
+nerdctl|nerdctl build -f docker/Dockerfile .
+depot|depot build -f docker/Dockerfile .
+buildah|buildah bud -f docker/Dockerfile .
 buildctl|buildctl build --frontend dockerfile.v0
 ko|ko build ./cmd/listener
 pack|pack build app --path .
@@ -849,8 +839,41 @@ earthly|earthly +docker
 crane|crane append -f layer.tar -t app:ci
 jib|mvn compile jib:dockerBuild
 dollar-docker|"$DOCKER" build -f docker/Dockerfile .
-podman-compose-up|podman compose up --build -d
-RED
+kaniko|/kaniko/executor --dockerfile docker/Dockerfile --context .
+BUILDS
+
+# The continuation form cannot go in the table: its body spans two lines.
+root=$(fixture net-build-continuation)
+run_step "$root" 'docker \
+  buildx build --load -f docker/Dockerfile .'
+run_check "$root"
+check "build shape continuation is refused" "$(is "$status" 1)"
+check "  and names the step" "$(contains "$out" "Build builds an image in a run step")"
+
+# Non-builds: the step runs a build word, or a build tool, without building an image. Each keeps
+# the readable build-push-action step, so a green here means the recogniser left it alone.
+while IFS='|' read -r label body; do
+  [ -n "$label" ] || continue
+  root=$(fixture "net-nonbuild-$label")
+  python3 - "$root/.github/workflows/image.yaml" "$body" <<'PYEOF'
+import sys
+path, body = sys.argv[1], sys.argv[2]
+text = open(path).read()
+open(path, "w").write(text + f"      - name: Extra\n        run: |\n          {body}\n")
+PYEOF
+  run_check "$root"
+  check "non-build $label is left alone" "$(is "$status" 0)"
+done <<'NONBUILDS'
+run-go-build|docker run --rm golang go build ./...
+compose-run-npm|docker compose run app npm run build
+exec-make|docker exec app make build
+run-echo|docker run alpine echo a b
+run-mount-go-build|docker run -v "$PWD":/w -w /w golang go build ./...
+imagetools|docker buildx imagetools inspect app:ci
+buildx-create|docker buildx create --use
+pull-then-make|docker pull x; make build
+NONBUILDS
+
 
 echo "case: a result comparison is compared case-insensitively, as GitHub does"
 root=$(fixture gate-result-capital-success)
@@ -918,6 +941,42 @@ runs:
 run_check "$root"
 check "a container action is refused" "$(is "$status" 1)"
 check "  and says why" "$(contains "$out" 'using: docker')"
+
+root=$(fixture local-action-node-execsync)
+local_action "$root" "name: Local
+runs:
+  using: node20
+  main: index.js"
+printf 'require("child_process").execSync("docker buildx build --load -f docker/Dockerfile .");\n' \
+  > "$root/.github/actions/local/index.js"
+run_check "$root"
+check "a local node20 action is refused, since its program is unread" "$(is "$status" 1)"
+check "  and says how to admit it" "$(contains "$out" 'add this action to NON_BUILDING_ACTIONS')"
+
+# The three local composites are READ, not named: appending a build to one must be seen.
+root=$(fixture local-action-composite-appended)
+mkdir -p "$root/.github/actions/setup-bun"
+cat > "$root/.github/actions/setup-bun/action.yml" <<'ACTION'
+name: Setup Bun
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+    - shell: bash
+      run: docker buildx build --load -f docker/Dockerfile .
+ACTION
+python3 - "$root/.github/workflows/image.yaml" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+open(path, "w").write(text.replace(
+    "      - uses: docker/build-push-action@v6\n",
+    "      - uses: ./.github/actions/setup-bun\n      - uses: docker/build-push-action@v6\n",
+))
+PYEOF
+run_check "$root"
+check "a build appended to a local composite is read, not trusted" "$(is "$status" 1)"
+check "  and names the action file" "$(contains "$out" '.github/actions/setup-bun/action.yml')"
 
 root=$(fixture local-action-javascript)
 local_action "$root" "name: Local
