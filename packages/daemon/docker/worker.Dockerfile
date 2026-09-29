@@ -13,13 +13,15 @@
 # exactly as the daemon resolves it; @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy
 # and linked into the isolated OMP profile `legion`; the role prompts (packages/pi-envoy/roles) at
 # /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
-# debian:trixie-slim runtime base — jj's git backend requires it); gh. The last two RUNs gate the publish,
+# debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
+# repositories the workers work, specific to none of them: uv and uvx, Node with npm (an LTS line), and
+# the AWS CLI v2, each on PATH at /usr/local/bin. The last two RUNs gate the publish,
 # as the runtime user: the first checks every binary runs on the base, proves jj accepts the image's git
 # with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
 # daemon's two plus the session-storage probe) through `legion probe-image`; the last runs the Go
 # `legion version` and the Go `legion probe-image`, which runs the same three probes, holds the plugin
-# to the Go daemon API contract, and prints the OK line the Go daemon's probe Sandbox reads. A broken
-# image never publishes.
+# to the Go daemon API contract, prints the OK line the Go daemon's probe Sandbox reads, and checks that
+# every toolchain command runs as the runtime user. A broken image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -36,6 +38,18 @@ ARG GH_TOOL=gh@2.98.0
 # go.work's `go` line: the Go stage builds in workspace mode, and the golang image's GOTOOLCHAIN=local
 # fails the build if go.work moves past this.
 ARG GO_VERSION=1.26.1
+# The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 archive the
+# stage downloads for it, which the build checks before unpacking anything.
+ARG UV_VERSION=0.12.21
+ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
+# Node's Active LTS line.
+ARG NODE_VERSION=24.21.0
+ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+ARG AWS_CLI_VERSION=2.37.6
+ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6fbb2
+# apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
+# archive serves only a suite's current version of a package, so a pinned version stops resolving at
+# the suite's next update. The base image's suite is the pin.
 
 # ------------------------------------------------------------------------------------------------
 # cli: workspace install, the compiled legion CLI, the OMP pin, and the packed plugin.
@@ -43,6 +57,7 @@ FROM oven/bun:${BUN_VERSION}-slim AS cli
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy job runs. python3/make/g++: native
 # devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json bun.lock ./
@@ -71,8 +86,8 @@ RUN mkdir -p /out \
 # The plugin ships from this checkout with the steps release.yaml's pi_envoy job runs before
 # `bun pm pack` (prepack.sh refuses to pack with the source manifest). The tarball is unpacked into a
 # directory: `omp plugin install` links a directory and rejects a tarball path (ENOTDIR).
-RUN cd packages/pi-envoy \
-    && jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' package.json > tmp.json \
+WORKDIR /repo/packages/pi-envoy
+RUN jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' package.json > tmp.json \
     && mv tmp.json package.json \
     && rm -f ./*.tgz && bun pm pack \
     && mkdir -p /out/pi-legion-envoy \
@@ -85,6 +100,7 @@ FROM debian:bookworm-slim AS tools
 ARG MISE_VERSION
 ARG JJ_TOOL
 ARG GH_TOOL
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://mise.run -o /tmp/mise-install.sh \
@@ -128,12 +144,47 @@ RUN test -n "$LEGION_REVISION" \
     && CGO_ENABLED=0 go -C /src/packages/envoy build -o /out/agent-secrets ./cmd/agent-secrets
 
 # ------------------------------------------------------------------------------------------------
+# toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
+# installs each project's own Python from its `.python-version` or `requires-python`, so the image bakes
+# no Python), Node with npm, and the AWS CLI v2. All three archives are checked against their pinned
+# SHA-256 before any is unpacked. uv and uvx are single binaries, copied to /usr/local/bin as gh and jj
+# are; Node and the AWS CLI keep their own trees under /opt, and /out/bin holds the symlinks into them
+# that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir` writes its two).
+FROM debian:trixie-slim AS toolchain
+ARG UV_VERSION
+ARG UV_SHA256
+ARG NODE_VERSION
+ARG NODE_SHA256
+ARG AWS_CLI_VERSION
+ARG AWS_CLI_SHA256
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    t=/tmp/toolchain; mkdir -p "$t" /out/bin /opt/node; \
+    curl -fsSLo "$t/uv.tar.gz" \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz"; \
+    curl -fsSLo "$t/node.tar.xz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
+    curl -fsSLo "$t/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip"; \
+    printf '%s  %s\n' "$UV_SHA256" "$t/uv.tar.gz" "$NODE_SHA256" "$t/node.tar.xz" \
+      "$AWS_CLI_SHA256" "$t/awscli.zip" > "$t/SHA256SUMS"; \
+    sha256sum --check --strict "$t/SHA256SUMS"; \
+    tar -xzf "$t/uv.tar.gz" -C /out/bin --strip-components=1 --no-same-owner \
+      uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
+    tar -xJf "$t/node.tar.xz" -C /opt/node --strip-components=1 --no-same-owner; \
+    for tool in node npm npx corepack; do ln -s "/opt/node/bin/$tool" "/out/bin/$tool"; done; \
+    unzip -q "$t/awscli.zip" -d "$t"; \
+    "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
+    rm -rf "$t"
+
+# ------------------------------------------------------------------------------------------------
 # runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
 # bookworm-backports stop at 2.39.5). The dynamically linked binaries copied in below were built or
 # fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
 FROM debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 legion \
@@ -192,8 +243,16 @@ RUN set -eu; \
     omp plugin install /opt/legion/pi-legion-envoy; \
     legion probe-image; \
     rm -rf /home/legion/.omp/profiles/legion/logs
-# The Go `legion` goes in after the probe layer: its binary differs on every commit (it links the
-# commit), so a new commit rebuilds only the last two layers, never the probe layer and its natives.
+# The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its
+# natives, and before the Go `legion`, which changes on every commit. It lands outside HOME, in /opt and
+# /usr/local/bin, so no volume a pod mounts under HOME shadows it, and /usr/local/bin is on the image
+# PATH and on every pod's (imagePath, packages/daemon-go/internal/runtime/sandbox/names.go).
+COPY --from=toolchain /opt/node /opt/node
+COPY --from=toolchain /opt/aws-cli /opt/aws-cli
+COPY --from=toolchain /out/bin/ /usr/local/bin/
+# The Go `legion` goes in after the probe layer and the toolchain: its binary differs on every commit (it
+# links the commit), so a new commit rebuilds only the layers from here down, never the probe layer and
+# its natives.
 COPY --from=go /out/legion /opt/legion/go/bin/legion
 # agent-secrets (packages/envoy/cmd/agent-secrets, AGENTC-393): the pod's secrets client — the shim
 # runs `keygen` before its hello and `renew` after its enrollment, and the agent's tools call it
@@ -213,7 +272,8 @@ COPY --from=go /out/agent-secrets /opt/legion/go/bin/agent-secrets
 # Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
 # resolving every agent's model, and refuses a skipped result, before any claim runs on the image
 # (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
-# the cached probe layer above carries.
+# the cached probe layer above carries. Last, every toolchain command runs, as the runtime user from the
+# image PATH. No Python is checked: uv installs each project's own at run time.
 ARG LEGION_REVISION
 RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
@@ -221,6 +281,8 @@ RUN set -eu; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
     /opt/legion/go/bin/legion probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models; \
     /opt/legion/go/bin/agent-secrets --help >/dev/null; \
+    uv --version; uvx --version; node --version; npm --version; npx --version; corepack --version; \
+    aws --version; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs

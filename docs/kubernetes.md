@@ -29,7 +29,16 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
   (bookworm's 2.39.5 made every `jj git clone` in the init container fail), so the build also proves the
   image's jj accepts its git with a network-free `jj git clone` of a scratch bare repository before the
-  probes run, and its last step refuses a git anywhere but `/usr/bin/git`.
+  probes run, and its last step refuses a git anywhere but `/usr/bin/git`;
+- a generic toolchain for the repositories the workers work, specific to none of them: `uv` and `uvx`;
+  `node`, `npm`, `npx` and `corepack` from Node's Active LTS line; and the AWS CLI v2's `aws` — all at
+  `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned release whose
+  linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the `ARG`s at the
+  top of `worker.Dockerfile`). The image bakes no Python: `uv` installs each project's own, from its
+  `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`), into
+  `~/.local/share/uv/python` on the pod's own filesystem, so every new pod downloads it once. Node and the
+  AWS CLI keep their trees at `/opt/node` and `/opt/aws-cli`, outside `HOME`, so no volume a pod mounts
+  under `HOME` shadows any of it.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -63,6 +72,10 @@ tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.g
 `docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
 (`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
+The same final step runs every toolchain command (`uv`, `uvx`, `node`, `npm`, `npx`, `corepack`, `aws`)
+as `legion`, from the image `PATH`, so a toolchain binary that does not run on the base fails the build.
+To check a published image's toolchain end to end, Python install included:
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -126,17 +139,22 @@ set to public — a package-settings action on GitHub with no API.
 
 ### Per-deployment toolchains layer on top
 
-The base image carries Legion's own tools only. A deployment whose repositories need more (`uv`, Python,
-Node) builds its own image in **its** repo:
+The base image carries Legion's own tools and the generic toolchain above (`uv`, Node with npm, the AWS
+CLI v2), and nothing in it is specific to one repository: `uv` takes each project's Python from the
+project itself, and the rest is the same for every project. A Python or Node repository therefore runs on
+the published image as it is. A deployment whose repositories need more than that (a system library,
+another language, a different Node line) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
 # deployment toolchain here
 ```
 
-and pins `runtime.kubernetes.image` to *that* image's digest. The toolchain churns on the deployment's
-schedule, not Legion's release schedule, and the deployment's repo owns its own reproducibility — one Legion
-release therefore never has to know about anyone's Python version.
+and pins `runtime.kubernetes.image` to *that* image's digest. The runtime sets every container's `PATH`
+itself (the image's `PATH` with its own directories in front), so an `ENV PATH` in the derived image never
+reaches a pod: put the added commands in `/usr/local/bin` or `/usr/bin`, and outside `HOME`, where a
+pod's volumes would shadow them. What the deployment adds churns on its own schedule, not Legion's
+release schedule, and the deployment's repo owns its reproducibility.
 
 ### Entrypoint
 
