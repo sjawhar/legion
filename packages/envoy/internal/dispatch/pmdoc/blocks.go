@@ -292,9 +292,16 @@ func marksInNodes(nodes []*Node) []MarkRef {
 // The operation refuses (ErrSchema) before allocating missing cells when the tables it pads would
 // add more than maxTablePaddingCells cells in total.
 func PadTables(doc *Node, first, last int) (*Node, error) {
+	return PadTablesWithTablePaddingBudget(doc, first, last, NewTablePaddingBudget())
+}
+
+// PadTablesWithTablePaddingBudget pads tables with budget, which may be shared with Markdown
+// parses in one caller write.
+func PadTablesWithTablePaddingBudget(doc *Node, first, last int, budget *TablePaddingBudget) (*Node, error) {
+	if budget == nil {
+		budget = NewTablePaddingBudget()
+	}
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: append([]*Node(nil), doc.Children...)}
-	tableCount := 0
-	paddedCells := 0
 	for index := first; index <= last && index < len(out.Children); index++ {
 		block := cloneNode(out.Children[index])
 		var paddingErr error
@@ -302,8 +309,7 @@ func PadTables(doc *Node, first, last int) (*Node, error) {
 			if node.Type != "table" {
 				return true
 			}
-			tableCount++
-			if err := padTable(node, tableCount, &paddedCells); err != nil {
+			if err := padTable(node, budget); err != nil {
 				paddingErr = err
 			}
 			return false
@@ -316,7 +322,7 @@ func PadTables(doc *Node, first, last int) (*Node, error) {
 	return out, nil
 }
 
-func padTable(table *Node, tableCount int, paddedCells *int) error {
+func padTable(table *Node, budget *TablePaddingBudget) error {
 	widths := make([]int, len(table.Children))
 	width := 0
 	var widest *Node
@@ -332,9 +338,8 @@ func padTable(table *Node, tableCount int, paddedCells *int) error {
 		padding.written += rowWidth
 		padding.implied += width
 	}
-	*paddedCells += padding.cells()
-	if *paddedCells > maxTablePaddingCells {
-		return padding.refusal(tableCount, *paddedCells)
+	if err := budget.add(padding); err != nil {
+		return err
 	}
 	firstShort, lastShort := -1, -1
 	for index := range table.Children {

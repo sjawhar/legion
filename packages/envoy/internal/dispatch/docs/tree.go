@@ -19,7 +19,11 @@ var ErrDocSchema = errors.New("document is outside the Proof schema")
 // first text, or the empty text a delete splices. Text an insert or an accept writes into a
 // document is parseFragmentInput's.
 func parseInput(markdown string) (*pmdoc.Node, error) {
-	return parseReplacing(nil, markdown)
+	return parseInputWithTablePaddingBudget(markdown, pmdoc.NewTablePaddingBudget())
+}
+
+func parseInputWithTablePaddingBudget(markdown string, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+	return parseReplacingWithTablePaddingBudget(nil, markdown, budget)
 }
 
 // parseFragmentInput parses text written into a document - an insert's, or an accepted
@@ -27,7 +31,11 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 // front-matter block is front matter where the text lands at the document's start
 // (pmdoc.ParseFragment). A block id the text repeats is refused, as parseInput refuses it.
 func parseFragmentInput(markdown string, opensDocument bool) (*pmdoc.Node, error) {
-	return uploadedInput(pmdoc.ParseFragment(markdown, opensDocument))
+	return parseFragmentInputWithTablePaddingBudget(markdown, opensDocument, pmdoc.NewTablePaddingBudget())
+}
+
+func parseFragmentInputWithTablePaddingBudget(markdown string, opensDocument bool, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+	return uploadedInput(pmdoc.ParseFragmentWithTablePaddingBudget(markdown, opensDocument, budget))
 }
 
 // opensDocument reports whether text written at position lands where the document begins: before
@@ -44,7 +52,11 @@ func opensDocument(tree *pmdoc.Node, position int) bool {
 // for none), refusing a block id the markdown repeats that live does not already carry
 // (pmdoc.ParseForWrite).
 func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
-	return uploadedInput(pmdoc.ParseForWrite(markdown, live))
+	return parseReplacingWithTablePaddingBudget(live, markdown, pmdoc.NewTablePaddingBudget())
+}
+
+func parseReplacingWithTablePaddingBudget(live *pmdoc.Node, markdown string, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+	return uploadedInput(pmdoc.ParseForWriteWithTablePaddingBudget(markdown, live, budget))
 }
 
 func uploadedInput(tree *pmdoc.Node, err error) (*pmdoc.Node, error) {

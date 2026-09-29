@@ -265,6 +265,7 @@ func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, a
 }
 
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
+	budget := pmdoc.NewTablePaddingBudget()
 	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
@@ -320,7 +321,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// A reject is not checked: it removes the text a browser insert added, which gives back
 		// the document the insert started from.
 		if !accept {
-			next, err := rejectedInsert(tree, id)
+			next, err := rejectedInsert(tree, id, budget)
 			if err != nil {
 				return err
 			}
@@ -336,7 +337,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		var replacement *pmdoc.Node
 		if code {
 			replacement = codeReplacement(acceptedCode(tree, with, at, range_))
-		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
+		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From), budget); err != nil {
 			return err
 		}
 		// Accepted text stays inside every ask and comment anchor the suggestion lay wholly inside,
@@ -357,7 +358,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// after a reject, before anything reads the accept back, where the browser's accept writes
 		// the replacement where Splice does (padsLikeTheBrowser).
 		if padsLikeTheBrowser(tree, range_, at, inline) {
-			if next, err = padCutTables(tree, next, range_); err != nil {
+			if next, err = padCutTables(tree, next, range_, budget); err != nil {
 				return acceptSpliceRefusal(err)
 			}
 		}
@@ -383,7 +384,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err := refuseBrokenAsks(tree, next); err != nil {
 			return err
 		}
-		if err := refuseMisreadAccept(tree, next, with); err != nil {
+		if err := refuseMisreadAccept(tree, next, with, budget); err != nil {
 			return err
 		}
 		return write(next)

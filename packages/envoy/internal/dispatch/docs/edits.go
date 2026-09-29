@@ -267,7 +267,7 @@ func checkEditPrecondition(tree *pmdoc.Node, precondition model.EditPrecondition
 	return &ErrPreconditionFailed{CurrentDocument: currentDocument, Mismatches: mismatches}
 }
 
-func requirePreconditionCoverage(tree *pmdoc.Node, ops []model.EditOp, precondition model.EditPrecondition) error {
+func requirePreconditionCoverage(tree *pmdoc.Node, ops []model.EditOp, precondition model.EditPrecondition, budget *pmdoc.TablePaddingBudget) error {
 	if precondition.Document != "" {
 		return nil
 	}
@@ -276,7 +276,7 @@ func requirePreconditionCoverage(tree *pmdoc.Node, ops []model.EditOp, precondit
 		covered[block.ID] = struct{}{}
 	}
 	required := make(map[string]struct{})
-	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+	_, err := applyOperationsWithTablePaddingBudget(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
 		ids, err := operationPreconditionBlocks(current, op)
 		if err != nil {
 			return err
@@ -285,7 +285,7 @@ func requirePreconditionCoverage(tree *pmdoc.Node, ops []model.EditOp, precondit
 			required[id] = struct{}{}
 		}
 		return nil
-	})
+	}, budget)
 	if err != nil {
 		return err
 	}
@@ -446,6 +446,10 @@ func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 }
 
 func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
+	return applyOperationsWithTablePaddingBudget(tree, ops, validate, pmdoc.NewTablePaddingBudget())
+}
+
+func applyOperationsWithTablePaddingBudget(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator, budget *pmdoc.TablePaddingBudget) (editBatch, error) {
 	before, err := nodeToken(tree)
 	if err != nil {
 		return editBatch{}, err
@@ -482,7 +486,7 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 				}
 			}
 		}
-		next, err := applyOperation(tree, op)
+		next, err := applyOperationWithTablePaddingBudget(tree, op, budget)
 		if err != nil {
 			return editBatch{}, stampOperation(index, err)
 		}
@@ -578,8 +582,12 @@ func tableAnchorCheck(tree *pmdoc.Node, op model.EditOp) (tableAnchorSnapshot, [
 }
 
 func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
+	return s.prevalidateOperationsWithTablePaddingBudget(ctx, artifactID, tree, ops, pmdoc.NewTablePaddingBudget())
+}
+
+func (s *Service) prevalidateOperationsWithTablePaddingBudget(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp, budget *pmdoc.TablePaddingBudget) ([]tableAnchorSnapshot, error) {
 	snapshots := make([]tableAnchorSnapshot, 0)
-	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+	_, err := applyOperationsWithTablePaddingBudget(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
 		snapshot, marks, table, err := tableAnchorCheck(current, op)
 		if err != nil || !table {
 			return err
@@ -592,7 +600,7 @@ func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, 
 		}
 		snapshots = append(snapshots, snapshot)
 		return nil
-	})
+	}, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -646,8 +654,12 @@ func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axi
 }
 
 func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots []tableAnchorSnapshot) error {
+	return verifyTableAnchorSnapshotsWithTablePaddingBudget(tree, ops, snapshots, pmdoc.NewTablePaddingBudget())
+}
+
+func verifyTableAnchorSnapshotsWithTablePaddingBudget(tree *pmdoc.Node, ops []model.EditOp, snapshots []tableAnchorSnapshot, budget *pmdoc.TablePaddingBudget) error {
 	index := 0
-	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+	_, err := applyOperationsWithTablePaddingBudget(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
 		snapshot, _, table, err := tableAnchorCheck(current, op)
 		if err != nil || !table {
 			return err
@@ -657,7 +669,7 @@ func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots 
 		}
 		index++
 		return nil
-	})
+	}, budget)
 	if err != nil {
 		return err
 	}
@@ -667,10 +679,10 @@ func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots 
 	return nil
 }
 
-func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
-	return applyOperationsWithValidation(tree, ops, func(tree *pmdoc.Node, op model.EditOp) error {
+func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp, budget *pmdoc.TablePaddingBudget) (editBatch, error) {
+	return applyOperationsWithTablePaddingBudget(tree, ops, func(tree *pmdoc.Node, op model.EditOp) error {
 		return s.validateTableEditAnchors(ctx, artifactID, tree, op)
-	})
+	}, budget)
 }
 
 func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID string, tree *pmdoc.Node, op model.EditOp) error {
@@ -754,6 +766,10 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 }
 
 func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
+	return applyOperationWithTablePaddingBudget(tree, op, pmdoc.NewTablePaddingBudget())
+}
+
+func applyOperationWithTablePaddingBudget(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
 	// Every text an operation writes - a replace's with, an insert's markdown, whether it becomes
 	// blocks or table rows, and a retype's attributes - reaches the document with line feeds
 	// alone (pmdoc.LineFeeds), before any check below reads it.
@@ -826,7 +842,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if out, removed, err := pmdoc.DeleteTextblock(tree, r); err != nil || removed {
 			return out, invalidSchemaOp("find", err)
 		}
-		empty, err := parseInput("")
+		empty, err := parseInputWithTablePaddingBudget("", budget)
 		if err != nil {
 			return nil, err
 		}
@@ -858,7 +874,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			}
 		}
 		// Front matter opens only the document's start, so only there does the insert read it.
-		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position))
+		with, err := parseFragmentInputWithTablePaddingBudget(op.Markdown, opensDocument(tree, position), budget)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
@@ -874,7 +890,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		}
 		// What is stored is the document's rendering, so an insert that leaves it reading back
 		// otherwise than it did would store another document than the one it wrote.
-		if err := pmdoc.RefuseMisreadWrite(tree, out); err != nil {
+		if err := pmdoc.RefuseMisreadWriteWithTablePaddingBudget(tree, out, budget); err != nil {
 			return nil, invalidSchemaOp("markdown", err)
 		}
 		return out, nil
@@ -1277,8 +1293,8 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 // inlineAware parses a suggestion's replacement as blocks written into the document, keeping the
 // edge whitespace of a replacement that stays inline. opensDocument says whether the replacement
 // lands where the document begins.
-func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.Node, error) {
-	tree, err := parseFragmentInput(markdown, opensDocument)
+func inlineAware(markdown string, edges textEdges, opensDocument bool, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+	tree, err := parseFragmentInputWithTablePaddingBudget(markdown, opensDocument, budget)
 	if err != nil {
 		return nil, err
 	}

@@ -425,10 +425,10 @@ the table in place. Row `0` is the header; deleting it promotes the first body r
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
 index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
 partially mutates a table. Parsing pads short rows to their headers' widths, as the browser editor's
-table plugin does on load, only while a document's tables add at most 100,000 cells in total; a
-larger document is refused before its cells are allocated, naming the table, cells written, cells its
-header implies, and the limit. `pmdoc.PadTables` applies the same cumulative ceiling when an accept
-or reject pads cut tables.
+table plugin does on load, only while one write request's Markdown parses and cut-table padding add
+at most 100,000 cells in total; a larger request is refused before its cells are allocated, naming
+the table, cells written, cells its header implies, and the limit. `pmdoc.PadTables` shares that
+cumulative request ceiling when an accept or reject pads cut tables.
 Milkdown's gfm preset installs prosemirror-tables' `tableEditing`, whose `fixTables` pads a table a
 transaction brings in (verified on an `EditorState`; that the browser loads by a transaction is
 y-prosemirror's sync, not checked in a browser). The headless engine runs no plugins and keeps the short

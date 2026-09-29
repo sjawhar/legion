@@ -20,7 +20,7 @@ var errJoinsTwoTables = errors.New("the insert runs from one table into the next
 // it. Text without the mark between two runs ends a span, so it is kept, where the browser's reject
 // deletes it with them. A removal the document cannot hold, one the schema refuses or the renderer
 // cannot write, is refused (rejectSpliceRefusal).
-func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
+func rejectedInsert(tree *pmdoc.Node, id string, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
 	spans := pmdoc.MarkSpans(tree, string(MarkSuggestion), id)
 	nothing := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{Type: "paragraph"}}}
 	next := tree
@@ -33,7 +33,7 @@ func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, rejectSpliceRefusal(err)
 		}
-		if next, err = padCutTables(next, spliced, span); err != nil {
+		if next, err = padCutTables(next, spliced, span, budget); err != nil {
 			return nil, rejectSpliceRefusal(err)
 		}
 		if err := next.Validate(); err != nil {

@@ -97,8 +97,8 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 // before it read one block at a time; this one reads the blocks beside each other. The refusal
 // names what reads back and advises rejecting. An error reading the document back that is no
 // refusal, a panic (pmdoc.ErrPanic) among them, is pmdoc's bug, and is its error.
-func refuseMisreadAccept(before, after *pmdoc.Node, with string) error {
-	misread, err := pmdoc.NewMisread(before, after)
+func refuseMisreadAccept(before, after *pmdoc.Node, with string, budget *pmdoc.TablePaddingBudget) error {
+	misread, err := pmdoc.NewMisreadWithTablePaddingBudget(before, after, budget)
 	if err != nil {
 		return err
 	}
@@ -158,12 +158,12 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 // padCutTables pads each table in the document-level blocks a splice of r changed, from before to
 // after (changedBlocks), to its width (pmdoc.PadTables), as the browser editor's table plugin pads a
 // table after any change.
-func padCutTables(before, after *pmdoc.Node, r pmdoc.Range) (*pmdoc.Node, error) {
+func padCutTables(before, after *pmdoc.Node, r pmdoc.Range, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
 	first, _, last, err := changedBlocks(before, after, r)
 	if err != nil {
 		return nil, err
 	}
-	return pmdoc.PadTables(after, first, last)
+	return pmdoc.PadTablesWithTablePaddingBudget(after, first, last, budget)
 }
 
 // padsLikeTheBrowser reports whether an accept may pad the tables its splice cut: whether the

@@ -1188,3 +1188,31 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 		t.Fatalf("cascaded table batch changed document = %q, want %q", text.Markdown, want)
 	}
 }
+
+func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Cumulative table padding", "Before.\n")
+	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	ops := make([]map[string]string, 12)
+	for index := range ops {
+		ops[index] = map[string]string{"op": "insert", "after": "end", "markdown": tablePaddingInsert(100)}
+	}
+
+	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": ops,
+	}, "alice")
+	body := rejected.Body.String()
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) ||
+		!strings.Contains(body, `field \"markdown\"`) || !strings.Contains(body, "table ") || !strings.Contains(body, "limit 100000") {
+		t.Fatalf("cumulative table padding edit: status=%d body=%s", rejected.Code, body)
+	}
+	if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {
+		t.Fatalf("refused edit changed document = %q, want %q", after, before)
+	}
+}
+
+func tablePaddingInsert(width int) string {
+	return strings.Repeat("| header ", width) + "|\n" +
+		strings.Repeat("| --- ", width) + "|\n" +
+		strings.Repeat("| body |\n", width)
+}

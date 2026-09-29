@@ -25,9 +25,8 @@ var tableTransformer = extension.NewTableParagraphTransformer()
 const maxTablePaddingCells = 100_000
 
 var (
-	tablePaddingErrorKey = parser.NewContextKey()
-	tablePaddingCountKey = parser.NewContextKey()
-	tablePaddingCellsKey = parser.NewContextKey()
+	tablePaddingErrorKey  = parser.NewContextKey()
+	tablePaddingBudgetKey = parser.NewContextKey()
 )
 
 type tablePadding struct {
@@ -41,7 +40,7 @@ func (p tablePadding) cells() int {
 
 func (p tablePadding) refusal(table, total int) error {
 	return fmt.Errorf(
-		"%w: table %d writes %d cells, its header implies %d cells, and padding would add %d cells; tables in this operation would add %d cells (limit %d)",
+		"%w: table %d writes %d cells, its header implies %d cells, and padding would add %d cells; tables in this write would add %d cells (limit %d)",
 		ErrSchema,
 		table,
 		p.written,
@@ -52,18 +51,38 @@ func (p tablePadding) refusal(table, total int) error {
 	)
 }
 
-func recordTablePadding(pc parser.Context, padding tablePadding) bool {
-	count, _ := pc.Get(tablePaddingCountKey).(int)
-	count++
-	pc.Set(tablePaddingCountKey, count)
-	cells, _ := pc.Get(tablePaddingCellsKey).(int)
-	cells += padding.cells()
-	pc.Set(tablePaddingCellsKey, cells)
-	if cells <= maxTablePaddingCells {
-		return false
+// TablePaddingBudget bounds the empty cells that one caller write can add while reading or
+// padding Markdown tables. A write shares one budget across all of its parses and PadTables calls.
+type TablePaddingBudget struct {
+	cells  int
+	tables int
+}
+
+// NewTablePaddingBudget returns a fresh budget for one caller write.
+func NewTablePaddingBudget() *TablePaddingBudget {
+	return &TablePaddingBudget{}
+}
+
+func (b *TablePaddingBudget) add(padding tablePadding) error {
+	b.tables++
+	b.cells += padding.cells()
+	if b.cells <= maxTablePaddingCells {
+		return nil
 	}
-	pc.Set(tablePaddingErrorKey, padding.refusal(count, cells))
-	return true
+	return padding.refusal(b.tables, b.cells)
+}
+
+func recordTablePadding(pc parser.Context, padding tablePadding) bool {
+	budget, _ := pc.Get(tablePaddingBudgetKey).(*TablePaddingBudget)
+	if budget == nil {
+		budget = NewTablePaddingBudget()
+		pc.Set(tablePaddingBudgetKey, budget)
+	}
+	if err := budget.add(padding); err != nil {
+		pc.Set(tablePaddingErrorKey, err)
+		return true
+	}
+	return false
 }
 
 func (lazyAwareTable) Extend(m goldmark.Markdown) {

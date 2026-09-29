@@ -353,8 +353,8 @@ syntax, and a table-cell target is its cell text.
 | `insert` | `markdown`, exactly one of `after` or `before` | Insert a sibling block before or after a quote or heading's enclosing document block. `"start"` and `"end"` select document edges. Pipe-table row fragments at a table-cell target are the exception: they extend that table before or after the containing row. Use `replace` for inline continuation. |
 
 Table-row fragments contain body rows only: omit the table header and delimiter row. Short rows are
-padded to the table width while the fragment adds at most 100,000 cells; a larger fragment is
-rejected as `INVALID_OP` on `markdown`. Rows wider than the table are rejected.
+padded to the table width while all operations in the edit request add at most 100,000 cells; a
+larger request is rejected as `INVALID_OP` on `markdown`. Rows wider than the table are rejected.
 
 ## Document errors
 

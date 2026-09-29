@@ -83,7 +83,13 @@ func blockParsers() []util.PrioritizedValue {
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
-	doc, err := parseUnstamped(markdown, true)
+	return ParseWithTablePaddingBudget(markdown, NewTablePaddingBudget())
+}
+
+// ParseWithTablePaddingBudget parses markdown with budget, which may be shared with other parses
+// in one caller write.
+func ParseWithTablePaddingBudget(markdown string, budget *TablePaddingBudget) (*Node, error) {
+	doc, err := parseUnstamped(markdown, true, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -99,11 +105,17 @@ func Parse(markdown string) (*Node, error) {
 // whose rendering, the markdown it is stored as, reads back otherwise is refused
 // (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseForWrite(markdown, live, true)
+	return ParseForWriteWithTablePaddingBudget(markdown, live, NewTablePaddingBudget())
+}
+
+// ParseForWriteWithTablePaddingBudget parses a whole-document write with budget, which may be
+// shared with other parses and table padding in one caller write.
+func ParseForWriteWithTablePaddingBudget(markdown string, live *Node, budget *TablePaddingBudget) (*Node, error) {
+	doc, err := parseForWrite(markdown, live, true, budget)
 	if err != nil {
 		return nil, err
 	}
-	if err := RefuseMisreadDocument(doc); err != nil {
+	if err := RefuseMisreadDocumentWithTablePaddingBudget(doc, budget); err != nil {
 		return nil, err
 	}
 	return doc, nil
@@ -114,11 +126,17 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 // after a document's start. Written where the document begins (opensDocument), a closed
 // front-matter block opening the markdown is front matter, as Parse reads it.
 func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
-	return parseForWrite(markdown, nil, opensDocument)
+	return ParseFragmentWithTablePaddingBudget(markdown, opensDocument, NewTablePaddingBudget())
 }
 
-func parseForWrite(markdown string, live *Node, readFrontmatter bool) (*Node, error) {
-	doc, err := parseUnstamped(LineFeeds(markdown), readFrontmatter)
+// ParseFragmentWithTablePaddingBudget parses a document fragment with budget, which may be shared
+// with other fragments in one caller write.
+func ParseFragmentWithTablePaddingBudget(markdown string, opensDocument bool, budget *TablePaddingBudget) (*Node, error) {
+	return parseForWrite(markdown, nil, opensDocument, budget)
+}
+
+func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *TablePaddingBudget) (*Node, error) {
+	doc, err := parseUnstamped(LineFeeds(markdown), readFrontmatter, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +197,7 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
 // as the blocks its lines make.
-func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error) {
+func parseUnstamped(markdown string, readFrontmatter bool, budget *TablePaddingBudget) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
@@ -189,7 +207,7 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
 		source = source[rest:]
 	}
-	root, err := blockReader.parse(source, unclosedFrontmatter)
+	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
 	if err != nil {
 		return nil, err
 	}
