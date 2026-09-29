@@ -2515,6 +2515,14 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // the same timer. With a stall that never recovers all three would pass, main because its per-key
 // Gets then time out on a dead link — a second route to a failed start that hides the first — and
 // that is the run the Flush assertion refuses.
+//
+// Those FAIL rows can flip to PASS under load, and do: this test's review saw 2 false passes at
+// 88f9fbaa in 45 iterations, both "context deadline exceeded", and 3fa4774d passed 1 of 3 runs
+// here the same way. A run whose requests time out before the release never reaches the shape
+// being measured. It has never gone red on correct code, so this is a demonstration rather than
+// the regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
+// which is deterministic and failed on both of those builds in every run, plus the Flush here
+// against anyone weakening the hold.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	names := testBuckets(t)
 	direct, cleanup := connectNATS(t)
