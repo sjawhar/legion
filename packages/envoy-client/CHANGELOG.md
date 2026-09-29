@@ -14,6 +14,14 @@
 
 ### Changed
 
+- `dispatch_read` of an issue prints an `External links:` section: each URL a person or an agent
+  linked on the issue (the pull request that delivers it among them), with its kind, as the issue
+  page shows them. Before, an agent had no tool that showed a linked pull request.
+- A session's claim, on `dispatch_read` and on each `dispatch_issues` row, says `· not running`
+  when the live agent registry loaded and does not list the holder — the judgement the
+  dashboard's claim chip makes, through `claimHolds` — and `· liveness unknown` when the registry
+  could not be read. Before, the line named the holder either way, with nothing to say whether its
+  session still ran.
 - The `envoy_subscribe` description says a `pr.<n>.checks` settlement is published for every
   commit of the pull request whose checks settle, the head or not, and names its `sha`
   (LEGION-208).

@@ -167,6 +167,14 @@ type ControllerNotice Notice
 
 func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNotice }
 
+// The controller notices no architect is told of. A triage notice's root is unrecorded, so no
+// architect owns it; a slot-free notice names the root whose slot admission released while no
+// waiting root took it, and the controller picks the next root to hand to Legion.
+const (
+	TriageNotice   NoticeKind = "triage"
+	SlotFreeNotice NoticeKind = "slot-free"
+)
+
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
 // the one request that ends the claim, the tree's root claim included. There is no plain stop:
@@ -374,8 +382,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
 		}
 	case ControllerNotice:
-		// A triage notice is the controller's alone: its root is unrecorded, so no architect owns it.
-		if value.Kind != "triage" && !validNoticeKind(value.Kind) {
+		if value.Kind != TriageNotice && value.Kind != SlotFreeNotice && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
 		}
 	case SuperviseRequest:

@@ -36464,6 +36464,15 @@ function actorLabel(actor, titles) {
   }
   return `${name} (as ${serviceSubjectLabel(service)})`;
 }
+function claimHolds(claim, titles) {
+  if (claim.actor.kind !== "session") {
+    return true;
+  }
+  if (titles === undefined) {
+    return;
+  }
+  return titles.has(claim.actor.id);
+}
 // ../contracts/src/agent-stream.ts
 var AGENT_STREAM_LIMITS = {
   partChars: 16000,
@@ -39941,17 +39950,19 @@ function componentsLine(components) {
   }
 }
 function claimText(claim, titles) {
-  return `${actorLabel(claim.actor, titles)} since ${claim.at}`;
+  const holds = claimHolds(claim, titles);
+  const marker = holds === undefined ? " \xB7 liveness unknown" : holds ? "" : " \xB7 not running";
+  return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
 async function liveSessionTitles(client, needed) {
   if (!needed) {
-    return new Map;
+    return;
   }
   try {
     const agents = await client.listAgents();
     return new Map(agents.map((agent) => [agent.session_id, agent.title]));
   } catch {
-    return new Map;
+    return;
   }
 }
 function holdsSession(claim) {
@@ -39983,6 +39994,9 @@ function issueSummary(issue2, events, references, graph, titles) {
     throw new Error("Dispatch issue is missing components");
   if (issue2.claim === undefined)
     throw new Error("Dispatch issue is missing claim");
+  if (issue2.external_links === undefined) {
+    throw new Error("Dispatch issue is missing external_links");
+  }
   return [
     `Title: ${issue2.title}`,
     `Key: ${issue2.key}`,
@@ -39994,6 +40008,8 @@ function issueSummary(issue2, events, references, graph, titles) {
     componentsLine(issue2.components),
     `Route: ${routeText(issue2, titles)}`,
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
+    "External links:",
+    ...issue2.external_links.length === 0 ? ["- none"] : issue2.external_links.map((link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`),
     "Open asks:",
     ...asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`),
     "References:",

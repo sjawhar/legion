@@ -1,3 +1,4 @@
+import { claimHolds } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import type { IssueClaim } from "../../api/types";
@@ -16,7 +17,8 @@ export interface AgentRegistry {
 /**
  * Whether a claim's session has lapsed: the registry has loaded and does not list it, which is
  * exactly when the server lets any agent take the issue. A human's claim never lapses - there
- * is no session to end, and only a human releases or forces it.
+ * is no session to end, and only a human releases or forces it. The judgement is `claimHolds`
+ * from `@legion/contracts`, the one the agent tools print as "not running" too.
  *
  * The loaded test is the whole point. A chip paints the stamped title before the registry
  * answers, so "the registry has not arrived" and "the holder is gone" look identical to a bare
@@ -24,13 +26,8 @@ export interface AgentRegistry {
  * moment, and mark them all free for good whenever the listener is unreachable.
  */
 export function claimHasLapsed(claim: IssueClaim, registry: AgentRegistry): boolean {
-  if (claim.actor.kind !== "session") {
-    return false;
-  }
-  if (registry.isPending || registry.isError) {
-    return false;
-  }
-  return !registry.titles.has(claim.actor.id);
+  const loaded = registry.isPending || registry.isError ? undefined : registry.titles;
+  return claimHolds(claim, loaded) === false;
 }
 
 /**

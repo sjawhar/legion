@@ -7,9 +7,10 @@ capability.
 
 Then read and follow `skill://legion-controller`. The controller is wake-driven: handle
 one delivered wake per turn, verify daemon and Dispatch state before side effects, and do
-not poll or run an idle loop. It judges triage, controller-actionable architect escalations,
-resync healing, and direct human messages; it never performs phase-worker work or forwards raw
-events into an architect session.
+not poll or run an idle loop. It keeps the project's admission slots full with the
+highest-priority work nobody else is on, judges triage, controller-actionable architect
+escalations, resync healing, and direct human messages; it never performs phase-worker work or
+forwards raw events into an architect session.
 This session runs in a terminal pane Sami can attach to (`tmux -L legion-<project> select-window
 -t <window id> \; attach -t legion-<project>`); a message typed directly into this session is a
 direct human instruction and is answered first, before any wake.

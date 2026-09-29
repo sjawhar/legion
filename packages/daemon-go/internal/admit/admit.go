@@ -64,29 +64,41 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
 // observation of a recorded issue, wakes the controller for an unrecorded root in triage handed to
-// Legion (a controller notice, not a record), releases slots that the workflow completed, and
-// promotes waiting roots while capacity remains. The workflow handler runs first: it records every
-// live-tree child, leaving admission to record only a still-unrecorded root or orphan.
+// Legion (a controller notice, not a record), releases slots that the workflow completed, promotes
+// waiting roots while capacity remains, and wakes the controller when a slot it released is still
+// free after that (wakeForFreeSlot). The workflow handler runs first: it records every live-tree
+// child, leaving admission to record only a still-unrecorded root or orphan.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
-	if err := a.releaseDoneSlots(ctx, tx); err != nil {
+	released, err := a.applyFact(ctx, tx, fact)
+	if err != nil {
 		return intake.Result{}, err
+	}
+	return intake.Result{}, a.wakeForFreeSlot(ctx, tx, released)
+}
+
+// applyFact is Apply's work, and reports the issues whose slots it released.
+func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) ([]string, error) {
+	released, err := a.releaseDoneSlots(ctx, tx)
+	if err != nil {
+		return nil, err
 	}
 
 	if position, ok := fact.(intake.DispatchConsumerPosition); ok {
-		return a.release(ctx, tx, position)
+		more, err := a.release(ctx, tx, position)
+		return append(released, more...), err
 	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
 		if _, err := a.promote(ctx, tx); err != nil {
-			return intake.Result{}, err
+			return nil, err
 		}
-		return intake.Result{}, nil
+		return released, nil
 	}
 
 	stored, err := a.store.Issue(ctx, tx, observation.Key)
 	if err != nil {
-		return intake.Result{}, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
+		return nil, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
 	if stored == nil {
 		handed := observation.HandedOver
@@ -99,8 +111,8 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		// controller. The record stays empty, as for any root not yet todo; Reconcile's boot
 		// listing reads every status now, but a triage root is never a todo candidate it admits.
 		if observation.Status == "triage" && observation.Parent == "" && handed {
-			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: "triage"}, a.now()); err != nil {
-				return intake.Result{}, err
+			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: record.TriageNotice}, a.now()); err != nil {
+				return nil, err
 			}
 		}
 		// An unrecorded todo issue without the label is someone else's work in a project Legion may
@@ -111,12 +123,12 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		// found it would have release admit on that stale information instead.
 		if observation.Status != "todo" {
 			a.refreshHeldSummary(observation)
-			return intake.Result{}, nil
+			return released, nil
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
-			return intake.Result{}, nil
+			return released, nil
 		}
 		a.mu.Lock()
 		summary, held := a.pending[observation.Key]
@@ -134,22 +146,46 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 			// event already acknowledged as processed. promote's own pending membership check —
 			// not this one — is what still holds the freshly recorded candidate back from a slot
 			// until pending is actually clear; a later pass once the hold clears promotes it.
-			return intake.Result{}, nil
+			return released, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
-			return intake.Result{}, err
+			return nil, err
 		}
 	} else if err := a.applyObservation(ctx, tx, *stored, observation); err != nil {
-		return intake.Result{}, err
+		return nil, err
 	}
 
-	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
-		return intake.Result{}, err
+	inactive, err := a.releaseInactiveSlots(ctx, tx)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := a.promote(ctx, tx); err != nil {
-		return intake.Result{}, err
+		return nil, err
 	}
-	return intake.Result{}, nil
+	return append(released, inactive...), nil
+}
+
+// wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left
+// free: a tree finished or left the workflow and no waiting root took its place, so the controller
+// picks the next root to hand to Legion (skill://legion-controller). It is one controller notice,
+// `slot-free` on the first issue whose slot was released; a slot the waiting line refilled wakes
+// nobody. Free is the capacity promote itself counts against the cap.
+func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []string) error {
+	if len(released) == 0 {
+		return nil
+	}
+	issues, err := a.store.Issues(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("list admission issues: %w", err)
+	}
+	slots, err := a.store.Slots(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("list admission slots: %w", err)
+	}
+	if len(ownSlots(issues, slots)) >= a.cap {
+		return nil
+	}
+	return a.enqueue(ctx, tx, released[0], record.ControllerNotice{Kind: record.SlotFreeNotice}, a.now())
 }
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available
@@ -206,11 +242,14 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 			"count", len(deferred), "target", target, "ack_floor", position.AckFloorStream)
 	}
 
-	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
+	released, err := a.releaseInactiveSlots(ctx, tx)
+	if err != nil {
 		return err
 	}
-	_, err = a.promote(ctx, tx)
-	return err
+	if _, err := a.promote(ctx, tx); err != nil {
+		return err
+	}
+	return a.wakeForFreeSlot(ctx, tx, released)
 }
 
 func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intake.DispatchIssue, logOrphan bool) error {
@@ -428,48 +467,51 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
 }
 
-func (a *Admission) releaseDoneSlots(ctx context.Context, tx pgx.Tx) error {
+func (a *Admission) releaseDoneSlots(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return a.releaseSlots(ctx, tx, "completed", func(issue record.Issue) bool { return issue.Phase == phase.Done })
 }
 
-func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
+func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return a.releaseSlots(ctx, tx, "inactive", func(issue record.Issue) bool {
 		return issue.Phase == phase.Done || record.OutOfWorkflow(issue.Status)
 	})
 }
 
 // releaseSlots releases the slot of every issue of this project that release says is done with
-// it; which describes such an issue in an error. Each release is logged once the fact commits.
-func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, release func(record.Issue) bool) error {
+// it, and reports those issues in slot order; which describes such an issue in an error. Each
+// release is logged once the fact commits.
+func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, release func(record.Issue) bool) ([]string, error) {
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("list admission slots: %w", err)
+		return nil, fmt.Errorf("list admission slots: %w", err)
 	}
 	own := []record.Issue{}
 	for _, slot := range slots {
 		issue, err := a.store.Issue(ctx, tx, slot.Issue)
 		if err != nil {
-			return fmt.Errorf("read slotted issue %s: %w", slot.Issue, err)
+			return nil, fmt.Errorf("read slotted issue %s: %w", slot.Issue, err)
 		}
 		if issue == nil {
-			return fmt.Errorf("slotted issue %s has no record", slot.Issue)
+			return nil, fmt.Errorf("slotted issue %s has no record", slot.Issue)
 		}
 		if issue.Project == a.project {
 			own = append(own, *issue)
 		}
 	}
 	inUse := len(own)
+	var released []string
 	for _, issue := range own {
 		if !release(issue) {
 			continue
 		}
 		if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
-			return fmt.Errorf("release %s issue %s: %w", which, issue.Key, err)
+			return nil, fmt.Errorf("release %s issue %s: %w", which, issue.Key, err)
 		}
 		inUse--
+		released = append(released, issue.Key)
 		a.logSlot(ctx, "released", issue.Key, inUse)
 	}
-	return nil
+	return released, nil
 }
 
 // logSlot logs a slot released or taken once the fact commits: the issue, the slots the project
@@ -597,7 +639,7 @@ func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
 // actually committed (intake.OnCommit): clearing it any earlier would say a hold is
 // resolved while a failed commit leaves nothing of this release durable, so the next
 // promote-triggering call would trust an unreleased hold's authority.
-func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.DispatchConsumerPosition) (intake.Result, error) {
+func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.DispatchConsumerPosition) ([]string, error) {
 	a.mu.Lock()
 	caughtUp := len(a.pending) > 0 && position.Reached(a.target)
 	var releasing map[string]dispatch.IssueSummary
@@ -606,10 +648,11 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 	}
 	a.mu.Unlock()
 
+	var released []string
 	if caughtUp {
 		slots, err := a.store.Slots(ctx, tx)
 		if err != nil {
-			return intake.Result{}, fmt.Errorf("list admission slots: %w", err)
+			return nil, fmt.Errorf("list admission slots: %w", err)
 		}
 		slotted := make(map[string]struct{}, len(slots))
 		for _, slot := range slots {
@@ -617,19 +660,19 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 		}
 		for _, summary := range releasing {
 			if err := a.applySummary(ctx, tx, summary, slotted); err != nil {
-				return intake.Result{}, err
+				return nil, err
 			}
 		}
-		if err := a.releaseInactiveSlots(ctx, tx); err != nil {
-			return intake.Result{}, err
+		if released, err = a.releaseInactiveSlots(ctx, tx); err != nil {
+			return nil, err
 		}
 	}
 	admitted, err := a.promoteHolds(ctx, tx, !caughtUp)
 	if err != nil {
-		return intake.Result{}, err
+		return nil, err
 	}
 	if !caughtUp {
-		return intake.Result{}, nil
+		return nil, nil
 	}
 	a.log.Info("admission: the Dispatch consumer has caught up; releasing held roots",
 		"count", len(releasing), "ack_floor", position.AckFloorStream, "idle", position.Idle, "admitted", admitted)
@@ -640,7 +683,7 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 		}
 		a.mu.Unlock()
 	})
-	return intake.Result{}, nil
+	return released, nil
 }
 
 // ownSlots is the slots of issues, this project's. The slots table is shared by every project's
