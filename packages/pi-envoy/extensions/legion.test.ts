@@ -3317,9 +3317,9 @@ describe("Legion OMP extension", () => {
   // OMP dispatches one session event to every extension's handler; the manifest lists envoy.ts
   // before legion.ts, but nothing in the code may depend on that. The claim legion.ts makes on
   // /new must reach the pane's own envoy instance in either order, because only that instance's
-  // heartbeat re-asserts the role (LEGION-29): under the previous last-bound-wins routing the
-  // legion-first order handed the claim to the subagent's instance, whose heartbeat then saw the
-  // pane's id as drift and soft-claimed the controller role for the subagent's session.
+  // heartbeat re-asserts the role (LEGION-29): with last-bound-wins routing the legion-first
+  // order would hand the claim to the subagent's instance, whose heartbeat would then see the
+  // pane's id as drift and soft-claim the controller role for the subagent's session.
   for (const order of ["envoy.ts", "legion.ts"] as const) {
     test(`after /new in a pane that ran a task subagent, the heartbeat re-asserts the controller for the pane's new session when ${order} handles the switch first`, async () => {
       await controllerPaneEnvironment();

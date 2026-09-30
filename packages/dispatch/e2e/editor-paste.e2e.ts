@@ -12,9 +12,9 @@ test.beforeEach(async () => {
 const loneAsk = ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n';
 
 // Plain text pasted into a table cell lands in that one cell, with its blocks and line breaks
-// flattened to inline text joined by spaces, since a GFM cell holds one line. It once overwrote the
-// caret's cell and spread the other lines into new cells of the same row, past the header's column
-// count, where a GFM reader drops them.
+// flattened to inline text joined by spaces, since a GFM cell holds one line. Overwriting the
+// caret's cell and spreading the other lines into new cells of the row would put them past the
+// header's column count, where a GFM reader drops them.
 const table = "| alpha one | beta two |\n| --- | --- |\n| gamma three | delta four |\n";
 for (const [cell, quote, pasted, stored] of [
   [
@@ -72,8 +72,8 @@ for (const [cell, quote, pasted, stored] of [
 }
 
 // HTML pasted into a table cell, the usual clipboard, lands in that one cell the same way, with its
-// marks and links kept. It once spread its paragraphs into new cells of the row, overwriting the
-// caret's cell, or replaced the header row.
+// marks and links kept, never spread into new cells of the row, over the caret's cell or over the
+// header row.
 const html =
   '<p><strong>Bold</strong> <a href="https://example.com">Link</a> <code>Code</code></p><p><em>Second</em></p>';
 for (const [cell, quote, stored] of [
@@ -110,8 +110,8 @@ for (const [cell, quote, stored] of [
 
 // Text flattened into a cell takes the marks at the caret, or of the text it replaces, when it is one
 // line, as a one-line paste does anywhere else, and more than one line pasted into bold text isn't
-// bold, as anywhere else. The one line once kept only its own marks: after bold "delta" the pasted
-// "x" was stored outside the bold, and pasted over bold "delta" it lost the bold.
+// bold, as anywhere else. A line that kept only its own marks would store an "x" pasted after bold
+// "delta" outside the bold, and lose the bold pasted over bold "delta".
 const boldTable = "| alpha one | beta two |\n| --- | --- |\n| gamma three | **delta** four |\n";
 for (const [name, clipboard, target, stored] of [
   ["plain text", { html: "", text: "x" }, "after bold text", "**deltax** four"],
@@ -176,8 +176,8 @@ for (const [cell, quote, stored] of [
 }
 
 // A spreadsheet's copy is a table too, although Google Sheets and Excel put a style block beside it:
-// pasted with the caret in the header cell, it fills the table from there. Its CSS once counted as
-// text outside the table, and the copy was joined into the one cell.
+// pasted with the caret in the header cell, it fills the table from there. Its CSS counted as text
+// outside the table would join the copy into the one cell.
 for (const [source, html] of [
   [
     "Google Sheets",
@@ -308,9 +308,9 @@ async function openAt(browser: Browser, title: string, target: Target) {
 }
 
 // Tab-separated text pasted onto a selection of cells fills them as a grid, one value per cell, the
-// way a spreadsheet's copy pastes. It once threw inside prosemirror-tables once the selection
-// reached the header row, whose cells must be header cells, and the browser then pasted the text
-// into the last cell by itself.
+// way a spreadsheet's copy pastes, header row included, whose cells must be header cells. A grid
+// paste that throws inside prosemirror-tables there leaves the browser pasting the text into the
+// last cell by itself.
 for (const how of ["drag", "shift-click"] as const) {
   test(`tab-separated text pasted onto four cells selected by ${how} fills them as a grid`, async ({
     browser,
@@ -337,8 +337,7 @@ for (const how of ["drag", "shift-click"] as const) {
 
 // A line break pasted into a table as cells, from HTML or a code block, is a space in its cell, as in
 // text pasted at a caret, since a GFM cell holds one line and a hard break stored in a table ends the
-// row. These pastes once kept the break in the cell, and the stored table read back broken, or
-// they threw and stored nothing.
+// row. A break kept in the cell stores a table that reads back broken.
 const lineBreakHtml = { html: "<p>one<br>two</p>", text: "one\ntwo" };
 const lineBreakCells = {
   html: "<table><tr><td>b1<br>b2</td><td>c</td></tr></table>",
@@ -410,9 +409,8 @@ for (const [name, clipboard, target, stored] of [
 // A copied cell holding more than one block, as a Docs cell of two paragraphs or a list does, keeps
 // all of it, joined into its one line the way the caret path joins pasted text: text beside a block,
 // and a table nested in the cell, as email HTML nests them, included. Fitting the parsed cell into a
-// Milkdown cell, which holds one paragraph, once kept only the first block, text before a block
-// once ran into that block's first line and lost the rest, and a nested table's rows once became
-// rows of the grid, with their text removed from the cell.
+// Milkdown cell, which holds one paragraph, must not keep only the first block, run text before a
+// block into that block's first line, or turn a nested table's rows into rows of the grid.
 const cellBlocks = [
   ["two paragraphs", "<p>x</p><p>y</p>", "x y"],
   ["a list", "<ul><li>a</li><li>b</li></ul>", "a b"],
@@ -460,8 +458,8 @@ for (const [blocks, cellHtml, joined] of cellBlocks) {
 
 // HTML pasted onto selected cells that isn't a copy of cells fills them one line each, a line being
 // a paragraph, a list item, or text beside a block, and like a copy of cells it repeats from its
-// first line across a selection wider than it. A list once filled every cell with its first item,
-// and text or an image beside a block was once dropped.
+// first line across a selection wider than it. A list's items each fill a cell, and text or an image
+// beside a block is never dropped.
 const threeColumns = "| c1 | c2 | c3 |\n| --- | --- | --- |\n| d1 | d2 | d3 |\n";
 const image = "![](https://example.com/i.png)";
 for (const [shape, html, cells] of [
@@ -513,8 +511,8 @@ for (const [shape, html, cells] of [
 }
 
 // A copied table's row with no cells (an empty <tr>) carries nothing to paste, so the grid paste
-// leaves it out. It once reached prosemirror-tables' insert as a row of no cells, which threw, and the
-// paste stored nothing.
+// leaves it out: prosemirror-tables' insert throws on a row of no cells, and the paste would store
+// nothing.
 const emptyFirstRow = {
   html: "<table><tr></tr><tr><td>a</td><td>b</td></tr></table>",
   text: "a\tb",
@@ -555,8 +553,8 @@ for (const [clipboard, target, stored] of [
 }
 
 // A copied table whose rows hold no cells pastes as nothing, so onto selected cells it empties them,
-// as pasting nothing over selected text deletes it. Its cell-less row once reached prosemirror-tables
-// as a grid of no columns, which threw, and the paste stored nothing.
+// as pasting nothing over selected text deletes it. Its cell-less row, handed to prosemirror-tables,
+// is a grid of no columns, which throws, and the paste would store nothing.
 test("a table with no cells, pasted onto the whole table, empties its cells", async ({
   browser,
 }) => {
@@ -645,8 +643,8 @@ test("plain text pasted onto a selection of cells fills them line by line", asyn
 // A soft line break in pasted plain text is pasted as a hard break, since a pasted "alpha\nbeta"
 // keeps its line break (packages/proof-editor/src/lib.ts, where markdown import alone turns soft
 // breaks into spaces). The editor shows the break, and the stored backslash and newline read back as
-// that break. It was once pasted as a soft break, which the editor draws as a space while its stored
-// copy reads back as a line break. A markdown hard break, an HTML <br>, and a soft break in markdown
+// that break. Pasted as a soft break, it would show as a space in the editor while its stored copy
+// reads back as a line break. A markdown hard break, an HTML <br>, and a soft break in markdown
 // written through the API are the controls.
 for (const [shape, spec, quote, clipboard, stored] of [
   [

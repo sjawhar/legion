@@ -35,14 +35,14 @@ func TestDevAttestationRootRefusedWithRulesS3URI(t *testing.T) {
 
 // TestMainRefusesDevAttestationRootWithRulesS3URI drives the REAL compiled binary's main(), not
 // refuseDevAttestationRootInProduction directly — the prior three tests below prove only that the
-// helper function itself is correct, and a commit already once deleted its only call site from
-// main() while every one of those tests, go build, and go vet all stayed green, because none of
-// them exercises the actual boot wiring. This builds cmd/broker once, execs it with both
+// helper function itself is correct, so deleting its only call site from main() would leave every
+// one of them, go build, and go vet green, because none of them exercises the actual boot wiring.
+// This builds cmd/broker once, execs it with both
 // -dev-attestation-root and BROKER_RULES_S3_URI set (plus just enough other required BROKER_*
 // variables for config.Load to succeed — the refusal runs immediately after config.Load and
 // before store.Open, so no real Postgres or AWS credential is ever needed), and asserts the
-// process exits non-zero naming the refusal reason on stderr. A future regression that drops the
-// fatal(refuseDevAttestationRootInProduction(...)) call again would make this test time out
+// process exits non-zero naming the refusal reason on stderr. A regression that drops the
+// fatal(refuseDevAttestationRootInProduction(...)) call would make this test time out
 // waiting for a process that instead tries to open a nonexistent database, or exit 0/with an
 // unrelated error — either way, it fails here where the unit tests above cannot catch it.
 func TestMainRefusesDevAttestationRootWithRulesS3URI(t *testing.T) {
@@ -115,9 +115,9 @@ func TestNonZeroPortPublicURLIsFineEvenWithRulesS3URI(t *testing.T) {
 
 // TestMainRefusesPortZeroPublicURLWithRulesS3URI drives the REAL compiled binary's main(), not
 // refusePortZeroPublicURLInProduction directly, for the same reason
-// TestMainRefusesDevAttestationRootWithRulesS3URI does: a commit once moved this guard's only
-// call site to run after st.Migrate, two S3 reads, and net.Listen, so a misconfigured production
-// boot would migrate the production database and bind a socket before ever refusing. This builds
+// TestMainRefusesDevAttestationRootWithRulesS3URI does: with this guard's only call site moved to
+// run after st.Migrate, two S3 reads, and net.Listen, a misconfigured production boot would
+// migrate the production database and bind a socket before ever refusing. This builds
 // cmd/broker once, execs it with BROKER_PUBLIC_URL=http://127.0.0.1:0 and BROKER_RULES_S3_URI set
 // (plus an unreachable BROKER_DATABASE_URL and just enough other required BROKER_* variables for
 // config.Load to succeed — the refusal must run before store.Open, so no real Postgres or AWS

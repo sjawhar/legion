@@ -497,7 +497,7 @@ func TestSlackEnvelopesThread(t *testing.T) {
 	// first wins per (key, session). Publishing the thread copy ahead of the
 	// channel copy gives dual-subscribed sessions ONE push labeled with the most
 	// specific topic — instead of the channel copy silently starving the thread
-	// subscription (observed live 2026-07-20).
+	// subscription.
 	if items[0].Topic != "notifications.slack.T01234567.C01234567.thread.1234567890_123456.message" {
 		t.Fatalf("unexpected thread topic: %s", items[0].Topic)
 	}

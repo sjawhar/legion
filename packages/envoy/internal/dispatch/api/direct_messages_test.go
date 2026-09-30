@@ -890,9 +890,9 @@ func assertRootCarriesDelivery(t *testing.T, database *store.Store, rootID, sess
 // is that its other member stays green.)
 //
 // The flag a conversation comes back with is the read mark's verdict, not "this session has
-// replied here". Written by the Legion PO's reviewer (#1533, issuecomment-5865095561), green at
-// 13dbc553; it hangs off directConversationFrom, as TestARootInBothCandidateBranchesIsListedOnce
-// does, so a change to that helper fails both at once, which is the point of sharing it.
+// replied here". It hangs off directConversationFrom, as
+// TestARootInBothCandidateBranchesIsListedOnce does, so a change to that helper fails both at
+// once, which is the point of sharing it.
 func TestTheWindowsUnreadFlagIsReadAgainstTheMarkNotThePresenceOfAReply(t *testing.T) {
 	handler, _, readRoot, replyToRead, _ := directConversationFrom(t, "alice")
 	readReply := decodeBody[model.Message](t, replyToRead("Answered, and read."))

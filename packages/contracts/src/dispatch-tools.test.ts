@@ -419,9 +419,8 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  // Sami, 2026-09-24, answering "may agents set issue priority (P0–P3), or only propose it for
-  // you?" on dispatch://LEGION/artifact/issue-status-conventions-md: "Agents may set". Only
-  // priority was ruled on, so rank stays the board's and is still refused.
+  // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
+  // rank stays the board's and is refused.
   test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
     const schema = schemaFor("dispatch_issue_update");
 

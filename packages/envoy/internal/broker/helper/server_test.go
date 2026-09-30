@@ -440,9 +440,9 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 		t.Fatalf("recovery uses a fresh key and a new enrollment for the same runtime_id: %+v", sess.Info())
 	}
 	// The recovered session's own goroutine revokes the old enrollment before its first enroll
-	// call (the AGENTC-834 thermonuclear review's finding on Recover's ordering, fixed by
-	// threading priorID through adopt/enrollLoop): by the time sess reads "enrolled" above, the
-	// old id must already be revoked, so this poll should already find it on the first check.
+	// call (AGENTC-834 thermonuclear review, Recover's ordering; adopt threads priorID into
+	// enrollLoop): by the time sess reads "enrolled" above, the old id must already be revoked, so
+	// this poll should already find it on the first check.
 	revokeDeadline := time.Now().Add(5 * time.Second)
 	for {
 		r.fake.mu.Lock()
@@ -589,10 +589,10 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 // revoke-before-enroll guard calls revokeLapsed synchronously, and revokeLapsed retries
 // indefinitely with backoff — so if the re-pinned session ends (Registry.Remove, exactly what
 // retire/unregister would do) while that revoke is genuinely stuck retrying against a failing
-// broker, the previous fix left priorID abandoned forever: retire's own revoke only ever touches
+// broker, priorID would be abandoned forever: retire's own revoke only ever touches
 // sess.EnrollmentID(), still empty at this point since this session never reached its first
 // successful Enroll, and once Registry.Remove drops the record a later restart's Recover has no
-// way to find priorID either. The fix falls back to firing the same bounded, independent
+// way to find priorID either. So enrollLoop falls back to firing the same bounded, independent
 // s.revoke used elsewhere whenever revokeLapsed gives up because the session ended rather than
 // because ctx was canceled. fakeBroker's revokeFailFirst holds the first revoke attempt at a 503
 // (an unreachable broker, not merely a slow one) so revokeLapsed is genuinely retrying with

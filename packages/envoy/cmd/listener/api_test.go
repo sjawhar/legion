@@ -316,19 +316,19 @@ func TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends(t *testing.T) {
 	}
 }
 
-// TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames proves the listener refuses --
-// rather than silently allowing, as it once did -- a send whose targeted frame claims
+// TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames proves the listener refuses, rather
+// than silently allows, a send whose targeted frame claims
 // delivery (the exact "delivery" key is present) but whose mode cannot be read as a single,
 // unambiguous, non-empty string: an empty delivery object, a non-string mode, an empty mode
 // string, a delivery value that is not even an object, and a same-key-different-case sibling
 // key at either level. Presence of the exact "delivery" key is itself a claim that this send
 // is targeted; an unreadable or ambiguous claim is refused, never defaulted open the way a
 // send with no "delivery" key at all is (see TestSendHandlerAllowsAdvertisedFrameModeAnd
-// UntaggedSends). The case-variant case reproduces a second independent review's finding: the
-// guard used to decode the payload into a Go struct, whose case-insensitive key matching could
-// read a same-key-different-case sibling ("Delivery") instead of the exact "delivery" key the
-// receiving client actually executes, so an attacker could hide an unadvertised real mode
-// ("btw", exact key) behind an advertised decoy in the wrong-cased key ("aside", sibling key).
+// UntaggedSends). The case-variant case is why the guard never decodes the payload into a Go
+// struct: case-insensitive key matching could read a same-key-different-case sibling
+// ("Delivery") instead of the exact "delivery" key the receiving client actually executes, so an
+// attacker could hide an unadvertised real mode ("btw", exact key) behind an advertised decoy in
+// the wrong-cased key ("aside", sibling key).
 func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)

@@ -689,8 +689,7 @@ func main() {
 	// Wait for the interest cache to finish its initial scan of existing KV
 	// entries before we start accepting NATS messages. Without this gate, real
 	// events that arrive in the warm-up window get "no matching interests"
-	// even when the durable KV entry has subscribers — the second half of the
-	// Atlas dropout investigation (PR #610 fixed the silent-fallback half).
+	// even when the durable KV entry has subscribers.
 	//
 	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
 	// If the watcher fails to start, signalReady() unblocks startup and the

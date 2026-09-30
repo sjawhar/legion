@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// A paragraph line the document parser reads as a block is the text the caller loses. #1326
-// escaped ATX markers for this reason; these are the rest of the line-start forms: a thematic
+// A paragraph line the document parser reads as a block is the text the caller loses. ATX
+// markers are escaped for that reason; these are the rest of the line-start forms: a thematic
 // break, a setext underline, and a directive opener, which either silently becomes another node
 // or refuses to parse at all.
 func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {

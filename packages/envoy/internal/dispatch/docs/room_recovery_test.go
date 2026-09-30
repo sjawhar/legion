@@ -85,9 +85,9 @@ func (s *failRoomDuringLoadStore) Load(ctx context.Context, room string) (persis
 
 // A room that fails while it is still loading recovers. The failure's eviction waits in ygo's
 // CloseRoom for the load's ready barrier and closes the recovery's channel only afterwards, so
-// a load that waited for that recovery held the eviction that would end its wait: the room
-// stayed failed, and every later write to the document answered 503 until the server was
-// restarted (LEGION-282).
+// a load that waits for that recovery holds the eviction that would end its wait: the room stays
+// failed, and every later write to the document answers 503 until the server restarts
+// (LEGION-282).
 func TestARoomThatFailsWhileItIsLoadingRecovers(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")

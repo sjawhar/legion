@@ -719,8 +719,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var written *docs.VersionResult
 	var published []model.Event
-	// A batch that left the document as it was names no version, however deliberate its summary:
-	// AGENTC-193 grew seven versions, five of them byte-identical, from edits that changed nothing.
+	// A batch that left the document as it was names no version, however deliberate its summary,
+	// so edits that change nothing never pile up byte-identical versions.
 	if edit.Changed {
 		summary := strings.TrimSpace(input.Summary)
 		if summary != "" {

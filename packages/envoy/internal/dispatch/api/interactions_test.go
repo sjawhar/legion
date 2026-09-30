@@ -1879,9 +1879,8 @@ func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
 	}
 }
 
-// AGENTC-193's spec grew versions 13 through 19 from edits that left it byte-identical, because
-// the batch's `summary` reached NamedVersion unconditionally. A batch that changes nothing mints
-// nothing and says so, with or without a summary.
+// A batch that changes nothing mints nothing and says so, with or without a summary: a `summary`
+// that reached NamedVersion unconditionally would version a byte-identical document.
 func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
 	for _, test := range []struct {
 		name    string

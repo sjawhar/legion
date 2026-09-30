@@ -371,11 +371,11 @@ func awaitBroadcastDeliveries(t *testing.T, handler http.Handler, id string) bro
 	}
 }
 
-// LEGION-233 review, P1. Delivery used to run inside the create request, so a request cut off
-// partway - a closed tab, a deploy's shutdown, the load balancer's idle timeout - left one
-// attempt stranded pending and every later recipient with no attempt at all, and nothing
-// recovered them. The send now answers as soon as the messages are committed and delivers
-// behind the request, on the server's lifetime rather than the request's.
+// LEGION-233 review, P1. The send answers as soon as the messages are committed and delivers
+// behind the request, on the server's lifetime rather than the request's: delivering inside the
+// create request would let a request cut off partway - a closed tab, a deploy's shutdown, the
+// load balancer's idle timeout - strand one attempt pending and leave every later recipient with
+// no attempt at all, with nothing to recover them.
 func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testing.T) {
 	release := make(chan struct{})
 	var listenerState struct {
@@ -447,9 +447,9 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 
 // LEGION-233 review, second round. A broadcast's worker is queued behind its own attempt, so a
 // human who changes the mode from the agent card in the meantime settles attempt 1 and sends
-// their own frame. The worker used to find no pending attempt, open one of its own, and send a
-// SECOND frame to the same session. It is bound to attempt 1 now, and skips the recipient once
-// that attempt is no longer its to send.
+// their own frame. The worker is bound to attempt 1, and skips the recipient once that attempt is
+// no longer its to send; a worker that opened an attempt of its own would send a SECOND frame to
+// the same session.
 func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 	release := make(chan struct{})
 	// The worker announces itself when it parks, so the takeover below happens while it is

@@ -1266,11 +1266,9 @@ func TestPing_ClosedConnReturnsError(t *testing.T) {
 
 // --- Cache readiness tests ---
 //
-// Follow-up to PR #610. The Upsert silent-fallback fix doesn't address the
-// initial-cache-warmup race: after Open() returns, watch() populates the cache
+// The initial-cache-warmup race: after Open() returns, watch() populates the cache
 // asynchronously, and events arriving in that window get "no matching
-// interests" even when the durable KV entry has subscribers. This was ~36/235
-// of Atlas's observed drops (the 07:39:38 burst right at listener restart).
+// interests" even when the durable KV entry has subscribers.
 
 func TestWaitForCacheReady_ReturnsAfterInitialScan(t *testing.T) {
 	conn, cleanup := connectNATS(t)

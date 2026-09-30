@@ -978,7 +978,7 @@ func anchorField(after bool) string {
 
 // replacementMarkdown resolves `with` against the marker the matched block already renders.
 // A replace is inline, so a `with` that opens with the block's own marker would write that
-// marker twice (AGENTC-193 read back `## ##`, `7. 7\.`, `4. 4\.` and `-    - `). A heading
+// marker twice (`## ##`, `7. 7\.`, `4. 4\.`, `-    - `). A heading
 // rename is the one shape that keeps working: `find` carried the marker through the match, so
 // an identical one in `with` is the block's, and it is dropped. Every other repetition is
 // refused, and a marker of a different kind stays the literal text it has always been.
