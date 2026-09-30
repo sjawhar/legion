@@ -6,7 +6,8 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
-      - "skills/dispatch/**"
+      # Every skill: pi-envoy ships them, and its skills-guard test checks their sizes and links.
+      - "skills/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy/**"
