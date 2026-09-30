@@ -391,3 +391,31 @@ test("a row runs its binding only if the binding still applies when the row is c
   row?.run();
   expect(reopen.fired()).toBe(1);
 });
+
+test("a row does nothing once its binding's component has unregistered it", () => {
+  const { keymap } = harness();
+  const close = binding("close", [], { label: "Close issue" });
+  const unregister = keymap.register("issue", [close.definition]);
+  keymap.pushScope("issue");
+  const [row] = keymap.actions();
+
+  // The issue header unmounted while the palette was open (the page fell to its error view).
+  unregister();
+  row?.run();
+  expect(close.fired()).toBe(0);
+});
+
+test("rows within a scope read alphabetically, a lowercase word among capitalised ones included", () => {
+  const { keymap } = harness();
+  keymap.register("global", [
+    binding("go-settings", "g s", { label: "Go to Settings" }).definition,
+    binding("go-project", "g p", { label: "Go to project…" }).definition,
+    binding("go-inbox", "g i", { label: "Go to Inbox" }).definition,
+  ]);
+
+  expect(keymap.actions().map((action) => action.label)).toEqual([
+    "Go to Inbox",
+    "Go to project…",
+    "Go to Settings",
+  ]);
+});

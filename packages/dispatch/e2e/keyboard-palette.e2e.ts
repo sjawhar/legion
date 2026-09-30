@@ -61,15 +61,14 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     ]);
     await expect(actions.getByRole("option", { name: "Set priority P2" })).toBeVisible();
     await expect(actions.getByRole("option", { name: "Reopen issue" })).toHaveCount(0);
+    // An issue page names its project in its key, so `g d` has a row here.
+    await expect(actions.getByRole("option", { name: "Go to Documents" })).toHaveCount(1);
     // `$mod+k` fires inside an input, as the palette's own close, so it is no row, and `/` would
     // only reopen this palette with its actions taken away. A binding that opens anything else is
     // a row: it runs once this palette has closed (the rows below).
     for (const absent of ["Search and actions", "Search only"]) {
       await expect(actions.getByRole("option", { exact: true, name: absent })).toHaveCount(0);
     }
-    await page.screenshot({
-      path: testInfo.outputPath(`palette-actions-${testInfo.project.name}.png`),
-    });
 
     // Arrows move over action rows exactly as they move over hits, from the first row. Which row
     // that is belongs to `actions()`'s sort, so this names none.
@@ -160,15 +159,14 @@ test("/ searches only, and a query lists matching actions above the hits", async
     const options = dialog.getByRole("option");
     await expect(options.first()).toHaveAttribute("id", /^search-option-action-/);
     await expect(options.last()).toHaveAttribute("id", /^search-option-issue-/);
-    await page.screenshot({
-      path: testInfo.outputPath(`palette-filtered-${testInfo.project.name}.png`),
-    });
   } finally {
     await context.close();
   }
 });
 
-test("g d opens the project's Documents and g p picks a project", async ({ browser }, testInfo) => {
+test("g d opens the route's project Documents, from an issue key or a project path, and g p picks a project", async ({
+  browser,
+}, testInfo) => {
   test.skip(
     testInfo.project.name === "iphone",
     "desktop keyboard navigation is covered by chromium"
@@ -179,11 +177,11 @@ test("g d opens the project's Documents and g p picks a project", async ({ brows
   const context = await asUser(browser, "alice");
 
   try {
+    // One page load; every later step is an in-app navigation, which is what the keys do.
     const page = await context.newPage();
-    await page.goto("/projects/CORE/issues");
-    await expect(page.getByRole("heading", { level: 1, name: "Core" })).toBeVisible();
-    await page.locator("body").focus();
+    await openIssue(page, issue.key, "Documents from an issue");
 
+    // An issue page names its project only in its key.
     await page.keyboard.press("g");
     await page.keyboard.press("d");
     await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
@@ -196,23 +194,15 @@ test("g d opens the project's Documents and g p picks a project", async ({ brows
     const input = page.getByRole("combobox", { name: "Search" });
     await input.fill("operations");
     await expect(dialog.getByRole("option")).toHaveCount(1);
-    await page.screenshot({
-      path: testInfo.outputPath(`palette-projects-${testInfo.project.name}.png`),
-    });
     await input.press("Enter");
     await expect(page).toHaveURL(/\/projects\/OPS\/issues/);
 
-    // An issue page names its project too, in its key, so `g d` and the palette row work there.
-    await openIssue(page, issue.key, "Documents from an issue");
-    const issueActions = page
-      .getByRole("dialog", { name: "Search" })
-      .getByRole("group", { name: "Actions" });
-    await page.keyboard.press("Control+k");
-    await expect(issueActions.getByRole("option", { name: "Go to Documents" })).toBeVisible();
-    await page.keyboard.press("Escape");
+    // A project path names it outright. The heading is the page the key reads its route from.
+    await expect(page.getByRole("heading", { level: 1, name: "Operations" })).toBeVisible();
+    await page.locator("body").focus();
     await page.keyboard.press("g");
     await page.keyboard.press("d");
-    await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
+    await expect(page).toHaveURL(/\/projects\/OPS\/documents$/);
   } finally {
     await context.close();
   }
@@ -927,6 +917,86 @@ test("the arrows keep the highlighted row in view when the list is longer than t
       (await last.getAttribute("id")) as string
     );
     await expect(last).toBeInViewport();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a nested Architecture level offers Up one level, and not the keys that move into children", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  await seedFakeGithub({
+    "legion/arch": {
+      contents: "read",
+      files: {
+        "platform.md": "---\ntitle: Platform\n---\nEverything that runs.\n",
+        "web.md": "---\ntitle: Web\nparent: platform\n---\nThe SPA.\n",
+      },
+      installation_id: 101,
+    },
+  });
+  await putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
+  expect((await syncArchitectureSource("CORE")).last_error).toBeNull();
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE/architecture?component=platform");
+    const row = page.locator('[data-component-row="web"]');
+    await expect(row).toBeVisible();
+    await page.locator("body").focus();
+    await page.keyboard.press("j");
+    await expect(row).toBeFocused();
+
+    await page.keyboard.press("Control+k");
+    const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
+      name: "Actions",
+    });
+    const up = actions.getByRole("option", { exact: true, name: "Up one level h" });
+    await expect(up).toHaveCount(1);
+    // `l` into children is `o`'s Open row where there are children and nothing on a leaf, and
+    // the arrows are the letters' twins. Soft, so one run names every row that should not be there.
+    for (const absent of ["Into the focused component's children", "(arrow key)"]) {
+      await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
+    }
+    await up.click();
+    await expect(page).toHaveURL(/\/projects\/CORE\/architecture$/);
+  } finally {
+    await context.close();
+  }
+});
+
+test("on a short window the palette fits the screen and each highlighted row shows whole", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Short window" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ height: 300, width: 1440 });
+    await openIssue(page, issue.key, "Short window");
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const input = page.getByRole("combobox", { name: "Search" });
+    await expect(dialog.getByRole("group", { name: "Actions" })).toBeVisible();
+    await expect.soft(dialog).toBeInViewport({ ratio: 1 });
+
+    for (let step = 0; step < 6; step += 1) {
+      const active = await input.getAttribute("aria-activedescendant");
+      await expect(page.locator(`[id="${active}"]`)).toBeInViewport({ ratio: 1 });
+      await input.press("ArrowDown");
+    }
   } finally {
     await context.close();
   }

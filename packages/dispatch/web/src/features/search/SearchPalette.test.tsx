@@ -176,6 +176,67 @@ test("arrow keys move aria-activedescendant and Enter navigates to the active hr
   }
 });
 
+function issueHit(key: string): SearchResult {
+  return {
+    href: `/issues/${key}`,
+    id: key,
+    kind: "issue",
+    owner: { key, kind: "issue", status: "todo", title: `Instrument ${key}` },
+    rank: 1,
+    snippet: `The <mark>astrolabe</mark> of ${key}.`,
+  };
+}
+
+test("a refetch that re-ranks the hits leaves the highlight on the hit the reader sees", async () => {
+  const [first, second] = [issueHit("LEGION-3"), issueHit("LEGION-4")];
+  const search = spyOn(api, "search").mockResolvedValue({ results: [first, second], took_ms: 1 });
+  const view = renderPalette();
+
+  try {
+    const input = await searchFor("astrolabe");
+    const shown = input.getAttribute("aria-activedescendant");
+    expect(shown).toBe(screen.getAllByRole("option")[0]?.id ?? "");
+
+    // A focus refetch, or the event stream's reconnect, answers the same query re-ranked.
+    search.mockResolvedValue({ results: [second, first], took_ms: 1 });
+    await view.queryClient.refetchQueries();
+    await waitFor(() => expect(screen.getAllByRole("option")[0]?.id).not.toBe(shown));
+    expect(input.getAttribute("aria-activedescendant")).toBe(shown);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("a highlighted hit that drops out hands the highlight to the head, which keeps it", async () => {
+  const [first, second] = [issueHit("LEGION-3"), issueHit("LEGION-4")];
+  const search = spyOn(api, "search").mockResolvedValue({ results: [first, second], took_ms: 1 });
+  const view = renderPalette();
+
+  try {
+    const input = await searchFor("astrolabe");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const [head, arrowed] = screen.getAllByRole("option").map((option) => option.id);
+    expect(input.getAttribute("aria-activedescendant")).toBe(arrowed ?? "");
+
+    search.mockResolvedValue({ results: [first], took_ms: 1 });
+    await view.queryClient.refetchQueries();
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(1));
+    expect(input.getAttribute("aria-activedescendant")).toBe(head ?? "");
+
+    // The row coming back does not take the highlight back from the one the reader now sees.
+    search.mockResolvedValue({ results: [first, second], took_ms: 1 });
+    await view.queryClient.refetchQueries();
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
+    expect(input.getAttribute("aria-activedescendant")).toBe(head ?? "");
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
 test("Escape calls onClose", () => {
   let closed = 0;
   const view = renderPalette(() => {
