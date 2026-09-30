@@ -170,15 +170,21 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	current, err := issuePhase(ctx)
+	current, err := issueRecord(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: read the issue's phase from the daemon's state: %v\n", err)
 		return 1
 	}
-	commit, err := handoffCommit(workspace, role, current)
+	commit, err := handoffCommit(workspace, role, current.Phase)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
+	}
+	if *ready {
+		if err := readyChecks(ctx, workspace, current, stdout); err != nil {
+			fmt.Fprintf(stderr, "legion handoff complete: READY refused: %v\n", err)
+			return 1
+		}
 	}
 	grant, err := grantFromEnvironment()
 	if err != nil {
@@ -287,34 +293,41 @@ func standingCommit(jj, workspace string) (string, error) {
 	return jjOutput(jj, workspace, "the workspace", "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 }
 
-// issuePhase reads the pane's issue phase (LEGION_ISSUE) from the daemon's state document, decoding
-// that one issue's phase and nothing else of the document.
-func issuePhase(ctx context.Context) (phase.Phase, error) {
+// paneIssue is what a completion reads of the pane's issue from the daemon's state document: its
+// phase, and the pull request the daemon records for it, if any.
+type paneIssue struct {
+	Phase       phase.Phase `json:"phase"`
+	PullRequest *struct {
+		Number int `json:"number"`
+	} `json:"pullRequest"`
+}
+
+// issueRecord reads the pane's issue (LEGION_ISSUE) from the daemon's state document, decoding that
+// one issue's phase and pull request and nothing else of the document.
+func issueRecord(ctx context.Context) (paneIssue, error) {
 	issue := os.Getenv("LEGION_ISSUE")
 	if issue == "" {
-		return "", errors.New("LEGION_ISSUE is not set")
+		return paneIssue{}, errors.New("LEGION_ISSUE is not set")
 	}
 	body, err := get(ctx, daemonURL()+"/legion/v1/state")
 	if err != nil {
-		return "", err
+		return paneIssue{}, err
 	}
 	var state struct {
 		Issues map[string]json.RawMessage `json:"issues"`
 	}
 	if err := json.Unmarshal(body, &state); err != nil {
-		return "", fmt.Errorf("decode the daemon's state: %w", err)
+		return paneIssue{}, fmt.Errorf("decode the daemon's state: %w", err)
 	}
 	recorded, ok := state.Issues[issue]
 	if !ok {
-		return "", fmt.Errorf("the daemon's state records no issue %s", issue)
+		return paneIssue{}, fmt.Errorf("the daemon's state records no issue %s", issue)
 	}
-	var current struct {
-		Phase phase.Phase `json:"phase"`
-	}
+	var current paneIssue
 	if err := json.Unmarshal(recorded, &current); err != nil {
-		return "", fmt.Errorf("decode the daemon's record of %s: %w", issue, err)
+		return paneIssue{}, fmt.Errorf("decode the daemon's record of %s: %w", issue, err)
 	}
-	return current.Phase, nil
+	return current, nil
 }
 
 // jjOutput runs the boot-resolved jj on the pane workspace and returns its trimmed output.

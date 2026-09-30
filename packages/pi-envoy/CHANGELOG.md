@@ -4,6 +4,12 @@
 
 ### Added
 
+- The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
+  they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
+  which runs that procedure and decides whether the push skips CI: a handoff push that a later push
+  follows starts no CI run, and every other push runs CI in full. A worker that pushed with the
+  skill's commands by hand would run full CI on every handoff. Under the TypeScript daemon, whose
+  `legion` has no `push` command, the commands stay hand-run (LEGION-208).
 - The session publishes its own conversation for Dispatch's agent conversation view (LEGION-232):
   every turn, tool call and streamed update becomes a frame on `agentstream.<session id>.frames`
   over core NATS, a subject family the notification stream does not capture, so the bus retains

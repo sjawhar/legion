@@ -25,7 +25,7 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Re
 
 ## Workspace restrictions
 
-Do not replace another phase's commit. Create reviewable commits only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch, with `skill://legion-worker`'s push procedure (it checks that `@-` descends from `legion/<KEY>@origin`, then pushes with `jj git push`). The extension injects the session credential grant for `jj git push`.
+Do not replace another phase's commit. Create reviewable commits only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch, with `skill://legion-worker`'s push procedure (it checks that `@-` descends from `legion/<KEY>@origin`, then pushes with `jj git push`). The extension injects the session credential grant for `jj git push`. Under the Go daemon, push with `legion push` from bash instead: it runs that procedure and decides whether the push skips CI.
 
 ## Implementation handoff
 
