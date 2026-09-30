@@ -191,6 +191,28 @@ drive_gate() {
 
 # ---- the proof human on the smoke repository ------------------------------------------------------
 
+# The proof human is the devbox's ordinary gh acting as the sjawhar-agent App. The dotfiles gh shim
+# routes a call to the repository owner's App only in an agent session (an Oh My Pi session's bash
+# tool, which carries OMP_SESSION_ID); from any other shell, a plain tmux window included, gh acts as
+# the user's own login, and a run started there reviews, comments and merges as that person.
+# require_proof_human asks gh which account it acts as for the smoke repository and fails the check,
+# naming that account, unless it is the App's bot; every stage proof that writes to GitHub as the
+# proof human calls it before its first gh call, and the EXIT trap's GitHub teardown runs only once
+# it has passed. The probe is GraphQL's viewer, which answers an App installation token with the
+# App's bot login, where REST's GET /user refuses one (403, "Resource not accessible by
+# integration"). GH_REPO names the owner the shim routes by, as each write's own repository does.
+proof_human_login='sjawhar-agent[bot]'
+proof_human=
+require_proof_human() {
+  local login
+  login=$(GH_REPO="$repo" gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>"$work/proof-human.err") ||
+    fail "the devbox gh could not say which account it acts as for $repo: $(tr '\n' ' ' <"$work/proof-human.err")"
+  [ "$login" = "$proof_human_login" ] ||
+    fail "the devbox gh acts as ${login:-no account} for $repo, not the proof human $proof_human_login: start the run from an agent session (an Oh My Pi session's bash tool, whose OMP_SESSION_ID the dotfiles gh shim routes to the App), never a plain shell"
+  proof_human=$login
+  note "the proof human: the devbox gh acts as $login for $repo"
+}
+
 # pull_request_product_files prints each file the pull request changes outside .legion/.
 pull_request_product_files() {
   gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .filename'
@@ -356,9 +378,11 @@ close_run_pull_requests() {
 }
 # close_unpassed_run_pull_requests is the EXIT trap's part: a run that did not pass (`ok` unset)
 # closes what it opened, best effort, reporting to stderr. A passing run closed them in
-# cleanup-is-complete.
+# cleanup-is-complete. A run that never established the proof human (require_proof_human) opened
+# nothing and makes no gh call here, since its gh may act as someone else.
 close_unpassed_run_pull_requests() {
   [ -z "${ok:-}" ] || return 0
+  [ -n "$proof_human" ] || return 0
   close_run_pull_requests >&2 ||
     printf "some of this run's pull requests may still be open on %s (above)\n" "$repo" >&2
   return 0

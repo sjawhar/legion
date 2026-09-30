@@ -241,7 +241,14 @@ server, the Go daemon; stage 2 and the other local rigs unset every variable bel
 users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
-anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
+anyway). The shim routes `gh` to that App only inside an agent session, so the run starts from an
+Oh My Pi session's bash tool; from any other shell, a plain tmux window included, `gh` acts as the
+user's own login. `prerequisites` therefore proves the account before the run's first write to
+GitHub ([`require_proof_human`](#libworkflowsh)): it asks `gh` for GraphQL's `viewer` against the
+smoke repository, which an App installation token answers with the App's bot login (REST's
+`GET /user` refuses one: 403, "Resource not accessible by integration"), and unless that is
+`sjawhar-agent[bot]` it exits 1 with one `FAIL prerequisites` line naming the account it found and
+saying to start the run from an agent session. The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
 `GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier. The agents'
 model is Anthropic through the Hawk model gateway, the route every devbox agent session uses:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes the isolated profile there in
@@ -349,10 +356,13 @@ transcripts too, and fails unless they hold the same turns, sessions and subagen
 scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
 root, which frees its admission slot as its sign-off would), `restart` also skips the held worker,
 and the credential and idle-read checks read `STAGE3_PR` (default: the newest smoke pull request).
-`STAGE3_UNTIL=rework` is the other development aid: it drives the first issue through its three
-review rounds, the per-round handoff checks, and the final review, then skips every later scenario.
-Such a run skips the status-actor check, which needs the first issue's whole history, ends
-`stage 3 e2e: development run from <step> finished (not the proof)` (or `until rework`), and is
+`STAGE3_UNTIL` is the other development aid. `STAGE3_UNTIL=prerequisites` stops once
+`prerequisites` has passed (the tools, the inputs, the proof human, the smoke repository read and
+the model route), before the rig starts anything, and removes the scratch work directory.
+`STAGE3_UNTIL=rework` drives the first issue through its three review rounds, the per-round handoff
+checks, and the final review, then skips every later scenario. Such a run skips the status-actor
+check, which needs the first issue's whole history, ends
+`stage 3 e2e: development run from <step> finished (not the proof)` (or `until <step>`), and is
 never cited as the proof; only a full run is.
 
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
@@ -385,8 +395,10 @@ ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_N
 **Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
 stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
 required inputs and the same model route and proof human as
-[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), but creates no Docker container: the daemon
-and Dispatch take their own databases in the running Postgres container `ACCEPT_PG_CONTAINER` names
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), so it too runs from an agent session and
+refuses to start in `prerequisites` when `gh` acts as anyone but `sjawhar-agent[bot]`. It creates
+no Docker container: the daemon and Dispatch take their own databases in the running Postgres
+container `ACCEPT_PG_CONTAINER` names
 (user `postgres`, password `ci`), and NATS is the native `ACCEPT_NATS_BIN`. Real agents drive the
 task's surfaces through it: a Go prompt part a restart rewrites, the refused root stops, the pane's
 refusal of `legion handoff complete` from a shell in every pane kind, park and re-run, the
@@ -626,7 +638,11 @@ the run that owns it. A signal to the whole process group does not stop the remo
   claim, so the workflow reads its status writes as a human's.
 - **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, and tree 1's pull request, which
   the proof human merges. The teardown closes any pull request the run left open, such as one from a
-  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`.
+  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. Every one of
+  these writes is Stage 3's proof human's: the devbox `gh`, and for the fixture push the git
+  credential helper the same agent-session routing installs. So the driver runs from an agent
+  session, and `prerequisites` refuses to start, before it takes the lock, when `gh` acts as anyone
+  but `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)).
 - **Namespace `legion`**: the run's Sandboxes, pods, Secrets and PVCs, its control pods, and its
   copy of the operator fixture's ConfigMap, `legion-operator-route-legsmoke`, all labelled
   `legsmoke`. [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown and
@@ -664,7 +680,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 
 | checkpoint | what it holds |
 | :--- | :--- |
-| `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
+| `prerequisites` | the tools, the restricted context and the image by digest; the devbox `gh` acts as the proof human, `sjawhar-agent[bot]`; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
@@ -1246,6 +1262,13 @@ where an agent runs:
 `new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
 `legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
 none, since it runs under its root's tree.
+
+`require_proof_human` is the proof human's precondition, which every stage proof that writes to
+GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox
+`gh` which account it acts as, through GraphQL's `viewer` with `GH_REPO` naming `repo` (the owner
+the dotfiles shim routes by), and fails the check naming that account unless it is
+`sjawhar-agent[bot]`. `close_unpassed_run_pull_requests`, the `EXIT` trap's part, makes no `gh` call
+in a run that never passed it.
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own

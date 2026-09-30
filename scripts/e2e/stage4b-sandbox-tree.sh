@@ -19,6 +19,12 @@
 # run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
 # `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
+# The proof human's GitHub writes (the merge, the teardown's closes and branch deletes, and the
+# fixture push) are the devbox gh's and its git credential helper's, which act as the sjawhar-agent
+# App only inside an agent session: run the driver from an Oh My Pi session's bash tool.
+# `prerequisites` refuses to start, naming the account, when gh acts as anyone else
+# (require_proof_human, lib/workflow.sh).
+#
 # Inputs:
 # - LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 #   ~/.kube/legion-daemon-production) name the restricted identity the daemon runs as.
@@ -1243,6 +1249,7 @@ gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
+require_proof_human
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
