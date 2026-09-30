@@ -491,6 +491,23 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "Pandoc fenced divs and malformed directives are not supported",
 		},
 		{
+			// A three-colon opening continuing a paragraph passes the browser editor's parser as
+			// the paragraph's text, so its block would be lost without a word (LEGION-416).
+			name:     "a typed block opening continuing a paragraph four columns in",
+			markdown: "x\n    :::callout{#c1 kind=\"note\" title=\"\"}\nBody.\n",
+			want:     `the line ":::callout{#c1 kind=\"note\" title=\"\"}" continues a paragraph`,
+		},
+		{
+			name:     "an ask opening continuing a paragraph in a quote",
+			markdown: "> Context\n>     :::ask{urgency=\"med\"}\n> Ship it?\n",
+			want:     `the line ":::ask{urgency=\"med\"}" continues a paragraph`,
+		},
+		{
+			name:     "an ask opening continuing a list item's paragraph",
+			markdown: "- Context\n        :::ask{urgency=\"med\"}\n  Ship it?\n",
+			want:     `the line ":::ask{urgency=\"med\"}" continues a paragraph`,
+		},
+		{
 			name:     "a leaf directive continuing a paragraph in a list item",
 			markdown: "- a\n        ::leaf\n",
 			want:     "leaf directives (::name) are not supported",
@@ -525,6 +542,33 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 				t.Fatalf("Parse(%q) = %v, want error containing %q", tc.markdown, err, tc.want)
 			}
 		})
+	}
+}
+
+// A typed block opening a writer keeps as text on purpose - escaped, standing inside a line, or
+// the whole of a replace's inline text - is stored as that text; only a line the writer broke to
+// open a block, which the parser reads as the paragraph's text anyway, is refused.
+func TestTypedBlockOpeningWrittenAsTextOnPurposeIsKept(t *testing.T) {
+	const opening = `:::ask{urgency="med"}`
+	for name, markdown := range map[string]string{
+		"escaped on a line of its own": "Context\n\\" + opening + "\n",
+		"inside a line":                "Write a " + opening + " block for each decision.\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v, want the opening kept as text", markdown, err)
+			}
+			if len(doc.Children) != 1 || doc.Children[0].Type != "paragraph" || !strings.Contains(textContent(doc.Children[0]), opening) {
+				t.Fatalf("Parse(%q) = %#v, want one paragraph holding %q", markdown, doc.Children, opening)
+			}
+		})
+	}
+	if nodes, err := ParseInline(opening); err != nil || len(nodes) != 1 || nodes[0].Text != opening {
+		t.Fatalf("ParseInline(%q) = %#v, %v, want the opening as its text", opening, nodes, err)
+	}
+	if _, err := ParseInline("Context\n" + opening); err == nil || !strings.Contains(err.Error(), "continues a paragraph") {
+		t.Fatalf("ParseInline of an opening on a line after the text = %v, want a refusal naming the line", err)
 	}
 }
 

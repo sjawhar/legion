@@ -158,9 +158,14 @@ runs the one settlement the failure dropped.
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
 session's two oldest open asks; issue creation and Markdown artifact uploads also report the
-document's `decision_blocks` count. Issue-state advice is computed in the write transaction after
-its event is appended, so it includes that write. Decision blocks are counted from canonical
-Markdown after the write transaction commits. Advice queries run behind a savepoint with a 500 ms
+document's `decision_blocks` count and, when it holds any, its `unparsed_openers`
+(`{count, examples}`): typed block openings (`:::name{`) in its text outside code, written inside a
+line or escaped, each example quoting the opening with a little of the text before it. A writer who
+meant a block learns it is text; a count of zero alone reads as a document needing no decision
+(LEGION-416). Issue-state advice is computed in the write transaction after its event is appended,
+so it includes that write. Decision blocks and unparsed openers are read from one parse of the
+canonical Markdown after the write transaction commits (`readDocumentBlocks`). Advice queries run
+behind a savepoint with a 500 ms
 timeout that is restored before the savepoint is released: one failure is logged and omits
 `advice` without preventing the write from committing. The consecutive-write query materializes
 the last-human fence so its `max(id)` runs once, and relies on the `events (issue_key, seq)` unique
@@ -780,7 +785,13 @@ invalid outside code blocks: a line opening with one is refused where it could o
 a paragraph wherever it stands, since the browser editor's parser checks each line of a
 paragraph's source with the whitespace it opens with trimmed (`paragraphDirectiveReason`), so only
 a quote's marker opening the line keeps it text, and there passes only `:::` alone or a three-colon
-opening, a four-colon one included in what it refuses. An unclosed typed block at document level is rejected, while one nested
+opening, a four-colon one included in what it refuses. The three-colon opening that parser passes
+is refused here on any line of a paragraph after its first, each line read after its containers'
+prefixes (`typedOpeningAsText`): it continues the paragraph - four or more columns in, or in a
+replace's inline text - so goldmark reads it as the paragraph's text, and its author wrote a block. The
+renderer never writes such a line (it escapes a line-start opening and encodes leading spaces as
+`&#32;`), so no stored rendering reads back refused; an escaped opening, or one inside a line, is
+stored as text and reported in the write's advice (`unparsed_openers`). An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end. A typed block's lines start where its opening line's
 text does: both parsers take up to that many columns of indentation off each of its lines, as off a
 fenced code block's (`typedDirective.indent`), so a typed block nested in an indented one closes,

@@ -177,13 +177,28 @@ function renderAdvice(
   const openAsks = advice.your_open_asks;
   const writesSinceHuman = advice.session_writes_since_human;
   const lines: string[] = [];
+  const unparsed = advice.unparsed_openers;
+  if (
+    unparsed !== undefined &&
+    unparsed.count > 0 &&
+    (tool === "dispatch_issue" || tool === "dispatch_artifact")
+  ) {
+    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
+    const subject =
+      unparsed.count === 1
+        ? "1 typed-block opening in this document is text, not a block"
+        : `${unparsed.count} typed-block openings in this document are text, not blocks`;
+    lines.push(
+      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`
+    );
+  }
   if (
     advice.decision_blocks === 0 &&
     opts.isPrimarySpec === true &&
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
     lines.push(
-      'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+      'This spec holds 0 ask blocks (a block opens with a `:::ask{…}` line of its own), so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
     );
   }
 

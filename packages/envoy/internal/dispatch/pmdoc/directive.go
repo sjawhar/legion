@@ -391,6 +391,29 @@ func paragraphDirectiveReason(lines *gmtext.Segments, source []byte) (string, bo
 	return "", false
 }
 
+// typedOpeningAsText is the refusal of a paragraph a line of which, after its first, is a
+// three-colon typed block opening (`:::name{…}`) once the whitespace it opens with is trimmed.
+// Goldmark reads that line as the paragraph's text, and the browser editor's parser lets it pass
+// (paragraphLineDirectiveReason): a typed block opens only on a line of its own less than four
+// columns past its container's lines, and this one continues the paragraph instead, four or more
+// columns in, or in inline markdown, which holds no block. Its author wrote a block, and storing
+// the line as text would drop the block without a word - an ask that asks nobody (LEGION-416).
+// Each line is read after its containers' prefixes, so a quote's marker does not hide it. A line
+// that escapes the opening (`\:::`) or writes it in code is text on purpose and never matches; the
+// paragraph's first line is the typed block itself wherever a block can open, and in inline
+// markdown the text a replace writes on purpose. The renderer never writes such a line (it escapes
+// a line-start opening and encodes a line's leading spaces), so no stored rendering is refused.
+func typedOpeningAsText(lines *gmtext.Segments, source []byte) (string, bool) {
+	for index := 1; index < lines.Len(); index++ {
+		segment := lines.At(index)
+		line := bytes.TrimRight(bytes.TrimLeftFunc(segment.Value(source), jsWhitespace), "\n")
+		if paragraphTypedOpening.Match(line) {
+			return fmt.Sprintf("the line %q continues a paragraph, so it is the paragraph's text rather than a typed block: a typed block opens on a line of its own, indented less than four columns past the lines around it, and inline text holds no block; escape its first colon (\\:::) or put it in code to write it as text", line), true
+		}
+	}
+	return "", false
+}
+
 // jsWhitespace reports whether JavaScript's String.prototype.trimStart takes char off: its white
 // space and line terminators.
 func jsWhitespace(char rune) bool {
