@@ -199,8 +199,8 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 
 Every wait is bounded and names what it waited for; a failed assertion prints
 `FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. A failed
-run also [notes](#libmodel-gateway-unservedsh) each agent whose last call since that check began got
-no model key, and still exits 1. The
+run also [notes](#libmodel-gateway-unservedsh) each agent that could have failed that check for
+want of a model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
@@ -382,8 +382,8 @@ On any exit the `EXIT` trap does the same teardown, except that a failure keeps 
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
 pull request open and prints gh's reason, with a line saying some may still be open. A failed run
-also [notes](#libmodel-gateway-unservedsh) each agent whose last call since the failing check began
-got no model key, and still exits 1.
+also [notes](#libmodel-gateway-unservedsh) each agent that could have failed the check for want of
+a model key, and still exits 1.
 
 ## stage3-4b13b-acceptance.sh
 
@@ -1130,22 +1130,17 @@ the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wa
 one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
 succeeds is served inside every caller's ten seconds.
 
-Every agent's call appends one tab-separated line to `<dir>/hawk-token.calls`: the time, the
-caller's pid, the directory Oh My Pi ran it in, the agent, the outcome, and a detail. On the Go tmux
-runtime every agent of one issue shares the issue's directory, so the agent field names the pane
-that called as `LEGION_ROLE/LEGION_GENERATION`, from the environment Oh My Pi hands the command,
-and `-` outside a Legion pane (the operator's controller, a harness's `omp -p`). The installer's
-preflight is no agent's and is left out; a call that gets no key also says why on stderr, which is
-where the installer reads the preflight's reason. The outcome is
-`served`; `timeout` when the call ran out of time — its own deadline, its wait behind another call's
-mint, or `hawk-token` saying it spent its whole budget (`in <spent> ms of a <budget> ms budget`,
-spent at least the budget); `killed` when a signal ended the mint while it had time left; and
-`failed` when the mint ended without a key for any other reason, with `hawk-token`'s last stderr
-line. The wrapper exits 1 whether its budget ran out or the login was refused, so that sentence is
-the only thing that tells them apart; a `hawk-token` that words it otherwise has a spent budget
-recorded as `failed`, never as a starve. A caller whose environment names
-`MODEL_GATEWAY_CALLS_FILE` gets its line in that file too, so a harness that gives each agent its
-own file can judge one run from that run's directory alone.
+Every agent's call appends one tab-separated line to `<dir>/hawk-token.calls`, and to the caller's
+`MODEL_GATEWAY_CALLS_FILE` when its environment names one: the time, the caller's pid, the
+directory Oh My Pi ran it in, the agent, the outcome, and a detail. The fields, and the values the
+agent and outcome take, are stated once, in the header of
+[`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh), the file that reads them. The
+installer's preflight is no agent's and is left out; a call that gets no key also says why on
+stderr, which is where the installer reads the preflight's reason. The key command tells a spent
+budget from a refused login only by `hawk-token`'s own sentence (`in <spent> ms of a <budget> ms
+budget`, spent at least the budget), since the wrapper exits 1 either way; a `hawk-token` that
+words it otherwise has a spent budget recorded as `failed`, never as a starve. A harness that gives
+each agent its own file can judge one run from that run's directory alone.
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
@@ -1178,8 +1173,9 @@ checkout whose key command predates the record carries the same signal without t
 session file at all.
 
 `--notes` is a stage proof's diagnostic: the `EXIT` trap runs it once it has decided the run
-failed, guarded so that it never changes the exit status, and not after a signal, which stopped
-the run rather than failed it. It prints, after the check's own failure, each agent that could
+failed, guarded so that it never changes the exit status, and not after a hangup, an interrupt or
+a termination (129, 130, 143), which stopped the run rather than failed it; a child a signal killed
+is a failure and still gets them. It prints, after the check's own failure, each agent that could
 have failed the check for want of a key: when it last got none, from where, and why.
 
 - **An agent whose last call got no key is still without one.** It is listed whenever that call
@@ -1191,14 +1187,18 @@ have failed the check for want of a key: when it last got none, from where, and 
   just before the check began.
 - **An agent served again before that window** held a key through the whole check, and is left out.
 
-Every call an earlier run left there is refused with its directory by `--fresh`. A person then sees
-whether starvation could explain the failure. A run-wide "not scored" would not be honest: in Stage
+No time rule keeps an earlier run's calls out, since an agent still without a key is listed however
+old its starve: each stage proof passes the notes a directory it sets only once `--fresh` has
+passed, and `--fresh` refuses a directory an earlier run left. A person then sees whether
+starvation could explain the failure. A run-wide "not scored" would not be honest: in Stage
 4b the key command's one caller is the operator's controller, while every pod uses its projected
 token, so a worker's failure cannot come from a starved controller.
 
-`--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make at setup, through their
-own `fail`, when the operator's evidence directory already holds `model-gateway/`: the key command
-would refuse that `--dest` anyway, and the message says why.
+`--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make first, before they write
+anything into their evidence directory or set any trap, when the operator's evidence directory
+already holds `model-gateway/`: this run must neither overwrite the earlier run's evidence nor
+read its calls as its own. Stage 4b prints its verdict line in that refusal, since no trap exists
+yet to print it.
 
 Every form exits 2 on an argument refusal (a `--record` in a directory that does not exist
 included), and `--record` and `--notes` 1 on a record line they cannot read.

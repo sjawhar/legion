@@ -25,6 +25,16 @@ work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
+# A reused STAGE3_EVIDENCE_DIR holds an earlier run's key command and evidence, which this run must
+# neither write into nor read as its own: refused before anything is written or any trap is set.
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
+# The key command's directory, whose record the trap's notes read: set only once --fresh has passed,
+# so the notes can never read an earlier run's calls.
+gateway_dest=$evidence/model-gateway
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
 check=setup
@@ -125,8 +135,10 @@ cleanup() {
     printf "the run's scratch workspace is %s\n" "$work" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
-  # A diagnostic for a failed run: it never sets the status, and after a signal the run was stopped.
-  [ -n "${ok:-}" ] || [ "$status" -gt 128 ] || bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
+  # A diagnostic for a failed run: it never sets the status. A hangup, an interrupt or a termination
+  # (129, 130, 143, as trapped below) stopped the run and gets none.
+  [ -n "${ok:-}" ] || [ -z "$gateway_dest" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$gateway_dest" "$check_started" "$check" >&2 || true
   return 0
 }
 trap cleanup EXIT
@@ -134,8 +146,6 @@ trap 'printf "FAIL %s: line %s exited %s: %s\n" "$check" "$LINENO" "$?" "$BASH_C
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# A reused STAGE3_EVIDENCE_DIR holds an earlier run's key command.
-reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence") || fail "$reason"
 
 # The host helpers below own only this run's isolated resources. Each service
 # binds a port the rig picked. A first start that loses its port to another process picks again; a
@@ -599,7 +609,7 @@ make_omp_home "$omp_home"
 # The model route, installed while this shell still holds the operator's HOME and XDG directories,
 # which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
 # run here, by name. The key command's log is evidence.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"

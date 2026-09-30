@@ -8,11 +8,24 @@
 #   bash scripts/e2e/lib/model-gateway-unserved.sh --notes <dest> <since> <check>
 #   bash scripts/e2e/lib/model-gateway-unserved.sh --fresh <evidence-dir>
 #
-# The key command records every agent's call: time, caller pid, caller working directory, agent
-# (the Legion pane's role/generation, or -), outcome and detail, tab-separated, the outcome one of
-# served, timeout (out of time), killed (a signal ended its mint) and failed (anything else). An
-# agent is its working directory and agent field together: on the Go tmux runtime every agent of an
-# issue shares the issue's directory, and the pid is a helper Oh My Pi starts for each call.
+# The record. The key command appends one line per call an agent makes (the installer's preflight
+# is none), to <dest>/hawk-token.calls and, when the caller's environment names one, to its
+# MODEL_GATEWAY_CALLS_FILE. Six tab-separated fields, none empty:
+#   time     when the call ended, %FT%TZ, UTC
+#   pid      its parent: a helper Oh My Pi starts for each call, so it names no agent
+#   cwd      the directory Oh My Pi ran it in, physically; on the Go tmux runtime every agent of an
+#            issue shares the issue's
+#   agent    LEGION_ROLE/LEGION_GENERATION when the caller's environment sets both (a Legion pane);
+#            LEGION_ROLE alone when it sets no generation (the operator's controller, which
+#            `legion controller start` runs with LEGION_ROLE=controller: `controller`, unless it was
+#            started from a shell that already carried a LEGION_GENERATION); - when it sets no role
+#            (a harness's `omp -p`)
+#   outcome  served; timeout (the call's own deadline, its wait behind another call's mint, or
+#            hawk-token saying it spent its whole budget); killed (a signal ended the mint while it
+#            had time left); failed (anything else)
+#   detail   why: the kept key or the mint's time for served, hawk-token's last stderr line or the
+#            key command's own reason otherwise
+# An agent is its cwd and agent field together.
 #
 # --record judges one agent run from its MODEL_GATEWAY_CALLS_FILE: a harness that runs one agent per
 # run (the skill-scenario rig: one `omp -p` process, which keeps its key for its life) names a file
@@ -37,8 +50,10 @@
 #     Inside that wait a request fails with no key and runs no command, so it leaves no line, and
 #     the agent's first calls in the check can fail on a starve just before it.
 #   - An agent served again before that window held a key through the whole check, and is left out.
-# Every call an earlier run left in <dest> is refused with the directory by --fresh. It says nothing
-# when no agent is listed, or when <dest> holds no record yet.
+# No time rule keeps an earlier run's calls out, since an agent still without a key is listed
+# however old its starve: a stage proof passes a <dest> it sets only once --fresh has passed, and
+# --fresh refuses a directory an earlier run left. It says nothing when no agent is listed, or when
+# <dest> holds no record yet.
 #
 # --fresh is the stage proofs' refusal of a reused evidence directory: it exits 0 when
 # <evidence-dir>/model-gateway does not exist, and otherwise prints why the run cannot use it and

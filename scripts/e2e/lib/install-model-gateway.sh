@@ -166,14 +166,9 @@ done
 # agent's ten seconds, and is where hawk-token's first-run build (in the foreground, about a minute)
 # happens on a fresh machine, so that one call has no deadline.
 #
-# Every agent's call appends its outcome to the record, tab-separated: time, caller pid, caller
-# working directory, agent, outcome and detail. The directory is the issue's on the Go tmux runtime,
-# where every agent of an issue shares it, and the pid is a helper Oh My Pi starts for each call, so
-# the agent field names the Legion pane that called: LEGION_ROLE/LEGION_GENERATION from the pane's
-# environment, which Oh My Pi hands to the command, or - outside a Legion pane (the operator's
-# controller, a harness's `omp -p`). The outcome is served, timeout (the call ran out of time: its
-# own deadline, its wait behind another call's mint, or hawk-token's budget), killed (a signal ended
-# the mint while it had time left) or failed (the mint ended without a key for any other reason).
+# Every agent's call appends its outcome to the record, one tab-separated line: time, caller pid,
+# caller working directory, agent, outcome and detail. What each field holds, and the values agent
+# and outcome take, is stated once, in lib/model-gateway-unserved.sh's header.
 # The installer's preflight is no agent, so it is not recorded; a call that gets no key also says
 # why on stderr, which is where the installer reads it. A caller whose environment names
 # MODEL_GATEWAY_CALLS_FILE gets its line there too: that is for a harness that runs one agent per
@@ -219,8 +214,8 @@ left_ms() { left=$((deadline_ms - (${EPOCHREALTIME/[.,]/} - started_us) / 1000))
 TZ=UTC printf '%(%FT%TZ)T invoked by pid %s\n' -1 "$PPID" >>"$log"
 # PWD names the directory Oh My Pi ran the call in, physically.
 cd -P . || exit
-# The Legion pane that called, as role/generation, or - outside one.
-agent=${LEGION_ROLE:+$LEGION_ROLE/${LEGION_GENERATION:-?}}
+# The caller as the record's agent field names it (lib/model-gateway-unserved.sh's header).
+agent=${LEGION_ROLE:-}${LEGION_ROLE:+${LEGION_GENERATION:+/$LEGION_GENERATION}}
 agent=${agent:--}
 # record OUTCOME DETAIL appends an agent's call to the record, and to the caller's
 # MODEL_GATEWAY_CALLS_FILE when its environment names one. No field is empty: read splits on runs

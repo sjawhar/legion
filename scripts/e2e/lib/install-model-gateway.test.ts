@@ -205,6 +205,18 @@ describe("the model gateway key command", () => {
     const record = readFileSync(join(dest, "hawk-token.calls"), "utf8");
     expect(record).toContain("\ttester/1\tfailed\t");
     expect(record).toContain("\tarchitect/2\tserved\t");
+
+    // `legion controller start` sets LEGION_ROLE=controller and no generation; a harness sets
+    // neither.
+    await call(keyCommand, join(run, "controller"), mints, { role: "controller" });
+    await call(keyCommand, join(run, "harness"), mints);
+    const fields = readFileSync(join(dest, "hawk-token.calls"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => l.split("\t"));
+    expect(fields.every((f) => f.length === 6 && f.every(Boolean))).toBe(true);
+    expect(fields.at(-2)?.[3]).toBe("controller");
+    expect(fields.at(-1)?.[3]).toBe("-");
   });
 
   test("lists for a failed check each agent still without a key, and each that recovered from a starve within 30 s of the check's start", () => {
@@ -220,8 +232,13 @@ describe("the model gateway key command", () => {
         line("2026-09-30T11:50:00Z", "implementer/1", "timeout"), // still without, long before
         line("2026-09-30T11:50:00Z", "reviewer/1", "timeout"),
         line("2026-09-30T11:50:10Z", "reviewer/1", "served"), // recovered before the window
-        line("2026-09-30T11:59:50Z", "merger/1", "killed"), // inside the 30 s window
+        line("2026-09-30T11:59:50Z", "planner/1", "killed"), // inside the 30 s window
+        line("2026-09-30T12:00:02Z", "planner/1", "served"),
+        line("2026-09-30T11:59:50Z", "merger/1", "killed"),
         line("2026-09-30T12:00:02Z", "merger/1", "served"),
+        // A second starve after that service: its own first service is the one that counts.
+        line("2026-09-30T12:00:10Z", "merger/1", "timeout"),
+        line("2026-09-30T12:00:15Z", "merger/1", "served"),
         line("2026-09-30T12:00:20Z", "merger/1", "served"),
         line("2026-09-30T12:00:05Z", "tester/1", "timeout"), // still without, during the check
         line("2026-09-30T12:00:06Z", "architect/1", "served"),
@@ -231,13 +248,14 @@ describe("the model gateway key command", () => {
     const notes = unserved("--notes", dest, since, "merge");
     expect(notes.code).toBe(0);
     expect(notes.stdout).toStartWith(
-      "model-gateway-unserved: 3 agent(s) may have failed check merge for want of a model key: 2 still without one on their last call, and 1 served again after a starve from 2026-09-30T11:59:30Z on"
+      "model-gateway-unserved: 4 agent(s) may have failed check merge for want of a model key: 2 still without one on their last call, and 2 served again after a starve from 2026-09-30T11:59:30Z on"
     );
     const listed = notes.stdout.split("\n").filter((l) => l.startsWith("  "));
     expect(listed).toEqual([
       "  2026-09-30T11:50:00Z implementer/1 in /ws (pid 42): timeout: why (before check merge began)",
-      "  2026-09-30T11:59:50Z merger/1 in /ws (pid 42): killed: why (before check merge began); served again at 2026-09-30T12:00:02Z",
+      "  2026-09-30T11:59:50Z planner/1 in /ws (pid 42): killed: why (before check merge began); served again at 2026-09-30T12:00:02Z",
       "  2026-09-30T12:00:05Z tester/1 in /ws (pid 42): timeout: why",
+      "  2026-09-30T12:00:10Z merger/1 in /ws (pid 42): timeout: why; served again at 2026-09-30T12:00:15Z",
     ]);
     // No record yet, a malformed time, and a line of the old five-field shape.
     expect(unserved("--notes", join(dir, "not-installed"), since, "setup")).toMatchObject({

@@ -60,6 +60,18 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
+# A reused STAGE4B_EVIDENCE_DIR holds an earlier run's key command and evidence (its transcript.log
+# included), which this run must neither write into nor read as its own: refused before anything is
+# written, the transcript's tee started or any trap set, so it prints the run's verdict line itself.
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "CHECK setup: FAIL: $reason"
+  echo "stage 4b e2e: FAIL (check setup)"
+  rmdir "$work"
+  exit 1
+fi
+# The controller's key command directory, whose record the trap's notes read: set only once --fresh
+# has passed, so the notes can never read an earlier run's calls.
+gateway_dest=$evidence/model-gateway
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
 # tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
 # TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
@@ -1036,8 +1048,10 @@ cleanup() {
   if [ -n "$was_blocked" ]; then
     echo "stage 4b e2e: BLOCKED (check $check): the checkpoint could not run, so the run is no verdict on the change; the checkpoints before it stand"
   elif [ -z "$ok" ]; then
-    # A diagnostic: it never sets the status, and after a signal the run was stopped, not failed.
-    [ "$status" -gt 128 ] || bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
+    # A diagnostic: it never sets the status. A hangup, an interrupt or a termination (129, 130,
+    # 143, as trapped below) stopped the run, which ends FAIL as on main but gets no notes.
+    [ -z "$gateway_dest" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$gateway_dest" "$check_started" "$check" || true
     echo "stage 4b e2e: FAIL (check $check)"
   fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
@@ -1048,8 +1062,6 @@ trap 'echo "CHECK $check: FAIL: line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# A reused STAGE4B_EVIDENCE_DIR holds an earlier run's key command.
-reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence") || fail "$reason"
 
 # ---- the production audit (checkpoint production-audit) --------------------------------------------
 
@@ -1770,7 +1782,7 @@ else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 make_omp_home "$omp_home"
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
-bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
+bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 cat >"$work/controller.yaml" <<EOF

@@ -41,6 +41,17 @@ base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
+# A reused ACCEPT_EVIDENCE_DIR holds an earlier run's key command and evidence (its
+# soft-failures.txt included), which this run must neither write into nor read as its own: refused
+# before anything is written or any trap is set.
+if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
+# The key command's directory, whose record the trap's notes read: set only once --fresh has passed,
+# so the notes can never read an earlier run's calls.
+gateway_dest=$evidence/model-gateway
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
 check=setup
@@ -132,10 +143,12 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
-  # A diagnostic for a hard failure: it never sets the status, and after a signal the run was
-  # stopped. A run that ends on its soft failures sets ok after its last check, once every pane has
-  # stopped, so its notes could only be empty.
-  [ -n "${ok:-}" ] || [ "$status" -gt 128 ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
+  # A diagnostic for a hard failure: it never sets the status. A hangup, an interrupt or a
+  # termination (129, 130, 143, as trapped below) stopped the run and gets none. A run that ends on
+  # its soft failures sets ok after its last check, once every pane has stopped, so its notes could
+  # only be empty.
+  [ -n "${ok:-}" ] || [ -z "$gateway_dest" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    bash "$unserved_reader" --notes "$gateway_dest" "$check_started" "$check" >&2 || true
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
@@ -160,8 +173,6 @@ trap 'printf "FAIL %s: line %s exited %s: %s\n" "$check" "$LINENO" "$?" "$BASH_C
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# A reused ACCEPT_EVIDENCE_DIR holds an earlier run's key command.
-reason=$(bash "$unserved_reader" --fresh "$evidence") || fail "$reason"
 
 # ---- the rig: copied from stage3-devbox-workflow.sh ------------------------------------------------
 start_listener() {
@@ -613,7 +624,7 @@ printf '%s\n' "$head_commit" >"$evidence/head.txt"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed"
 note "the agents' model route keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
