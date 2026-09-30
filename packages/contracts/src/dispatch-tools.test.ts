@@ -219,10 +219,20 @@ describe("dispatchToolSpecs", () => {
   test("dispatch_search takes a project key or none, and refuses anything else by name", () => {
     const schema = schemaFor("dispatch_search");
 
-    for (const project of [undefined, "", "LEGION", "LEGSMOKE"]) {
+    // The key's length limits are what keep the search URL short ("Search limits" in
+    // packages/contracts/AGENTS.md), and this copy of the pattern changes without a migration.
+    for (const project of [undefined, "", "AB", "LEGION", "LEGSMOKE", "ABCDEFGHIJ"]) {
       expect(schema.safeParse({ query: "ok", project }).success).toBe(true);
     }
-    for (const project of ["legion", " LEGION", "LEGION-1", "中".repeat(100)]) {
+    for (const project of [
+      "A",
+      "ABCDEFGHIJK",
+      "1ABC",
+      "legion",
+      " LEGION",
+      "LEGION-1",
+      "中".repeat(100),
+    ]) {
       const refused = schema.safeParse({ query: "ok", project });
       expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
         "project must be a project key such as CORE",
