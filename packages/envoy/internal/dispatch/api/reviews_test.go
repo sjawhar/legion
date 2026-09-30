@@ -3,15 +3,23 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -404,11 +412,63 @@ func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
 	}
 }
 
+// Only the approval-request route writes an approval ask, always naming its document, but the
+// schema does not make an ask of kind approval carry one. An answer to a hand-written row that
+// names none is a server fault the route reports, 500 APPROVAL_ASK_INVALID, and it writes nothing.
+func TestAnsweringAnApprovalAskThatNamesNoDocumentIsAServerFault(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Hand-written approval", "A spec")
+	// The row and its ask.opened event, as an insert site writes them, with no approval.
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	ask := model.Ask{
+		IssueKey: &issue.Key, Author: model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
+		Question: "Approve spec.md (version 1)?", Options: []model.AskOption{{Label: "Approve"}, {Label: "Request changes"}},
+		Urgency: "high", State: "open", Kind: "approval",
+	}
+	if err := tx.QueryRow(ctx, `
+		insert into asks (issue_key, author, question, options, urgency, kind, approval)
+		values ($1, '{"kind":"session","id":"session-0123456789abcdef"}', 'Approve spec.md (version 1)?',
+			'[{"label":"Approve"},{"label":"Request changes"}]', 'high', 'approval', null)
+		returning id::text, created_at
+	`, issue.Key).Scan(&ask.ID, &ask.CreatedAt); err != nil {
+		t.Fatalf("insert an approval ask naming no document: %v", err)
+	}
+	if _, err := events.NewBroker().Append(ctx, tx, model.Event{
+		IssueKey: &issue.Key, Type: "ask.opened", Actor: ask.Author, Payload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+	}); err != nil {
+		t.Fatalf("append the ask's ask.opened: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	askID := ask.ID
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{"selected": []string{"Approve"}}, "alice")
+	if body := answered.Body.String(); answered.Code != http.StatusInternalServerError || !strings.Contains(body, `"code":"APPROVAL_ASK_INVALID"`) || !strings.Contains(body, askID) {
+		t.Fatalf("answer to an approval ask naming no document: status=%d body=%s", answered.Code, body)
+	}
+	var state string
+	var answer *string
+	var reviews int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select state, answer::text, (select count(*) from artifact_reviews) from asks where id = $1
+	`, askID).Scan(&state, &answer, &reviews); err != nil {
+		t.Fatalf("read the ask after the answer: %v", err)
+	}
+	if state != "open" || answer != nil || reviews != 0 {
+		t.Fatalf("after the refused answer: ask %s with answer %v and %d reviews, want open, unanswered, none", state, answer, reviews)
+	}
+}
+
 // A new version of a document retracts an approval ask naming an older one in the same
-// transaction, in the writer's name and with a reason naming the new version, since no answer
-// could review that ask any more; its followers learn from the ask.resolved that approval has to
-// be requested again. Every path that writes a version does it, and a write that versions nothing
-// leaves the ask open.
+// transaction, in the name of its one writer and with a reason naming the new version, since no
+// answer could review that ask any more; its followers learn from the ask.resolved that approval
+// has to be requested again. Every path that writes a version does it, and a write that versions
+// nothing leaves the ask open.
 func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 	session := sessionActor()["id"].(string)
 	edit := func(t *testing.T, handler http.Handler, artifactID string, body map[string]any) {
@@ -575,9 +635,9 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 		}
 	})
 
-	t.Run("a version no writer is known for", func(t *testing.T) {
-		// Settlement names a version's writer from its pending authors, else the room's last
-		// actor, and after a room reload it can know neither; the retraction is then its own.
+	t.Run("a version no writer is credited with", func(t *testing.T) {
+		// Settlement can version a change it credits to nobody, such as one written before a room
+		// reload; the retraction is then its own.
 		doc := open(t, time.Hour)
 		ctx := context.Background()
 		tx, err := doc.database.Pool.Begin(ctx)
@@ -585,7 +645,7 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		retractions, err := docs.RetractStaleApprovalAsks(ctx, tx, events.NewBroker(), doc.artifactID, 2, model.Actor{})
+		retractions, err := docs.RetractStaleApprovalAsks(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2})
 		if err != nil {
 			t.Fatalf("retract with no known writer: %v", err)
 		}
@@ -597,10 +657,250 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 		}
 		retracted := decodeBody[askRead](t, dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/asks/"+doc.askID, nil, "alice")).Ask
 		if retracted.State != "resolved" || retracted.Resolution == nil || retracted.Resolution.Actor.ID != docs.SettlementActor.ID {
-			t.Fatalf("the ask after a version no writer is known for = %#v, want retracted by %s", retracted, docs.SettlementActor.ID)
+			t.Fatalf("the ask after a version no writer is credited with = %#v, want retracted by %s", retracted, docs.SettlementActor.ID)
 		}
 	})
 }
+
+// A version is credited to every writer whose change it carries: each peer connected when a
+// browser edit arrives, since the room cannot tell which of them sent it, and every author an
+// agent's write joins in one settlement window. A stale approval ask is retracted in the name of
+// the version's writer only when exactly one is credited; with several, naming the first of them
+// could name the asking session, and the outbox sends no event to its own actor, so the session
+// would never hear that it has to request approval again. Settlement retracts it instead, in its
+// own name. The outbox runs over each case to show where the ask.resolved goes; the asking
+// session writing alone is the case in which its own retraction reaches it with no copy.
+func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *testing.T) {
+	asker := model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	humanPeer := http.Header{"X-Dispatch-User": []string{"bob"}}
+	askerPeer := http.Header{"Authorization": []string{"Bearer agent-token"}, "X-Dispatch-Actor": []string{`{"kind":"session","id":"` + asker.ID + `"}`}}
+	type fixture struct {
+		handler         http.Handler
+		database        *store.Store
+		documentService *docs.Service
+		issueKey        string
+		artifactID      string
+		askID           string
+		sockets         *servedSockets
+		wsURL           string
+		peers           []*syncedPeer
+	}
+	open := func(t *testing.T) *fixture {
+		t.Helper()
+		f := &fixture{}
+		f.handler, f.database = newInteractionHandler(t, func(database *store.Store) docs.API {
+			f.documentService = docs.New(docs.Deps{
+				Store: database, Events: events.NewBroker(), Settle: time.Hour, AgentToken: "agent-token",
+				Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"bob": {}}},
+			})
+			t.Cleanup(func() { _ = f.documentService.Shutdown(context.Background()) })
+			return f.documentService
+		})
+		issue := createInteractionIssue(t, f.handler, "TEST", "Several writers", "A spec")
+		f.issueKey, f.artifactID = issue.Key, issue.PrimaryArtifactID
+		requested := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/artifacts/"+f.artifactID+"/approval-requests", map[string]any{
+			"actor": sessionActor(), "summary": "Caps retries at three attempts.",
+		})
+		if requested.Code != http.StatusCreated {
+			t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+		}
+		f.askID = decodeBody[struct {
+			Ask struct {
+				ID string `json:"id"`
+			} `json:"ask"`
+		}](t, requested).Ask.ID
+		f.sockets = &servedSockets{finished: make(map[string]chan struct{})}
+		server := httptest.NewServer(f.sockets.serve(f.documentService.ServeHTTP))
+		t.Cleanup(server.Close)
+		f.wsURL = "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + f.artifactID
+		return f
+	}
+	connect := func(t *testing.T, f *fixture, headers http.Header) *syncedPeer {
+		t.Helper()
+		peer := &syncedPeer{wsURL: f.wsURL, sockets: f.sockets, headers: headers, artifactID: f.artifactID, doc: crdt.New()}
+		peer.connect(t)
+		t.Cleanup(peer.close)
+		f.peers = append(f.peers, peer)
+		return peer
+	}
+	type actorRead struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	}
+
+	for _, test := range []struct {
+		name    string
+		write   func(t *testing.T, f *fixture)
+		authors int
+		// retractor is who the ask's retraction is recorded as, and askerHears whether the
+		// outbox sends its ask.resolved to the asking session's own topic.
+		retractor  model.Actor
+		askerHears bool
+	}{
+		{"two connected peers where the second types", func(t *testing.T, f *fixture) {
+			connect(t, f, askerPeer)
+			typist := connect(t, f, humanPeer)
+			typist.appendParagraph(t, "Bob's note.")
+			typist.barrier(t)
+		}, 2, docs.SettlementActor, true},
+		{"an agent's joined write and a human's typing in one settlement window", func(t *testing.T, f *fixture) {
+			typist := connect(t, f, humanPeer)
+			ctx := context.Background()
+			tx, err := f.database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin the agent's write: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			joined, ledger := f.documentService.Join(ctx, tx)
+			defer ledger.Discard()
+			if _, err := f.documentService.ReplaceText(joined, f.artifactID, "A revised spec", asker); err != nil {
+				t.Fatalf("the agent's joined write: %v", err)
+			}
+			if err := ledger.Commit(ctx); err != nil {
+				t.Fatalf("commit the agent's joined write: %v", err)
+			}
+			waitForLiveText(t, f.documentService, f.artifactID, "A revised spec")
+			typist.barrier(t)
+			typist.appendParagraph(t, "Bob's note.")
+			typist.barrier(t)
+		}, 2, docs.SettlementActor, true},
+		{"a human's typing and then an agent's edit that versions both", func(t *testing.T, f *fixture) {
+			typist := connect(t, f, humanPeer)
+			typist.appendParagraph(t, "Bob's note.")
+			typist.barrier(t)
+			if edited := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/artifacts/"+f.artifactID+"/edits", map[string]any{
+				"ops": []map[string]string{{"op": "replace", "find": "A spec", "with": "A revised spec"}}, "actor": sessionActor(),
+			}); edited.Code != http.StatusOK {
+				t.Fatalf("the agent's edit: status=%d body=%s", edited.Code, edited.Body.String())
+			}
+		}, 2, docs.SettlementActor, true},
+		{"the only connected peer types", func(t *testing.T, f *fixture) {
+			typist := connect(t, f, humanPeer)
+			typist.appendParagraph(t, "Bob's note.")
+			typist.barrier(t)
+		}, 1, bob, true},
+		{"the asking session alone types over its connection", func(t *testing.T, f *fixture) {
+			typist := connect(t, f, askerPeer)
+			typist.appendParagraph(t, "The asker's note.")
+			typist.barrier(t)
+		}, 1, asker, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := open(t)
+			test.write(t, f)
+			// The last peer to leave settles the room, which versions whatever the peers wrote.
+			for _, peer := range f.peers {
+				peer.close()
+			}
+			waitForArtifactVersion(t, f.handler, f.artifactID, 2)
+
+			version := decodeBody[struct {
+				Authors []actorRead `json:"authors"`
+			}](t, dispatchRequest(t, f.handler, http.MethodGet, "/api/v1/artifacts/"+f.artifactID+"/versions/2", nil, "alice"))
+			if len(version.Authors) != test.authors {
+				t.Fatalf("version 2 authors = %#v, want %d", version.Authors, test.authors)
+			}
+			var resolution struct {
+				Kind   string    `json:"kind"`
+				Reason string    `json:"reason"`
+				Actor  actorRead `json:"actor"`
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				read := decodeBody[struct {
+					Ask struct {
+						State      string          `json:"state"`
+						Resolution json.RawMessage `json:"resolution"`
+					} `json:"ask"`
+				}](t, dispatchRequest(t, f.handler, http.MethodGet, "/api/v1/asks/"+f.askID, nil, "alice")).Ask
+				if read.State == "resolved" {
+					if err := json.Unmarshal(read.Resolution, &resolution); err != nil {
+						t.Fatalf("decode the ask's resolution: %v", err)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the approval ask naming version 1 is still %s after version 2", read.State)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if resolution.Kind != "retracted" || resolution.Actor != (actorRead{test.retractor.Kind, test.retractor.ID}) || !strings.Contains(resolution.Reason, "version 2") {
+				t.Fatalf("the ask's resolution = %#v, want retracted by %#v with a reason naming version 2", resolution, test.retractor)
+			}
+			if strings.HasPrefix(resolution.Reason, docs.SettlementRetractionReason) {
+				t.Fatalf("retraction reason %q is one only settlement's removal of a block writes", resolution.Reason)
+			}
+			var logged []struct {
+				Type    string    `json:"type"`
+				Actor   actorRead `json:"actor"`
+				Payload struct {
+					ID string `json:"id"`
+				} `json:"payload"`
+			}
+			if err := json.NewDecoder(dispatchRequest(t, f.handler, http.MethodGet, "/api/v1/issues/"+f.issueKey+"/events", nil, "alice").Body).Decode(&logged); err != nil {
+				t.Fatalf("decode events: %v", err)
+			}
+			resolved := 0
+			for _, event := range logged {
+				if event.Type == "ask.resolved" && event.Payload.ID == f.askID {
+					resolved++
+					if event.Actor != (actorRead{test.retractor.Kind, test.retractor.ID}) {
+						t.Fatalf("ask.resolved actor = %#v, want %#v", event.Actor, test.retractor)
+					}
+				}
+			}
+			if resolved != 1 {
+				t.Fatalf("ask.resolved events for %s = %d, want 1", f.askID, resolved)
+			}
+
+			destinations := askResolvedDestinations(t, f.database, f.documentService, f.askID)
+			if heard := slices.Contains(destinations, contracts.AgentSubject(asker.ID)); heard != test.askerHears {
+				t.Fatalf("the outbox published the retraction to %v; the asking session's topic among them = %t, want %t", destinations, heard, test.askerHears)
+			}
+		})
+	}
+}
+
+// askResolvedDestinations runs the outbox over every committed event and returns the topics it
+// published askID's ask.resolved to.
+func askResolvedDestinations(t *testing.T, database *store.Store, documentService docs.API, askID string) []string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		outbox.Run(ctx, outbox.Deps{Store: database, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: documentService})
+	}()
+	defer func() {
+		cancel()
+		<-stopped
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var destinations []string
+		err := database.Pool.QueryRow(context.Background(), `
+			select published_destinations from events
+			where type = 'ask.resolved' and payload->>'id' = $1 and published_at is not null
+		`, askID).Scan(&destinations)
+		if err == nil {
+			return destinations
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("read the retraction's published destinations: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the outbox never published the ask.resolved for %s", askID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// acceptingPublisher takes every envelope the outbox publishes; the outbox records each topic on
+// its event.
+type acceptingPublisher struct{}
+
+func (acceptingPublisher) Publish(contracts.Envelope) error { return nil }
 
 func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
 	var documentService *docs.Service

@@ -59,6 +59,11 @@ func answerTransition(
 			hasText := text != nil && strings.TrimSpace(*text) != ""
 			switch ask.Kind {
 			case "approval":
+				// Only the approval-request route writes an approval ask, always naming its
+				// document, but the schema does not require one; a row naming none is a fault.
+				if ask.Approval == nil {
+					return model.Ask{}, errorf(http.StatusInternalServerError, "APPROVAL_ASK_INVALID", "approval ask %s names no document", ask.ID)
+				}
 				if _, _, err := reviewFromAnswer(selected, text); err != nil {
 					return model.Ask{}, err
 				}

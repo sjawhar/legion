@@ -252,6 +252,10 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
+		// A 500 the handler named is a server fault like any other, so the operator's log shows it.
+		if apiErr.status == http.StatusInternalServerError {
+			slog.Error("dispatch: API handler failed", "code", apiErr.code, "error", err)
+		}
 		return
 	}
 	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
