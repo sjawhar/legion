@@ -92,13 +92,6 @@ func answerTransition(
 	}
 }
 
-// answerAskTx answers an ask inside the caller's transaction without appending
-// or publishing its event; the header review path uses it to close an open
-// approval ask alongside the review it writes.
-func (s *server) answerAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, selected []string, text *string) (model.Ask, error) {
-	return s.transitionAskTx(ctx, tx, id, answerTransition(actor, selected, text, nil, nil))
-}
-
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -267,30 +260,40 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	defer tx.Rollback(ctx)
 	documentCtx, ledger := s.deps.Docs.Join(ctx, tx)
 	defer ledger.Discard()
-	ask, err := s.transitionAskTx(documentCtx, tx, id, transition)
+	ask, events, err := s.closeAskTx(documentCtx, tx, id, actor, transition)
 	if err != nil {
 		return model.Ask{}, err
-	}
-	// A transition writes no question text, so it moves no references and says so.
-	event, err := s.appendEvent(documentCtx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
-		transition.EventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-	))
-	if err != nil {
-		return model.Ask{}, err
-	}
-	events := []model.Event{event}
-	if transition.After != nil {
-		more, err := transition.After(documentCtx, tx, ask)
-		if err != nil {
-			return model.Ask{}, err
-		}
-		events = append(events, more...)
 	}
 	if err := ledger.Commit(ctx); err != nil {
 		return model.Ask{}, err
 	}
 	s.publish(events...)
 	return ask, nil
+}
+
+// closeAskTx applies a transition to an open ask inside the caller's transaction, appends the
+// transition's event and runs its After; the caller commits and publishes the events.
+func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, transition askTransition) (model.Ask, []model.Event, error) {
+	ask, err := s.transitionAskTx(ctx, tx, id, transition)
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	// A transition writes no question text, so it moves no references and says so.
+	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+		transition.EventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+	))
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	events := []model.Event{event}
+	if transition.After != nil {
+		more, err := transition.After(ctx, tx, ask)
+		if err != nil {
+			return model.Ask{}, nil, err
+		}
+		events = append(events, more...)
+	}
+	return ask, events, nil
 }
 
 // transitionAskTx locks an open ask and applies a transition inside the caller's

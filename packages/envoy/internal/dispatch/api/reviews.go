@@ -335,7 +335,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NO_VERSION", http.StatusConflict, "the document has no settled version to review yet")
 		return
 	}
-	events := []model.Event{}
+	var events []model.Event
 	var askID *string
 	if open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID); err != nil {
 		s.writeHandlerError(w, err)
@@ -345,21 +345,13 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		if state == "changes_requested" {
 			selected = approvalOptionRequestChanges
 		}
-		answered, err := s.answerAskTx(r.Context(), tx, open.ID, actor, []string{selected}, reason)
+		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, nil, nil))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		event, err := s.appendEvent(r.Context(), tx, ownerOf(answered.IssueKey, answered.ArtifactID).event(
-			"ask.answered", actor, model.NewAskEventPayload(answered, model.ReferenceChanges{}),
-		))
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		events = append(events, event)
-		id := answered.ID
-		askID = &id
+		events = answeredEvents
+		askID = &answered.ID
 	}
 	review, event, err := s.writeReview(r.Context(), tx, artifact, version, state, actor, reason, askID)
 	if err != nil {
@@ -461,24 +453,15 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
-	events := make([]model.Event, 0, 2)
+	var events []model.Event
 	if open != nil {
 		// The open request names a version the document has moved past, and an answer to it
 		// would pin a review to the latest version, which its question never named.
 		reason := fmt.Sprintf("%s moved on to version %d; approval is requested for that version instead", artifact.Name, version)
-		retracted, err := s.transitionAskTx(r.Context(), tx, open.ID, s.resolveTransition(actor, "retracted", reason))
-		if err != nil {
+		if _, events, err = s.closeAskTx(r.Context(), tx, open.ID, actor, s.resolveTransition(actor, "retracted", reason)); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		event, err := s.appendEvent(r.Context(), tx, owner.event(
-			"ask.resolved", actor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
-		))
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		events = append(events, event)
 	}
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
