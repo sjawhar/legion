@@ -5,7 +5,9 @@ import { join } from "node:path";
 
 // The key command install-model-gateway.sh writes, against a fake hawk-token first on PATH. The
 // fake appends its pid to FAKE_MINT_LOG (one line per mint), sleeps FAKE_MINT_SLEEP seconds, then
-// prints a JWT that expires in an hour.
+// by FAKE_MINT_MODE prints a JWT that expires in an hour (ok), fails the way the devbox wrapper
+// does when its 9000 ms budget runs out (budget), fails at once on the login (refused), or is
+// killed by a signal (killed).
 const lib = import.meta.dir;
 const dir = mkdtempSync(join(tmpdir(), "install-model-gateway-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -16,34 +18,57 @@ writeFileSync(
   `#!/usr/bin/env bash
 printf '%s\\n' "$$" >>"$FAKE_MINT_LOG"
 sleep "\${FAKE_MINT_SLEEP:-0}"
-payload=$(printf '{"exp":%s}' "$(($(date +%s) + 3600))" | base64 -w0 | tr '+/' '-_' | tr -d '=')
-printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
+case "\${FAKE_MINT_MODE:-ok}" in
+ok)
+  payload=$(printf '{"exp":%s}' "$(($(date +%s) + 3600))" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+  printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
+  ;;
+budget)
+  echo "hawk-token: mint produced no token after 1 attempt(s) in 9021 ms of a 9000 ms budget; last stderr follows" >&2
+  exit 1
+  ;;
+refused)
+  echo "hawk-token: mint produced no token after 2 attempt(s) in 812 ms of a 9000 ms budget; last stderr follows" >&2
+  echo "error: no usable hawk login: run hawk login" >&2
+  exit 1
+  ;;
+killed) kill -KILL $$ ;;
+esac
 `,
   { mode: 0o755 }
 );
 const operatorHome = join(dir, "operator-home");
 mkdirSync(operatorHome);
 
+interface Fake {
+  mode?: "ok" | "budget" | "refused" | "killed";
+  sleep?: number;
+  // The MODEL_GATEWAY_CALLS_FILE a harness names in one agent's environment.
+  callsFile?: string;
+}
 let installs = 0;
-function env(mints: string, sleep = 0) {
+function env(mints: string, fake: Fake = {}) {
   return {
     PATH: `${bin}:${process.env.PATH}`,
     HOME: operatorHome,
     DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/bus",
     LEGION_E2E_MODEL_GATEWAY_URL: "https://gateway.internal.example/anthropic",
     FAKE_MINT_LOG: mints,
-    FAKE_MINT_SLEEP: String(sleep),
+    FAKE_MINT_MODE: fake.mode ?? "ok",
+    FAKE_MINT_SLEEP: String(fake.sleep ?? 0),
+    ...(fake.callsFile === undefined ? {} : { MODEL_GATEWAY_CALLS_FILE: fake.callsFile }),
   };
 }
 
-// install writes a fresh profile's route, its preflight mint (sleeping `sleep` seconds) included,
-// and then removes the key that mint kept, so the next call finds the cache cold (the state the
-// kept key's expiry leaves).
-function install(sleep = 0) {
+// install writes a fresh profile's route, its preflight mint (with the given fake) included, and
+// then removes the key that mint kept, so the next call finds the cache cold (the state the kept
+// key's expiry leaves).
+function install(fake: Fake = {}) {
   const run = join(dir, `install-${++installs}`);
   const home = join(run, "omp-home");
   mkdirSync(join(home, ".omp"), { recursive: true });
   const mints = join(run, "mints");
+  const dest = join(run, "model-gateway");
   const cache = join(run, "model-gateway-cache");
   const result = Bun.spawnSync(
     [
@@ -54,25 +79,25 @@ function install(sleep = 0) {
       "--home",
       home,
       "--dest",
-      join(run, "model-gateway"),
+      dest,
       "--cache-dir",
       cache,
     ],
-    { env: env(mints, sleep) }
+    { env: env(mints, fake) }
   );
   expect(result.exitCode).toBe(0);
   rmSync(join(cache, "hawk-token.key"));
   writeFileSync(mints, "");
-  return { run, mints, keyCommand: result.stdout.toString().trim() };
+  return { run, dest, cache, mints, keyCommand: result.stdout.toString().trim() };
 }
 
 // call runs the key command as Oh My Pi does, in a pane's own working directory.
-async function call(keyCommand: string, cwd: string, mints: string, sleep = 0) {
+async function call(keyCommand: string, cwd: string, mints: string, fake: Fake = {}) {
   mkdirSync(cwd, { recursive: true });
   const started = performance.now();
-  const child = Bun.spawn(["/bin/sh", "-c", keyCommand], {
+  const child = Bun.spawn(["/bin/sh", "-c", `exec ${keyCommand}`], {
     cwd,
-    env: env(mints, sleep),
+    env: env(mints, fake),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -80,13 +105,26 @@ async function call(keyCommand: string, cwd: string, mints: string, sleep = 0) {
   return { code, stdout: stdout.trim(), ms: performance.now() - started };
 }
 
+function unserved(...args: string[]) {
+  const result = Bun.spawnSync(["bash", join(lib, "model-gateway-unserved.sh"), ...args], {
+    env: { PATH: process.env.PATH ?? "" },
+  });
+  return {
+    code: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
+}
+
 const mintCount = (mints: string) => readFileSync(mints, "utf8").split("\n").filter(Boolean).length;
+// The record's own time format, UTC to the second.
+const now = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
 
 describe("the model gateway key command", () => {
   test("mints once for a wave of callers that finds the kept key expired, and serves them all", async () => {
     const { run, mints, keyCommand } = install();
     const calls = await Promise.all(
-      [1, 2, 3, 4, 5].map((n) => call(keyCommand, join(run, `pane-${n}`), mints, 1))
+      [1, 2, 3, 4, 5].map((n) => call(keyCommand, join(run, `pane-${n}`), mints, { sleep: 1 }))
     );
 
     expect(mintCount(mints)).toBe(1);
@@ -95,15 +133,91 @@ describe("the model gateway key command", () => {
     expect(calls[0].stdout).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
   });
 
-  test("gives up on a mint that outlasts the caller, and on the wait behind it, before Oh My Pi's ten seconds", async () => {
+  test("tells an agent that starved from one whose login was refused or whose mint was killed, in its own file", async () => {
     const { run, mints, keyCommand } = install();
+    const calls = (name: string) => join(run, name, "model-gateway-calls");
+    const outcome = async (name: string, fake: Fake) => {
+      const c = await call(keyCommand, join(run, name, "cwd"), mints, {
+        ...fake,
+        callsFile: calls(name),
+      });
+      return [c.code, c.stdout];
+    };
+
+    // What Oh My Pi sees is the same for each, which is why the run itself cannot tell them apart.
+    expect(await outcome("starved", { mode: "budget" })).toEqual([1, ""]);
+    expect(await outcome("refused", { mode: "refused" })).toEqual([1, ""]);
+    expect(await outcome("killed", { mode: "killed" })).toEqual([1, ""]);
+    // Each agent's own file does.
+    const s = unserved("--record", calls("starved"));
+    expect(s.code).toBe(75);
+    expect(s.stdout).toContain(`${join(run, "starved", "cwd")}: timeout: `);
+    expect(s.stdout).toContain("9021 ms of a 9000 ms budget");
+    const r = unserved("--record", calls("refused"));
+    expect(r.code).toBe(77);
+    expect(r.stdout).toContain(": failed: ");
+    expect(r.stdout).toContain("no usable hawk login");
+    // A signal is no login problem: it is a starve, which a rerun can fix.
+    const k = unserved("--record", calls("killed"));
+    expect(k.code).toBe(75);
+    expect(k.stdout).toContain(": killed: ");
+    // An agent never called, and a path whose directory does not exist, which is a harness mistake.
+    expect(unserved("--record", calls("never"))).toMatchObject({ code: 2 });
+    mkdirSync(join(run, "never"));
+    expect(unserved("--record", calls("never"))).toMatchObject({ code: 0, stdout: "" });
+  });
+
+  test("counts an agent that starved and was then served as served", async () => {
+    const { run, dest, mints, keyCommand } = install();
+    const since = now();
+    const file = join(run, "pane", "model-gateway-calls");
+    const pane = join(run, "pane", "cwd");
+    await call(keyCommand, pane, mints, { mode: "budget", callsFile: file });
+    expect(unserved("--record", file).code).toBe(75);
+    expect(unserved("--run-exit", "1", dest, since).code).toBe(75);
+
+    // Oh My Pi retries the key command, and this time it mints.
+    expect((await call(keyCommand, pane, mints, { callsFile: file })).code).toBe(0);
+    expect(unserved("--record", file)).toMatchObject({ code: 0, stdout: "" });
+    expect(unserved("--run-exit", "1", dest, since)).toMatchObject({ code: 1, stdout: "" });
+  });
+
+  test("ends a failed run with the verdict only for a starve since its failing check began", async () => {
+    const { run, dest, mints, keyCommand } = install();
+    await call(keyCommand, join(run, "pane-refused"), mints, { mode: "refused" });
+    // The failing check began after that call, so its record is no verdict on this failure. The
+    // record's times are whole seconds, so the check begins a second later: real time, since no fake
+    // timer reaches another process's clock.
+    await Bun.sleep(1100);
+    const later = now();
+    expect(unserved("--run-exit", "1", dest, later)).toMatchObject({ code: 1, stdout: "" });
+    await call(keyCommand, join(run, "pane-starved"), mints, { mode: "budget" });
+    const starved = unserved("--run-exit", "1", dest, later);
+    expect(starved.code).toBe(75);
+    expect(starved.stdout).not.toContain("pane-refused");
+
+    // A key failure since the check began outranks a starve: it is the one a rerun does not fix.
+    await call(keyCommand, join(run, "pane-refused"), mints, { mode: "refused" });
+    const failed = unserved("--run-exit", "1", dest, later);
+    expect(failed.code).toBe(77);
+    expect(failed.stdout).toMatch(/^model-gateway-unserved: KEY FAILED, not scored/);
+    // Every other status is the run's own, and a run that installed no key command passes none.
+    expect(unserved("--run-exit", "0", dest, later)).toMatchObject({ code: 0, stdout: "" });
+    expect(unserved("--run-exit", "130", dest, later)).toMatchObject({ code: 130, stdout: "" });
+    expect(unserved("--run-exit", "1", "", later)).toMatchObject({ code: 1, stdout: "" });
+    expect(unserved("--run-exit", "1", dest, "yesterday").code).toBe(2);
+  }, 30_000);
+
+  test("gives up on a mint that outlasts the caller, and on the wait behind it, before Oh My Pi's ten seconds", async () => {
+    const { run, dest, mints, keyCommand } = install();
+    const since = now();
     // Real time throughout: the deadline under test is the key command's own wall clock, in another
     // process, which no fake timer reaches. The second caller starts 300 ms after the first, so it
     // can take the lock the first releases when its mint is stopped with only a few hundred
     // milliseconds left: too little to mint.
     const calls = await Promise.all([
-      call(keyCommand, join(run, "pane-1"), mints, 12),
-      Bun.sleep(300).then(() => call(keyCommand, join(run, "pane-2"), mints, 12)),
+      call(keyCommand, join(run, "pane-1"), mints, { sleep: 12 }),
+      Bun.sleep(300).then(() => call(keyCommand, join(run, "pane-2"), mints, { sleep: 12 })),
     ]);
 
     expect(mintCount(mints)).toBe(1);
@@ -111,12 +225,16 @@ describe("the model gateway key command", () => {
       expect([c.code, c.stdout]).toEqual([1, ""]);
       expect(c.ms).toBeLessThan(10_000);
     }
+    const u = unserved("--run-exit", "1", dest, since);
+    expect(u.code).toBe(75);
+    expect(u.stdout.match(/: timeout: /g)).toHaveLength(2);
+    expect(u.stdout).toContain("for another call's mint");
   }, 30_000);
 
   test("exempts the installer's preflight mint from the deadline, for hawk-token's first-run build", () => {
     // Real time: the deadline is the key command's own wall clock, in another process.
     const started = performance.now();
-    install(11);
+    install({ sleep: 11 });
     expect(performance.now() - started).toBeGreaterThan(11_000);
   }, 30_000);
 });

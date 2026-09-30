@@ -60,6 +60,12 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
+# A reused STAGE4B_EVIDENCE_DIR holds an earlier run's key command, whose calls are not this run's.
+if [ -e "$evidence/model-gateway" ]; then
+  echo "CHECK setup: BLOCKED: $evidence/model-gateway is an earlier run's; give this run an evidence directory of its own"
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
 # tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
 # TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
@@ -118,7 +124,9 @@ omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$evidence/logs/daemon.log
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 ok=
+gateway_dest= # the controller's key command directory once this run installs it (lib/model-gateway-unserved.sh)
 torn_down=
 snapshotted=
 compared=
@@ -150,6 +158,7 @@ pair_session=
 
 begin() {
   check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
   echo "== $check"
 }
 note() { echo "   $*"; }
@@ -1004,6 +1013,8 @@ cleanup() {
   # one the checks set. Inside this EXIT trap BASH_COMMAND is still the command the trap interrupted,
   # so the warning names the line alone.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # Before the teardown, whose own failure below sets the status back to 1.
+  bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --run-exit "$status" "$gateway_dest" "$check_started" || status=$?
   stop_tree "$shape_pid"
   [ -z "$tree1" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
@@ -1758,7 +1769,8 @@ else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 make_omp_home "$omp_home"
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
-bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
+gateway_dest=$evidence/model-gateway
+bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 cat >"$work/controller.yaml" <<EOF

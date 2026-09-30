@@ -198,7 +198,9 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
-`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. The
+`FAIL <check>: <why>` and exits 1, unless the model key command served an agent no key
+([its verdict](#libmodel-gateway-unservedsh) decides), and any other failing command names the
+check it ended. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
@@ -379,7 +381,9 @@ a close whose branch delete failed is reported as closed with the reason the bra
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
-pull request open and prints gh's reason, with a line saying some may still be open.
+pull request open and prints gh's reason, with a line saying some may still be open. A failed run
+in which the model key command served an agent no key ends with
+[its verdict](#libmodel-gateway-unservedsh).
 
 ## stage3-4b13b-acceptance.sh
 
@@ -596,7 +600,9 @@ keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the 
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
 every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
 controller's), the interest samples, the audit files and the negative controls. What the
-run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh).
+run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). A failed run in which the model key
+command served the controller no key ends with [its verdict](#libmodel-gateway-unservedsh), unless
+the teardown fails as well.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -1047,10 +1053,13 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
 is unset for it), for that one command. It appends one line per invocation, one per mint, one per
-call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout
-carries the key alone. The profile's
-`agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
-and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
+call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`, and one line
+per call and its outcome to `<dir>/hawk-token.calls`
+([`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads it); stdout carries the key
+alone. The profile's `agent/models.yml` points the `anthropic` provider at
+`LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My
+Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started,
+so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model role
 (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
 `oracle`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
 `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
@@ -1098,9 +1107,9 @@ reads the hawk login from the keyring over the session bus, and the devbox's key
 serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run. A Stage 3 run
 invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before
 the cache. Every call inside the window gets the kept key. A key the gateway refuses before then is
-not re-minted: the proof's model turns fail, loudly, which is right for a proof. (The command cannot
-tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/sh -c`, so each call
-has a fresh parent process.)
+not re-minted: the proof's model turns fail, loudly, which is right for a proof. (A call's parent
+is the Oh My Pi process that ran it, on 18.2.9 a child of the agent's own `omp` rather than the
+agent's pid, so the record tells agents apart by the working directory each call ran in.)
 
 One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
 once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
@@ -1115,11 +1124,63 @@ reach its first line), whether it is waiting on the lock or minting under `timeo
 A waiter that takes the lock with under 2000 ms left starts no mint: the fastest mint measured on
 the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wait is bounded by
 one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
-succeeds is served inside every caller's ten seconds. A call that gets no key exits 1, which Oh My
-Pi reports as `No API key found for anthropic.` and retries 30 s later.
+succeeds is served inside every caller's ten seconds.
+
+Every call appends one tab-separated line to `<dir>/hawk-token.calls`: the time, the caller's pid,
+the directory Oh My Pi ran it in (the agent's own), the outcome, and a detail. The outcome is
+`served`; `timeout` when the call ran out of time — its own deadline, its wait behind another call's
+mint, or `hawk-token` saying it spent its whole budget (`in <spent> ms of a <budget> ms budget`,
+spent at least the budget); `killed` when a signal ended the mint while it had time left; and
+`failed` when the mint ended without a key for any other reason, with `hawk-token`'s last stderr
+line. The wrapper exits 1 whether its budget ran out or the login was refused, so that sentence is
+the only thing that tells them apart; a `hawk-token` that words it otherwise has a spent budget
+recorded as `failed`, never as a starve. A caller whose environment names
+`MODEL_GATEWAY_CALLS_FILE` gets its line in that file too, so a harness that gives each agent its
+own file can judge one run from that run's directory alone.
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
+
+## lib/model-gateway-unserved.sh
+
+Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) wrote
+left an agent without a key, and why, so a run in which an agent never got a model turn is scored
+neither as a pass nor as a failure of what it tests. Oh My Pi answers every call that gets no key
+the same way (`No API key found for anthropic.`, exit 1, and no session transcript at all or one
+holding no assistant message), whatever the cause.
+
+```sh
+bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-calls"                        # a scorer, one agent
+bash scripts/e2e/lib/model-gateway-unserved.sh --run-exit "$status" "$gateway_dest" "$check_started"     # a stage proof's EXIT trap
+```
+
+An agent is the calls made from one working directory, and it is left without a key when its last
+call was not served: Oh My Pi retries a failed key command 30 s later and after a 401, and a pane
+relaunched after a starve calls again, so an agent served since then has recovered. The verdict,
+printed with each such agent's last call, is `STARVED, not scored` (75) when each of them ran out of
+time or had its mint killed, so the run is to be rerun, and `KEY FAILED, not scored` (77) when one's
+last mint failed otherwise: a rerun does not fix that, so it outranks a starve.
+
+`--record` reads one agent's `MODEL_GATEWAY_CALLS_FILE` and exits 0 when its last call was served
+or it holds none (no file included), else with the verdict's status. A harness that scores each
+agent's run from its own directory, such as the skill-scenario rig's scorer, names a file in each
+agent's environment and reads it this way. A run from a checkout whose key command predates the
+record carries the same signal without the reason: no session transcript, or one holding no
+assistant message (a starved `omp -p` on Oh My Pi 18.2.9 wrote no session file at all).
+
+`--run-exit` exits with the status a stage proof's run ends with: `<status>` itself, unless it is 1
+and an agent left without a key made its last call at or after `<since>`, the time the failing check
+began, when it prints the verdict and exits with its status instead. A check that fails for its own
+reason once every agent is served ends 1, as does one that fails after an agent's last starve in an
+earlier check. `<dest>` is the key command's directory this run created, empty until it did: each
+stage proof sets it just before installing the key command, and refuses, before it installs its
+`EXIT` trap, an evidence directory that already holds one, whose calls would be an earlier run's.
+The tmux stage proofs (Stage 2, Stage 3, the 4b.13b acceptance) end their `EXIT` trap with it, and
+Stage 4b runs it for its controller before the teardown, whose own failure sets the status back to
+1.
+
+Either form exits 2 on an argument refusal (a `--record` in a directory that does not exist
+included), and 1 on a record line whose outcome it does not know.
 
 ## lib/check-model-route.sh
 

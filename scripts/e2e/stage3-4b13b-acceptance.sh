@@ -34,13 +34,24 @@
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+# The key command's record is read with this script's own reader: an ACCEPT_ROOT from before the
+# record has no reader to run.
+unserved_reader=$(cd "$(dirname "$0")" && pwd)/lib/model-gateway-unserved.sh
 base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
+# A reused ACCEPT_EVIDENCE_DIR holds an earlier run's key command, whose calls are not this run's.
+if [ -e "$evidence/model-gateway" ]; then
+  echo "FAIL setup: $evidence/model-gateway is an earlier run's; give this run an evidence directory of its own" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
+gateway_dest= # the key command's directory once this run installs it (lib/model-gateway-unserved.sh)
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="AC$(( ($$ + stamp) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -71,7 +82,11 @@ audited=
 soft_failures="$evidence/soft-failures.txt"
 : >"$soft_failures"
 
-begin() { check=$1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
+begin() {
+  check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
+  printf '== %s  (%s)\n' "$check" "$(date -u +%T)"
+}
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
@@ -96,7 +111,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -128,6 +143,7 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
+  bash "$unserved_reader" --run-exit "$status" "$gateway_dest" "$check_started" >&2 || exit "$?"
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
@@ -603,7 +619,8 @@ printf '%s\n' "$head_commit" >"$evidence/head.txt"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+gateway_dest=$evidence/model-gateway
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed"
 note "the agents' model route keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"

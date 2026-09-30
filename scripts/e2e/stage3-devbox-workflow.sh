@@ -25,9 +25,17 @@ work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
+# A reused STAGE3_EVIDENCE_DIR holds an earlier run's key command, whose calls are not this run's.
+if [ -e "$evidence/model-gateway" ]; then
+  echo "FAIL setup: $evidence/model-gateway is an earlier run's; give this run an evidence directory of its own" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
+gateway_dest= # the key command's directory once this run installs it (lib/model-gateway-unserved.sh)
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="S3$(( ($$ + $(date +%s)) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -72,7 +80,11 @@ prod_dispatch_url=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
 
-begin() { check=$1; printf '== %s\n' "$check"; }
+begin() {
+  check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
+  printf '== %s\n' "$check"
+}
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
@@ -96,7 +108,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -124,6 +136,7 @@ cleanup() {
     printf "the run's scratch workspace is %s\n" "$work" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
+  bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --run-exit "$status" "$gateway_dest" "$check_started" >&2 || exit "$?"
   return 0
 }
 trap cleanup EXIT
@@ -594,7 +607,8 @@ make_omp_home "$omp_home"
 # The model route, installed while this shell still holds the operator's HOME and XDG directories,
 # which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
 # run here, by name. The key command's log is evidence.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+gateway_dest=$evidence/model-gateway
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
