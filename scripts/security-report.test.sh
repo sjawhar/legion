@@ -613,11 +613,11 @@ window_case unknown-key '{"report_only": {"zizmor": true, "dependencies": true, 
   'report_only."codeql" names no check (zizmor, dependencies); ignored'
 
 echo "=== --window-flags: the window job's reading of the file, one output line per check ==="
-# run_flags FILE: runs the script's --window-flags mode; stdout in $flags_out, stderr in
-# $flags_err, exit code in $rc.
+# run_flags ARG…: runs the script's --window-flags mode with ARG… from the current directory;
+# stdout in $flags_out, stderr in $flags_err, exit code in $rc.
 run_flags() {
   rc=0
-  flags_out=$("$report" --window-flags "$1" 2> "$work/flags.err") || rc=$?
+  flags_out=$("$report" --window-flags "$@" 2> "$work/flags.err") || rc=$?
   flags_err=$(< "$work/flags.err")
 }
 mkdir -p "$work/flags"
@@ -645,6 +645,71 @@ check "the checked-in window file is in the per-check shape: no note" "$(is "$fl
 rc=0
 "$report" --window-flags > /dev/null 2>&1 || rc=$?
 check "--window-flags without a file exits 2" "$(is "$rc" 2)"
+
+echo "=== the base: a pull request is judged against its merge commit's first parent, and reads its flags there ==="
+# A real repository. Main promotes zizmor (A1); a pull request branched from A1 sets it back to
+# report-only (P); main moves on (A2), so the pull request's recorded base (A1) is stale; GitHub's
+# merge commit M joins A2 and P, as refs/pull/<n>/merge does. The run checks M out at depth 1 from
+# an origin, as actions/checkout does, so HEAD is shallow and its parents are not local.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+g() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
+src="$work/git/src"
+mkdir -p "$src/.github"
+g -C "$src" init -q
+echo '{"report_only": {"zizmor": false, "dependencies": true}}' > "$src/.github/security-window.json"
+echo 1 > "$src/other.txt"
+g -C "$src" add -A
+g -C "$src" commit -qm "A1: main promotes zizmor"
+a1=$(g -C "$src" rev-parse HEAD)
+g -C "$src" checkout -qb pr
+echo '{"report_only": {"zizmor": true, "dependencies": true}}' > "$src/.github/security-window.json"
+g -C "$src" commit -qam "P: the pull request sets zizmor back to report-only"
+g -C "$src" checkout -q main
+echo 2 > "$src/other.txt"
+g -C "$src" commit -qam "A2: main moves on"
+a2=$(g -C "$src" rev-parse HEAD)
+g -C "$src" checkout -q --detach main
+g -C "$src" merge -q --no-ff pr -m "M: GitHub's merge commit"
+g -C "$src" branch pull-merge HEAD
+g clone -q --bare "$src" "$work/git/origin.git"
+g clone -q --depth 1 --branch pull-merge "file://$work/git/origin.git" "$work/git/clone"
+g clone -q --depth 1 --branch main "file://$work/git/origin.git" "$work/git/main"
+# base_commit DIR ARG…: the script's --base-commit mode run in DIR; its output in $base_out, exit
+# code in $rc.
+base_commit() {
+  local dir=$1
+  shift
+  rc=0
+  base_out=$(cd "$dir" && "$report" --base-commit "$@" 2>&1) || rc=$?
+}
+base_commit "$work/git/clone" pull_request
+check "a pull request's base is its merge commit's first parent (main's tip), not its recorded base" \
+  "$( [ "$rc" = 0 ] && [ "$base_out" = "$a2" ] && [ "$base_out" != "$a1" ] && echo true || echo false)"
+base_commit "$work/git/clone" merge_group "$a1"
+check "a merge group's base is the event's base_sha" "$(is "$base_out" "$a1")"
+base_commit "$work/git/clone" push
+check "a push, a schedule or a dispatch has no base: prints nothing" \
+  "$( [ "$rc" = 0 ] && [ -z "$base_out" ] && echo true || echo false)"
+base_commit "$work/git/main" pull_request
+check "a pull_request run whose HEAD is not a merge commit fails, naming it" \
+  "$( [ "$rc" = 2 ] && [ "$(contains "$base_out" "not a merge commit")" = true ] && echo true || echo false)"
+base_commit "$work/git/clone" merge_group
+check "merge_group without its base_sha exits 2" "$(is "$rc" 2)"
+cd "$work/git/clone"
+run_flags .github/security-window.json --at "$a2"
+check "a pull request that sets zizmor back to report-only over a promoted base still reads the base's false" \
+  "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=false
+dependencies=true" ] && [ -z "$flags_err" ] && echo true || echo false)"
+run_flags .github/security-window.json
+check "the tree itself says true: the base read is what keeps zizmor blocking" "$(is "$flags_out" "zizmor=true
+dependencies=true")"
+run_flags .github/nowhere.json --at "$a2"
+check "a base with no window file: every check report-only, named with the commit" \
+  "$( [ "$flags_out" = "zizmor=true
+dependencies=true" ] && [ "$(contains "$flags_err" ".github/nowhere.json at ${a2:0:12}: missing")" = true ] &&
+  echo true || echo false)"
+cd - > /dev/null
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
 
 echo "=== R12. --decision force with the window open ==="
 setup r12 "3 days ago"

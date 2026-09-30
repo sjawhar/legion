@@ -59,9 +59,12 @@ rule, severity and state.
 
 `.github/workflows/security.yaml` runs zizmor over the workflows and composite actions, and
 osv-scanner and govulncheck over the dependencies, on every pull request, merge group and push to
-`main`, and daily. On a pull request zizmor is judged only on findings new against the base
-commit (`.github/scripts/zizmor-findings.sh` fingerprints both sides), and those show as
-annotations on the changed files.
+`main`, and daily. On a pull request or a merge group zizmor is judged only on findings new
+against the base (`.github/scripts/zizmor-findings.sh` fingerprints both sides), and those show as
+annotations on the changed files. A pull request's base is its merge commit's first parent, which
+is `main`'s tip when GitHub built the merge; the event's `pull_request.base.sha` does not follow
+`main`, so findings `main` gained since would read as the pull request's. A merge group's base is
+its `base_sha`.
 
 `.github/security-window.json` holds one flag per check:
 `{"report_only": {"zizmor": true, "dependencies": true}}`. While a check's flag is `true`, its
@@ -73,6 +76,11 @@ the file sets its flag to `false`. A missing file, a document that is not an obj
 report-only, and the `window` job's step summary and an annotation name the problem. A bare
 boolean (`{"report_only": true}`, the file's first form) applies to both checks. The `security` job
 gathers each run's counts and both flags into the `security-report` artifact and the step summary.
+
+A pull request or merge group reads the flags from its base's copy of the file, not its own; a
+push to `main` and the daily run read `main`'s. So a promotion takes effect on `main` from its
+merge, the promotion pull request's own run stays report-only, and a pull request that sets a
+promoted check back to `true` is still judged by the base's `false`.
 
 The window is 14 days from the workflow's first push run on `main`. `scripts/security-report.sh`
 prints the window's numbers: `main`'s daily runs, the merged pull requests' new zizmor findings

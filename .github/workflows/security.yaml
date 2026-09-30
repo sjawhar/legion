@@ -41,6 +41,7 @@ jobs:
   window:
     runs-on: ubuntu-24.04
     outputs:
+      base: ${{ steps.flags.outputs.base }}
       zizmor: ${{ steps.flags.outputs.zizmor }}
       dependencies: ${{ steps.flags.outputs.dependencies }}
     steps:
@@ -48,17 +49,34 @@ jobs:
         with:
           persist-credentials: false
 
-      # One flag per check. A check is blocking only where the file sets it false; any other form
-      # reads as report-only, and the step summary and an annotation name it
-      # (scripts/security-report.sh --window-flags).
-      - name: Read the report-only flags
+      # The base a pull request or merge group is judged against: the merge commit's first parent
+      # (main's tip when GitHub built it; pull_request.base.sha does not follow main) or the merge
+      # group's base_sha. None on push, schedule and dispatch.
+      #
+      # One flag per check, from the base's window file on a pull request or merge group and from
+      # the tree's own (main's) otherwise, so a promotion takes effect on main from its merge and a
+      # pull request cannot make its own check report-only again. A check is blocking only where
+      # the file sets it false; any other form reads as report-only, and the step summary and an
+      # annotation name it (scripts/security-report.sh --window-flags). The base is fetched without
+      # a credential, which persist-credentials: false relies on.
+      - name: Read the base and the report-only flags
         id: flags
+        env:
+          EVENT: ${{ github.event_name }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
-          scripts/security-report.sh --window-flags .github/security-window.json > flags.txt 2> notes.txt ||
+          base=$(scripts/security-report.sh --base-commit "$EVENT" "$MERGE_GROUP_BASE")
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          at=()
+          if [ -n "$base" ]; then
+            echo "base: $base"
+            at=(--at "$base")
+          fi
+          scripts/security-report.sh --window-flags .github/security-window.json "${at[@]}" > flags.txt 2> notes.txt ||
             { cat notes.txt >&2; exit 1; }
           cat flags.txt >> "$GITHUB_OUTPUT"
           {
-            echo "## Report-only flags (.github/security-window.json)"
+            echo "## Report-only flags (.github/security-window.json${base:+ at the base, $base})"
             echo
             sed 's/^/- /' flags.txt notes.txt
           } >> "$GITHUB_STEP_SUMMARY"
@@ -111,14 +129,15 @@ jobs:
           fi
           echo "tool_error=$tool_error" >> "$GITHUB_OUTPUT"
 
-      # The base is audited from its own root with the same input `.`, so its paths match the
-      # head's; the head's configuration applies to both through an absolute --config. A public
-      # repository fetches without a credential, which persist-credentials: false relies on.
+      # The base (the window job's) is audited from its own root with the same input `.`, so its
+      # paths match the head's; the head's configuration applies to both through an absolute
+      # --config. A public repository fetches without a credential, which persist-credentials:
+      # false relies on.
       - name: Audit workflows (base)
         id: base
-        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.head.outputs.tool_error == 'false'
+        if: needs.window.outputs.base != '' && steps.head.outputs.tool_error == 'false'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_SHA: ${{ needs.window.outputs.base }}
           CONFIG: ${{ github.workspace }}/.github/zizmor.yml
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -323,7 +342,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           EVENT: ${{ github.event_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_SHA: ${{ needs.window.outputs.base }}
           ZIZMOR_REPORT_ONLY: ${{ needs.window.outputs.zizmor }}
           DEPENDENCIES_REPORT_ONLY: ${{ needs.window.outputs.dependencies }}
           WORKFLOWS_RESULT: ${{ needs.workflows.result }}

@@ -4,7 +4,8 @@
 # `Report and decide`); anyone can run it from a checkout:
 #
 #   scripts/security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]
-#   scripts/security-report.sh --window-flags .github/security-window.json
+#   scripts/security-report.sh --window-flags .github/security-window.json [--at REV]
+#   scripts/security-report.sh --base-commit EVENT [MERGE_GROUP_BASE_SHA]
 #
 # .github/security-window.json holds one report-only flag per check,
 # {"report_only": {"zizmor": true, "dependencies": true}}: while a check's flag is true its Gate
@@ -13,7 +14,17 @@
 # a missing key and a value that is not true or false each read as report-only, and each is named
 # in a note. A bare boolean ({"report_only": true}, the file's first form) is that value for every
 # check. --window-flags prints the file's flags as `zizmor=<bool>` and `dependencies=<bool>` lines
-# (the window job appends them to $GITHUB_OUTPUT) and its notes on stderr, and exits 0.
+# (the window job appends them to $GITHUB_OUTPUT) and its notes on stderr, and exits 0; with --at
+# it reads the file as it is at commit REV (fetched from origin at depth 1 when absent), which is
+# how a pull request or merge group reads its base's flags rather than its own: a promotion takes
+# effect on main from its merge, its own pull request's run stays report-only, and a pull request
+# cannot make its own check report-only again by editing the file.
+#
+# --base-commit prints the commit a run's head is judged against, run from the checked-out tree:
+# for pull_request the first parent of HEAD, which is a merge commit GitHub builds on the base
+# branch's current tip, so its first parent is that tip (the event's pull_request.base.sha is the
+# base when the pull request was opened or last pushed, and does not follow main); for
+# merge_group the event's base_sha; for any other event nothing.
 #
 # The window opens at the first `push` run of the Security workflow on main (the merge that added
 # it) and lasts --window-days. Once it has closed, or with --decision force, the report ends in a
@@ -100,7 +111,8 @@ from itertools import takewhile
 from urllib.parse import quote
 
 USAGE = """usage: security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]
-       security-report.sh --window-flags .github/security-window.json"""
+       security-report.sh --window-flags .github/security-window.json [--at REV]
+       security-report.sh --base-commit EVENT [MERGE_GROUP_BASE_SHA]"""
 CHECKS = ("zizmor", "dependencies")
 PRECISION_BAR = 0.7
 MIN_DISPOSITIONS = 5
@@ -153,20 +165,70 @@ def window_flags(text, where):
     return flags, notes
 
 
+def git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True)
+
+
+def file_at(rev, path):
+    """PATH's text at commit REV, None when REV has no such file; REV is fetched from origin at depth 1
+    when it is not local (a depth-1 checkout holds only HEAD)."""
+    if git("cat-file", "-e", f"{rev}^{{commit}}").returncode != 0:
+        fetched = git("fetch", "--no-tags", "--depth=1", "origin", rev)
+        if fetched.returncode != 0:
+            fail(f"cannot fetch {rev} from origin: {fetched.stderr.strip()}")
+    if git("cat-file", "-e", f"{rev}:{path}").returncode != 0:
+        return None
+    shown = git("show", f"{rev}:{path}")
+    if shown.returncode != 0:
+        fail(f"cannot read {path} at {rev}: {shown.stderr.strip()}")
+    return shown.stdout
+
+
 def print_window_flags(args):
-    """--window-flags FILE: the window job's reading of the flags, as $GITHUB_OUTPUT lines."""
-    if len(args) != 1:
-        fail(f"--window-flags takes one file\n{USAGE}")
-    try:
-        with open(args[0], encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
-        text = None
-    flags, notes = window_flags(text, args[0])
+    """--window-flags FILE [--at REV]: the window job's reading of the flags, as $GITHUB_OUTPUT lines."""
+    if len(args) == 1:
+        path, rev = args[0], None
+    elif len(args) == 3 and args[1] == "--at":
+        path, rev = args[0], args[2]
+    else:
+        fail(f"--window-flags takes one file and, optionally, --at REV\n{USAGE}")
+    if rev is None:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError:
+            text = None
+        flags, notes = window_flags(text, path)
+    else:
+        flags, notes = window_flags(file_at(rev, path), f"{path} at {rev[:12]}")
     for check in CHECKS:
         print(f"{check}={json.dumps(flags[check])}")
     for note in notes:
         print(note, file=sys.stderr)
+    sys.exit(0)
+
+
+def print_base_commit(args):
+    """--base-commit EVENT [MERGE_GROUP_BASE_SHA]: the commit a run's head is judged against."""
+    if not args or len(args) > 2:
+        fail(f"--base-commit takes an event and, for merge_group, its base_sha\n{USAGE}")
+    event = args[0]
+    if event == "merge_group":
+        if len(args) != 2 or not args[1]:
+            fail("--base-commit merge_group needs the merge group's base_sha")
+        print(args[1])
+    elif event == "pull_request":
+        # A depth-1 checkout marks HEAD shallow, so `git rev-parse HEAD^1` fails; the raw commit still
+        # names its parents.
+        head = git("cat-file", "-p", "HEAD")
+        if head.returncode != 0:
+            fail(f"cannot read HEAD: {head.stderr.strip()}")
+        parents = [line.split()[1] for line in head.stdout.split("\n\n", 1)[0].splitlines()
+                   if line.startswith("parent ")]
+        if len(parents) != 2:
+            fail(f"HEAD is not a merge commit ({len(parents)} parents); a pull_request run checks out the pull "
+                 "request's merge commit")
+        print(parents[0])
     sys.exit(0)
 
 
@@ -198,6 +260,8 @@ def parse_args(args):
 
 if sys.argv[1:2] == ["--window-flags"]:
     print_window_flags(sys.argv[2:])
+if sys.argv[1:2] == ["--base-commit"]:
+    print_base_commit(sys.argv[2:])
 repo, window_days, decision = parse_args(sys.argv[1:])
 
 
