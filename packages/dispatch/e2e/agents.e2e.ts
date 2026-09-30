@@ -151,11 +151,14 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
       plannerCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
     ).toBeVisible();
 
-    // Collapsed by default: no conversation or composer until a card's title is expanded - none
-    // at all, hidden or not, since a row mounts them on its first open.
-    await expect(agents.getByRole("textbox", { includeHidden: true, name: "Comment" })).toHaveCount(
-      0
-    );
+    // Collapsed by default: no conversation or composer on screen until a card's title is
+    // expanded. The Archivist's, opened above and folded away with its row, is kept - with any
+    // draft in it - hidden; no card that was never opened has one at all.
+    const composers = agents.getByRole("textbox", { includeHidden: true, name: "Comment" });
+    await expect(composers).toHaveCount(1);
+    await expect(
+      archivistCard.getByRole("textbox", { includeHidden: true, name: "Comment" })
+    ).toBeHidden();
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`agents-collapsed-${width}.png`),
