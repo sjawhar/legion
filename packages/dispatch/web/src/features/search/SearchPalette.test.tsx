@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
@@ -144,6 +145,34 @@ test("does not query below two characters", () => {
 
     expect(search).not.toHaveBeenCalled();
     expect(screen.getByText("Type at least 2 characters")).not.toBeNull();
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("names the limit instead of querying over it, and queries at it", async () => {
+  const search = spyOn(api, "search").mockResolvedValue({ results: [], took_ms: 1 });
+  const view = renderPalette();
+
+  try {
+    const input = screen.getByRole("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "x".repeat(SEARCH_QUERY_MAX + 1) } });
+
+    expect(
+      screen.getByText(
+        `Search with a short phrase: ${SEARCH_QUERY_MAX + 1} characters is over the ${SEARCH_QUERY_MAX}-character limit`
+      )
+    ).not.toBeNull();
+    // Past the palette's 150 ms debounce, so a request would have gone out by now.
+    const settled = Promise.withResolvers<void>();
+    setTimeout(settled.resolve, 300);
+    await act(() => settled.promise);
+    expect(search).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "x".repeat(SEARCH_QUERY_MAX) } });
+    await waitFor(() => expect(search).toHaveBeenCalledWith("x".repeat(SEARCH_QUERY_MAX)));
   } finally {
     search.mockRestore();
     view.unmount();

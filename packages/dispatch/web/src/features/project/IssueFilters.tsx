@@ -1,3 +1,4 @@
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
@@ -42,15 +43,21 @@ export function IssueFilters({
     ...filters.activeFilters,
   ];
   const noIdentityFiltersExpanded = labels.length > 0;
+  // The saved preference is the only owner of the open state: the strip reads it when it mounts
+  // and when the signed-in identity resolves, never because the filter count moved. Arriving from
+  // another page, tab or project mounts a new strip, so that read covers the filters the route
+  // brings. On a strip that is up the count moves when the reader filters in it, when the view
+  // toggle folds `?status=` in or out (the List counts it, the Board does not), and when Back or
+  // Forward crosses entries of the Issues tab. A re-read would collapse the strip the moment the
+  // last filter goes (clearing the search box), taking the control being typed in with it, or
+  // open or close it against the reader's choice on the others, while its trigger and chips
+  // already show every filter. So it stays as they left it until they close it or leave the
+  // project or its Issues tab.
   const [filtersExpanded, setFiltersExpanded] = useUserPreference(
     "project.issue-filters",
     (stored) => activeFilterCount > 0 && stored !== "collapsed",
     (open) => (open ? "expanded" : "collapsed"),
-    {
-      failed: noIdentityFiltersExpanded,
-      pending: noIdentityFiltersExpanded,
-      refreshOn: activeFilterCount,
-    }
+    { failed: noIdentityFiltersExpanded, pending: noIdentityFiltersExpanded }
   );
   const [openPicker, setOpenPicker] = useState<"labels" | "status" | undefined>(undefined);
 
@@ -83,7 +90,13 @@ export function IssueFilters({
           Filters · {activeFilterCount} active
         </button>
         {activeFilters.map(({ label, remove }) => (
-          <Chip aria-label={`Remove ${label} filter`} key={label} onClick={remove} removable>
+          <Chip
+            aria-label={`Remove ${label} filter`}
+            key={label}
+            onClick={remove}
+            removable
+            title={label}
+          >
             {label}
           </Chip>
         ))}
@@ -118,7 +131,9 @@ export function IssueFilters({
             <input
               aria-label="Search issues"
               className={`mt-1 block min-h-11 rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
+              maxLength={SEARCH_QUERY_MAX}
               onChange={(event) => filters.setSearch(event.target.value)}
+              title={`At most ${SEARCH_QUERY_MAX} characters`}
               type="search"
               value={filters.search}
             />

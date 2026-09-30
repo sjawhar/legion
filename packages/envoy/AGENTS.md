@@ -1432,11 +1432,11 @@ revoked credential and for any launcher proof it cannot verify, such as clock sk
 dotfiles launcher gate matches, and stderr says the broker refused it when the helper reports
 that (`login_refused`); a helper from before that field gets the plain "the last machine login
 is expired". The helper logs every change of the credential: `machine login issued` (credential
-id, operator) when a login installs one, and `launcher credential refused; cleared` (credential
-id, the broker's code) when a refusal clears it. `agent-secrets --version` and
-`agent-secrets-helper --version` print the release tag the release job stamps in
-(`internal/buildversion`), `devel` for any other build, and the helper's startup line
-(`agent-secrets-helper listening`) carries the same version.
+id, and the operator the login was signed with) when a login installs one, and `launcher
+credential refused; cleared` (credential id, the broker's code) when a refusal clears it.
+`agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
+job stamps in (`internal/buildversion`), `devel` for any other build, and the helper's startup
+line (`agent-secrets-helper listening`) carries the same version.
 `register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles
 launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that
 login-status says `issued`, once the pinned release carries that answer and the helper has
