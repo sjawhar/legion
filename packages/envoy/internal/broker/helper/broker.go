@@ -33,14 +33,18 @@ var errNoCredential = errors.New(noCredentialMsg)
 
 // machineCredential is the helper's launcher identity, existing only in memory: the private key
 // never touches disk, and id is the launcher credential the broker minted once a human approved
-// the machine login that installed this.
+// the machine login that installed this. pendingID names that login, whose "issued" state lasts
+// exactly as long as this credential does (clearOnInvalid).
 type machineCredential struct {
-	key *ecdsa.PrivateKey
-	id  string
+	key       *ecdsa.PrivateKey
+	id        string
+	pendingID string
 }
 
-// loginState is a machine login in flight or just settled: the human-facing confirmation code,
-// the opaque id the helper polls the broker with, and its current state.
+// loginState is a machine login in flight or settled: the human-facing confirmation code, the
+// opaque id the helper polls the broker with, and its current state. "expired" is both a pending
+// login nobody approved in time and an issued one whose credential the broker has since refused
+// (expired or revoked; clearOnInvalid): either way the helper holds no credential from it.
 type loginState struct {
 	Code, PendingID, State string // State: pending|issued|denied|expired
 }
@@ -182,7 +186,7 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
 		if state, credentialID, ok := b.readLoginStatus(ctx, pendingID); ok {
 			switch state {
 			case "issued":
-				b.cred.Store(&machineCredential{key: key, id: credentialID})
+				b.cred.Store(&machineCredential{key: key, id: credentialID, pendingID: pendingID})
 				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: "issued"})
 				return
 			case "denied", "expired":
@@ -231,31 +235,41 @@ type leaseReply struct {
 }
 
 // launcherProof signs a launcher proof with the current machine credential, or fails with
-// errNoCredential if there is none yet.
-func (b *Broker) launcherProof(method, url string) (string, error) {
+// errNoCredential if there is none yet. It returns the credential it signed with, so a caller
+// whose call the broker then refuses clears exactly that one (clearOnInvalid).
+func (b *Broker) launcherProof(method, url string) (string, *machineCredential, error) {
 	cred := b.cred.Load()
 	if cred == nil {
-		return "", errNoCredential
+		return "", nil, errNoCredential
 	}
-	return proof.SignLauncher(cred.key, cred.id, method, url, time.Now())
+	compact, err := proof.SignLauncher(cred.key, cred.id, method, url, time.Now())
+	return compact, cred, err
 }
 
 // clearOnInvalid clears the machine credential and reports it missing whenever err is the
-// broker's 401 LAUNCHER_INVALID — an expired or revoked credential. It never auto-relogins.
-func (b *Broker) clearOnInvalid(err error) error {
+// broker's 401 LAUNCHER_INVALID — an expired or revoked credential. It never auto-relogins. cred
+// is the credential the refused call was signed with, and only that one is cleared: a refusal
+// that arrives after another login has installed a new credential leaves the new one alone. The
+// login that issued the cleared credential moves from "issued" to "expired", so login-status —
+// the probe every launcher decides on — stops reporting a credential the helper no longer holds.
+func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	var be *BrokerError
-	if errors.As(err, &be) && be.Status == http.StatusUnauthorized && be.Code == "LAUNCHER_INVALID" {
-		b.cred.Store(nil)
-		return errNoCredential
+	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
+		return err
 	}
-	return err
+	if b.cred.CompareAndSwap(cred, nil) {
+		if ls := b.login.Load(); ls != nil && ls.State == "issued" && ls.PendingID == cred.pendingID {
+			b.login.CompareAndSwap(ls, &loginState{Code: ls.Code, PendingID: ls.PendingID, State: "expired"})
+		}
+	}
+	return errNoCredential
 }
 
 // Enroll registers the session's key as kind host. 201 is a new enrollment; 200 is the live one
 // for the same credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
 func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, error) {
 	url := b.URL + "/v1/enrollments"
-	compact, err := b.launcherProof(http.MethodPost, url)
+	compact, cred, err := b.launcherProof(http.MethodPost, url)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -275,7 +289,7 @@ func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, err
 	req.Header.Set("Content-Type", "application/json")
 	var out leaseReply
 	if err := b.do(req, []int{http.StatusOK, http.StatusCreated}, &out); err != nil {
-		return "", time.Time{}, b.clearOnInvalid(err)
+		return "", time.Time{}, b.clearOnInvalid(cred, err)
 	}
 	if out.EnrollmentID == "" {
 		return "", time.Time{}, fmt.Errorf("broker returned no enrollment_id")
@@ -291,7 +305,7 @@ func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, err
 // idempotent 200/201 handling, same 401 LAUNCHER_INVALID handling.
 func (b *Broker) EnrollBox(ctx context.Context, runtimeID, thumbprint string, sessionID *string) (string, time.Time, error) {
 	url := b.URL + "/v1/enrollments"
-	compact, err := b.launcherProof(http.MethodPost, url)
+	compact, cred, err := b.launcherProof(http.MethodPost, url)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -311,7 +325,7 @@ func (b *Broker) EnrollBox(ctx context.Context, runtimeID, thumbprint string, se
 	req.Header.Set("Content-Type", "application/json")
 	var out leaseReply
 	if err := b.do(req, []int{http.StatusOK, http.StatusCreated}, &out); err != nil {
-		return "", time.Time{}, b.clearOnInvalid(err)
+		return "", time.Time{}, b.clearOnInvalid(cred, err)
 	}
 	if out.EnrollmentID == "" {
 		return "", time.Time{}, fmt.Errorf("broker returned no enrollment_id")
@@ -343,7 +357,7 @@ func (b *Broker) Renew(ctx context.Context, s *Session) (time.Time, error) {
 // Revoke deletes the enrollment and every grant under it. 204 and 404 both mean done.
 func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 	url := b.URL + "/v1/enrollments/" + enrollmentID
-	compact, err := b.launcherProof(http.MethodDelete, url)
+	compact, cred, err := b.launcherProof(http.MethodDelete, url)
 	if err != nil {
 		return err
 	}
@@ -353,7 +367,7 @@ func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 	}
 	req.Header.Set("Proof", compact)
 	if err := b.do(req, []int{http.StatusNoContent, http.StatusNotFound}, nil); err != nil {
-		return b.clearOnInvalid(err)
+		return b.clearOnInvalid(cred, err)
 	}
 	return nil
 }
