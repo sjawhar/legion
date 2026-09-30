@@ -349,12 +349,13 @@ export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artif
 
 export function requestApproval(
   id: string,
+  input: { summary?: string } = {},
   options: ApiOptions = {}
 ): Promise<{ ask: Ask; artifact_id: string; version: number }> {
   return request(
     `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
     "POST",
-    {},
+    input,
     options
   );
 }
