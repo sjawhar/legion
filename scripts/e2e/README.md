@@ -484,8 +484,9 @@ namespace list. Every evidence line names which one observed it (`[runtime]`, `[
 `[harness]` for the listener and its resolver).
 
 The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata) and port 13371 — the port the devbox's security group admits from Legion nodes, never
-`0.0.0.0` — and refuses to start while anything holds it, naming the holder. Its resolver accepts
+metadata, never `0.0.0.0`) and port 13373 — the rigs' worker-stream port, which the devbox's
+security group admits from Legion nodes beside the production daemon's 13370/13371 — and refuses
+to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
 pod's uid to a marker file in the tree volume's sessions directory, the file a resume names, and
@@ -607,8 +608,9 @@ Three roots are set todo under `admission_cap: 2`:
 - Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
   is outstanding, and is taken out the same way.
 
-**One run at a time.** The project, the durable consumer names, ports 13370 and 13371 and the
-namespace label `legion.dev/project=legsmoke` are shared.
+**One run at a time.** The project, the durable consumer names, ports 13372 and 13373 (the rigs'
+pair; the production daemon keeps 13370 and 13371) and the namespace label
+`legion.dev/project=legsmoke` are shared.
 - The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
 - It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
   `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.
@@ -699,7 +701,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `daily-report` | the controller's daily report, which the proof's instructions exempt from their wait for a targeted message and fit to the run: an issue titled `Legion daily report (<run directory>)` appears in LEGSMOKE, parked in icebox and without the `legion` label, holding the controller session's message, which names tree 1 and the free slots within 2,000 characters; in the controller's session that message comes after the first `tick on LEGSMOKE` delivery, never in its start turn. `production-audit` then holds that the issue, like every write, is in LEGSMOKE |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done`; tree 1's events carry its architect's `issue.claimed`, and the done leaves its root issue unclaimed |
-| `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
+| `node-release` | tree 1's Sandboxes stay Suspended, its volume Bound, and no pod of the run is left on its node: after the pool's consolidation the node is gone, or, when a pod of another project (a production daemon running beside the run) is on it, Pending or Running, the node stays; the note says which, and a timeout lists what the node still held |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
 | `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/workspace-recovered.json` naming `legion/<tree 1>` |
 | `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
