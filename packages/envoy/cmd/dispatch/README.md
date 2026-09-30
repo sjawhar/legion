@@ -196,10 +196,27 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 
 ## Database migrations
 
-Boot applies `internal/dispatch/store/migrations/*.up.sql` in filename order and records each
+Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each
 version in `schema_migrations`. Version 8 is an empty file: that version was recorded from Go by
 the one-time conversion of pre-Proof `Y.Text` rooms and offset anchors into Proof trees and mark
 anchors, which every deployed database has already run.
+
+The runner records a migration by its version alone, so before it touches the database it reads
+the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every
+file concerned, when two migrations share a version (it would apply the first and skip the rest as
+already applied), when a file is named other than `<version>_<name>.up.sql` or
+`<version>_<name>.down.sql` (a `.down.sql` is a rollback script an operator runs by hand, and needs
+its `.up.sql`), when a version is not decimal digits from 1 to 2147483647, and when a file cannot
+be read. Versions are applied by number, not by file name, and the store's tests require them to
+run 1 to N with no gap (`TestMigrateRecordsEveryVersionContiguously`), so take the next free number
+on `main`.
+
+Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, set with
+`SET LOCAL lock_timeout` once the runner holds its advisory lock), so a migration queued behind a
+long transaction fails the boot instead of holding every read and write of its table behind its
+request. The failure names the migration, the lock it wanted, the sessions it was queued behind,
+and the `pg_stat_activity` query that lists the holders; end the holder or let it finish and start
+the server again. A migration that needs another bound sets its own `SET LOCAL lock_timeout`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

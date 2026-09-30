@@ -6,12 +6,11 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"path"
-	"strconv"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 // Store is the shared Dispatch database handle.
@@ -19,7 +18,10 @@ type Store struct {
 	Pool *Pool
 }
 
-//go:embed migrations/*.up.sql
+// The whole directory, not *.up.sql alone, so pgmigrate.Load sees a file named any other way and
+// refuses it rather than a migration going unembedded and unapplied while its file sits in the tree.
+//
+//go:embed migrations
 var migrationFiles embed.FS
 
 // poolSizeParam is the connection-string parameter Open refuses. Open fixes MaxConns at
@@ -78,11 +80,21 @@ func declaresPoolSize(databaseURL string) (bool, error) {
 	return declared, nil
 }
 
-// Migrate applies embedded migrations in filename order. Every migration and
-// its durable version record are committed together.
+// Migrate applies the embedded migrations in version order, each committed with its version
+// record in one transaction. It refuses a set pgmigrate.Load refuses before it touches the
+// database, so a set it cannot apply as written applies nothing, and it bounds every lock wait a
+// migration makes by pgmigrate.LockTimeout.
 func (s *Store) Migrate(ctx context.Context) error {
+	return s.migrate(ctx, migrationFiles)
+}
+
+func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	if s == nil || s.Pool == nil {
 		return fmt.Errorf("migrate: store pool required")
+	}
+	migrations, err := pgmigrate.Load(fsys, "migrations")
+	if err != nil {
+		return fmt.Errorf("migrations refused, none applied: %w", err)
 	}
 	if _, err := s.Pool.Exec(ctx, `
 		create table if not exists schema_migrations (
@@ -92,28 +104,22 @@ func (s *Store) Migrate(ctx context.Context) error {
 	`); err != nil {
 		return fmt.Errorf("create schema migrations table: %w", err)
 	}
-
-	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	// A pool of its own, not the shared one: while a migration's transaction holds a shared-pool
+	// connection, a second from the same pool is the nested acquisition ErrNestedAcquire refuses.
+	watchPool, err := pgmigrate.OpenWatchPool(ctx, s.Pool.Config())
 	if err != nil {
-		return fmt.Errorf("list migrations: %w", err)
+		return err
 	}
-	for _, filename := range files {
-		version, err := migrationVersion(filename)
-		if err != nil {
-			return err
-		}
-		contents, err := migrationFiles.ReadFile(filename)
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", filename, err)
-		}
-		if err := s.applyMigration(ctx, version, string(contents)); err != nil {
-			return fmt.Errorf("apply migration %d: %w", version, err)
+	defer watchPool.Close()
+	for _, migration := range migrations {
+		if err := s.applyMigration(ctx, watchPool, migration); err != nil {
+			return fmt.Errorf("apply migration %d: %w", migration.Version, err)
 		}
 	}
 	return nil
 }
 
-func (s *Store) applyMigration(ctx context.Context, version int, sql string) error {
+func (s *Store) applyMigration(ctx context.Context, watchPool *pgxpool.Pool, migration pgmigrate.Migration) error {
 	// A migration is a transaction like any other, so it is marked like any other: nothing it
 	// runs may take a second pooled connection while it is open.
 	ctx = WithTransactionTracking(ctx)
@@ -125,35 +131,21 @@ func (s *Store) applyMigration(ctx context.Context, version int, sql string) err
 	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock($1)", int64(8150001)); err != nil {
 		return fmt.Errorf("lock migrations: %w", err)
 	}
+	if err := pgmigrate.BoundLockWaits(ctx, tx); err != nil {
+		return err
+	}
 	var applied bool
-	if err := tx.QueryRow(ctx, "select exists(select 1 from schema_migrations where version = $1)", version).Scan(&applied); err != nil {
+	if err := tx.QueryRow(ctx, "select exists(select 1 from schema_migrations where version = $1)", migration.Version).Scan(&applied); err != nil {
 		return fmt.Errorf("check migration: %w", err)
 	}
 	if applied {
 		return tx.Commit(ctx)
 	}
-	if _, err := tx.Exec(ctx, sql); err != nil {
+	if err := pgmigrate.Exec(ctx, tx, watchPool, migration); err != nil {
 		return fmt.Errorf("execute migration: %w", err)
 	}
-	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", version); err != nil {
+	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", migration.Version); err != nil {
 		return fmt.Errorf("record migration: %w", err)
 	}
 	return tx.Commit(ctx)
-}
-
-func migrationVersion(filename string) (int, error) {
-	name := path.Base(filename)
-	stem, ok := strings.CutSuffix(name, ".up.sql")
-	if !ok {
-		return 0, fmt.Errorf("invalid migration filename %q", filename)
-	}
-	versionText, _, ok := strings.Cut(stem, "_")
-	if !ok {
-		return 0, fmt.Errorf("invalid migration filename %q", filename)
-	}
-	version, err := strconv.Atoi(versionText)
-	if err != nil || version < 1 {
-		return 0, fmt.Errorf("invalid migration version in %q", filename)
-	}
-	return version, nil
 }
