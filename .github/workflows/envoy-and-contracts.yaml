@@ -6,7 +6,8 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
-      - "skills/dispatch/**"
+      # Every skill: pi-envoy ships them, and its skills-guard test checks their sizes and links.
+      - "skills/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy/**"
@@ -37,7 +38,8 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
-      - "skills/dispatch/**"
+      # Every skill: pi-envoy ships them, and its skills-guard test checks their sizes and links.
+      - "skills/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy/**"
@@ -166,6 +168,8 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # The skills pi-envoy ships, which src/skills-guard.test.ts checks.
+              - 'skills/**'
               # The Oh My Pi pin the phase-stall test runs (extensions/legion-phase-stall-omp.test.ts).
               - 'packages/daemon/src/daemon/omp-pin.ts'
               - '.github/actions/install-omp/**'
