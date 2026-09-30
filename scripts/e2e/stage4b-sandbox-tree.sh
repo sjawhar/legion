@@ -1056,12 +1056,11 @@ cleanup() {
   # BLOCKED. The notes are a diagnostic for a failed checkpoint and never set the status; a stopped
   # run, which still ends FAIL, a blocked checkpoint and a pass get none.
   if [ -n "$teardown_failed" ]; then
-    [ -n "$ok" ] || [ -n "$stopped" ] || [ -n "$was_blocked" ] ||
-      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
     if [ -n "$ok" ] || [ -n "$stopped" ] || [ -n "$was_blocked" ]; then
       teardown_failed=${teardown_failed# }
       echo "stage 4b e2e: FAIL (check ${teardown_failed// /, }, in the teardown after check $check)"
     else
+      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
       echo "stage 4b e2e: FAIL (check $check)"
     fi
   elif [ -n "$was_blocked" ]; then
