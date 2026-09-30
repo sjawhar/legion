@@ -432,7 +432,10 @@ paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 `run-server.sh` builds `ENVOY_URL` from that port alone. Tests seed
 live sessions and their capabilities with `setLiveSessions`, change their scripted 200/404 send
 response with `setSessionSendStatus`, and inspect targeted sends with `getSentMessages`;
-persisted subscriptions use `setInterests`, all from `e2e/agents.ts`.
+persisted subscriptions use `setInterests`, all from `e2e/agents.ts`. It also holds the Agents
+page the keyboard specs share: `seedAgents` (the Planner and Reviewer sessions, both listed, and two
+open issues for the picker) and `openAgents`, which waits for the page's heading before a key is
+pressed, since the keymap binds only once sign-in resolves.
 `e2e/clipboard.ts`'s `recordClipboard(page)` swaps the page's async clipboard for a recorder before
 navigation, so a copy-button test asserts the written value rather than only the `Copied` label.
 `e2e/touch.ts` drives real touch gestures through Chromium's `Input.dispatchTouchEvent`
@@ -487,20 +490,25 @@ one where `PLAYWRIGHT_BASE_URL` selects a deployed server, and a listing run, wh
 load task and a report-begin task with no global setup. The port validation above is not gated on
 either, so a malformed or duplicated port is refused in every invocation.
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` alone. Where a caret lands beside
+The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
-while Firefox is unaffected, so that spec is the one that needs a second engine. CI installs
-WebKit beside Chromium for it (`bun run e2e:install` does the same locally).
+while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
+issue picker's keyboard-step rule (`markKeyStep` in `AgentsPage.tsx`), which holds only because every engine
+dispatches a closed select's `change` inside the key's own task where the HTML spec queues it as a task of its own:
+its two rows, the arrows and type-ahead, each committed by Enter and driven through `page.keyboard`, would see a
+step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
+Chromium. The project selects both specs by file name, not title, so renaming a row cannot drop it. CI installs
+WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 
 The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat the check whenever the `grep` or the titles change.
 
-The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` alone: Firefox's native
+The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a
 paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
-spec is the one that needs a second engine. CI installs Firefox
-beside Chromium for it (`bun run e2e:install` does the same locally).
+spec is the one that needs a second engine; the picker spec runs for the reason given under `webkit` above. CI installs Firefox
+beside Chromium for them (`bun run e2e:install` does the same locally).
 
 ## Phone acceptance
 

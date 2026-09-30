@@ -1,17 +1,9 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { type FakeSession, setLiveSessions } from "./agents";
-import { createAsk, createComment, createIssue, createMessage, createProject } from "./api";
+import { openAgents, plannerSession, seedAgents, setLiveSessions } from "./agents";
+import { createMessage } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-
-// The keymap binds only once sign-in resolves (`AuthGate` renders a skeleton until
-// `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
-async function openAgents(page: Page): Promise<void> {
-  await page.goto("/agents");
-  await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
-  await page.locator("body").focus();
-}
 
 /** Resolves once every timer queued before it has run: the next task, the soonest a reader's
  *  pick can follow a key. The issue picker's keyboard-step mark lasts until then, so a row that
@@ -31,49 +23,6 @@ test.beforeEach(async () => {
   }
 });
 test.describe("agents page", () => {
-  // Both sessions are seen recently and have Dispatch activity of their own, so both are listed
-  // rows rather than folded into `Inactive` or `No Dispatch activity`. The Planner's open ask
-  // waits on the viewer, which is what puts it above the Reviewer.
-  const planner: FakeSession = {
-    capabilities: ["aside", "btw"],
-    dir: "/srv/planner",
-    last_seen: Date.now() - 30_000,
-    machine_id: "box-1",
-    roles: ["planner"],
-    session_id: "planner-session",
-    title: "Planner",
-  };
-  const reviewer: FakeSession = {
-    capabilities: ["aside", "btw"],
-    dir: "/srv/reviewer",
-    last_seen: Date.now() - 30_000,
-    machine_id: "box-1",
-    roles: ["reviewer"],
-    session_id: "reviewer-session",
-    title: "Reviewer",
-  };
-
-  /** Both sessions live, both with Dispatch activity, and one issue for the picker to offer. */
-  async function seedAgents(): Promise<string> {
-    await createProject({ key: "CORE", name: "Core" });
-    const issue = await createIssue({ project: "CORE", title: "Keyboard issue" });
-    // A second open issue, so the picker has an option past the first: a keyboard reader has to
-    // be able to pass one to reach the other.
-    await createIssue({ project: "CORE", title: "Rollout plan" });
-    await createAsk(
-      issue.key,
-      { question: "Which release?" },
-      { actor: { id: planner.session_id, kind: "session" }, as: "agent" }
-    );
-    await createComment(
-      issue.key,
-      { body: "Reviewing the diff." },
-      { actor: { id: reviewer.session_id, kind: "session" }, as: "agent" }
-    );
-    await setLiveSessions([planner, reviewer]);
-    return issue.key;
-  }
-
   test("j/k rove the agent rows, Enter opens the composer, i the issue picker, x selects and Shift+P pins", async ({
     browser,
   }, testInfo) => {
@@ -395,49 +344,6 @@ test.describe("agents page", () => {
     }
   });
 
-  // The arrows choose and Enter commits, so a reader can pass the first option to reach the
-  // second - and the Enter that picks is the picker's, not a newline at the top of the message.
-  test("the arrows move the issue selection and Enter commits it", async ({ browser }) => {
-    await seedAgents();
-    const context = await asUser(browser, "alice");
-    try {
-      const page = await context.newPage();
-      await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
-      const toggle = row.getByRole("button", { name: "Choose issue" });
-      const field = row.getByRole("textbox", { name: "Comment" });
-
-      await page.keyboard.press("j");
-      await page.keyboard.press("i");
-      const picker = row.getByRole("combobox", { name: "Issue" });
-      await expect(picker).toBeFocused();
-      await page.keyboard.press("ArrowDown");
-      await page.keyboard.press("ArrowDown");
-      await expect(toggle).toHaveAttribute("aria-expanded", "true");
-      await expect(picker).toBeFocused();
-
-      await page.keyboard.press("Enter");
-      await expect(toggle).toContainText("CORE-2");
-      await expect(field).toBeFocused();
-      await expect(field).toHaveValue("@Planner");
-
-      // Escape after an arrow takes nothing: the selection was never committed. (The field is
-      // emptied first, since Escape over a written composer is its own discard prompt.)
-      await field.fill("");
-      await page.keyboard.press("Escape");
-      await expect(row).toBeFocused();
-      await page.keyboard.press("i");
-      await expect(picker).toBeFocused();
-      await page.keyboard.press("ArrowUp");
-      await page.keyboard.press("Escape");
-      await expect(toggle).toHaveAttribute("aria-expanded", "false");
-      await expect(toggle).toContainText("CORE-2");
-      await expect(row).toBeFocused();
-    } finally {
-      await context.close();
-    }
-  });
-
   // Enter commits whether or not it changes the issue, and the select unmounts either way. A
   // commit that left the reader on the document would hand the message they picked the issue
   // for to the page's shortcuts: `j` roves to a row and `x` then ticks its broadcast box.
@@ -668,7 +574,7 @@ test.describe("agents page", () => {
       );
       await page.keyboard.press("Control+Enter");
       const body = (await posted).postDataJSON();
-      expect(body.mentions).toEqual([{ target: `session:${planner.session_id}` }]);
+      expect(body.mentions).toEqual([{ target: `session:${plannerSession.session_id}` }]);
       expect(body.delivery).toBeTruthy();
       expect(body.body.match(/@Planner/g)).toHaveLength(1);
     } finally {
@@ -836,7 +742,7 @@ test.describe("agents page", () => {
     const root = await createMessage(issueKey, {
       body: "Can this ship?",
       delivery: "btw",
-      target: `session:${planner.session_id}`,
+      target: `session:${plannerSession.session_id}`,
     });
     expect(root.id).toBeTruthy();
     const context = await asUser(browser, "alice");

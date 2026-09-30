@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Request, test } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createProject, getIssue, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
@@ -29,6 +29,13 @@ function onBody(page: Page): Promise<boolean> {
 async function leaveFocus(page: Page): Promise<void> {
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await expect.poll(() => onBody(page)).toBe(true);
+}
+
+/** Whether a request is a pin or unpin write. The Conversation tab marks the issue read through
+ *  the same `PUT /me/issues/<key>/state` (`{ last_read_seq }`), and that write can land at any
+ *  moment after the page opens, so a row counting pins counts only the bodies that set `pinned`. */
+function isPinWrite(request: Request): boolean {
+  return request.method() === "PUT" && "pinned" in (request.postDataJSON() ?? {});
 }
 
 test.beforeEach(async () => {
@@ -567,7 +574,7 @@ test.describe("issue page", () => {
       // same two halves prove it: nothing from the card, the pin itself from the page.
       let pinned = 0;
       await page.route(`**/api/v1/me/issues/${issue.key}/state`, (route) => {
-        if (route.request().method() === "PUT") pinned += 1;
+        if (isPinWrite(route.request())) pinned += 1;
         return route.fallback();
       });
       await hold.click();
@@ -580,7 +587,9 @@ test.describe("issue page", () => {
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       await page.keyboard.press("Shift+P");
       await expect(page.getByRole("button", { name: "Unpin issue" })).toBeVisible();
-      expect(pinned).toBe(1);
+      // The header shows the pin optimistically, before its `PUT` leaves the page, so the write
+      // is waited for rather than read the moment the button flips.
+      await expect.poll(() => pinned).toBe(1);
     } finally {
       await context.close();
     }
@@ -612,7 +621,7 @@ test.describe("issue page", () => {
       });
       let pinned = 0;
       await page.route(`**/api/v1/me/issues/${issue.key}/state`, (route) => {
-        if (route.request().method() === "PUT") pinned += 1;
+        if (isPinWrite(route.request())) pinned += 1;
         return route.fallback();
       });
 

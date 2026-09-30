@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { setLiveSessions } from "./agents";
+import { openAgents, setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, getIssue, patchIssue } from "./api";
 import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
@@ -23,14 +23,6 @@ async function seedInbox(): Promise<{ issueKey: string }> {
 async function openInbox(page: Page): Promise<void> {
   await page.goto("/");
   await expect(page.locator("[data-testid^=ask-]")).toHaveCount(2);
-  await page.locator("body").focus();
-}
-
-// The keymap is bound only once sign-in resolves (`AuthGate` renders a skeleton until
-// `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
-async function openAgents(page: Page): Promise<void> {
-  await page.goto("/agents");
-  await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
   await page.locator("body").focus();
 }
 
