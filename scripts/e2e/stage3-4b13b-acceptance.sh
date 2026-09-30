@@ -143,11 +143,11 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
-  # A diagnostic for a hard failure: it never sets the status. A hangup, an interrupt or a
-  # termination (129, 130, 143, as trapped below) stopped the run and gets none. A run that ends on
-  # its soft failures sets ok after its last check, once every pane has stopped, so its notes could
-  # only be empty.
-  [ -n "${ok:-}" ] || [ -z "$gateway_dest" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+  # A diagnostic for a failed run, hard or soft: it never sets the status. A run that ends on its
+  # soft failures sets ok after its last check and still exits 1, and an agent still without a key
+  # from any check is listed, so it gets notes too. A hangup, an interrupt or a termination (129,
+  # 130, 143, as trapped below) stopped the run and gets none.
+  [ "$status" = 0 ] || [ -z "$gateway_dest" ] || [[ $status =~ ^(129|130|143)$ ]] ||
     bash "$unserved_reader" --notes "$gateway_dest" "$check_started" "$check" >&2 || true
   return 0
 }

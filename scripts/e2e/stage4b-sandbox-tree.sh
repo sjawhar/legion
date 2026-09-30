@@ -1010,7 +1010,7 @@ collect_transcripts() {
   fi
 }
 cleanup() {
-  local status=$? p
+  local status=$? p teardown_failed=
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -1037,15 +1037,17 @@ cleanup() {
     # own control pods (the memory hog, the reachability pod) go first.
     op delete pod -l "legion.dev/project=$run_label,legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     teardown
-    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
+    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || { status=1 teardown_failed=1; }; fi
     delete_consumers
     remove_run_branches
-    if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
+    if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || { status=1 teardown_failed=1; }; fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
-  if [ -n "$was_blocked" ]; then
+  # A teardown check that fails (a namespace left dirty, a write outside LEGSMOKE) is a failure of the
+  # run whatever stopped it, so only a clean teardown lets a blocked checkpoint end BLOCKED.
+  if [ -n "$was_blocked" ] && [ -z "$teardown_failed" ]; then
     echo "stage 4b e2e: BLOCKED (check $check): the checkpoint could not run, so the run is no verdict on the change; the checkpoints before it stand"
   elif [ -z "$ok" ]; then
     # A diagnostic: it never sets the status. A hangup, an interrupt or a termination (129, 130,

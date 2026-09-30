@@ -603,9 +603,10 @@ controller's), the interest samples, the audit files and the negative controls. 
 run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
 `stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
 on whether the controller could have failed that check for want of a model key; or
-`stage 4b e2e: BLOCKED (check <check>)` when the checkpoint could not run, which makes the run no
-verdict on the change while the checkpoints before it stand, and gets no notes. Every one but the
-pass exits 1.
+`stage 4b e2e: BLOCKED (check <check>)` when the checkpoint could not run and the teardown checks
+(`namespace-clean`, `production-audit`) passed, which makes the run no verdict on the change while
+the checkpoints before it stand, and gets no notes; a teardown check that fails ends the run FAIL
+whatever stopped it. Every one but the pass exits 1.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -1158,9 +1159,9 @@ bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$evidence/model-gateway"
 bash scripts/e2e/lib/model-gateway-unserved.sh --fresh "$evidence"                                         # a stage proof's setup
 ```
 
-An agent is a working directory and an agent field together. Its last call decides whether it
-went without a key: Oh My Pi retries a failed key command 30 s later and after a 401, and a
-relaunched pane calls again.
+An agent is a working directory and an agent field together, so a relaunched pane, with its new
+generation, is a new agent. An agent's last call decides whether it went without a key: Oh My Pi
+retries a failed key command 30 s later and after a 401.
 
 `--record` scores one agent run from the `MODEL_GATEWAY_CALLS_FILE` a harness named in that
 agent's environment: a file of the run's own, which does not exist before the run, so every line
