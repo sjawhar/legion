@@ -26,7 +26,8 @@
   returned such ties in an order of its own: in a project whose issues share one creation time and
   alternate between two ranks, the old order listed one rank as `S8-2 S8-6 S8-4 S8-8`. A walk of
   the pages is exact only while the listing does not change. The Stage 4b live proof no longer
-  sends `limit=200`, which would now answer a page.
+  sends `limit=200` (its preflight) or `limit=250` (its daily-report check); each would now answer
+  a page its `jq` cannot read.
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it

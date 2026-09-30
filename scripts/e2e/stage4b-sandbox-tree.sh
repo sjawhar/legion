@@ -1987,7 +1987,7 @@ if [ -n "$skip_controller" ]; then
 else
 # report_key STATUS prints the key of this run's report issue in STATUS, or nothing.
 report_key() {
-  dispatch_get "issues?project=$project&status=$1&limit=250" | jq -r --arg t "$report_title" '[.[] | select(.title == $t)][0].key // empty'
+  dispatch_get "issues?project=$project&status=$1" | jq -r --arg t "$report_title" '[.[] | select(.title == $t)][0].key // empty'
 }
 report_in_icebox() { [ -n "$(report_key icebox)" ]; }
 until_true 600 "the controller's report issue '$report_title' in $project, parked in icebox" report_in_icebox
