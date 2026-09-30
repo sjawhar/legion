@@ -22,6 +22,10 @@ const headlessOnly = [
   "roleToken",
   "spawn_worker",
   "legion-worker",
+  // A task subagent the interactive fragment starts dispatches none of its own. The needle is the
+  // boot gate's own form (packages/daemon-go/internal/promptrefs/promptrefs.go), so a dispatch that
+  // carries other arguments is caught too.
+  'agent="',
 ];
 const repoSpecific = [
   "Inspect",

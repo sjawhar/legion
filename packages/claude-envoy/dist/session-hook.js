@@ -13731,6 +13731,8 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var MAX_ISSUE_PAGE_LIMIT = 250;
+var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
@@ -14130,6 +14132,8 @@ var SPEC_SECTIONS = [
 var SPEC_WRITING_GUIDANCE = `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` + "Write for a reader who has not seen the code: plain sentences, every identifier expanded on " + "first use, no coined shorthand; see skills/dispatch Writing for the human and Writing a spec.";
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
+var SEARCH_QUERY_MAX = 1000;
+var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -14442,7 +14446,11 @@ var dispatchToolSpecs = [
     example: { query: "astrolabe" },
     description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR.',
     arguments: (z2) => ({
-      query: z2.string({ min: 2 }).describe("Keyword, phrase, or websearch expression; at least 2 characters."),
+      query: z2.string({
+        min: 2,
+        max: SEARCH_QUERY_MAX,
+        maxHint: SEARCH_QUERY_HINT
+      }).describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z2.string().describe("Optional project key to search within.").optional(),
       limit: z2.number({ int: true, min: 1, max: 50 }).describe("Maximum results, 1-50; default 20.").optional()
     })
@@ -14450,7 +14458,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issues",
     example: { project: "AGENTC", limit: 250, offset: 250 },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are paged after the server returns the full response: limit sets the page size (default 50, " + "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " + "enumerate every matching issue.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -14459,7 +14467,7 @@ var dispatchToolSpecs = [
       priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
-      limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional(),
+      limit: z2.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
       offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional()
     })
   },
@@ -14935,8 +14943,9 @@ function zodSchemaApi(zod) {
         schema = schema.min(opts.min);
       if (opts.max !== undefined) {
         const max = opts.max;
+        const hint = opts.maxHint === undefined ? "" : `; ${opts.maxHint}`;
         schema = schema.max(max, {
-          error: (issue2) => overCapMessage(typeof issue2.input === "string" ? issue2.input.length : max + 1, max)
+          error: (issue2) => overCapMessage(typeof issue2.input === "string" ? issue2.input.length : max + 1, max) + hint
         });
       }
       return schema;
@@ -15123,8 +15132,26 @@ class DispatchClient {
   async resolveIssue(issueReference) {
     return this.#resolveIssue(issueReference);
   }
-  async listIssues(options = {}) {
-    return this.#json("GET", ["api", "v1", "issues"], undefined, options);
+  async listIssuePage(options, page) {
+    const answer = await this.#json("GET", ["api", "v1", "issues"], undefined, {
+      ...options,
+      limit: page.limit,
+      offset: page.offset
+    });
+    if (Array.isArray(answer)) {
+      const issues = answer;
+      return {
+        issues: issues.slice(page.offset, page.offset + page.limit),
+        total: issues.length,
+        limit: page.limit,
+        offset: page.offset
+      };
+    }
+    const served = answer;
+    if (typeof served !== "object" || served === null || !Array.isArray(served.issues) || typeof served.total !== "number" || typeof served.limit !== "number" || typeof served.offset !== "number") {
+      throw new Error("GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues");
+    }
+    return served;
   }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
@@ -16794,9 +16821,7 @@ async function executeDispatchTool(input) {
       const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const routeStatus = optionalString(args, "route_status");
-      const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
-      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
-      const issues = await client.listIssues({
+      const page = await client.listIssuePage({
         project,
         ...status === undefined ? {} : { status },
         ...parent === undefined ? {} : { parent },
@@ -16804,9 +16829,12 @@ async function executeDispatchTool(input) {
         ...priority === undefined ? {} : { priority },
         ...updatedSince === undefined ? {} : { updated_since: updatedSince },
         ...routeStatus === undefined ? {} : { route_status: routeStatus }
+      }, {
+        limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+        offset: optionalNumber(args, "offset") ?? 0
       });
-      const total = issues.length;
-      const rows = issues.slice(offset, offset + limit).map((row) => ({
+      const { total, limit, offset } = page;
+      const rows = page.issues.map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
