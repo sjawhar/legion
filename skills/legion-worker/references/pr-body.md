@@ -27,6 +27,8 @@ left open <thread URL> — newest reply by <login> is not its opener's or the Le
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
 
+**Security:** `Security` run <run-id> at <head-sha>: <n> new findings against the base (report-only until the window closes) or 0; pair: <the review's Security: line>. (omitted with Thermo on a docs-only PR)
+
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
 Negative control: <deliberately broken input> → <refusal or failure observed>.
 
@@ -66,6 +68,9 @@ and the tester's proof below are both this proof.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
   the implementer's command or drives the same surface independently, and records the verdict in
   `.legion/test.json` as `implementerProof` (`{verdict, how}`).
+  When the change adds or moves an authorization or refusal boundary, the negative control is the
+  unauthorized caller: drive the boundary as the party it must refuse, and record the refusal as
+  the observation.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
   the architect return the issue to the implementer — the agent that developed the change owns
