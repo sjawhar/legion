@@ -7,12 +7,15 @@
 // live document.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Transform } from "prosemirror-transform";
-import * as Y from "yjs";
-import { initProseMirrorDoc, updateYFragment } from "y-prosemirror";
 import { createHeadlessProof } from "@legion/proof-editor/headless";
+import { Transform } from "prosemirror-transform";
+import { initProseMirrorDoc, updateYFragment } from "y-prosemirror";
+import * as Y from "yjs";
+import { printLine } from "./print";
 
-const blockSchema = JSON.parse(readFileSync(join(import.meta.dir, "..", "schema", "blocks.json"), "utf8"));
+const blockSchema = JSON.parse(
+  readFileSync(join(import.meta.dir, "..", "schema", "blocks.json"), "utf8")
+);
 const { schema } = await createHeadlessProof({ blockSchema });
 const ydoc = new Y.Doc();
 Y.applyUpdate(ydoc, Buffer.from(process.argv[2], "base64"));
@@ -50,4 +53,4 @@ if (image < 0) {
 }
 tr.setNodeMarkup(image, undefined, { ...tr.doc.nodeAt(image)?.attrs, alt: "alt2" });
 ydoc.transact(() => updateYFragment(ydoc, fragment, tr.doc, meta));
-console.log(Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"));
+await printLine(Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"));

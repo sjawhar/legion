@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -210,16 +210,41 @@ func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	return decoded
 }
 
+// runDecoder runs gen/<script> on encoded and returns the line it prints, without its line feed,
+// and its stderr when it fails.
 func runDecoder(script, encoded string) ([]byte, []byte, error) {
-	cmd := exec.Command("bun", "run", script, encoded)
-	cmd.Dir = filepath.Join("gen")
-	output, err := cmd.Output()
-	var stderr []byte
+	output, err := genScript(script, encoded).Output()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		stderr = exitErr.Stderr
+		return output, exitErr.Stderr, err
 	}
-	return output, stderr, err
+	if err != nil {
+		return output, nil, err
+	}
+	line, err := wholeLine(script, output)
+	return line, nil, err
+}
+
+// genScript is the command that runs gen/<script> with args, as every test that reads the
+// browser editor's engine runs it.
+func genScript(script string, args ...string) *exec.Cmd {
+	cmd := exec.Command("bun", append([]string{"run", script}, args...)...)
+	cmd.Dir = "gen"
+	return cmd
+}
+
+// wholeLine is the one line a gen script printed, without its line feed. Each script prints its
+// result as one line, its line feed last, so output without that line feed at its end was cut
+// short, whatever the exit status said, and is refused as that rather than handed on as a result.
+func wholeLine(script string, output []byte) ([]byte, error) {
+	line, rest, found := bytes.Cut(output, []byte("\n"))
+	if !found {
+		return nil, fmt.Errorf("%s printed %d bytes without the line feed that ends its one line: its output was cut short", script, len(output))
+	}
+	if len(rest) > 0 {
+		return nil, fmt.Errorf("%s printed %d bytes after the line feed that ends its one line: %q", script, len(rest), rest)
+	}
+	return line, nil
 }
 
 // Every null attribute Go writes into the live document survives the browser editor: loaded as its
@@ -253,7 +278,7 @@ func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run edit-blocks.ts: %v\nstderr:\n%s", err, stderr)
 	}
-	update, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+	update, err := base64.StdEncoding.DecodeString(string(output))
 	if err != nil {
 		t.Fatalf("edit-blocks.ts output: %v\n%s", err, output)
 	}
