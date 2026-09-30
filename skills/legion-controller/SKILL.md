@@ -123,12 +123,12 @@ unrecorded: on its creation with the label, and on each change to it after that 
 in triage, the change that adds the label included (the dashboard creates an issue without
 labels, so a human adds it from the issue header). Two parties hand work over: a person, who sets
 the label from the issue header, and you, when you fill a free slot (below). You label an issue
-only when you take it, so the label means Legion has the issue or had it. A person's label is
-their decision: never take it off. A child needs no label: it runs under its tree's architect
-once its root is admitted. `legion status <KEY> todo` admits a root only while it carries the
-label, so a root you hand over or file for Legion to run carries it first (`labels` in
-`dispatch_issue_update` or `dispatch_issue`). Taking the label off a waiting root drops it from
-the waiting line; taking it off an admitted tree does not stop it.
+only when you take it or file it for Legion, so the label means Legion has the issue or had it.
+A person's label is their decision: never take it off. A child needs no label: it runs under its
+tree's architect once its root is admitted. `legion status <KEY> todo` admits a root only while
+it carries the label, so a root you hand over or file for Legion to run carries it first
+(`labels` in `dispatch_issue_update` or `dispatch_issue`). Taking the label off a waiting root
+drops it from the waiting line; taking it off an admitted tree does not stop it.
 
 ## Keeping the slots full (Go daemon)
 
@@ -151,9 +151,12 @@ issue of the project is in scope.
 you add). With none free, stop.
 
 **Candidates.** The project's open issues in `todo`, `backlog`, or `triage` that do not carry the
-`legion` label. The Go daemon runs only labelled roots, so every root it ran carries the label: a
-labelled root in `todo` is the daemon's to admit or queue, one in `triage` is yours to triage
-(step 2 above), and one anywhere else was parked by Legion or by a person, and the walk leaves it.
+`legion` label. The Go daemon runs only labelled roots, so every root it ran since the daemon
+required the label carries it: a labelled root in `todo` is the daemon's to admit or queue, one in
+`triage` is yours to triage (step 2 above), and one anywhere else was parked by Legion or by a
+person, and the walk leaves it.
+The `dispatch_issues` rows show no labels, so the listing below does not filter them: the label
+is checked on each issue's `dispatch_read`, at the table's first row.
 Take the candidates one priority at a time: `priority: [0]` first, then `[1]`, `[2]`, `[3]`, and
 `[null]` (no priority) last. Within one priority, list `todo`, then `backlog`, then `triage`, since
 `todo` is what a person already called ready; within one status, keep the listing's order, which
@@ -180,7 +183,7 @@ leans on `External links:`, and the label row is the one that never depends on h
 |---|---|
 | It carries the `legion` label | `Labels:` lists `legion`, in any case. Legion has the issue or had it, as **Candidates** above says. |
 | It is not a root | `Links:` names a `child_of` issue. Its parent's architect owns it. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
-| Legion ran it before and a person took the label off | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every `legion status` (yours included) and on its own `in_progress` at admission. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`, closed-tree activity). |
+| Legion ran it without the label now on it | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every `legion status` (yours included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`, closed-tree activity). |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
 | Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
 | A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. You cannot read GitHub, so an open, merged, or closed pull request all count. A person who wants Legion on it anyway hands it over themselves: the label, then `todo`. |
@@ -199,7 +202,11 @@ leans on `External links:`, and the label row is the one that never depends on h
 
 2. Admit it with `legion status <KEY> todo`. One already in `todo` needs no status write: the
    label admits it. Labelling a `triage` root wakes you with its own `triage on <KEY>`; by the time
-   you read it the root is recorded, and that wake needs nothing.
+   you read it the root is recorded, and that wake needs nothing. When the status write fails
+   (the daemon answers 502 when Dispatch refused or failed it), run it once more. When it fails
+   again, take the label back off with `dispatch_issue_update`, keeping the issue's other labels,
+   so a later walk does not skip a `backlog` or `triage` issue that never reached Legion; name the
+   issue in your summary, and skip step 3.
 3. Post one short comment that says Legion took it and names who is asked at its design gate, from
    the `Assignee:` line, with the assignee sentence [New issue triage](#new-issue-triage) step 4
    gives:
