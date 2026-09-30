@@ -120,13 +120,12 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await leaveFocus(page);
 
     // t is a chord: the indicator shows it waiting, then the second key picks that tab. c is a
-    // global shortcut on its own (the create dialog), and completing the chord is not it.
+    // global shortcut on its own (the create dialog), and completing the chord is not it. The
+    // chord's second key must follow within the keymap's 1000 ms window, so nothing slow sits
+    // between the two keys: the screenshot is taken once the tab is reached.
     await page.keyboard.press("t");
     const indicator = page.getByTestId("chord-indicator");
     await expect(indicator).toHaveText(/t/);
-    await page.screenshot({
-      path: testInfo.outputPath(`issue-tab-chord-${testInfo.project.name}.png`),
-    });
     await page.keyboard.press("c");
     await expect(indicator).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "Create issue" })).toHaveCount(0);
@@ -135,6 +134,9 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
       "true"
     );
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
+    await page.screenshot({
+      path: testInfo.outputPath(`issue-tab-chord-${testInfo.project.name}.png`),
+    });
 
     for (const [key, tab] of [
       ["h", "Children"],

@@ -41,16 +41,18 @@ test("g then i goes to the Inbox, showing the pending chord until it completes",
     const page = await context.newPage();
     await openAgents(page);
 
+    // The chord's second key must follow within the keymap's 1000 ms window, so nothing slow sits
+    // between the two keys: the screenshot is taken once the Inbox is reached.
     const indicator = page.getByTestId("chord-indicator");
     await page.keyboard.press("g");
     await expect(indicator).toBeVisible();
     await expect(indicator).toHaveText(/g/);
-    await page.screenshot({
-      path: testInfo.outputPath(`chord-indicator-${testInfo.project.name}.png`),
-    });
     await page.keyboard.press("i");
     await expect(page).toHaveURL(/\/$/);
     await expect(indicator).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath(`chord-g-i-${testInfo.project.name}.png`),
+    });
   } finally {
     await context.close();
   }
