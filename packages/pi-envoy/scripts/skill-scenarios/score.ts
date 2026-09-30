@@ -279,8 +279,10 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
     .filter((p) => p.ref === `refs/heads/${world.branch}`);
   const own = [world.head, ...pushes.map((p) => p.sha)];
   const entries = session(runDir);
+  // `bun greet.ts`, `/path/to/bun greet.ts` or `"$BUN" greet.ts`, as a tester that looked bun up
+  // runs it; reading the file is not running it.
   const drove = toolCalls(entries).find((call) =>
-    /\bbun\s+(?:run\s+)?\S*greet\.ts\b/.test(call.args)
+    /(?:\bbun|\$\{?\w*BUN\w*\}?)["'\\]*\s+(?:run\s+)?\S*greet\.ts\b/.test(call.args)
   );
   const ran = drove !== undefined && write !== undefined && drove.at < write.at;
   const push = pushes.find(
