@@ -6,6 +6,7 @@ import {
   type Artifact,
   dispatchToolSpecs,
   type IssueComponents,
+  SEARCH_QUERY_MAX,
   zodSchemaApi,
 } from "@legion/contracts";
 import { z } from "zod";
@@ -1089,6 +1090,31 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(/2 characters/);
+    expect(requests).toBe(0);
+  });
+
+  test("dispatch_search refuses a spec-sized query by name before any request", async () => {
+    let requests = 0;
+    const fetchImpl = (() => {
+      requests += 1;
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+    const length = 26_637;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_search",
+        args: { query: "x".repeat(length) },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(
+      `- query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
+    );
     expect(requests).toBe(0);
   });
 
