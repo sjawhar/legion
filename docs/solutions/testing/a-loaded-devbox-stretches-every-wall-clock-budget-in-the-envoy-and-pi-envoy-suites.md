@@ -17,6 +17,7 @@ symptoms:
   - "`durable document = \"…HUMAN WRITE\\n\", want \"keep\"` in `…TableAnchorCheck/unconditional_baseline`"
   - "`start NATS: … create container: … context deadline exceeded` at 30 s in natstail, or `start NATS JetStream: …` in daemon-go's intake, admit or workflow"
   - "pi-envoy `this test timed out after 5000ms` in a test that runs jj, then `# Unhandled error between tests` from a jj helper with an empty stderr (`jj config list failed: `)"
+  - "`the server's trace holds no publish to $JS.API.STREAM.PURGE.KV_…; the purge went somewhere else` in envoy's store, while the trace printed in the same message holds that publish; or `put ses_gone_002: nats: timeout` in the same test's setup"
 ---
 
 # A loaded devbox stretches every wall-clock budget: find what the budget covers
@@ -72,6 +73,17 @@ default.
   `TESTCONTAINERS_RYUK_DISABLED=true`, so every shared container needs its own `TestMain`
   teardown, and a started container needs its cleanup registered before the start's error is
   checked (#1300).
+- **A read of a container's log covered Docker's log copy.** The NATS server writes a trace line
+  as it handles a request, and Docker copies the container's output into its log a moment later,
+  so the purge-grant test's read, taken as soon as the purge answered, missed the line in 14 of
+  36 loaded runs; an instrumented copy saw the line arrive 8-300 ms after such a read. The test
+  now waits for the line with testcontainers' `wait.ForLog`, bounded at 5 s, as `testnats` waits
+  for NATS' reload line.
+- **A one-second JetStream wait meant for a refused purge covered seeding.** The same test bounded
+  its whole JetStream context at a second so that a purge the grant refuses, which the server
+  never answers, would not hold it for 10 s; seeding the bucket through that context timed out
+  under load. Only the refused purge now runs on the bounded context. nats.go's `PurgeStream`
+  ignores a per-call wait, so the bound has to be the context's.
 - **Bun's 5 s per-test timeout covered `jj` processes.** At first it was six `jj git init` runs, one
   per role. The per-role tests now share one workspace. A test that checks jj config still runs
   four jj processes, `jj git init` among them. When bun times a test out it kills the test's

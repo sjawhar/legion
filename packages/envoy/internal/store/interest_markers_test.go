@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // captureJSONLogs routes slog.Default() into a buffer for the test and decodes the records back, so
@@ -638,21 +639,19 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 	// its grant names is computed from the same test's bucket.
 	t.Run("a grant that allows it purges, and the trace names the subject", func(t *testing.T) {
 		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + testBuckets(t).interests
-		ctr, registry, js, _ := grantedRegistry(t, nil)
+		ctr, registry, js, _, _ := grantedRegistry(t, nil)
 		purged, err := collectorOf(registry).pass(js, nil)
 		if err != nil || purged == 0 {
 			t.Fatalf("a pass under a grant that allows the purge = %d, %v; want the markers purged", purged, err)
 		}
-		traced := serverLogLines(t, ctr, "[PUB "+purgeSubject)
-		if len(traced) == 0 {
-			t.Fatalf("the server's trace holds no publish to %s; the purge went somewhere else:\n%s",
-				purgeSubject, strings.Join(serverLogLines(t, ctr, "$JS.API.STREAM."), "\n"))
-		}
+		// A traced publish reads `<<- [PUB <subject> <reply> <size>]`, so the space after the subject
+		// keeps a longer subject that starts with this one from counting as it.
+		traced := awaitServerLogLines(t, ctr, "[PUB "+purgeSubject+" ", "the purge went somewhere else")
 		for _, line := range traced {
 			t.Logf("server trace: %s", strings.TrimSpace(line))
 		}
 		for _, line := range serverLogLines(t, ctr, "$JS.API.STREAM.PURGE") {
-			if !strings.Contains(line, purgeSubject) {
+			if !strings.Contains(line, purgeSubject+" ") {
 				t.Fatalf("the pass published to another purge subject: %s", strings.TrimSpace(line))
 			}
 		}
@@ -662,12 +661,12 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 		bucket := testBuckets(t).interests
 		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + bucket
 		records := captureJSONLogs(t)
-		ctr, registry, js, kv := grantedRegistry(t, []string{purgeSubject})
+		ctr, registry, js, boundedJS, kv := grantedRegistry(t, []string{purgeSubject})
 		before := bucketState(t, js, bucket)
 		// One collector for both passes, as the listener runs one: its latch is what says once.
 		collector := collectorOf(registry)
 		for pass := range 2 {
-			purged, err := collector.pass(js, nil)
+			purged, err := collector.pass(boundedJS, nil)
 			if err == nil || purged != 0 {
 				t.Fatalf("pass %d under a grant that denies the purge = %d, %v; want no purge and the error", pass, purged, err)
 			}
@@ -681,10 +680,8 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 		if refusal["level"] != "WARN" {
 			t.Fatalf("a refused purge logged %v, want one WARN for two passes", refusal)
 		}
-		violations := serverLogLines(t, ctr, "Permissions Violation for Publish to")
-		if len(violations) == 0 {
-			t.Fatal("the server logged no permissions violation; the grant did not refuse the purge")
-		}
+		violations := awaitServerLogLines(t, ctr, "Permissions Violation for Publish to",
+			"the grant did not refuse the purge")
 		for _, line := range violations {
 			if !strings.Contains(line, purgeSubject) {
 				t.Fatalf("the grant refused another subject too: %s", strings.TrimSpace(line))
@@ -703,10 +700,13 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 
 // grantedRegistry starts a tracing NATS server whose one nkey user may publish to everything except
 // deny, opens a registry on it as the listener does (one connection, its own JetStream context) and
-// seeds t's interest bucket with markers behind live keys. The JetStream context bounds its
-// requests at a second, so a purge the grant refuses -- which the server answers with nothing --
-// does not hold the test for the listener's own 10 s.
-func grantedRegistry(t *testing.T, deny []string) (*tcnats.NATSContainer, *Registry, natsgo.JetStreamContext, natsgo.KeyValue) {
+// seeds t's interest bucket with markers behind live keys. It returns two JetStream contexts on that
+// connection. js waits as long as the listener's own context does (10 s, internal/bus), for every
+// request the server answers: on a loaded machine a seeding put can take more than a second.
+// boundedJS waits a second, for a purge the grant refuses: the server answers that with nothing, so
+// a pass on js would hold the test for the whole 10 s. nats.go's PurgeStream ignores a per-call
+// wait, so the bound has to be the context's.
+func grantedRegistry(t *testing.T, deny []string) (*tcnats.NATSContainer, *Registry, natsgo.JetStreamContext, natsgo.JetStreamContext, natsgo.KeyValue) {
 	t.Helper()
 	seed, public := testnats.User(t)
 	quoted := make([]string, len(deny))
@@ -744,9 +744,13 @@ func grantedRegistry(t *testing.T, deny []string) (*tcnats.NATSContainer, *Regis
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Cleanup(conn.Close)
-	js, err := conn.JetStream(natsgo.MaxWait(time.Second))
+	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
+	}
+	boundedJS, err := conn.JetStream(natsgo.MaxWait(time.Second))
+	if err != nil {
+		t.Fatalf("bounded jetstream: %v", err)
 	}
 	waitFor(t, 30*time.Second, func() bool { _, err := js.AccountInfo(); return err == nil })
 	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
@@ -761,7 +765,7 @@ func grantedRegistry(t *testing.T, deny []string) (*tcnats.NATSContainer, *Regis
 	}
 	t.Cleanup(registry.StopWatch)
 	waitFor(t, 30*time.Second, registry.watcher.Ready)
-	return ctr, registry, js, kv
+	return ctr, registry, js, boundedJS, kv
 }
 
 // serverLogLines is every line of the container's log holding want.
@@ -783,6 +787,24 @@ func serverLogLines(t *testing.T, ctr *tcnats.NATSContainer, want string) []stri
 		}
 	}
 	return found
+}
+
+// traceWait bounds how long a test waits for a line the server wrote to reach its container's
+// log. The server writes a trace line as it handles a request, and Docker copies the container's
+// output into the log a moment later, so on a loaded machine a read taken as soon as the request
+// has answered can come before the line does.
+const traceWait = 5 * time.Second
+
+// awaitServerLogLines waits, up to traceWait, for the container's log to hold a line holding want,
+// then returns every line that does. Past traceWait it fails the test, naming want, what its
+// absence means, and every publish the server traced.
+func awaitServerLogLines(t *testing.T, ctr *tcnats.NATSContainer, want, meaning string) []string {
+	t.Helper()
+	if err := wait.ForLog(want).WithStartupTimeout(traceWait).WaitUntilReady(context.Background(), ctr); err != nil {
+		t.Fatalf("the server's log holds no line with %q after %s, so %s (%v). Every publish it traced:\n%s",
+			want, traceWait, meaning, err, strings.Join(serverLogLines(t, ctr, "[PUB "), "\n"))
+	}
+	return serverLogLines(t, ctr, want)
 }
 
 // recreateBucket creates bucket again after a delete, retrying while the server is still removing
