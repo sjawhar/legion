@@ -317,8 +317,9 @@ function mentionQuery(
   return { query: before.slice(at + 1), start: at };
 }
 
-/** The prefix that sends a comment or message in a mode other than a Send, the default one; the
- *  prefixes `parseDelivery` reads. */
+/** The prefix that sends a comment or message in a mode other than a Send, the default one, as the
+ *  composer's does-not-advertise warning names it. `parseDelivery` matches the same two prefixes
+ *  with its own pattern. */
 const DELIVERY_PREFIXES = { aside: "/aside", btw: "/btw" } as const;
 
 function parseDelivery(body: string): { body: string; delivery: DeliveryCapability } {

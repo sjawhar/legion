@@ -288,9 +288,12 @@ In a phase-worker session (planner, implementer, tester, reviewer, merger: never
 controller, a session with no Legion environment, or a `task` subagent), `src/legion/phase-stall.ts`
 tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
 `handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
-own turn is a user message too, but it counts as an Envoy delivery, never an assignment: the Envoy
-extension records each body it sends in, process-wide, and legion.ts asks that record at
-`message_start` (`matchInjectedUserTurn`). When a run is about to settle (`session_stop`) with the phase still
+own turn is a user message too, and counts as an Envoy delivery rather than an assignment: the
+Envoy extension records each body it sends in, process-wide, and legion.ts asks that record at
+`message_start` (`matchInjectedUserTurn`). The record is forgotten at the run's `agent_end`, so a
+Send that arrives after the run's last queue poll, which the host then runs as a turn of its own
+after `agent_end`, matches nothing: it counts as an assignment, which opens even a closed phase,
+and the dashboard shows it twice. When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
 message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a
