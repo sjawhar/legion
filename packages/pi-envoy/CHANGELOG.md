@@ -113,8 +113,9 @@
 
 ### Fixed
 
-- A session remembers the dedupe key of every frame it handed its agent for the 72-hour duplicate
-  window (`DELIVERY_DUPLICATE_WINDOW_MS`), where it kept only the latest 1,000. A session that
+- A session remembers the dedupe key of every Dispatch frame (and every webhook frame keyed by its
+  delivery id) for the 72-hour duplicate window (`DELIVERY_DUPLICATE_WINDOW_MS`), where it kept only
+  the latest 1,000; other keys keep that bound. A session that
   follows a busy repository's topics saw those 1,000 in about an hour, so a Dispatch Retry made
   later than that reached the agent a second time while the dashboard promised it would not. The
   keys still live in memory, so a restarted session no longer recognises a frame it received

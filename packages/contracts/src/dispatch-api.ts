@@ -802,9 +802,12 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   copy only, and a core subscriber is handed every publish, repeats included.
  * - Each host that subscribes over core NATS (the Oh My Pi extension, the Claude Code channel)
  *   hands its agent at most one frame per dedupe key inside this window, through
- *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. It holds those keys in memory: a
- *   host process that restarts after the first frame landed has forgotten it, and a Retry then
- *   reaches that agent a second time.
+ *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`, for a key that names its event:
+ *   every Dispatch key, and a webhook key equal to its source and delivery id (the stream's own
+ *   MsgId rule, `DedupeKeyNamesTheUpstreamEvent`). Any other key is remembered only among the
+ *   latest 1,000, because some producers give distinct events one key. It holds those keys in
+ *   memory: a host process that restarts after the first frame landed has forgotten it, and a
+ *   Retry then reaches that agent a second time.
  *
  * Past the window neither remembers the key, and a same-mode retry is a second delivery, so the
  * dashboard makes the promise only inside it (`isSafeRetry`). `scripts/gen-go.ts` emits this as

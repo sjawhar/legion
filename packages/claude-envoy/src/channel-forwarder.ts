@@ -66,6 +66,8 @@ interface Following {
 // send there and only there (`createDeliveryDedupe`).
 const DeliveryIdentity = z.object({
   dedupe_key: z.string().min(1).optional(),
+  source: z.string().optional(),
+  source_event_id: z.string().optional(),
   topic: z.string().min(1).optional(),
 })
 

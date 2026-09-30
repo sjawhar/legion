@@ -29,9 +29,10 @@
 ### Fixed
 
 - `createDeliveryDedupe` replaces `rememberBounded` as the one dedupe both core-NATS hosts keep: it
-  recognises a repeat by `dedupe_key` alone and remembers each key for
-  `DELIVERY_DUPLICATE_WINDOW_MS` rather than for the latest 1,000 keys, and a host `forget`s the key
-  of a delivery that failed so its re-send still arrives.
+  recognises a repeat by `dedupe_key` alone, remembers a key that names its event (every Dispatch
+  key, a webhook key equal to its source and delivery id) for `DELIVERY_DUPLICATE_WINDOW_MS` and any
+  other among the latest 1,000, and a host `forget`s the key of a delivery that failed so its
+  re-send still arrives.
 - `getArchitectureSource` reads both answers a server gives for a project with no architecture
   source as `null`: a current server's `200 null` and an older server's `404 SOURCE_NOT_FOUND`.
   A client meets both while a rollout mixes versions. Before, only `200 null` read as none, so

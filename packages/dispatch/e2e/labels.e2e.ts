@@ -89,7 +89,6 @@ test("edits issue labels from a searchable multi-select and filters project issu
     }
     await pickFilterOption(page, "Labels", "docs");
     await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
-    await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await pickFilterOption(page, "Labels", "Frontend");
     await expect(page.getByText("Editable labels", { exact: true })).toBeVisible();
     await expect(page.getByText("Frontend documentation", { exact: true })).toBeVisible();

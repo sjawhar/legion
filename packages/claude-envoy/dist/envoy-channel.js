@@ -36637,6 +36637,8 @@ var SPEC_SECTIONS = [
 var SPEC_WRITING_GUIDANCE = `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` + "Write for a reader who has not seen the code: plain sentences, every identifier expanded on " + "first use, no coined shorthand; see skills/dispatch Writing for the human and Writing a spec.";
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
+var SEARCH_QUERY_MAX = 1000;
+var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -36949,7 +36951,11 @@ var dispatchToolSpecs = [
     example: { query: "astrolabe" },
     description: "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " + "Use it before creating an issue or a design document, and to find where a word was written. " + 'Websearch syntax: "quoted phrase", -excluded, OR.',
     arguments: (z2) => ({
-      query: z2.string({ min: 2 }).describe("Keyword, phrase, or websearch expression; at least 2 characters."),
+      query: z2.string({
+        min: 2,
+        max: SEARCH_QUERY_MAX,
+        maxHint: SEARCH_QUERY_HINT
+      }).describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z2.string().describe("Optional project key to search within.").optional(),
       limit: z2.number({ int: true, min: 1, max: 50 }).describe("Maximum results, 1-50; default 20.").optional()
     })
@@ -37442,8 +37448,9 @@ function zodSchemaApi(zod) {
         schema = schema.min(opts.min);
       if (opts.max !== undefined) {
         const max = opts.max;
+        const hint = opts.maxHint === undefined ? "" : `; ${opts.maxHint}`;
         schema = schema.max(max, {
-          error: (issue2) => overCapMessage(typeof issue2.input === "string" ? issue2.input.length : max + 1, max)
+          error: (issue2) => overCapMessage(typeof issue2.input === "string" ? issue2.input.length : max + 1, max) + hint
         });
       }
       return schema;
@@ -38081,6 +38088,7 @@ var InboundSenderSchema = exports_external.object({
 var InboundEnvelopeSchema = exports_external.object({
   event_id: exports_external.string().optional(),
   source: exports_external.string(),
+  source_event_id: exports_external.string().optional(),
   source_session: exports_external.string().optional(),
   topic: exports_external.string().optional(),
   dedupe_key: exports_external.string().optional(),
@@ -38124,30 +38132,58 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
+var UNNAMED_KEYS_REMEMBERED = 1000;
+function keyNamesTheEvent(frame) {
+  switch (frame.source) {
+    case "dispatch":
+      return true;
+    case "github":
+    case "slack":
+    case "ghostwispr":
+      return frame.source_event_id !== undefined && frame.source_event_id !== "" && frame.dedupe_key === `${frame.source}.${frame.source_event_id}`;
+    default:
+      return false;
+  }
+}
 function createDeliveryDedupe(now = Date.now) {
-  const deliveredAt = new Map;
+  const named = new Map;
+  const unnamed = new Set;
   return {
     isRepeat(frame) {
       const key = frame?.dedupe_key;
-      const at = key === undefined ? undefined : deliveredAt.get(key);
-      return at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS;
+      if (key === undefined)
+        return false;
+      const at = named.get(key);
+      return at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS || unnamed.has(key);
     },
     remember(frame) {
       const key = frame?.dedupe_key;
-      if (key === undefined)
+      if (frame === undefined || key === undefined)
         return;
-      const at = now();
-      for (const [oldest, deliveredAtOldest] of deliveredAt) {
-        if (at - deliveredAtOldest < DELIVERY_DUPLICATE_WINDOW_MS)
-          break;
-        deliveredAt.delete(oldest);
+      if (!keyNamesTheEvent(frame)) {
+        unnamed.delete(key);
+        unnamed.add(key);
+        if (unnamed.size > UNNAMED_KEYS_REMEMBERED) {
+          const oldest = unnamed.values().next();
+          if (!oldest.done)
+            unnamed.delete(oldest.value);
+        }
+        return;
       }
-      deliveredAt.delete(key);
-      deliveredAt.set(key, at);
+      const at = now();
+      for (const [oldest, deliveredAt] of named) {
+        if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
+          break;
+        named.delete(oldest);
+      }
+      named.delete(key);
+      named.set(key, at);
     },
     forget(frame) {
-      if (frame?.dedupe_key !== undefined)
-        deliveredAt.delete(frame.dedupe_key);
+      if (frame?.dedupe_key === undefined)
+        return;
+      named.delete(frame.dedupe_key);
+      unnamed.delete(frame.dedupe_key);
     }
   };
 }
@@ -43886,6 +43922,8 @@ var version2 = "0.5.1";
 // src/channel-forwarder.ts
 var DeliveryIdentity = exports_external.object({
   dedupe_key: exports_external.string().min(1).optional(),
+  source: exports_external.string().optional(),
+  source_event_id: exports_external.string().optional(),
   topic: exports_external.string().min(1).optional()
 });
 var decoder = new TextDecoder;

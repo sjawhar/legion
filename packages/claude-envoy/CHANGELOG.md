@@ -9,8 +9,8 @@
   message that had already reached the session arrived as a new event and was notified again, while the
   dashboard promised "Retry won't deliver it twice". The channel now recognises a repeat by its
   `dedupe_key`, which a Retry shares with the send before it, through the same
-  `createDeliveryDedupe` the Oh My Pi extension uses: each key is remembered for the 72-hour
-  duplicate window rather than for the latest 1,000 events, and a send whose notification failed
+  `createDeliveryDedupe` the Oh My Pi extension uses: a Dispatch key is remembered for the 72-hour
+  duplicate window, any key that does not name its event among the latest 1,000, and a send whose notification failed
   is forgotten, so its re-send still arrives. Keys live in memory; a restarted channel server
   forgets them.
 

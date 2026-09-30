@@ -47,6 +47,7 @@ const InboundEnvelopeSchema = z
   .object({
     event_id: z.string().optional(),
     source: z.string(),
+    source_event_id: z.string().optional(),
     source_session: z.string().optional(),
     topic: z.string().optional(),
     dedupe_key: z.string().optional(),
@@ -153,6 +154,34 @@ export function expectsLaneReceipt<
 /** The part of an inbound frame a host recognises a repeat by: its `dedupe_key`, never its `event_id`. */
 export interface DedupeIdentity {
   readonly dedupe_key?: string | undefined;
+  readonly source?: string | undefined;
+  readonly source_event_id?: string | undefined;
+}
+
+/** How many keys a host remembers of frames whose dedupe key does not name their event. */
+const UNNAMED_KEYS_REMEMBERED = 1_000;
+
+/**
+ * Whether a frame's dedupe key is the identity its upstream gave the event, so a second frame under
+ * it is that event again: always for Dispatch, and for a webhook source when the key is the source
+ * plus the upstream's delivery id. The Go side's `contracts.DedupeKeyNamesTheUpstreamEvent`
+ * (`packages/envoy/internal/contracts/dedupe.go`), which decides the stream's MsgId, is the same rule.
+ */
+function keyNamesTheEvent(frame: DedupeIdentity): boolean {
+  switch (frame.source) {
+    case "dispatch":
+      return true;
+    case "github":
+    case "slack":
+    case "ghostwispr":
+      return (
+        frame.source_event_id !== undefined &&
+        frame.source_event_id !== "" &&
+        frame.dedupe_key === `${frame.source}.${frame.source_event_id}`
+      );
+    default:
+      return false;
+  }
 }
 
 /**
@@ -161,7 +190,7 @@ export interface DedupeIdentity {
  * subscribes over core NATS (the Oh My Pi extension, the Claude Code channel) keeps one.
  */
 export interface DeliveryDedupe {
-  /** Whether a frame under this dedupe key was handed to the agent inside the window. */
+  /** Whether a frame under this dedupe key was already handed to the agent and is still remembered. */
   isRepeat(frame: DedupeIdentity | undefined): boolean;
   /** Records a frame handed to the agent. */
   remember(frame: DedupeIdentity | undefined): void;
@@ -169,28 +198,47 @@ export interface DeliveryDedupe {
   forget(frame: DedupeIdentity | undefined): void;
 }
 
+/**
+ * A key that names its event is remembered for `DELIVERY_DUPLICATE_WINDOW_MS`, the window the retry
+ * promise is made for. Any other key is remembered only among the latest 1,000: some producers mint
+ * a key two distinct events share (the MCP bridge's content hash), and a long window would silence
+ * the later one.
+ */
 export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
   // Insertion order is delivery order, so the entries past the window are always at the front.
-  const deliveredAt = new Map<string, number>();
+  const named = new Map<string, number>();
+  const unnamed = new Set<string>();
   return {
     isRepeat(frame) {
       const key = frame?.dedupe_key;
-      const at = key === undefined ? undefined : deliveredAt.get(key);
-      return at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS;
+      if (key === undefined) return false;
+      const at = named.get(key);
+      return (at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS) || unnamed.has(key);
     },
     remember(frame) {
       const key = frame?.dedupe_key;
-      if (key === undefined) return;
-      const at = now();
-      for (const [oldest, deliveredAtOldest] of deliveredAt) {
-        if (at - deliveredAtOldest < DELIVERY_DUPLICATE_WINDOW_MS) break;
-        deliveredAt.delete(oldest);
+      if (frame === undefined || key === undefined) return;
+      if (!keyNamesTheEvent(frame)) {
+        unnamed.delete(key);
+        unnamed.add(key);
+        if (unnamed.size > UNNAMED_KEYS_REMEMBERED) {
+          const oldest = unnamed.values().next();
+          if (!oldest.done) unnamed.delete(oldest.value);
+        }
+        return;
       }
-      deliveredAt.delete(key);
-      deliveredAt.set(key, at);
+      const at = now();
+      for (const [oldest, deliveredAt] of named) {
+        if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS) break;
+        named.delete(oldest);
+      }
+      named.delete(key);
+      named.set(key, at);
     },
     forget(frame) {
-      if (frame?.dedupe_key !== undefined) deliveredAt.delete(frame.dedupe_key);
+      if (frame?.dedupe_key === undefined) return;
+      named.delete(frame.dedupe_key);
+      unnamed.delete(frame.dedupe_key);
     },
   };
 }
