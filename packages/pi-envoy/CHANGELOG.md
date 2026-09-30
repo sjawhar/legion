@@ -34,6 +34,13 @@
 
 ### Changed
 
+- The `legion-worker` skill arrives whole (LEGION-386). At 54,977 bytes it was over Oh My Pi's
+  51,200-byte spill threshold, so a phase worker read it with its middle cut out. Its body is now
+  under 500 lines, and the PR-body template and proofs, review threads, conflicts and fingerprints,
+  and the merge gate are references under `skill://legion-worker/references/`, each linked from
+  the step that needs it. The reviewer's role prompt approves the `.legion/` deletion head with
+  the skill's head-pinned review submission, and the implementer, reviewer and tester role
+  prompts point at the reference that now holds each procedure they name.
 - `legion.goDaemonApiVersion` is 11. Contract 11 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, each Legion role App's login keyed by its App role (`{implement, review}`), which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
 - `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
   role Apps once the Legion review App's `Accepted:` is its newest submitted comment. A CI bot

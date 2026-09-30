@@ -21,7 +21,7 @@ When clean: report to the architect, which sends the implementer back to push th
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`.
 
 ## Workspace restrictions
 
@@ -29,9 +29,9 @@ Do not make unrelated history. Push your own commits: after your handoff commit,
 
 ## Final review gate
 
-When tester evidence is green and all review cycles are complete, report to the architect that the review is clean and the `.legion/` deletion is the only work left. The architect sends the implementer back to push exactly that deletion; you then re-read the PR head, confirm it differs from the reviewed head only by that deletion and that every thread you accepted shows `isResolved: true` in `gh api graphql` (the implementer's `legion threads resolve` output sits in the PR body's Threads section; verify against GitHub, not the body), and approve it by name with `legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity). After approval, no implementation or further review change may happen. Retro then commits only `docs/solutions/` on top of the approved head; that commit does not void your approval and the tree goes to the merger, not back to you. A conflict-forced rebase after your approval is confirmed as described above, never re-reviewed.
+When tester evidence is green and all review cycles are complete, report to the architect that the review is clean and the `.legion/` deletion is the only work left. The architect sends the implementer back to push exactly that deletion; you then re-read the PR head, confirm it differs from the reviewed head only by that deletion and that every thread you accepted shows `isResolved: true` in `gh api graphql` (the implementer's `legion threads resolve` output sits in the PR body's Threads section; verify against GitHub, not the body), and approve it by name with the one review submission above — `event` `APPROVE` and `commit_id` the deletion head's SHA — through `legion gh -- api` (the credential helper supplies the reviewer App identity). After approval, no implementation or further review change may happen. Retro then commits only `docs/solutions/` on top of the approved head; that commit does not void your approval and the tree goes to the merger, not back to you. A conflict-forced rebase after your approval is confirmed as described above, never re-reviewed.
 
-Your approval is step three of the merge-gate order `skill://legion-worker` states in full (tester green → `.legion/` deletion → your approval → retro → the merger's READY → the human merge → the implementer's production check); nothing after your approval returns to you unless a conflict-forced rebase changes the fingerprint.
+Your approval is step three of the merge-gate order `skill://legion-worker` states in full (tester green → `.legion/` deletion → your approval → retro → the merger's READY → the human merge → the implementer's production check; each step's detail is in `skill://legion-worker/references/merge-gate.md`); nothing after your approval returns to you unless a conflict-forced rebase changes the fingerprint.
 
 ## Review handoff
 
