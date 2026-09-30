@@ -26,6 +26,12 @@ work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/transcripts"
+# Every line of the run also goes to $evidence/transcript.log, through a tee that ignores the stop
+# signals and SIGPIPE, with /dev/null as an output it cannot lose. Whoever reads the run's output can
+# go first (a supervised launcher's own tee, stopped with it) or the transcript's disk can fill, and
+# the driver and its cleanup, which closes the run's pull requests, still never fail on a write.
+# (GNU and busybox tee both drop an output that fails with SIGPIPE ignored; busybox rejects -p.)
+exec > >(trap '' HUP INT TERM PIPE && exec tee -a "$evidence/transcript.log" /dev/null) 2>&1
 ok=
 check=setup
 project="S3$(( ($$ + $(date +%s)) % 100000000 ))"

@@ -363,11 +363,11 @@ check, which needs the first issue's whole history, ends
 never cited as the proof; only a full run is.
 
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
-`/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): every agent transcript, the daemon,
-Dispatch, listener, and bridge logs, the model key command and its log of every mint
-(`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks, and the
-production audit. A passing run's last three checks stop every process, kill the private tmux
-server and remove both containers (`services-stopped`), check the model route
+`/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): `transcript.log` (the whole run), every agent
+transcript, the daemon, Dispatch, listener, and bridge logs, the model key command and its log of
+every mint (`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks,
+and the production audit. A passing run's last three checks stop every process, kill the private
+tmux server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-gateway`), and close every pull request the run still has open on the
 smoke repository — its own, by branch: the daemon's `legion/<project>-*` and the proof human's
 `proof/clean-main-<project, lowercased>` — before removing the isolated OMP profile and the scratch
@@ -379,7 +379,10 @@ a close whose branch delete failed is reported as closed with the reason the bra
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
-pull request open and prints gh's reason, with a line saying some may still be open.
+pull request open and prints gh's reason, with a line saying some may still be open. Whoever reads
+the run's output can go first, for example a supervised launcher's own `tee` stopped with the run,
+and the transcript's disk can fill. The run keeps going, and the trap still closes its pull
+requests.
 
 ## stage3-4b13b-acceptance.sh
 
