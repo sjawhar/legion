@@ -1,9 +1,9 @@
 # Documents: typed blocks, comments, suggestions, and artifacts
 
 `skill://dispatch` sends you here when you write a typed block (an `:::ask` or a callout), comment on
-or suggest a change to a document, upload an artifact, or get `DOC_SCHEMA`, `INVALID_ASK_BLOCK` or
-`DOC_SERVICE_UNAVAILABLE` back. Changing a document's text, tables included, is
-[Editing a document](skill://dispatch/references/document-edits.md).
+or suggest a change to a document, upload an artifact, request a document's approval, or get
+`DOC_SCHEMA`, `INVALID_ASK_BLOCK` or `DOC_SERVICE_UNAVAILABLE` back. Changing a document's text,
+tables included, is [Editing a document](skill://dispatch/references/document-edits.md).
 
 ## Typed blocks
 
@@ -127,6 +127,26 @@ Documents are CommonMark. A bare `<https://example.com|text>` is a CommonMark au
 dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|text>` displays as `<https://example.com|text>` in the
 document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,
 still belongs inside a fenced code block, where it survives verbatim both ways.
+
+## Approval requests
+
+```
+dispatch_request_approval({ issue?, project?, artifact?, summary })
+```
+
+The call opens an approval ask with the options `Approve` and `Request changes`, its question
+"Approve spec.md (version N)?" followed by `summary`, where N is the document's latest version. It
+is refused, with nothing sent, while that version holds a decision block open, and the refusal
+names each block and its ask. An answer or a `dispatch_resolve_ask` closes the ask at once but
+reaches a version only when the document settles, about two seconds later, or with your next
+`dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
+in) and then request. A block written in the last few seconds counts as open before Dispatch has
+opened its ask. A repeat at the same version returns the open request unchanged. A new version
+retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
+the new version once its blocks are settled. The answer reaches you as `artifact.approved` or
+`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
+which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show the document's
+approval state; `stale` means it was approved and then edited.
 
 ## A document that is reloading
 

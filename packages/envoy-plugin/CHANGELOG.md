@@ -8,6 +8,8 @@
   the human hasn't already agreed to, in one to three sentences (LEGION-387). The Inbox shows it
   after "Approve spec.md (version N)?", and the result text quotes the question the human sees.
   It needs a Dispatch server that accepts `summary`; an older one refuses the call.
+- `dispatch_request_approval` is refused, with nothing sent, while the document holds an open
+  decision block, and the refusal names each block.
 - The `dispatch_issue` and `dispatch_doc_edit` descriptions no longer list spec headings; they
   point at the dispatch skill's "Writing a spec".
 

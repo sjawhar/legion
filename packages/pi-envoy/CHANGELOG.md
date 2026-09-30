@@ -15,6 +15,12 @@
   the human hasn't already agreed to, in one to three sentences. The Inbox shows it after "Approve
   spec.md (version N)?", and the result text quotes the question the human sees. It needs a
   Dispatch server that accepts `summary`; an older one refuses the call.
+- `dispatch_request_approval` is refused while the document holds an open decision block, even
+  when a human asked for approval, and the refusal names each block. "Approval of a spec" says
+  what to do instead: name the open block and ask the human to answer or waive it; a waived block
+  is closed with `dispatch_resolve_ask`. It also says to request approval in the pass that
+  finishes a spec whose remaining choices are the agent's own, rather than making each of them a
+  decision block.
 - The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
   decision blocks first, then request approval with a summary of what the tree will do.
 - The run-end nudge that tells an agent to open an ask no longer offers

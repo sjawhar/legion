@@ -89,3 +89,13 @@ posted message. The result is one line —
 `KEY: status a -> b; priority -> P1; linked <url> (N links)`, with `priority cleared` on a clear
 and `reason posted as message <id> (<ref>)` ahead of a close — and a server refusal keeps its
 `code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) at the head of the thrown message.
+`dispatch_request_approval` refuses, before it sends anything, while the version the request would
+name (the document's latest, `approval.latest_version`) holds a decision block open. It reads the
+live document's `ask` blocks (`GET /api/v1/artifacts/{id}/blocks`), then that version's markdown
+and the owner's asks (the issue's for an issue document, since the artifact route refuses those),
+and judges each block by its `state` in the version: an answer or a resolution closes the ask at
+once but reaches a version only when the document settles or the next edit is written. A block the
+version does not hold yet, or one with no ask yet, counts as open. A request over an open block
+would be retracted by the version its answer writes. The refusal names each block and its ask and
+tells the agent to ask the human to answer or waive it. A document already approved at its latest
+version skips the reads and gets the server's answer.

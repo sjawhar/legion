@@ -1580,6 +1580,72 @@ async function openArtifactMarks(
 }
 
 /**
+ * Refuses an approval request while the document holds an open decision block. A request names
+ * the latest version, and a new version retracts it, so a request over a block the human has yet
+ * to answer goes stale the moment they answer it. The live document's `ask` blocks are judged by
+ * the latest version, the one the request would name: a block that version shows open counts as
+ * open even when its ask is already answered or closed, since that answer reaches a version only
+ * when the document settles, about two seconds later, or with the next edit (the agent's fold of
+ * the answer into the text). A block not yet in that version counts as open too. A document
+ * already approved at its latest version is left to the server, which answers with that approval.
+ */
+async function refuseOpenDecisionBlocks(
+  client: DispatchClient,
+  tool: string,
+  resolved: ResolvedArtifact
+): Promise<void> {
+  const artifact = resolved.artifact;
+  const latest = artifact.approval?.latest_version;
+  // No approval state means no document version to approve: the server's own refusal says so.
+  if (latest === undefined || latest < 1 || artifact.approval?.state === "approved") return;
+  const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
+  if (blocks.length === 0) return;
+  // An issue's document lists its asks under the issue; the artifact route refuses it.
+  if (resolved.owner.kind !== "project" && resolved.issue === undefined) {
+    throw new Error("issue document is missing its issue");
+  }
+  const [owned, version] = await Promise.all([
+    resolved.issue === undefined
+      ? client.getArtifactAsks(artifact.id)
+      : client.listIssueAsks(resolved.issue.key),
+    client.docRead(artifact.id, latest),
+  ]);
+  const asks = new Map(
+    owned
+      .filter((ask) => ask.block_id != null && ask.block_artifact?.id === artifact.id)
+      .map((ask) => [ask.block_id, ask])
+  );
+  const lines = version.markdown.split("\n");
+  const open = blocks.flatMap((block) => {
+    const ask = asks.get(block.id);
+    const named =
+      ask === undefined
+        ? `block ${block.id}`
+        : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
+    // The block's opening line, `:::ask{#<id> … state="…"}`; a block with no state is open.
+    const opening = lines.find(
+      (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
+    );
+    if (opening === undefined) return [`${named}, which version ${latest} does not hold yet`];
+    if ((/\bstate="(\w+)"/.exec(opening)?.[1] ?? "open") !== "open") return [];
+    if (ask === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
+    if (ask.state === "open") return [named];
+    return [
+      `${named}, ${ask.state} but still open in version ${latest}: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it`,
+    ];
+  });
+  if (open.length === 0) return;
+  const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
+  throw new Error(
+    [
+      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+      ...open.map((line) => `- ${line}`),
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again.",
+    ].join("\n")
+  );
+}
+
+/**
  * A Dispatch refusal carrying its own code in the message the host shows: the code
  * (ISSUE_CLAIMED, CLAIM_CONTENDED, EXTERNAL_LINK_TAKEN, ...) is the part an agent acts on, and
  * the prose alone hides it. Only the message changes: every other field of the refusal
@@ -2465,6 +2531,7 @@ export async function executeDispatchTool(
           ? ownerArguments.ref.id
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
+      await refuseOpenDecisionBlocks(client, input.tool, resolved);
       const result = await client.requestApproval(resolved.artifact.id, {
         actor,
         summary: stringArg(args, "summary"),

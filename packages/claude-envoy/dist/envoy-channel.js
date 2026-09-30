@@ -36896,7 +36896,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " + "and writing it retracts an open request for an older version; request again for the new " + "one. A repeat at the version an open request names returns that request unchanged. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " + "and writing it retracts an open request for an older version; request again for the new " + "one. A repeat at the version an open request names returns that request unchanged. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -40251,6 +40251,50 @@ async function openArtifactMarks(client, resolved) {
     ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
   ];
 }
+async function refuseOpenDecisionBlocks(client, tool, resolved) {
+  const artifact = resolved.artifact;
+  const latest = artifact.approval?.latest_version;
+  if (latest === undefined || latest < 1 || artifact.approval?.state === "approved")
+    return;
+  const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
+  if (blocks.length === 0)
+    return;
+  if (resolved.owner.kind !== "project" && resolved.issue === undefined) {
+    throw new Error("issue document is missing its issue");
+  }
+  const [owned, version2] = await Promise.all([
+    resolved.issue === undefined ? client.getArtifactAsks(artifact.id) : client.listIssueAsks(resolved.issue.key),
+    client.docRead(artifact.id, latest)
+  ]);
+  const asks = new Map(owned.filter((ask) => ask.block_id != null && ask.block_artifact?.id === artifact.id).map((ask) => [ask.block_id, ask]));
+  const lines = version2.markdown.split(`
+`);
+  const open = blocks.flatMap((block) => {
+    const ask = asks.get(block.id);
+    const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
+    const opening = lines.find((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
+    if (opening === undefined)
+      return [`${named}, which version ${latest} does not hold yet`];
+    if ((/\bstate="(\w+)"/.exec(opening)?.[1] ?? "open") !== "open")
+      return [];
+    if (ask === undefined)
+      return [`${named}, whose ask Dispatch has not opened yet`];
+    if (ask.state === "open")
+      return [named];
+    return [
+      `${named}, ${ask.state} but still open in version ${latest}: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it`
+    ];
+  });
+  if (open.length === 0)
+    return;
+  const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
+  throw new Error([
+    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+    ...open.map((line) => `- ${line}`),
+    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again."
+  ].join(`
+`));
+}
 function refusalWithCode(error48, suffix = "") {
   if (!(error48 instanceof DispatchServiceError))
     return error48;
@@ -40878,6 +40922,7 @@ ${trailer.join(`
     case "dispatch_request_approval": {
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
+      await refuseOpenDecisionBlocks(client, input.tool, resolved);
       const result = await client.requestApproval(resolved.artifact.id, {
         actor,
         summary: stringArg(args, "summary")

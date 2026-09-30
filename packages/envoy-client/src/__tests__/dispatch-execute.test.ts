@@ -3219,9 +3219,20 @@ describe("executeDispatchTool", () => {
         return response({
           key: "DSP-42",
           primary_artifact_id: "artifact-42",
-          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          artifacts: [
+            {
+              id: "artifact-42",
+              slug: "spec",
+              name: "spec.md",
+              primary: true,
+              approval: { state: "draft", latest_version: 3 },
+            },
+          ],
           open_asks: [],
         });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/blocks") {
+        return response([{ id: "p-1", type: "paragraph", from: 0, to: 12 }]);
       }
       if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
         const body = JSON.parse(String(init?.body)) as { summary: string };
@@ -3279,9 +3290,20 @@ describe("executeDispatchTool", () => {
         return response({
           key: "DSP-42",
           primary_artifact_id: "artifact-42",
-          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          artifacts: [
+            {
+              id: "artifact-42",
+              slug: "spec",
+              name: "spec.md",
+              primary: true,
+              approval: { state: "awaiting", latest_version: 3 },
+            },
+          ],
           open_asks: [],
         });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/blocks") {
+        return response([]);
       }
       if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
         return response({
@@ -3323,7 +3345,15 @@ describe("executeDispatchTool", () => {
         return response({
           key: "DSP-42",
           primary_artifact_id: "artifact-42",
-          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          artifacts: [
+            {
+              id: "artifact-42",
+              slug: "spec",
+              name: "spec.md",
+              primary: true,
+              approval: { state: "approved", latest_version: 3, version: 3 },
+            },
+          ],
           open_asks: [],
         });
       }
@@ -3360,6 +3390,113 @@ describe("executeDispatchTool", () => {
     expect(result.text).not.toContain("ask ");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
     expect(dispatchFollowNotice(result.details)).toBeNull();
+  });
+
+  // A request names the latest version, and a new version retracts it: a request made over an
+  // open block goes stale the moment the human answers it, and an answer reaches a version only
+  // when the document settles or the agent folds it into the text.
+  describe("dispatch_request_approval with decision blocks in the document", () => {
+    const opening = (block: string, state: string) =>
+      `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
+    const requestOver = async (blocks: string[], version4: string[], asks: unknown[]) => {
+      const posts: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [
+              {
+                id: "artifact-42",
+                slug: "spec",
+                name: "spec.md",
+                primary: true,
+                approval: { state: "draft", latest_version: 4 },
+              },
+            ],
+            open_asks: [],
+          });
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/blocks") {
+          return response([
+            { id: "p-1", type: "paragraph", from: 0, to: 9 },
+            ...blocks.map((id) => ({ id, type: "ask", from: 10, to: 90 })),
+          ]);
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/versions/4") {
+          return response({ number: 4, markdown: ["## Where", ...version4].join("\n\n") });
+        }
+        // An issue's document lists its asks under the issue: the artifact route refuses it.
+        if (target.pathname === "/api/v1/issues/DSP-42/asks") return response(asks);
+        if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
+          posts.push(target.pathname);
+          return response({
+            ask: { id: "ask-9", kind: "approval", question: "Approve spec.md (version 4)? X." },
+            artifact_id: "artifact-42",
+            version: 4,
+          });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const outcome = executeDispatchTool({
+        tool: "dispatch_request_approval",
+        args: { issue: "DSP-42", summary: "Proposes writing the export to S3." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return { outcome, posts };
+    };
+    const blockAsk = (block: string, state: string) => ({
+      id: `ask-${block}`,
+      kind: "question",
+      block_id: block,
+      block_artifact: { id: "artifact-42" },
+      state,
+      question: `Question of ${block}?`,
+    });
+
+    test("refuses over every block the named version still holds open, sending nothing", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1", "b-2", "b-3", "b-4"],
+        [opening("b-1", "open"), opening("b-2", "open"), opening("b-4", "open")],
+        [
+          blockAsk("b-1", "open"),
+          blockAsk("b-4", "answered"),
+          { ...blockAsk("b-3", "answered"), block_artifact: { id: "another-document" } },
+        ]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(0, 5)).toEqual([
+        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would retract this request.",
+        '- "Question of b-1?" (block b-1, ask ask-b-1)',
+        "- block b-2, whose ask Dispatch has not opened yet",
+        "- block b-3, which version 4 does not hold yet",
+        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it',
+      ]);
+      expect(refusal).toContain("even when a human asked for it");
+      expect(refusal).toContain("ask them to answer it or to waive it");
+      expect(posts).toEqual([]);
+    });
+
+    test("requests approval once the named version holds every block answered or resolved", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1", "b-2"],
+        [opening("b-1", "answered"), opening("b-2", "resolved")],
+        [blockAsk("b-1", "answered"), blockAsk("b-2", "resolved")]
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
   });
 
   test("dispatch_doc_read tells the agent when the document's approval went stale", async () => {

@@ -6,6 +6,13 @@
 
 - `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
+- `dispatch_request_approval` is refused, with no request sent, while the version it would name
+  (the document's latest) holds a decision block open (LEGION-387): answering the block would
+  write a new version and retract the request. A block is judged by its state in that version, so
+  an answer not yet folded into a version still counts, and so does a block with no ask yet. The
+  refusal names each block and its ask, and tells the agent to ask the human to answer or waive
+  it. It reads `GET /artifacts/{id}/blocks` first, then, only when an `ask` block is present, the
+  owner's asks and that version's markdown; an approved document skips the reads.
 
 ### Added
 

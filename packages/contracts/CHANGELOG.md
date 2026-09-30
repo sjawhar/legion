@@ -8,6 +8,8 @@
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing
   headings.
+- `dispatch_request_approval`'s description says the call is refused while the document holds an
+  open decision block, even when a human asked for approval (LEGION-387).
 
 ### Added
 

@@ -823,6 +823,9 @@ export const dispatchToolSpecs = [
       "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " +
       "and writing it retracts an open request for an older version; request again for the new " +
       "one. A repeat at the version an open request names returns that request unchanged. " +
+      "Refused, with nothing sent, while the document holds an open decision block, even when a " +
+      "human asked for approval: the refusal names each block; ask the human to answer or waive " +
+      "it first. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),

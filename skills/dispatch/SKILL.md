@@ -386,20 +386,19 @@ both hold: the spec has no open decision blocks, every one answered and folded i
 it proposes something the human has not already settled. A Legion root spec under an armed design
 gate always goes to approval once its blocks are settled (`skill://legion-architect`).
 
-```
-dispatch_request_approval({ issue?, project?, artifact?, summary })
-```
+When both hold, request it in the pass that finishes the spec: a design waiting with nothing in
+the human's Inbox waits on nobody. A choice you can make yourself is not a decision block
+([Before you ask](#before-you-ask), gate 1): write your call and its reason into the design and
+name it in `summary`; a human who disagrees answers `Request changes`. When a human asks for
+approval while a block is open, do not request it and do not hold it silently: name each open
+block and ask them to answer it or waive it. For a waiver, close the block with `dispatch_resolve_ask`
+(`kind: "resolved"`, their words as `reason`), then write their decision into the text in their
+words and request. `dispatch_request_approval` refuses while any block is open.
 
 `summary` names the proposals in this version the human has not agreed to, in one to three
-sentences, and never an open question. The Inbox shows it after "Approve spec.md (version N)?", so
-it is what the human reads to decide. The call opens an approval ask with the options `Approve` and
-`Request changes`. A repeat at the same version returns the open request unchanged. A new version
-retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
-the new version once its blocks are settled. The answer reaches you as `artifact.approved` or
-`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
-which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show the document's
-approval state; `stale` means it was approved and then edited. Never write "Approve" options into
-an ordinary `dispatch_ask`, and never approve anything yourself: only humans approve.
+sentences, and never an open question: the Inbox shows it after "Approve spec.md (version N)?".
+Never write "Approve" options into an ordinary `dispatch_ask`; only humans approve. The call, its
+result and its answer: [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
 ## The Spec
 
