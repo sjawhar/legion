@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Fingerprints zizmor's findings so a pull request is judged only on what it adds. The Security
 # workflow (.github/workflows/security.yaml) audits the pull request's head and its base commit,
-# each from its own tree root, and this script compares the two json-v1 outputs.
+# each from its own tree root, and this script compares the two json-v1 outputs. On a pull
+# request it also audits the head with --no-ignores, which reports the findings zizmor's inline
+# `# zizmor: ignore[<audit>]` comments and `rules.<audit>.ignore` lists suppress; the difference
+# between that run and the head's is the set the pull request's ignores account for.
 #
-# Usage: zizmor-findings.sh --head head.json [--base base.json] --out findings.json [--annotate]
+# Usage: zizmor-findings.sh --head head.json [--base base.json] [--no-ignores no-ignores.json]
+#                           --out findings.json [--annotate]
 #
 # A finding's fingerprint is sha256(ident NUL path NUL route NUL text), read from its Primary
 # location (the first location when none is Primary):
@@ -19,13 +23,15 @@
 #     `# zizmor: ignore[<audit>]` to a step leaves its findings' fingerprints as they were.
 # Rows never enter the fingerprint; `line` in the output is the Primary location's row + 1.
 #
-# The difference is a multiset: `new` lists each head occurrence of a fingerprint beyond the
+# A difference is a multiset: `new` lists each head occurrence of a fingerprint beyond the
 # number of times the base carries it, so a second copy of an existing finding is one new
-# finding and removing one of two copies adds none.
+# finding and removing one of two copies adds none; `ignored` lists each --no-ignores occurrence
+# beyond the number of times the head carries it.
 #
 # Output (--out): {"head_count", "new_count", "head": [entry], "base": [entry] | null,
-# "new": [entry] | null}, entry = {fingerprint, ident, severity, confidence, path, line, route};
-# new_count, base and new are null without --base. With --annotate, one GitHub workflow command
+# "new": [entry] | null, "ignored": [entry] | null}, entry = {fingerprint, ident, severity,
+# confidence, path, line, route}; new_count, base and new are null without --base, ignored is
+# null without --no-ignores. With --annotate, one GitHub workflow command
 # `::warning file=<path>,line=<line>,title=zizmor <ident>::<desc>` per new finding on stdout.
 #
 # Exit codes: 0 written; 2 a usage error or an input that is not a json-v1 array.
@@ -38,7 +44,8 @@ import json
 import sys
 from collections import Counter
 
-USAGE = "usage: zizmor-findings.sh --head head.json [--base base.json] --out findings.json [--annotate]"
+USAGE = ("usage: zizmor-findings.sh --head head.json [--base base.json] [--no-ignores no-ignores.json] "
+         "--out findings.json [--annotate]")
 
 
 def fail(message):
@@ -48,7 +55,7 @@ def fail(message):
 
 
 args = sys.argv[1:]
-opts = {"--head": None, "--base": None, "--out": None}
+opts = {"--head": None, "--base": None, "--no-ignores": None, "--out": None}
 annotate = False
 while args:
     flag = args.pop(0)
@@ -113,19 +120,33 @@ def escape_property(value):
     return escape_data(value).replace(":", "%3A").replace(",", "%2C")
 
 
-head = [entry(finding) for finding in load(opts["--head"])]
-result = {"head_count": len(head), "new_count": None, "head": [e for e, _ in head], "base": None, "new": None}
+def entries(path):
+    return [entry(finding) for finding in load(path)]
 
-new = []
-if opts["--base"]:
-    base = [e for e, _ in (entry(finding) for finding in load(opts["--base"]))]
-    allowance = Counter(e["fingerprint"] for e in base)
-    for found, desc in head:
+
+def beyond(minuend, subtrahend):
+    """Each (entry, desc) of minuend whose fingerprint occurs more often there than in subtrahend."""
+    allowance = Counter(e["fingerprint"] for e, _ in subtrahend)
+    extra = []
+    for found, desc in minuend:
         if allowance[found["fingerprint"]] > 0:
             allowance[found["fingerprint"]] -= 1
         else:
-            new.append((found, desc))
-    result.update(base=base, new=[e for e, _ in new], new_count=len(new))
+            extra.append((found, desc))
+    return extra
+
+
+head = entries(opts["--head"])
+result = {"head_count": len(head), "new_count": None, "head": [e for e, _ in head], "base": None, "new": None,
+          "ignored": None}
+
+new = []
+if opts["--base"]:
+    base = entries(opts["--base"])
+    new = beyond(head, base)
+    result.update(base=[e for e, _ in base], new=[e for e, _ in new], new_count=len(new))
+if opts["--no-ignores"]:
+    result["ignored"] = [e for e, _ in beyond(entries(opts["--no-ignores"]), head)]
 
 with open(opts["--out"], "w", encoding="utf-8") as handle:
     json.dump(result, handle, indent=2)

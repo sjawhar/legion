@@ -158,6 +158,7 @@ check "exits 0" "$(is "$rc" 0)"
 check "new is null" "$(is "$(out no-base '.new')" null)"
 check "new_count is null" "$(is "$(out no-base '.new_count')" null)"
 check "base is null" "$(is "$(out no-base '.base')" null)"
+check "ignored is null" "$(is "$(out no-base '.ignored')" null)"
 check "head_count is the fixture size (5)" "$(is "$(out no-base .head_count)" 5)"
 check "prints no annotation" "$(is "$(wc -l < "$work/no-base.stdout")" 0)"
 
@@ -195,6 +196,23 @@ run inline-comment "$(< "$testdata/zizmor-ignores-no-ignores.json")" "$(< "$test
 check "the commented finding is in the head" \
   "$(is "$(out inline-comment '[.head[] | select(.ident == "template-injection")] | length')" 3)"
 check "nothing is new against the tree without the comment" "$(is "$(out inline-comment '.new | tojson')" '[]')"
+
+echo "=== 9. --no-ignores: the findings zizmor's ignores suppressed, one entry each ==="
+# The tree with an inline ignore on one of a.yaml's two template-injection steps and a
+# rules.artipacked.ignore entry for b.yaml, audited normally and with --no-ignores.
+run ignores "$(< "$testdata/zizmor-ignores.json")" "$(< "$testdata/zizmor.json")" \
+  --no-ignores "$testdata/zizmor-ignores-no-ignores.json"
+check "exits 0" "$(is "$rc" 0)"
+check "ignored holds the inline-ignored step and the config-ignored file, nothing else" \
+  "$(is "$(out ignores '[.ignored[] | "\(.ident) \(.path) \(.line)"] | sort | join(", ")')" \
+    "artipacked .github/workflows/b.yaml 10, template-injection .github/workflows/a.yaml 14")"
+# shellcheck disable=SC2016 # $base is a jq variable
+check "each ignored fingerprint is the one that finding had before the ignore" \
+  "$(is "$(out ignores '[.base[].fingerprint] as $base | [.ignored[].fingerprint | select(. as $f | $base | index($f) | not)] | length')" 0)"
+check "the other template-injection in a.yaml is not ignored" \
+  "$(is "$(out ignores '[.ignored[] | select(.ident == "template-injection")] | length')" 1)"
+check "nothing is new" "$(is "$(out ignores '.new | tojson')" '[]')"
+check "head_count counts only what zizmor reported (6)" "$(is "$(out ignores .head_count)" 6)"
 
 echo "=== usage errors exit 2 ==="
 rc=0
