@@ -7,6 +7,7 @@ import {
   type AgentStreamReplay,
   capAgentStreamText,
 } from "@legion/contracts";
+import { userMessageText } from "./dispatch-user-turn";
 
 /**
  * Turns this Oh My Pi session's own messages into the frames a Dispatch viewer renders
@@ -124,19 +125,6 @@ function contentText(content: unknown): string {
     const part = raw as HostPart;
     if (typeof part.text === "string") pieces.push(part.text);
     else if (typeof part.type === "string") pieces.push(`[${part.type}]`);
-  }
-  return pieces.join("\n");
-}
-
-/** A user message's own text: its text parts alone, which is what a prompt's text became. */
-function userText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  const pieces: string[] = [];
-  for (const raw of content) {
-    if (typeof raw !== "object" || raw === null) continue;
-    const part = raw as HostPart;
-    if (part.type === "text" && typeof part.text === "string") pieces.push(part.text);
   }
   return pieces.join("\n");
 }
@@ -364,7 +352,7 @@ export class AgentStreamPublisher {
 
   #tagDispatchTurn(key: string, message: ReadableMessage): void {
     if (this.#expectedTurns.length === 0 || this.#dispatchIds.has(key)) return;
-    const text = userText(message.host.content);
+    const text = userMessageText(message.host.content);
     const index = this.#expectedTurns.findIndex((expected) => expected.body === text);
     const expected = this.#expectedTurns[index];
     if (expected === undefined) return;

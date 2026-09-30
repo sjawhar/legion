@@ -11,6 +11,7 @@ import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { resetInjectedUserTurnsForTests, takeInjectedUserTurn } from "../src/dispatch-user-turn";
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
@@ -266,6 +267,7 @@ beforeEach(() => {
   // instance reports.
   resetLegionBootstrappedSessionForTests();
   resetEnvoySessionsForTests();
+  resetInjectedUserTurnsForTests();
   testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
@@ -4624,6 +4626,10 @@ describe("envoy OMP extension", () => {
         data: { message_id: DIRECT_MESSAGE_ID },
         type: "custom",
       });
+      // Legion's phase-stall check reads this: the user message it starts is the person's, never
+      // the daemon's assignment.
+      const turn = { content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }], role: "user" };
+      expect(takeInjectedUserTurn("ses_delivery", turn)).toBe(true);
     });
 
     // Send is Enter at the terminal (no deliverAs); Aside lands at the next step. The frame's

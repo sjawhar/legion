@@ -33,6 +33,7 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import pkg from "../package.json";
+import { noteInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
@@ -242,6 +243,7 @@ afterEach(async () => {
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   resetLegionBootstrappedSessionForTests();
+  resetInjectedUserTurnsForTests();
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
     if (value === undefined) delete process.env[key];
@@ -4681,6 +4683,49 @@ describe("Legion OMP extension", () => {
 
       await worker.arrives(assignment);
       expect(await worker.settles("Round 2 pushed.")).toEqual(followUp("handoff_complete"));
+    });
+
+    // A person's Send or Aside from Dispatch's Agents page reaches the session as its own user
+    // turn (extensions/envoy.ts), a user message exactly like the daemon's assignment. It is an
+    // inbound event, as its Envoy card was before: it never opens a phase, and it wakes a stall
+    // that already had its follow-up or a WAITING reply.
+    const personsMessage = {
+      message: {
+        role: "user",
+        attribution: "user",
+        content: [{ type: "text", text: "Where is the dashboard?" }],
+        timestamp: 1,
+      },
+    };
+
+    test("a person's direct message the session took as its own turn opens no phase; the daemon's assignment still does", async () => {
+      const worker = await bootStalling({});
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?");
+      await worker.arrives(personsMessage);
+      expect(await worker.settles("It is at /dash.")).toBeUndefined();
+
+      await worker.arrives(assignment);
+      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("a person's direct message wakes a stall that had its WAITING reply, as its card did", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("WAITING: CI on the pull request")).toBeUndefined();
+
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?");
+      await worker.arrives(personsMessage);
+      expect(await worker.settles("It is at /dash.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("the same words arriving again as a user message are the daemon's, not the person's", async () => {
+      const worker = await bootStalling({});
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?");
+      await worker.arrives(personsMessage);
+      expect(await worker.settles("It is at /dash.")).toBeUndefined();
+
+      await worker.arrives({ message: { ...personsMessage.message, timestamp: 2 } });
+      expect(await worker.settles("Answered.")).toEqual(followUp("handoff_complete"));
     });
 
     test("a handoff_complete whose command fails is an error result and leaves the phase open", async () => {

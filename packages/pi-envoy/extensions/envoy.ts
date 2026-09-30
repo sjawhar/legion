@@ -63,6 +63,7 @@ import {
   confirmUserTurn,
   DISPATCH_USER_TURN_ENTRY,
   isUserTurnCandidate,
+  noteInjectedUserTurn,
   userTurnEntryMessageID,
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
@@ -587,6 +588,7 @@ export default function envoyExtension(pi: PiApi): void {
     userTurnMessageIDs.add(delivery.id);
     pi.appendEntry(DISPATCH_USER_TURN_ENTRY, { message_id: delivery.id });
     agentStream.expectDispatchTurn(turn.body, delivery.id);
+    noteInjectedUserTurn(sessionID, turn.body);
     pi.sendUserMessage(turn.body, turn.mode === "aside" ? { deliverAs: "aside" } : undefined);
     return true;
   };

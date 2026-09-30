@@ -87,3 +87,65 @@ export function confirmUserTurn(
   if (attempt?.delivery !== "aside" && attempt?.delivery !== "steer") return undefined;
   return { body: message.body, mode: attempt.delivery };
 }
+
+/** A user message's own text: its text parts alone, which is what a sent prompt's text became. */
+export function userMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const pieces: string[] = [];
+  for (const part of content) {
+    if (typeof part !== "object" || part === null) continue;
+    if ("type" in part && part.type === "text" && "text" in part && typeof part.text === "string") {
+      pieces.push(part.text);
+    }
+  }
+  return pieces.join("\n");
+}
+
+interface GlobalInjectedUserTurnStore {
+  [key: symbol]: Map<string, string[]> | undefined;
+}
+
+// Process-wide, because each manifest entry loads its own copy of this module: envoy.ts writes
+// what legion.ts reads.
+const INJECTED_USER_TURNS = Symbol.for("legion.pi-envoy.injected-user-turns");
+
+/**
+ * The bodies of the user turns this process sent into each session (by session id) whose user
+ * message the session has not started yet. Legion's phase-stall check reads them
+ * (`extensions/legion.ts`): the daemon's assignment is a user message too, and a person's message
+ * must not open a phase. In memory only, since a queued turn dies with the process.
+ */
+function injectedUserTurns(): Map<string, string[]> {
+  const store = globalThis as typeof globalThis & GlobalInjectedUserTurnStore;
+  const turns = store[INJECTED_USER_TURNS] ?? new Map<string, string[]>();
+  store[INJECTED_USER_TURNS] = turns;
+  return turns;
+}
+
+/** Records that `body` was just sent into `sessionID` as its user's own turn. */
+export function noteInjectedUserTurn(sessionID: string, body: string): void {
+  const turns = injectedUserTurns();
+  turns.set(sessionID, [...(turns.get(sessionID) ?? []), body]);
+}
+
+/**
+ * Whether a message `sessionID` is starting is a user turn this process sent into it, which it
+ * then forgets: each sent turn accounts for one user message, so the same words arriving again
+ * are someone else's.
+ */
+export function takeInjectedUserTurn(sessionID: string, message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false;
+  if (!("role" in message) || message.role !== "user") return false;
+  const pending = injectedUserTurns().get(sessionID) ?? [];
+  const text = userMessageText("content" in message ? message.content : undefined);
+  const index = pending.indexOf(text);
+  if (index === -1) return false;
+  pending.splice(index, 1);
+  return true;
+}
+
+/** Test seam: `bun test` runs every file in one process, and the record is process-wide. */
+export function resetInjectedUserTurnsForTests(): void {
+  injectedUserTurns().clear();
+}
