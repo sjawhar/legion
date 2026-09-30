@@ -77,13 +77,16 @@ passed — never as a fresh identity.
 
 Deployment instructions, when present, are the operator's standing rules for this repository —
 required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
-the merge credential. They override this skill's defaults where they conflict, except four rules
+the merge credential. They override this skill's defaults where they conflict, except five rules
 they never override: no deferrals (*PR body, review, and the merge gate*, below); bringing the base
 into the branch only on a real conflict or a retarget
 (`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the
 implementer's own proof on a production-like surface before the merge
-(`skill://legion-worker/references/pr-body.md#what-a-proof-is`); and the implementer's production
-check after it (`skill://legion-worker/references/merge-gate.md#after-the-human-merge`).
+(`skill://legion-worker/references/pr-body.md#what-a-proof-is`); that proof re-run at the head
+an applied simplify pass leaves final
+(`skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the
+implementer's production check after it
+(`skill://legion-worker/references/merge-gate.md#after-the-human-merge`).
 
 ## Asking another role
 

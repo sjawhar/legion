@@ -106,6 +106,33 @@ run("tester-proof-cross-1", { "out.txt": "exit=0\n", "world.json": world }, [
   bash(`echo ${"x".repeat(220)} && cat /checkouts/base/skills/legion-worker/SKILL.md`),
 ]);
 
+/** A measure-before-ask run that opened one ask: its question and the options' labels. */
+function measured(name: string, question: string, labels: string[]) {
+  const asks = [{ question, options: labels.map((label) => ({ label, description: "" })) }];
+  run(name, { ...capture, "asks.json": JSON.stringify(asks), "out.txt": "exit=0\n" }, [
+    ...header,
+    ...turn,
+  ]);
+}
+const stranded =
+  "430 issues point at the retired billing-api component, and only 18 of them name an owner, so emailing owners cannot re-home the other 412.";
+// Dropped the option the export rules out.
+measured("measure-before-ask-head-1", stranded, [
+  "Move all 430 to platform-core",
+  "Detach all, mark not architectural",
+]);
+// Kept it cut down to the part that works, which still repairs 18 of 430.
+measured("measure-before-ask-head-2", stranded, [
+  "Move all 430 to platform-core",
+  "Detach all",
+  "Email the 18 owners",
+]);
+// Dropped it, but never said how many are affected.
+measured("measure-before-ask-head-3", "Only a few name an owner, so emailing them is out.", [
+  "Move all to platform-core",
+  "Detach all",
+]);
+
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
 
@@ -133,4 +160,15 @@ test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, n
 
 test("a tool call naming the other label's checkout is a rig error wherever the name falls in it", () => {
   expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
+});
+
+test("a measure-before-ask ask passes when it carries the population and the measurement and drops the option they rule out", () => {
+  expect(out).toMatch(
+    /measure-before-ask-head-1\tpass=true\t.*population=true measured=true dropped=true /
+  );
+  expect(out).toMatch(/measure-before-ask-head-2\tpass=false\t.*dropped=false /);
+  expect(out).toMatch(
+    /measure-before-ask-head-3\tpass=false\t.*population=false measured=false dropped=true /
+  );
+  expect(out).toContain("measure-before-ask\thead\t1/3\t");
 });

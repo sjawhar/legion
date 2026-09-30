@@ -28,6 +28,15 @@
 #                   the export shows one way cannot work (run_measure_before_ask). Scored by
 #                   measureBeforeAsk.
 #
+# A scenario measures its rule only if a label whose skills lack the rule scores lower than one
+# whose skills state it. So every comparison carries an ablate label: a checkout of the head with
+# the scenario's scored rule deleted from its skills, never committed. measure-before-ask is the
+# instrument: gate 2 lives in the dispatch skill alone, and deleting it took the drop rate from
+# 7/10 to 0/10. ask-on-message and tester-proof are controls: their rules also live in
+# dispatch-first and dispatch_ask's description, and in the tester role prompt, so ablate scores
+# as the head does and they cannot detect a lost skill rule. A new scenario is an instrument only
+# once an ablate arm has scored lower on it.
+#
 # A batch's services are the e2e harness's real Go Dispatch server
 # (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded and read back
 # through its API (seed.ts), a NATS container, and the Envoy listener built from this checkout.
@@ -50,9 +59,10 @@
 #     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n>. The pane shows nothing: omp's
 #     output goes to <work>/runs/<run>/out.txt, and the transcript, which grows as the agent works,
 #     to the .jsonl under <work>/runs/<run>/sessions.
-#   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and every
-#     bun it runs is the bun this script runs on, recorded. Every container and tmux session a work
-#     directory starts carries the directory's digest in its name.
+#   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and a bun
+#     it reaches through PATH is the bun this script runs on, recorded. A bun named by its path or
+#     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
+#     session a work directory starts carries the directory's digest in its name.
 #   - Its agent can still read the whole filesystem, including the other label's checkout and the
 #     checkout this script runs from (its `legion` resolves there), and write the machine's /tmp,
 #     which nothing here cleans. score.ts does not score a run that read outside its own label, or
@@ -432,6 +442,10 @@ run_measure_before_ask() {
 # <index> seconds after <start>, the batch's start, so no two runs of a batch share a PR number or
 # a head (two runs can meet in a scratch file in the shared /tmp), and each batch's heads carry its
 # own start time.
+# The CLI must meet every acceptance criterion the seeded spec lists. testerProof fails a run whose
+# push changes more than .legion/test.json, and it cannot tell a tester that pinned a real defect
+# with a red test, which roles/core/tester.md asks for, from one that went off-task. A defect left
+# in the fixture turns correct testing into a fail.
 worker_fixture() {
   local index=$1 start=$2 src C1 C2 body when worker_pr worker_pr_url
   worker_pr=$((1000 + index))

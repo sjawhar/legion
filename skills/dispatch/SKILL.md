@@ -222,9 +222,9 @@ Every `dispatch_ask` passes four gates first:
    the question is that action in one sentence, with options that name its outcomes (below).
    Measure before you write: how many are affected, whether anything reaches the path, what the
    current state already is. The measurement decides whether a human is needed at all, and when
-   one is, it turns a research request he cannot answer into a decision he can: the ask carries
-   the measurement and the size of the affected population, and drops an option the measurement
-   shows cannot work.
+   one is, it turns a research request he cannot answer into a decision he can. Put the
+   measurement and the size of the affected population in the ask, and drop any option the
+   measurement shows cannot reach most of that population.
    Report what the measurement could **not** establish, with its own control: "I found no
    evidence" and "there is no evidence to find" read alike and mean opposite things, and a
    control that shares the query's blind spot proves neither. Before you say you are waiting on
@@ -286,8 +286,8 @@ passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; c
 with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
 message above", or "as attached".
 
-**Pointing at another message is a defect, not a shortcut.** The ask view does not show the
-issue's comments, so an ask that points at one cannot be answered from its own text. The rules:
+**Pointing at another message is a defect, not a shortcut:** the ask view does not show the
+issue's comments. The rules:
 
 - An ask that names another message in prose — "my comment above", "the procedure I posted",
   "see the earlier message" — is retracted by the PO as failing the gates. Put the content IN the

@@ -8,9 +8,9 @@
 //     the file arrived whole; then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
 //     One row per run, then counts per scenario and label, and a legend saying what each count
-//     is. Each scenario's rule is on the function that scores it: askOnMessage, testerProof. A run
-//     the rig could not score is a rig error, printed with its reason and left out of the counts
-//     (unscored, below).
+//     is. Each scenario's rule is on the function that scores it: askOnMessage,
+//     measureBeforeAsk, testerProof. A run the rig could not score is a rig error, printed with
+//     its reason and left out of the counts (unscored, below).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describePhaseHandoffWriteProblems } from "@legion/contracts";
@@ -409,7 +409,7 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
  *     the profile's gateway key command ran past its budget. The key command's own record of each
- *     call, which #1623 adds, is the better signal; no checkout on main writes it yet;
+ *     call, which open pull request #1623 adds, would be a better signal;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
  *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
@@ -456,9 +456,17 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       return [];
     }
   });
+  // Each scenario's scorer, keyed by the name its runs' directories start with.
+  const scorers: Record<string, (dir: string, run: string, label: string) => Row> = {
+    "ask-on-message": askOnMessage,
+    "measure-before-ask": measureBeforeAsk,
+    "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
+  };
+  const name = new RegExp(`^(${Object.keys(scorers).join("|")})-(.+)-(\\d+)$`);
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
-    const match = /^(ask-on-message|measure-before-ask|tester-proof)-(.+)-(\d+)$/.exec(run);
-    if (!match) continue;
+    const match = name.exec(run);
+    const score = scorers[match?.[1] ?? ""];
+    if (!match || !score) continue;
     const [, scenario = "", label = ""] = match;
     if (only && scenario !== only) continue;
     const dir = path.join(runsDir, run);
@@ -466,14 +474,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     let reason: string | undefined;
     try {
       reason = unscored(dir, label, labels);
-      if (reason === undefined)
-        rows.push(
-          scenario === "ask-on-message"
-            ? askOnMessage(dir, run, label)
-            : scenario === "measure-before-ask"
-              ? measureBeforeAsk(dir, run, label)
-              : testerProof(dir, run, label, heads)
-        );
+      if (reason === undefined) rows.push(score(dir, run, label));
     } catch (error) {
       reason = error instanceof Error ? error.message : String(error);
     }
@@ -505,6 +506,8 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           which point a person at the asks to read and do not check a recommendation",
       "pass+ref   passed, and the agent read the file the rule is in",
       "rig errors runs the rig could not score (unscored), left out of both counts",
+      "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",
+      "           before believing it, since the stand-in sees only a bun reached through PATH",
     ].join("\n")
   );
 }
