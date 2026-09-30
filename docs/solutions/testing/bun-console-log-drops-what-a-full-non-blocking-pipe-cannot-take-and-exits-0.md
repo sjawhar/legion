@@ -16,7 +16,7 @@ applies_when:
   - A Go (or any) test runs a Bun script and parses what it prints, and fails now and then on invalid JSON or a bad encoding while the script exited 0
   - The failing case changes between runs and is always one of the larger outputs
   - A Bun script's output is cut at a round size (4096, 8192, 65536 bytes) only on a loaded machine
-  - A Bun script whose output something parses reads process.stdout, or depends on anything that might (a colour library checking isTTY is enough)
+  - A Bun script writes a result something parses with console.log, whatever the script reads: a dependency that reads process.stdout (a colour library checking isTTY is enough), or an earlier Bun command on the same pipe that did, leaves the pipe non-blocking
   - You are about to reach for Bun.write(Bun.stdout, ...) to "flush" a script's output
 ---
 
@@ -38,14 +38,30 @@ run and `empty-items-holding-the-next-line` on the next: lost output, not bad da
    default import, a namespace import and vfile's `export {default as minproc} from
    'node:process'` flip both; `process.stdout.isTTY` or a first `process.stdout.write` through the
    global flips fd 1, and `process.stderr` flips fd 2; `console.log`, `console.error`,
-   `process.argv` and `require("node:process")` flip neither. So a script that only reads
-   `process.argv` is safe until someone adds `process.stdout.isTTY` for a progress line. The
-   hazard is not one import: any dependency can read `process.stdout` without saying so, and
-   whether it does can depend on the environment.
+   `process.argv` and `require("node:process")` flip neither. That does not make a script that
+   reads only `process.argv` safe: the flag can come from a dependency, or from another process
+   on the same pipe (below), so a script that writes a result another process parses must not use
+   `console.log`, whatever it reads. Any dependency can read `process.stdout` without saying so,
+   and whether it does can depend on the environment.
    picocolors 1.1.1 reads `process.stdout.isTTY` unless `NO_COLOR` or `FORCE_COLOR` is set, and
    flipped fd 1 with `CI=true` alone but not with either of those. Here the import comes from
    `@legion/proof-editor/headless`, which imports `unified`, which imports `vfile` and its
    `node:process` re-export.
+
+   The flag belongs to the pipe, not to the process. `O_NONBLOCK` is set on the open pipe, which
+   every process writing to it shares, and Bun leaves it set when it exits, so every later writer
+   to that pipe inherits it: the next command in the same `$(...)`, or a later command in the same
+   `{ ...; } | reader` group or CI step. Measured at Bun 1.3.14 into a reader stalled for 2 s:
+   `bun -e 'process.stdout.isTTY'; bun -e 'console.log("x".repeat(200000))'` delivered 65,536 of
+   200,001 bytes and exited 0, where the same pair with `bun -e '1'` first delivered all 200,001;
+   a command run between the two found `flags: 04001` on the pipe (`01` after `bun -e '1'`); and a
+   second command that awaited `process.stdout.write`'s callback delivered all 200,001 with the
+   flag set. So auditing a script and its dependencies is not sufficient on its own: the script
+   loses output to a process it knows nothing about. No consumer in this repository is hit today,
+   because each parsed capture has a pipe of its own: Go's `exec.Cmd` makes one per command, a Bun
+   parent hands each child a fresh socket rather than its own stdout, and each `$(...)` whose
+   output is parsed holds one command (the deep review's census on
+   https://github.com/sjawhar/legion/pull/1622).
 2. **console.log on a full non-blocking pipe loses the rest.** It writes what the pipe has room
    for, gets `EAGAIN` for the remainder, drops it, and the script exits 0. strace of a 20,000-byte
    `console.log` into a one-page pipe: `write(1, …, 20000) = 4096`, `write(1, …, 15904) = -1
@@ -77,9 +93,13 @@ received the first 4096 bytes twice.
 Any dependency can make stdout non-blocking, and whether it does can depend on the environment,
 so a Bun script's stdout is not a safe place for a result a program parses. `decode.ts` and
 `edit-blocks.ts` take an output path as their last argument and `writeFileSync` their result
-there, as `differential.ts` and `gen.ts` already did, so no gen script a test reads returns
-anything over a pipe. A regular file takes the whole write, and a write that fails throws
-and exits non-zero. The Go runner (`genResult`, `update_test.go`) reads the file after exit 0 and
+there, as `differential.ts` already wrote its result to a file it is given, so no gen script a
+test reads returns anything over a pipe. `writeFileSync` writes the whole result or throws: on a
+full disk the file takes what fits and the call then throws `ENOSPC`, so the script exits 1.
+`fs.writeSync` returns a short count without throwing: on a 16 KiB tmpfs it wrote and returned
+16,384 of a 25,141-byte line, and `differential.ts`, which writes each line with it, exited 0
+with that line cut, so it now checks the count and throws, exiting 1 with the short write named.
+The Go runner (`genResult`, `update_test.go`) reads the file after exit 0 and
 fails the test when the script printed anything to stdout or exited 0 without writing the file,
 so a script moved back to `console.log` fails every test that runs it.
 
