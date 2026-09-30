@@ -53,9 +53,10 @@
 # It says nothing when no agent is listed, or when <dest> holds no record yet.
 #
 # --fresh is the stage proofs' refusal of a reused evidence directory, the first thing each does:
-# it exits 0 when <evidence-dir> does not exist or is an empty directory, and otherwise prints why
-# the run cannot use it and exits 1, for the stage to fail with. Any content is an earlier run's
-# evidence, whether or not that run got as far as installing its key command.
+# it exits 0 when <evidence-dir> does not exist or is an empty directory it can list, and otherwise
+# prints why the run cannot use it and exits 1, for the stage to fail with. Any content is an
+# earlier run's evidence, whether or not that run got as far as installing its key command, and a
+# directory it cannot list may hold some.
 #
 # Every form exits 2 on an argument refusal, and --record and --notes 1 on a record line they
 # cannot read.
@@ -161,7 +162,6 @@ case "${1:-}" in
   [ $# = 2 ] || refuse "$usage"
   [ -e "$2" ] || exit 0
   if [ -d "$2" ]; then
-    # A directory it cannot list is refused, never read as empty.
     if ! entries=$(ls -A -- "$2" 2>&1); then
       echo "$2 cannot be listed ($entries), so this run cannot tell whether it holds an earlier run's evidence; give this run an evidence directory of its own"
       exit 1

@@ -20,7 +20,8 @@ mkdirSync(bin);
 writeFileSync(join(bin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
 let runs = 0;
-function blockedRun(outside: string) {
+// blockedRun ends the controller checkpoint in blocked, or, for the case the notes are for, in fail.
+function blockedRun(outside: string, ending: "blocked" | "fail" = "blocked") {
   const run = join(dir, `run-${++runs}`);
   const evidence = join(run, "evidence");
   mkdirSync(evidence, { recursive: true });
@@ -35,8 +36,8 @@ check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
 tree1= tree2= tree3= tree4= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
 mkdir -p "$work" "$evidence/model-gateway"
-# The controller starved during the blocked checkpoint, so notes would list it if the verdict let
-# them print: a blocked checkpoint gets none.
+# The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
+# would list it, and a failed checkpoint's do.
 printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:05Z 4242 /x controller timeout no-key >"$evidence/model-gateway/hawk-token.calls"
 exec 7>&1
 stop_tree() { :; }; stop_pid() { :; }; collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
@@ -51,9 +52,10 @@ production_audit() {
 ${fn("audit_verdict")}
 ${fn("audit_failure")}
 ${fn("blocked")}
+${fn("fail")}
 ${fn("cleanup")}
 trap cleanup EXIT
-blocked "the controller's model route could not be installed"
+${ending} "the controller's model route could not be installed"
 `,
     ],
     { env: { PATH: `${bin}:${process.env.PATH}`, OUTSIDE: outside } }
@@ -90,5 +92,14 @@ describe("stage 4b's verdict line", () => {
       "stage 4b e2e: FAIL (check production-audit, in the teardown after check controller)"
     );
     expect(outside.stdout).not.toContain("model-gateway-unserved:");
+  });
+
+  test("prints the notes for a checkpoint that failed itself, so the seeded starve is read", () => {
+    const failed = blockedRun("[]", "fail");
+    expect(failed.code).toBe(1);
+    expect(failed.stdout).toContain(
+      "model-gateway-unserved: 1 agent(s) may have failed check controller for want of a model key"
+    );
+    expect(failed.stdout).toContain("stage 4b e2e: FAIL (check controller)");
   });
 });

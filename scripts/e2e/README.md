@@ -1200,9 +1200,9 @@ uses its projected token, so a worker's failure cannot come from a starved contr
 
 `--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make first, before they write
 anything into their evidence directory or set any trap, when the operator's evidence directory
-exists and is not empty: whatever it holds is an earlier run's, whether or not that run got as far
-as its key command, and this run must neither overwrite it nor read it as its own. An absent or
-empty directory, every default, passes. Stage 4b prints its
+exists and is not empty, or cannot be listed: whatever it holds is an earlier run's, whether or not
+that run got as far as its key command, and this run must neither overwrite it nor read it as its
+own. An absent directory, or an empty one it can list (every default), passes. Stage 4b prints its
 verdict line in that refusal, since no trap exists yet to print it.
 
 Every form exits 2 on an argument refusal (a `--record` in a directory that does not exist
