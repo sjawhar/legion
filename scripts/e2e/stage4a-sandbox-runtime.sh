@@ -41,7 +41,9 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 namespace=legion
-port=13371
+# The rigs' worker-stream port, beside the production daemon's 13370/13371. Stage 4b binds the same
+# pair, and each stage refuses to start while the other holds it.
+port=13373
 repo=sjawhar/legion-smoke
 app_id=3202636
 app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64

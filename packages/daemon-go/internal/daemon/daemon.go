@@ -797,6 +797,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Project:           p.project,
 		OperatorToken:     p.operatorToken,
 		Controller:        st,
+		DesignGate:        cfg.Gates.Design,
 		Log:               s.log,
 		Pool:              st.Pool(),
 		Handlers:          handlers,

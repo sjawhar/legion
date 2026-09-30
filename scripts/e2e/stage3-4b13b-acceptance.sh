@@ -19,25 +19,39 @@
 # It never merges into sjawhar/legion-smoke's main: each proof PR is retargeted to a scratch base
 # branch before any merge, and the scratch base is deleted at the end.
 #
-# Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh`, with the Stage 3 proof's two required
-# inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS (scripts/e2e/README.md), and three of
-# its own, since it creates no Docker container: ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running
-# Postgres container (user postgres, password ci) in which the daemon and Dispatch take their own
-# databases, and ACCEPT_NATS_BIN a nats-server binary it runs natively. The binary under test is
-# stamped (vcs.revision and main.revision) and the run's scratch workspace is always kept; phase
-# workers, which act on the daemon's assignment alone when no instruction reaches them, are
-# instructed by a background watcher the moment each assignment arrives, and the script asserts what
-# the daemon did rather than the order it expected.
+# Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from the operator's own Oh My Pi session,
+# with the Stage 3 proof's two required inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS
+# (scripts/e2e/README.md), and three of its own, since it creates no Docker container:
+# ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running Postgres container (user postgres, password
+# ci) in which the daemon and Dispatch take their own databases, and ACCEPT_NATS_BIN a nats-server
+# binary it runs natively. Its GitHub writes are the Stage 3 proof human's, the devbox gh acting as
+# the sjawhar-agent App, so the session is not a Legion pane and carries no personal GH_TOKEN:
+# `prerequisites` refuses to start otherwise (require_proof_human, lib/workflow.sh). The binary
+# under test is stamped (vcs.revision and main.revision) and the run's scratch workspace is always
+# kept; phase workers, which act on the daemon's assignment alone when no instruction reaches them,
+# are instructed by a background watcher the moment each assignment arrives, and the script asserts
+# what the daemon did rather than the order it expected.
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+# The key command's record is read with this script's own reader: an ACCEPT_ROOT from before the
+# record has no reader to run.
+unserved_reader=$(cd "$(dirname "$0")" && pwd)/lib/model-gateway-unserved.sh
 base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="AC$(( ($$ + stamp) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -68,13 +82,19 @@ audited=
 soft_failures="$evidence/soft-failures.txt"
 : >"$soft_failures"
 
-begin() { check=$1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 # soft records a failed assertion and lets the run go on, so one run yields every observation; the
-# run ends non-zero naming each one.
-soft() { printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2; }
+# run ends non-zero naming each one. It remembers the first soft-failing check and when it began,
+# for a soft ending's notes.
+first_soft_check=
+first_soft_since=
+soft() {
+  printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2
+  [ -n "$first_soft_check" ] || { first_soft_check=$check first_soft_since=$check_started; }
+}
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source=/dev/null
@@ -93,7 +113,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -125,12 +145,25 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run, hard or soft: it never sets the status. A hard failure's notes
+  # are for its check. A run that ends on its soft failures sets ok after its last check, once every
+  # pane has stopped, so its notes are for its first soft-failing check, from that check's start. A
+  # run that sets ok with no soft failure and still exits non-zero (its PASS line could not be
+  # written) failed no check, and gets none. A hangup, an interrupt or a termination (129, 130,
+  # 143, as trapped below) stopped the run and gets none.
+  if [ "$status" != 0 ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    local since=$check_started failed=$check
+    [ -z "${ok:-}" ] || { since=$first_soft_since failed=$first_soft_check; }
+    [ -z "$failed" ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$since" "$failed" >&2 || true
+  fi
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
-# scratch base. Nothing here touches the smoke main.
+# scratch base. Nothing here touches the smoke main, and nothing runs unless require_proof_human
+# passed: a refused run's gh acts as someone else.
 github_cleanup() {
   local n b
+  [ -n "$proof_human" ] || return 0
   [ -n "${main_sha:-}" ] || return 0
   for n in $(gh -R "$repo" pr list --state open --limit 100 --json number,headRefName \
     --jq ".[] | select(.headRefName | startswith(\"legion/$project-\")) | .number" 2>/dev/null); do
@@ -589,6 +622,7 @@ begin prerequisites
 for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
 real_gh=$(mise which gh) || fail "mise has no gh"
+require_proof_human
 gh api "repos/$repo" --jq .name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 head_commit=$(jj -R "$root" log -r @- --no-graph -T commit_id)
 note "head under test: $head_commit ($(jj -R "$root" log -r @- --no-graph -T 'description.first_line()'))"

@@ -135,6 +135,7 @@ func defaultsFor(port int) Config {
 		TreeStopTimeout:                         60 * time.Second,
 		SlowCommandTimeout:                      300 * time.Second,
 		ProbeInterval:                           30 * time.Second,
+		ControllerWakeInterval:                  time.Hour,
 		LaunchFailureLimit:                      3,
 		PromptFailureLimit:                      3,
 		PromptRetireLimit:                       2,
@@ -193,6 +194,7 @@ worker_stop_timeout_seconds: 11
 tree_stop_timeout_seconds: 61
 slow_command_timeout_seconds: 301
 probe_interval_seconds: 15
+controller_wake_interval_seconds: 900
 launch_failure_limit: 5
 prompt_failure_limit: 6
 prompt_retire_limit: 7
@@ -227,6 +229,7 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 	want.TreeStopTimeout = 61 * time.Second
 	want.SlowCommandTimeout = 301 * time.Second
 	want.ProbeInterval = 15 * time.Second
+	want.ControllerWakeInterval = 15 * time.Minute
 	want.LaunchFailureLimit = 5
 	want.PromptFailureLimit = 6
 	want.PromptRetireLimit = 7
@@ -709,6 +712,16 @@ func TestLoadRefuses(t *testing.T) {
 			name: "probe_interval_seconds past the timer bound",
 			body: minimalFile + "probe_interval_seconds: 2147484\n",
 			want: "probe_interval_seconds must be at most 2147483",
+		},
+		{
+			name: "controller_wake_interval_seconds zero",
+			body: minimalFile + "controller_wake_interval_seconds: 0\n",
+			want: "controller_wake_interval_seconds must be a positive integer",
+		},
+		{
+			name: "controller_wake_interval_seconds past the timer bound",
+			body: minimalFile + "controller_wake_interval_seconds: 2147484\n",
+			want: "controller_wake_interval_seconds must be at most 2147483",
 		},
 		{
 			name: "launch_failure_limit zero",

@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -77,15 +78,19 @@ function renderStrip(
   const getMyState = spyOn(api, "getMyState").mockResolvedValue(state);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["whoami"], { kind: "user", login });
-  const view = render(
+  // `ProjectPage` keeps one strip across the List/Board toggle and flips `showStatus`, so
+  // re-rendering this tree with the other value is that toggle. It has to be a re-render of this
+  // root: a second `render` mounts a second strip, whose own mount read is not the rule tested.
+  const tree = (status: boolean) => (
     <MemoryRouter initialEntries={[initialEntry]}>
       <QueryClientProvider client={queryClient}>
-        <StripAndList showStatus={showStatus} />
+        <StripAndList showStatus={status} />
         <LocationSearch />
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return { getMyState, listIssues, view };
+  const view = render(tree(showStatus));
+  return { getMyState, listIssues, tree, view };
 }
 
 test("Needs you keeps only issues with open asks and lives in the URL", async () => {
@@ -226,6 +231,48 @@ test("a search restored from ?q= narrows the list before anyone types", async ()
   }
 });
 
+test("the search filter writes at most SEARCH_QUERY_MAX characters into the page URL", async () => {
+  const { getMyState, listIssues, view } = renderStrip([
+    issue({ key: "CORE-1", title: "Guidance" }),
+  ]);
+
+  try {
+    await screen.findByText("Guidance");
+    await openFilters();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search issues" }), {
+      target: { value: "x".repeat(SEARCH_QUERY_MAX + 500) },
+    });
+    const written = new URLSearchParams(screen.getByTestId("location-search").textContent ?? "");
+    expect(written.get("q")).toBe("x".repeat(SEARCH_QUERY_MAX));
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
+test("a ?q= over the cap from a link is cut on a code point, never leaving half an emoji", async () => {
+  const long = `${"x".repeat(SEARCH_QUERY_MAX - 1)}😀`;
+  const { getMyState, listIssues, view } = renderStrip(
+    [issue({ key: "CORE-1", title: "Guidance" })],
+    {},
+    `/projects/CORE?q=${encodeURIComponent(long)}`
+  );
+
+  try {
+    await openFilters();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search issues" }), {
+      target: { value: `${long}y` },
+    });
+    const written = new URLSearchParams(screen.getByTestId("location-search").textContent ?? "");
+    expect(written.get("q")).toBe("x".repeat(SEARCH_QUERY_MAX - 1));
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
 test("one or many statuses narrow the List as an OR, each in the URL and each a chip", async () => {
   const { getMyState, listIssues, view } = renderStrip([
     issue({ key: "CORE-1", status: "todo", title: "Planned" }),
@@ -299,6 +346,44 @@ test("collapses a saved filter disclosure when no filters are active", async () 
         screen.getByRole("button", { name: "Filters · 0 active" }).getAttribute("aria-expanded")
       ).toBe("false")
     );
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    window.localStorage.clear();
+  }
+});
+
+// The saved preference is the only owner of the open state: the strip reads it when it mounts
+// and when identity resolves, never because the filter count moved. The List folding a
+// `?status=` into the count on the view toggle is one of two ways that count rises on a mounted,
+// closed strip (Back or Forward within the Issues tab is the other), and neither opens it.
+test("the List and Board toggle leaves a closed strip closed; the reader still opens it", async () => {
+  window.localStorage.clear();
+  const { getMyState, listIssues, tree, view } = renderStrip(
+    [issue()],
+    {},
+    "/projects/CORE?status=todo",
+    "alice",
+    false
+  );
+
+  try {
+    await screen.findByText("Core work");
+    // The Board ignores `?status=`, so nothing is active and the strip starts collapsed.
+    expect(
+      screen.getByRole("button", { name: "Filters · 0 active" }).getAttribute("aria-expanded")
+    ).toBe("false");
+
+    view.rerender(tree(true));
+    const trigger = screen.getByRole("button", { name: "Filters · 1 active" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "Remove Status: Todo filter" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Status( · \d+)?$/ })).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Status · 1" })).toBeTruthy();
   } finally {
     view.unmount();
     getMyState.mockRestore();

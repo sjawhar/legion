@@ -19,6 +19,12 @@
 # run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
 # `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
+# The proof human's GitHub writes (the merge, the teardown's closes and branch deletes, and the
+# fixture push) are the devbox gh's and its git credential helper's, acting as the sjawhar-agent
+# App: run the driver from the operator's own Oh My Pi session, not a Legion pane, with no personal
+# GH_TOKEN in its environment. `prerequisites` refuses to start otherwise (require_proof_human,
+# lib/workflow.sh).
+#
 # Inputs:
 # - LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 #   ~/.kube/legion-daemon-production) name the restricted identity the daemon runs as.
@@ -46,7 +52,7 @@
 # The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
 # into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
 # reads them from header files), and never in the evidence. One run at a time: the project, the NATS
-# durable consumer names, ports 13370/13371 and the namespace label are shared, so the run takes a
+# durable consumer names, ports 13372/13373 and the namespace label are shared, so the run takes a
 # lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
 # it did not create.
 set -Eeuo pipefail
@@ -54,6 +60,14 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
+# Refused before anything is written into the evidence directory, the transcript's tee started or
+# any trap set, so it prints the run's verdict line itself (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "CHECK setup: FAIL: $reason"
+  echo "stage 4b e2e: FAIL (check setup)"
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
 # tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
 # TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
@@ -97,8 +111,10 @@ providers_secret=legion-$run_label-providers
 # daemon's spawn requires; the trailing digit keeps the child apart from the root.
 optree="S4BOP-$$"
 opchild="S4BOP-${$}1"
-port_daemon=13370
-port_worker_stream=13371
+# The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
+# the Legion nodes, so a run never waits for the production daemon to stop.
+port_daemon=13372
+port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
 # One path for every run on the devbox, whatever its environment names as its state directory.
 lock=$HOME/.local/state/legion/e2e/stage4b.lock
@@ -112,7 +128,9 @@ omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$evidence/logs/daemon.log
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 ok=
+was_blocked= # set by blocked: the run stopped on a prerequisite, so it did not run, and did not fail
 torn_down=
 snapshotted=
 compared=
@@ -144,6 +162,7 @@ pair_session=
 
 begin() {
   check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
   echo "== $check"
 }
 note() { echo "   $*"; }
@@ -171,6 +190,7 @@ fail() {
 }
 blocked() {
   echo "CHECK $check: BLOCKED: $*"
+  was_blocked=1
   exit 1
 }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
@@ -412,6 +432,7 @@ gates:
   design: "off"
 admission_cap: 2
 linger_hours: 0.3
+controller_wake_interval_seconds: 60
 instructions: $work/instructions.md
 github_apps:
   implement:
@@ -599,12 +620,17 @@ relaunch_ends() {
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
 # resume that finds the tree volume lost dies by design (the runtime's detail begins "the tree volume
 # was lost: "), and
-# re-admission counts those itself. The memory hog, labelled legion.dev/e2e-control=memory-hog, is
-# excluded, and must have been seen OOMKilled.
+# re-admission counts those itself. A pod the scheduler never placed is no unexplained death either:
+# the daemon retires a pod still unscheduled at its boot deadline and relaunches the claim, so a
+# death whose pod the watch saw `PodScheduled=False Unschedulable` and never `PodScheduled=True` (nor
+# on a node) is accounted for (never_scheduled_deaths); a pod that was scheduled and then died is
+# judged as before. The memory hog, labelled legion.dev/e2e-control=memory-hog, is excluded, and
+# must have been seen OOMKilled.
 pod_watch_verdict() {
   local watch=$1 actions=$2 log=$3
-  jq -s -r --rawfile actions "$actions" --rawfile log "$log" '
+  jq -s -r --rawfile actions "$actions" --rawfile log "$log" --arg unscheduled "$(never_scheduled_deaths "$watch" "$log")" '
     ($actions | split("\n") | map(select(. != "") | split(" ")[1])) as $driver
+    | ($unscheduled | split("\n") | map(select(. != ""))) as $retired
     | ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died"))) as $died
     | [ .[] | select(.object.kind == "Pod") | .object ] as $pods
     | ($pods | map(select(.metadata.labels["legion.dev/e2e-control"] == "memory-hog"))
@@ -617,12 +643,30 @@ pod_watch_verdict() {
         | select($podReason == "Evicted" or any($terms[]; .reason == "OOMKilled"))
         | "\($p.metadata.name) uid \($p.metadata.uid): \($podReason) \([$terms[] | "\(.reason) exit \(.exitCode)"] | join(", "))" ]
       + [ $died[] | select((.detail // "") | startswith("the tree volume was lost: ") | not)
-          | .incarnation as $i | select(($driver | index($i)) == null)
+          | .incarnation as $i | select(($driver | index($i)) == null and ($retired | index($i)) == null)
           | "incarnation \($i) died with no driver action: observed \(.observed), \((.detail // "") | .[0:200])" ]
       | unique as $bad
     | if $hog then $bad[] else ("the memory hog was never seen OOMKilled", $bad[]) end
   ' "$watch" | tee "$work/pod-watch-verdict.txt"
   [ ! -s "$work/pod-watch-verdict.txt" ]
+}
+# never_scheduled_deaths WATCH DAEMONLOG prints, one a line, each incarnation the daemon found dead
+# (`supervise: process died`) whose pod the watch saw `PodScheduled=False` with reason
+# `Unschedulable` and never `PodScheduled=True` or bound to a node: a pod the daemon retired at its
+# boot deadline because the scheduler never placed it. It reads the pod's own conditions, never the
+# daemon's detail text.
+never_scheduled_deaths() {
+  local watch=$1 log=$2
+  jq -s -r --rawfile log "$log" '
+    ($log | split("\n") | map(fromjson? // empty) | map(select(.msg == "supervise: process died") | .incarnation)) as $died
+    | [ .[] | select(.object.kind == "Pod") | .object ] as $pods
+    | $died[] | . as $i
+    | [ $pods[] | select(.metadata.uid == $i) ] as $seen
+    | select(($seen | length) > 0
+        and any($seen[]; any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))
+        and (any($seen[]; (.spec.nodeName // "") != "" or any(.status.conditions[]?; .type == "PodScheduled" and .status == "True")) | not))
+    | $i
+  ' "$watch" | sort -u
 }
 # watch_raw FILE KIND PATH writes every watch event of the API collection PATH (with its query) to
 # FILE, one JSON object a line, for the rest of the run. kubectl's own watch ends, silently, when the
@@ -1011,9 +1055,11 @@ delete_consumers() {
 }
 # remove_run_branches closes each pull request the run left open on the smoke repository and deletes
 # each tree's branch legion/<tree> there (tree 2's is the fixture's): the run's own, which a run that
-# stops before the proof human's merge would otherwise leave behind.
+# stops before the proof human's merge would otherwise leave behind. It makes no gh call unless
+# require_proof_human passed: a refused run's gh acts as someone else.
 remove_run_branches() {
   local issue number
+  [ -n "$proof_human" ] || return 0
   for issue in $tree1 $tree2 $tree3 $tree4; do
     number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
     if [ -n "$number" ]; then
@@ -1040,7 +1086,7 @@ collect_transcripts() {
   fi
 }
 cleanup() {
-  local status=$? p
+  local status=$? p teardown_failed=""
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -1067,16 +1113,33 @@ cleanup() {
     # own control pods (the memory hog, the reachability pod) go first.
     op delete pod -l "legion.dev/project=$run_label,legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     teardown
-    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
+    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || teardown_failed+="${teardown_failed:+, }namespace-clean"; fi
     delete_consumers
     remove_run_branches
-    if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
+    if [ -z "$audited" ] && [ -n "$prod_baseline" ] && ! production_audit; then
+      teardown_failed+="${teardown_failed:+, }production-audit"
+      echo "CHECK production-audit: FAIL: $(audit_failure)"
+    fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
-  [ -n "$ok" ] || echo "stage 4b e2e: FAIL (check $check)"
+  # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
+  # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
+  # check (a namespace left dirty, a write outside LEGSMOKE) names itself, and only a clean teardown
+  # lets a blocked checkpoint end BLOCKED.
+  if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
+    echo "stage 4b e2e: FAIL (check $check)"
+  elif [ -n "$teardown_failed" ]; then
+    echo "stage 4b e2e: FAIL (check $teardown_failed, in the teardown after check $check)"
+  elif [ -n "$was_blocked" ]; then
+    echo "stage 4b e2e: BLOCKED (check $check): the checkpoint could not run, so the run is no verdict on the change; the checkpoints before it stand"
+  elif [ -z "$ok" ]; then
+    echo "stage 4b e2e: FAIL (check $check)"
+  fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
+  [ -z "$teardown_failed" ] || status=1
   exit "$status"
 }
 trap cleanup EXIT
@@ -1268,6 +1331,8 @@ interests_outside() {
     | select((contains($p) or contains($t) or startswith($space) or startswith($repo) or contains($op) or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
+# audit_failure is what a failed production audit says, in the checkpoint and in the teardown.
+audit_failure() { echo "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"; }
 
 # ==== checkpoints ===================================================================================
 
@@ -1297,6 +1362,7 @@ gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
+require_proof_human
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
@@ -1350,12 +1416,12 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
 # LEGSMOKE's stale todo roots would be admitted at boot ahead of the run's own.
-stale=$(dispatch_get "issues?project=$project&status=todo&limit=200" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
+stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
 for key in $stale; do
   set_status "$key" backlog
   note "moved stale todo root $key to backlog"
 done
-[ -z "$(dispatch_get "issues?project=$project&status=todo&limit=200" | jq -r '.[].key')" ] || fail "LEGSMOKE still holds todo issues"
+[ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "LEGSMOKE still holds todo issues"
 # The configured stream carries both halves of the workflow's intake. Dispatch publishes every
 # project's issue events under subjects that name the issue, so any project's shows the Dispatch
 # half (LEGSMOKE's own age out between runs; admission is where the run's are seen); the GitHub
@@ -1466,6 +1532,19 @@ handoffs, and do not create work outside the issue's smoke branch.
 The controller hands Legion no issue itself: this proof admits only the issues its driver sets to
 `todo`. LEGSMOKE holds earlier runs' roots, and a slot the proof frees stays for the tree the driver
 admits next.
+EOF
+# The daily report is the one controller action that waits for no targeted message (daily-report).
+report_title="Legion daily report ($work)"
+cat >>"$work/instructions.md" <<EOF
+
+## The controller's daily report
+
+The controller's daily report is the one controller action that waits for no targeted message.
+Post it as \`skill://legion-controller\`'s "Daily report" says, on the first turn a \`tick on $project\`
+wake starts after your start turn has ended: never in your start turn, where a tick that arrives
+while that turn still runs does not count, and once in this run. Its issue is titled
+\`$report_title\`: find it with \`dispatch_search\`, and when there is none, create it once with
+that title and park it in icebox, as the skill says for the default report issue.
 EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
@@ -1764,7 +1843,7 @@ begin fence
 # claim relaunches with a third uid.
 # (b) needs the boot token of the generation (a) replaces, so it is read before the delete.
 boot_token() { op get secret "$pod-boot" -o json | jq -er '.data.LEGION_BOOT_TOKEN // empty | @base64d' | grep .; }
-old_token=$(boot_token) || blocked "the merger's boot Secret $pod-boot has no LEGION_BOOT_TOKEN"
+old_token=$(boot_token) || fail "the merger's boot Secret $pod-boot has no LEGION_BOOT_TOKEN: the Sandbox runtime under test writes it"
 (umask 077 && printf '%s' "$old_token" >"$work/old-boot-token")
 end_claim_pod "$tree1" merger delete
 uid=$ended_pod_uid
@@ -1848,6 +1927,20 @@ tmux -L "legion-e2e4b-$$" new-session -d -s controller -x 200 -y 50 \
 until_true 300 "controllerLocator in the state" sh -c "'$work/legion' state --json --config '$work/legion.yaml' | jq -e '.controllerLocator.sessionId != null' >/dev/null"
 controller_session=$(daemon_state | jq -r .controllerLocator.sessionId)
 note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
+# The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
+# its session's first user message is the start message `legion controller start` launches Oh My
+# Pi with (controllerStartMessage, cmd/legion/controller.go), and the model answers it.
+controller_started_itself() {
+  local file
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    grep -m1 '"role":"user"' "$file" | grep -qF 'Legion controller start: follow skill://legion-controller' &&
+      grep -q '"role":"assistant"' "$file" && return 0
+  done
+  return 1
+}
+until_true 300 "the controller's first turn to start itself, with nothing typed" controller_started_itself
+note "the controller's first turn began from its start message, with nothing typed into its pane"
 wait_for_worker "$tree3" architect
 drive_spec "$tree3"
 wait_for_worker "$tree3" planner
@@ -1938,8 +2031,113 @@ until_true 120 "Dispatch to show $tree3 in backlog" dispatch_status_is "$tree3" 
 note "legion status $tree3 backlog from the operator shell, with the operator bearer: Dispatch moved $tree3 from $before_status to $(dispatch_get "issues/$tree3" | jq -r .status)"
 until_true 600 "$tree3's pods to be gone" sh -c \
   "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree3' -o name) && [ -z \"\$out\" ]"
+# The controller's walk wakes (LEGION-392). controller_received NEEDLE: an Envoy delivery in the
+# controller's session holds NEEDLE.
+controller_received() {
+  local file
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    grep -F '"customType":"envoy-message"' "$file" | grep -qF "$1" && return 0
+  done
+  return 1
+}
+# (1) The controller was launched with the daemon's own design gate policy (gates.design: off): the
+# Oh My Pi running in the controller's directory carries the line in its --append-system-prompt.
+# shellcheck disable=SC2016 # the backticks are the line's own text, never a substitution
+policy_line='Design gate policy: `gates.design: off`.'
+controller_launched_with_policy() {
+  local proc
+  for proc in /proc/[0-9]*; do
+    [ "$(readlink "$proc/cwd" 2>/dev/null)" = "$work/controller-state/controller" ] || continue
+    tr '\0' '\n' <"$proc/cmdline" 2>/dev/null | grep -qF "$policy_line" && return 0
+  done
+  return 1
+}
+controller_launched_with_policy || fail "no process in $work/controller-state/controller was launched with '$policy_line'"
+note "the controller's Oh My Pi was launched with '$policy_line'"
+# (2) With tree 3 out, a slot stands free (tree 1 holds the other), so an unlabelled leaf set to
+# todo wakes the controller with `todo on <KEY>`.
+free=$(daemon_state | jq -r '.admission.cap - (.admission.active | length) - (.admission.waiting | length)')
+[ "$free" -gt 0 ] || fail "no admission slot stands free after $tree3 left ($(daemon_state | jq -c .admission)), so no walk wake can be sent"
+walk_candidate=$(dispatch_human POST issues "$(jq -cn --arg project "$project" --arg title "Stage 4b proof walk candidate ($work)" '{project:$project,title:$title,force:true}')" | jq -er .key) ||
+  fail "create the unlabelled walk candidate in $project"
+set_status "$walk_candidate" todo
+until_true 300 "'todo on $walk_candidate' to reach the controller session $controller_session" controller_received "$(notice_needle todo "$walk_candidate")"
+note "the controller session received 'todo on $walk_candidate' with $free slot(s) free"
+# (3) The daemon's periodic tick (controller_wake_interval_seconds: 60) reaches it too.
+until_true 300 "'tick on $project' to reach the controller session $controller_session" controller_received "$(notice_needle tick "$project")"
+note "the controller session received 'tick on $project'"
+# (4) The walk takes nothing: this proof's scope line says the controller hands Legion no issue
+# itself. The controller has a minute after the tick to act on either wake, and the candidate must
+# still be unlabelled and unrecorded when it ends.
+sleep 60
+dispatch_get "issues/$walk_candidate" | jq -e '(.labels | map(ascii_downcase) | index("legion")) == null' >/dev/null ||
+  fail "the controller labelled $walk_candidate legion, though the proof's scope says it hands Legion no issue"
+daemon_state | jq -e --arg key "$walk_candidate" '.issues[$key] == null' >/dev/null ||
+  fail "the daemon recorded $walk_candidate, though the controller was to take nothing"
+set_status "$walk_candidate" "done"
+note "the controller took nothing: $walk_candidate stayed unlabelled and unrecorded, and is now done"
+# (5) A root architect claimed its root issue at its first catch-up: tree 3's root is claimed by a
+# session that is not the controller's, and its events say so.
+root_claim=$(dispatch_get "issues/$tree3" | jq -c '.claim')
+jq -e --arg c "$controller_session" '.actor.kind == "session" and .actor.id != $c' <<<"$root_claim" >/dev/null ||
+  fail "$tree3's root issue is not claimed by its architect's session: claim $root_claim"
+dispatch_events "$tree3" | jq -e --argjson claim "$root_claim" 'any(.[]; .type == "issue.claimed" and .actor.id == $claim.actor.id)' >/dev/null ||
+  fail "$tree3's events hold no issue.claimed by $(jq -r .actor.id <<<"$root_claim")"
+note "$tree3's root issue is claimed by its architect session $(jq -r .actor.id <<<"$root_claim")"
 pass
 fi # the controller checks
+
+begin daily-report
+# The controller's daily report runs by rule, not on a human's word, so the proof's instructions
+# exempt it from their wait for a targeted message and fit its day to this run: a report issue of
+# this run's own (so the skill's "no report message from today" guard starts fresh), posted on the
+# first turn a tick starts. With every slot taken, the tick is the quiet day's only wake.
+if [ -n "$skip_controller" ]; then
+  skipped "STAGE4B_SKIP_CONTROLLER: no controller ran"
+else
+# report_key STATUS prints the key of this run's report issue in STATUS, or nothing.
+report_key() {
+  dispatch_get "issues?project=$project&status=$1" | jq -r --arg t "$report_title" '[.[] | select(.title == $t)][0].key // empty'
+}
+report_in_icebox() { [ -n "$(report_key icebox)" ]; }
+until_true 600 "the controller's report issue '$report_title' in $project, parked in icebox" report_in_icebox
+report=$(report_key icebox)
+dispatch_get "issues/$report" | jq -e '(.labels | map(ascii_downcase) | index("legion")) == null' >/dev/null ||
+  fail "$report, the report issue, carries the legion label"
+# The message is the controller's, names tree 1, which runs throughout, and the free slots, and
+# fits the skill's 2,000 characters.
+report_posted() {
+  dispatch_events "$report" | jq -e --arg s "$controller_session" --arg tree "$tree1" \
+    'any(.[]; .type == "message.created" and .actor.id == $s and (.payload.body | test("(^|[^0-9A-Za-z-])" + $tree + "($|[^0-9])")) and (.payload.body | test("slot"; "i")) and (.payload.body | length) <= 2000)' >/dev/null
+}
+until_true 300 "the controller's report message on $report" report_posted
+# It was posted on a turn a tick started while the controller was idle, the quiet day's wake. A
+# tick delivered while a turn still runs is steered into that turn (pi-envoy delivers every Envoy
+# message as a steer), and Oh My Pi keeps an errored or aborted attempt in the transcript and
+# retries in the same turn, so neither a turn's first terminal-looking message nor line order
+# marks idleness. The anchor is the tick itself: some tick delivery before the first report call
+# whose last preceding message entry is an assistant message with stopReason `stop`, a turn that
+# had genuinely finished. A start turn that ends in an unretried error fails the check.
+report_after_tick() {
+  local file
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    jq -R -s -e --arg tick "summary: tick on $project" '
+      [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
+      | [$lines[] | select(.m.type? == "message" and .m.message.role? != "custom")] as $msgs
+      | ([$lines[] | select(.raw | test("xd://dispatch_message|\"name\":\"dispatch_message\"")) | .i] | first) as $call
+      | $call != null and any($lines[]; .i < $call and (.raw | contains($tick))
+          and (.i as $t | ([$msgs[] | select(.i < $t)] | last) as $before
+            | $before != null and $before.m.message.role == "assistant" and $before.m.message.stopReason == "stop"))
+    ' "$file" >/dev/null && return 0
+  done
+  return 1
+}
+report_after_tick || fail "the controller's first report message was not posted on a turn a tick started while it was idle"
+note "the controller parked $report ('$report_title') in icebox and posted its daily report there on a tick's turn"
+pass
+fi # the daily report
 
 begin deaths-with-work
 # A worker whose process dies after its agent is ready, while it has its task outstanding, gets the
@@ -2027,19 +2225,62 @@ until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_
 clean_smoke_main
 release_smoke_main
 note "$repo#$pr_number merged by the proof human; the production check and the sign-off closed $tree1"
+# The daemon's done released the claim tree 1's architect took on its root issue (LEGION-392).
+dispatch_events "$tree1" | jq -e 'any(.[]; .type == "issue.claimed" and .actor.kind == "session")' >/dev/null ||
+  fail "$tree1's events hold no issue.claimed by its architect's session"
+root_claim_released() { dispatch_get "issues/$1" | jq -e '.claim == null' >/dev/null; }
+until_true 120 "$tree1's root claim to be released by its done" root_claim_released "$tree1"
+note "$tree1's architect claimed its root issue, and the done released the claim"
 pass
 
 begin node-release
-# Tree 1 lingers (linger_hours 0.3): after the pool's consolidateAfter, its node is gone while its
-# Sandboxes still exist Suspended and its volume is Bound.
+# Tree 1 lingers (linger_hours 0.3): its Sandboxes stay Suspended, its volume stays Bound, and no pod
+# of the run is left on its node. The pool consolidates a node only once it is empty, so the node is
+# gone after consolidateAfter unless another project's pod is now on it: a tree pod refuses only a
+# node holding another tree's pod (the runtime's affinity, internal/runtime/sandbox/manifest.go), and
+# the image probe carries no tree label, so a production daemon running beside the run can place a
+# pod on the node tree 1 emptied. That pod keeps the node from the moment it is bound, Pending through
+# its init containers included. Either case passes, and the note says which one it saw.
 node=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | tail -1)
 [ -n "$node" ] || fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
-until_true 1500 "tree 1's node $node to be released" sh -c "out=\$(timeout 120 kubectl --context '$operator' get node '$node' -o name --ignore-not-found) && [ -z \"\$out\" ]"
+node_release=
+node_released() {
+  local out pods others
+  out=$(timeout 120 kubectl --context "$operator" get node "$1" -o name --ignore-not-found) || return 1
+  if [ -z "$out" ]; then
+    node_release="node $1 is gone"
+    return 0
+  fi
+  pods=$(timeout 120 kubectl --context "$operator" -n "$namespace" get pods --field-selector "spec.nodeName=$1" -o json) || return 1
+  jq -e --arg run "$run_label" '[.items[] | select(.metadata.labels["legion.dev/project"] == $run and .status.phase != "Succeeded" and .status.phase != "Failed")] | length == 0' <<<"$pods" >/dev/null || return 1
+  others=$(jq -r --arg run "$run_label" '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed") | (.metadata.labels["legion.dev/project"] // empty) as $p | select($p != $run) | "\($p)/\(.metadata.name) \(.status.phase)"] | join(", ")' <<<"$pods")
+  [ -n "$others" ] || return 1
+  node_release="node $1 stays, carrying no pod of the run while another project's pod is on it ($others)"
+}
+# A timed-out wait says what the node held: a pod of the run that never left, another project's pod,
+# or nothing the pool ever deleted.
+report_node_release() {
+  local out
+  if ! out=$(timeout 120 kubectl --context "$operator" get node "$node" -o name --ignore-not-found 2>&1); then
+    note "node $node could not be read: $out"
+    return
+  fi
+  if [ -z "$out" ]; then
+    note "node $node no longer exists"
+    return
+  fi
+  note "node $node still exists; its pods (namespace/name, project label, phase):"
+  timeout 120 kubectl --context "$operator" get pods -A --field-selector "spec.nodeName=$node" -o json |
+    jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(.status.phase)"'
+}
+timeout_hook=report_node_release
+until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
+timeout_hook=
 modes=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].spec.operatingMode}')
 bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
-if [ -z "$modes" ] || grep -qv Suspended <<<"$(tr ' ' '\n' <<<"$modes")"; then fail "tree 1's Sandboxes are '$modes' after its node went, want all Suspended"; fi
-[ "$bound" = Bound ] || fail "tree 1's volume is '$bound' after its node went, want Bound"
-note "at $(date -u +%FT%TZ) node $node is gone; tree 1's Sandboxes Suspended ($modes), its volume Bound"
+if [ -z "$modes" ] || grep -qv Suspended <<<"$(tr ' ' '\n' <<<"$modes")"; then fail "tree 1's Sandboxes are '$modes' after its node was released ($node_release), want all Suspended"; fi
+[ "$bound" = Bound ] || fail "tree 1's volume is '$bound' after its node was released ($node_release), want Bound"
+note "at $(date -u +%FT%TZ) $node_release; tree 1's Sandboxes Suspended ($modes), its volume Bound"
 pass
 
 begin close
@@ -2147,6 +2388,8 @@ missing=$(stream_missing "$evidence/pod-watch.json")
 if ! pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt" "$daemon_log"; then
   fail "the pod watch saw terminations the run cannot account for: $(tr '\n' ';' <"$work/pod-watch-verdict.txt")"
 fi
+retired=$(never_scheduled_deaths "$evidence/pod-watch.json" "$daemon_log")
+[ -z "$retired" ] || note "accounted for: the daemon retired pods the scheduler never placed at their boot deadline and relaunched their claims: $(tr '\n' ' ' <<<"$retired")"
 pressure=$(jq -R -c 'fromjson? | select(.pressure? and (.pressure | index("MemoryPressure")))' "$evidence/node-memory.txt")
 [ -z "$pressure" ] || fail "a node of the run reported MemoryPressure: $(head -3 <<<"$pressure" | tr '\n' ' ')"
 # grep -c exits 1 on a count of 0, which under errtrace would fire the ERR trap inside the
@@ -2158,6 +2401,17 @@ cat "$evidence/pod-watch.json" "$work/injected.json" >"$evidence/controls/pod-wa
 expect_failure pod-watch-synthetic-oom pod_watch_verdict "$evidence/controls/pod-watch-with-oom.json" "$evidence/driver-actions.txt" "$daemon_log"
 { cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-control", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-with-death.log"
 expect_failure pod-watch-synthetic-death pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-with-death.log"
+# Controls for the unscheduled-retirement rule: a pod that was only ever Unschedulable and then died
+# is accounted for, and the same death is unexplained once its pod was scheduled.
+jq -cn '{kind: "Pod", object: {kind: "Pod", metadata: {name: "control-unscheduled", uid: "00000000-e2e4-unscheduled", labels: {}},
+  spec: {}, status: {phase: "Pending", conditions: [{type: "PodScheduled", status: "False", reason: "Unschedulable"}]}}}' >"$work/unscheduled.json"
+cat "$evidence/pod-watch.json" "$work/unscheduled.json" >"$evidence/controls/pod-watch-unscheduled.json"
+{ cat "$daemon_log"; jq -cn '{msg: "supervise: process died", incarnation: "00000000-e2e4-unscheduled", observed: "gone", detail: "synthetic"}'; } >"$evidence/controls/daemon-log-unscheduled-death.log"
+pod_watch_verdict "$evidence/controls/pod-watch-unscheduled.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-unscheduled-death.log" ||
+  fail "the verdict counted a pod retired unscheduled as an unexplained death: $(tr '\n' ';' <"$work/pod-watch-verdict.txt")"
+jq -c '.object.spec.nodeName = "control-node" | .object.status.conditions = [{type: "PodScheduled", status: "True"}]' "$work/unscheduled.json" >"$work/scheduled.json"
+cat "$evidence/controls/pod-watch-unscheduled.json" "$work/scheduled.json" >"$evidence/controls/pod-watch-scheduled-then-died.json"
+expect_failure pod-watch-scheduled-then-died pod_watch_verdict "$evidence/controls/pod-watch-scheduled-then-died.json" "$evidence/driver-actions.txt" "$evidence/controls/daemon-log-unscheduled-death.log"
 pass
 
 begin hygiene
@@ -2175,7 +2429,7 @@ namespace_clean
 begin production-audit
 audit_verdict_ok=
 if production_audit; then audit_verdict_ok=1; fi
-[ -n "$audit_verdict_ok" ] || fail "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"
+[ -n "$audit_verdict_ok" ] || fail "$(audit_failure)"
 printf '["AGENTC-1"]\n' >"$evidence/controls/audit-outside.json"
 expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-interests-outside.json"
 # The interest filter, on the run's own samples with one topic outside the run added for a session
