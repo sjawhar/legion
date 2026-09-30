@@ -492,6 +492,8 @@ notice_needle() { printf 'summary: %s on %s' "$1" "$2"; }
 notice_deliveries() {
   { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -cF -- "$3" || true
 }
+# notice_line ISSUE ROLE NEEDLE prints each Envoy delivery in the claim's session holding NEEDLE.
+notice_line() { { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$3" || true; }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
 # worker_sessions SESSIONS prints each phase-worker session file under SESSIONS and the role it
 # claims, tab-separated. A session's role is its newest Envoy role claim; an architect or controller

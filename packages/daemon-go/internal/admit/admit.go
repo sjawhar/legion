@@ -262,6 +262,7 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		Rank:            observation.Rank,
 		HandedOver:      observation.HandedOver,
 		LastDispatchSeq: observation.Seq,
+		DispatchStatus:  observation.Status,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
@@ -335,7 +336,15 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		if err != nil {
 			return fmt.Errorf("re-read %s after its engine transition: %w", summary.Key, err)
 		}
+		// The engine consumed the snapshot when it recorded the snapshot's sequence: it kept its own
+		// status over a status Dispatch already showed (keepStatus), or re-entered a child. The record's
+		// status is then the engine's; recording the snapshot's instead would put a set-back's backlog
+		// on a running tree, whose slot releaseInactiveSlots would then free. Otherwise the snapshot's
+		// move is recorded, as the live event's would be.
 		stored, status = refreshed, summary.Status
+		if refreshed.LastDispatchSeq >= summary.LastSeq {
+			status = refreshed.Status
+		}
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
 		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq)
@@ -347,7 +356,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	}
 	return a.recordObservation(ctx, tx, *stored, observed{
 		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-		Status: status, HandedOver: handed, Seq: seq,
+		Status: status, Shown: summary.Status, HandedOver: handed, Seq: seq,
 	})
 }
 
@@ -373,7 +382,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
-		Status: observation.Status, HandedOver: handed, Seq: observation.Seq,
+		Status: observation.Status, Shown: observation.Status, HandedOver: handed, Seq: observation.Seq,
 	})
 }
 
@@ -402,26 +411,31 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 }
 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
-// the boot read.
+// the boot read: Shown is the status Dispatch showed, and Status the one the record takes, which is
+// Shown unless the engine kept its own over it.
 type observed struct {
-	Title, Parent, Rank, Status string
-	HandedOver                  bool
-	Seq                         int64
+	Title, Parent, Rank, Status, Shown string
+	HandedOver                         bool
+	Seq                                int64
 }
 
-// recordObservation is the one place a Dispatch observation reaches an issue record: a live
+// recordObservation is where admission writes a Dispatch observation to an issue record: a live
 // event's and the boot read's, so a rename, a re-rank, a re-parent, a label or a status change is
 // written the same way whichever brought it. Each caller owns its own guards — the stream's
-// sequence fence, the boot read's — and this writes what they let through.
+// sequence fence, the boot read's — and this writes what they let through. The engine, which runs
+// first, writes the observation itself when it keeps its own status over the event's (its
+// keepStatus: a session's write it sets back, or an edit that changed no status), and a live event
+// it wrote then stops at the sequence fence here.
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
-	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.HandedOver == o.HandedOver &&
-		sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
+	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
+		stored.HandedOver == o.HandedOver && sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
 		return nil
 	}
 	stored.Title = o.Title
 	stored.Parent = record.ParentOf(o.Parent)
 	stored.Rank = o.Rank
 	stored.Status = o.Status
+	stored.DispatchStatus = o.Shown
 	stored.HandedOver = o.HandedOver
 	stored.LastDispatchSeq = o.Seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
@@ -451,7 +465,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Tree = stored.Key
 	stored.Phase = phase.Admitted
 	stored.Generation++
-	stored.Status = "todo"
+	stored.Status, stored.DispatchStatus = "todo", "todo"
 	stored.Rank = rank
 	stored.LingerUntil = nil
 	stored.Hold = nil

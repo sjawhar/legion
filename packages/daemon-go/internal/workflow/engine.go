@@ -14,7 +14,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -126,20 +125,22 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if fact.Seq != 0 && fact.Seq <= issue.LastDispatchSeq || fact.Status == issue.Status {
 		return intake.Result{}, nil
 	}
-	// The record takes a status when the daemon queues its write, and Dispatch shows it only once the
-	// outbox has run that write; every event until then carries the status the write was queued
-	// over. Such an event changes no status, whoever wrote it: it is a rank, title or label edit.
-	shown, err := e.queuedOver(ctx, tx, issue.Key, fact.Status)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	if shown {
+	// An event carries the whole issue, so it writes a status only when its status differs from the
+	// one Dispatch showed at the event before it. One that does not is an edit — a rank, title or
+	// label change — made while a status the daemon queued has not reached Dispatch, whoever made it.
+	if fact.Status == issue.Shown() {
 		return intake.Result{}, e.keepStatus(ctx, tx, *issue, fact)
 	}
 	if reasserted, err := e.sessionStatusWrite(ctx, tx, *issue, fact); err != nil || reasserted {
 		return intake.Result{}, err
 	}
 	if record.OutOfWorkflow(fact.Status) {
+		// The move is the issue's status now, so no status write the daemon queued before it lands
+		// over it: a set-back queued over an outside backlog would otherwise find a person's later
+		// backlog on Dispatch and write over that.
+		if err := e.store.DropStatusWrites(ctx, tx, issue.Key); err != nil {
+			return intake.Result{}, err
+		}
 		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 	}
 	if fact.Status == "todo" && !claim.IsTreeRoot(issue.Key, issue.Tree) {
@@ -155,11 +156,10 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 // one outside Legion that took the issue for its own — has no part in the running tree it would end
 // or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
 // the observation is recorded with the status kept (keepStatus), and the daemon re-asserts its own
-// status through the outbox. A person's move (a user actor, which carries no session) and the
-// daemon's own write (dispatch.DaemonSession: every `legion status`, the controller's park) are the
-// workflow's to act on.
+// status through the outbox. A person's move and the daemon's own write carry no session
+// (intake.DispatchIssue.ActorSession): they are the workflow's to act on.
 func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
-	if fact.ActorSession == "" || fact.ActorSession == dispatch.DaemonSession(issue.Key) {
+	if fact.ActorSession == "" {
 		return false, nil
 	}
 	agent, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.ActorSession)
@@ -182,42 +182,18 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 	if agent {
 		return true, nil
 	}
-	return true, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "status-reasserted", Role: claim.RoleArchitect, Reason: fmt.Sprintf(
-		"session %s set %s to %s, and the daemon set it back to %s: a session with no claim in the tree neither ends nor parks it; a person does, from the Dispatch dashboard, and so does the controller's legion status",
-		fact.ActorSession, issue.Key, fact.Status, issue.Status)})
-}
-
-// queuedOver says whether a status write of the issue that the outbox has not finished was queued
-// over status: until that write lands, Dispatch still shows status. A write the daemon sets back
-// over an outside status is queued over that status too.
-func (e *Engine) queuedOver(ctx context.Context, tx pgx.Tx, key, status string) (bool, error) {
-	project, _, _ := strings.Cut(key, "-")
-	pending, err := e.store.PendingStatusWrites(ctx, tx, project)
-	if err != nil {
-		return false, err
-	}
-	for _, row := range pending {
-		if row.Issue != key {
-			continue
-		}
-		payload, err := record.DecodeOutboxPayload(row)
-		if err != nil {
-			return false, err
-		}
-		if write, ok := payload.(record.StatusWrite); ok && write.ObservedStatus == status {
-			return true, nil
-		}
-	}
-	return false, nil
+	return true, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "status-reasserted", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("session %s set %s to %s, and the daemon set it back to %s", fact.ActorSession, issue.Key, fact.Status, issue.Status)})
 }
 
 // keepStatus records an observation of the issue whose status the workflow does not take: its title,
-// rank, parent, label and sequence, with the recorded status kept. Admission, running after this
-// handler, then finds the event no newer than the record, so it neither records that status nor
-// frees the slot or re-admits on it.
+// rank, parent, label, sequence and the status Dispatch showed, with the recorded status kept.
+// Admission, running after this handler, then records none of that status: a live event stops at its
+// sequence fence, and a boot listing the engine applied this way keeps the recorded status (admit's
+// applySummary), so neither frees the slot nor re-admits on it.
 func (e *Engine) keepStatus(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) error {
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
-	issue.HandedOver = fact.HandedOver
+	issue.HandedOver, issue.DispatchStatus = fact.HandedOver, fact.Status
 	return e.store.PutIssue(ctx, tx, issue)
 }
 
@@ -303,7 +279,7 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
-		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq}
+		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}

@@ -171,6 +171,59 @@ func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfW
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-AGENT", Index: 0, AdmittedAt: fixedNow}})
 }
 
+// The daemon boots after an outside session's backlog on a running root and a comment after it. The
+// comment advances Dispatch's sequence and reaches no record, so the boot listing, still showing the
+// backlog, is newer than the record and is held for the stream. The stream then delivers the backlog,
+// which is set back; the consumer catches up and the held listing is applied. It shows the status
+// Dispatch already showed at the backlog, so it changes nothing: whether or not the set-back has
+// finished by then, the tree keeps its slot and its status and runs on. Recorded as the listing's
+// backlog, it would free the running tree's slot for the next root (two trees at cap 1); taken as a
+// person's move once the set-back's row is gone, it would end the tree.
+func TestABootListingOfASetBackBacklogLeavesTheTreeRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		finished bool
+	}{
+		{name: "the set-back still queued"},
+		{name: "the set-back finished", finished: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			putIssue(t, pool, record.Issue{
+				Key: "LEGION-RUN", Project: testProject, Title: "run", Tree: "LEGION-RUN", Phase: phase.Implementing,
+				Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 5,
+			})
+			inTx(t, pool, func(tx pgx.Tx) {
+				if err := record.NewStore().PutSlot(context.Background(), tx, record.Slot{Issue: "LEGION-RUN", Index: 0, AdmittedAt: fixedNow}); err != nil {
+					t.Fatalf("seed slot: %v", err)
+				}
+			})
+			seedWaiting(t, pool, "LEGION-NEXT", "B")
+
+			reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+				{Key: "LEGION-RUN", Title: "run", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 7},
+			}, 10, 2, false)
+			apply(t, pool, admission, "outside-backlog", intake.DispatchIssue{Key: "LEGION-RUN", Seq: 6, Type: "issue.updated", Status: "backlog", Title: "run", Rank: "A",
+				HandedOver: true, ActorSession: "ses-outsider"}, admission.engine)
+			if tc.finished {
+				if _, err := pool.Exec(context.Background(), "delete from outbox where kind = 'dispatch_status'"); err != nil {
+					t.Fatalf("finish the set-back: %v", err)
+				}
+			}
+			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 10}, admission.engine, admission); err != nil {
+				t.Fatalf("ApplyFact position-reached: %v", err)
+			}
+
+			got := issue(t, pool, "LEGION-RUN")
+			if got.Status != "in_progress" || got.Phase != phase.Implementing || got.LingerUntil != nil || got.LastDispatchSeq != 7 {
+				t.Fatalf("LEGION-RUN after the held listing = %#v, want status in_progress kept, still implementing, not lingering, at the listing's sequence", got)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-RUN", Index: 0, AdmittedAt: fixedNow}})
+		})
+	}
+}
+
 // putNewRoot, called from applySummary's stored==nil branch at release, never carried the
 // summary's own sequence, so a freshly created root's LastDispatchSeq was always 0 regardless of
 // what the summary actually showed. An older, already-superseded event reaching Apply later then
