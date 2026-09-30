@@ -72,8 +72,8 @@ for (const [cell, quote, pasted, stored] of [
 }
 
 // HTML pasted into a table cell, the usual clipboard, lands in that one cell the same way, with its
-// marks and links kept, never spread into new cells of the row, over the caret's cell or over the
-// header row.
+// marks and links kept; it never spreads into new cells of the row, replaces the caret cell's text,
+// or replaces the header row.
 const html =
   '<p><strong>Bold</strong> <a href="https://example.com">Link</a> <code>Code</code></p><p><em>Second</em></p>';
 for (const [cell, quote, stored] of [
@@ -148,8 +148,9 @@ for (const [name, clipboard, target, stored] of [
 
 // Cells copied from a table and pasted with the caret in a cell are a grid paste, as on a selection
 // of cells: prosemirror-tables writes them over the cells from the caret's on, growing the table as
-// needed. Each pasted cell is retyped for the row it lands in: pasted onto the body, the copied
-// header cells became header cells in a body row, and prosemirror-tables threw and stored nothing.
+// needed. Each pasted cell is retyped for the row it lands in: copied header cells pasted onto the
+// body as they are would be header cells in a body row, where prosemirror-tables throws and stores
+// nothing.
 const copiedCells = "<table><tr><th>one</th><th>two</th></tr><tr><td>1</td><td>2</td></tr></table>";
 for (const [cell, quote, stored] of [
   ["a header cell", "alpha", "| one | two |\n| :--- | :--- |\n| 1 | 2 |\n"],
@@ -176,8 +177,8 @@ for (const [cell, quote, stored] of [
 }
 
 // A spreadsheet's copy is a table too, although Google Sheets and Excel put a style block beside it:
-// pasted with the caret in the header cell, it fills the table from there. Its CSS counted as text
-// outside the table would join the copy into the one cell.
+// pasted with the caret in the header cell, it fills the table from there. If its CSS counted as
+// text outside the table, the copy would be joined into the one cell.
 for (const [source, html] of [
   [
     "Google Sheets",
@@ -337,7 +338,8 @@ for (const how of ["drag", "shift-click"] as const) {
 
 // A line break pasted into a table as cells, from HTML or a code block, is a space in its cell, as in
 // text pasted at a caret, since a GFM cell holds one line and a hard break stored in a table ends the
-// row. A break kept in the cell stores a table that reads back broken.
+// row. A break kept in the cell would store a table that reads back broken, or the paste would
+// throw and store nothing.
 const lineBreakHtml = { html: "<p>one<br>two</p>", text: "one\ntwo" };
 const lineBreakCells = {
   html: "<table><tr><td>b1<br>b2</td><td>c</td></tr></table>",

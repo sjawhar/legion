@@ -69,8 +69,7 @@ func TestBuildSignerSelectsMode(t *testing.T) {
 // key.pem is present but the enrollment file the launcher writes on success is missing (an
 // enroll that failed), buildSigner's error appends whatever the launcher recorded in
 // enrollment.error, so a caller sees why enrollment failed rather than a bare "no such file";
-// with no enrollment.error file, the message stays byte-identical to today's bare
-// missing-file error.
+// with no enrollment.error file, the message is the bare missing-file error.
 func TestBuildSignerNamesTheEnrollmentErrorDiagnostic(t *testing.T) {
 	dir := newKeyDir(t)
 	if err := os.Remove(filepath.Join(dir, "enrollment")); err != nil {

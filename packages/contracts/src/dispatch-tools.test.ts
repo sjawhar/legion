@@ -529,9 +529,9 @@ describe("dispatchToolSpecs", () => {
   });
 
   // A mistyped `with` (`replace:`) stripped by Zod's default strip mode would validate with `with`
-  // simply absent - which the server reads as the one `with` that deletes the match: the edit
-  // applies, 200, and the quoted prose is gone with nothing to tell the model. Every key of an op
-  // but `op` is optional, so an unknown key is the only signal there is.
+  // simply absent - which the server reads as the one `with` that deletes the match: the edit would
+  // apply, 200, and the quoted prose would be gone with nothing to tell the model. Every key of an
+  // op but `op` is optional, so an unknown key is the only signal there is.
   test("rejects a document edit op carrying an unknown key rather than stripping it", () => {
     const schema = schemaFor("dispatch_doc_edit");
     const target = { issue: "DSP-1", artifact: "spec" };

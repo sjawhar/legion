@@ -375,25 +375,24 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 // the sender learns immediately whether the holder received it. After the
 // dedupe/attempt-cache skip -- a duplicate of an envelope already forwarded
 // (or already being forwarded) is disposed of first, with no forward and no
-// exception -- and before forwarding,
-// it applies the same capability guard as sendHandler (frameDeliveryMode +
-// hasCapability, api.go): a holder that does not advertise the envelope's
-// own targeted delivery mode is refused like a stale holder. Role forwarding
-// needs its own copy of the guard because it never goes through
-// /v1/messages/send. The
-// ordering matters: guarding before the dedupe check would re-evaluate an
-// already-delivered duplicate against the holder's *current* capabilities,
-// which can have changed since the original successful forward, and
-// misreport a delivered message as delivery_failed -- a false signal the
-// Legion daemon treats as cause to probe and potentially resume the worker.
-// Every branch ACKs: role lanes have no durable transit to retry against,
-// so a failed forward is reported via a delivery exception instead of a
-// NAK. A forward that reached the server and drew no receipt from the live
-// holder inside roleReceiptTimeout (bus.ErrReceiptTimeout, the one error
-// keyed on) is receipt_timeout; a forward not known to have left this
-// process -- the flush timed out or failed, the publish failed -- is
-// delivery_failed like a stale holder or an unadvertised/unreadable
-// delivery mode; no claim is no_holder.
+// exception -- and before forwarding, it applies the same capability guard
+// as sendHandler (frameDeliveryMode + hasCapability, api.go): a holder that
+// does not advertise the envelope's own targeted delivery mode is refused
+// like a stale holder. Role forwarding needs its own copy of the guard
+// because it never goes through /v1/messages/send. The ordering matters:
+// guarding before the dedupe check would re-evaluate an already-delivered
+// duplicate against the holder's *current* capabilities, which can have
+// changed since the original successful forward, and misreport a delivered
+// message as delivery_failed -- a false signal the Legion daemon treats as
+// cause to probe and potentially resume the worker. Every branch ACKs: role
+// lanes have no durable transit to retry against, so a failed forward is
+// reported via a delivery exception instead of a NAK. A forward that reached
+// the server and drew no receipt from the live holder inside
+// roleReceiptTimeout (bus.ErrReceiptTimeout, the one error keyed on) is
+// receipt_timeout; a forward not known to have left this process -- the
+// flush timed out or failed, the publish failed -- is delivery_failed like
+// a stale holder or an unadvertised/unreadable delivery mode; no claim is
+// no_holder.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
 		message.finalize(false)

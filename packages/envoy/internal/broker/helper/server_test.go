@@ -531,7 +531,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.cancel() // the helper dies; keys are gone with it
 	time.Sleep(100 * time.Millisecond)
 	// Hold the old row "live" for 300ms once srv2.Recover asks to revoke it: nothing has issued
-	// a DELETE for this broker yet, so this is that first (and, under the fix, only) one.
+	// a DELETE for this broker yet, so this is that first (and only) one.
 	r.fake.mu.Lock()
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
@@ -585,14 +585,13 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 }
 
 // TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff is the regression for
-// the Important finding on the third fix pass (AGENTC-834 thermonuclear review): enrollLoop's
-// revoke-before-enroll guard calls revokeLapsed synchronously, and revokeLapsed retries
-// indefinitely with backoff — so if the re-pinned session ends (Registry.Remove, exactly what
-// retire/unregister would do) while that revoke is genuinely stuck retrying against a failing
-// broker, priorID would be abandoned forever: retire's own revoke only ever touches
-// sess.EnrollmentID(), still empty at this point since this session never reached its first
-// successful Enroll, and once Registry.Remove drops the record a later restart's Recover has no
-// way to find priorID either. So enrollLoop falls back to firing the same bounded, independent
+// AGENTC-834: enrollLoop's revoke-before-enroll guard calls revokeLapsed synchronously, and
+// revokeLapsed retries indefinitely with backoff — so if the re-pinned session ends
+// (Registry.Remove, exactly what retire/unregister would do) while that revoke is genuinely stuck
+// retrying against a failing broker, priorID would be abandoned forever: retire's own revoke only
+// ever touches sess.EnrollmentID(), still empty at this point since this session never reached its
+// first successful Enroll, and once Registry.Remove drops the record a later restart's Recover has
+// no way to find priorID either. So enrollLoop falls back to firing the same bounded, independent
 // s.revoke used elsewhere whenever revokeLapsed gives up because the session ended rather than
 // because ctx was canceled. fakeBroker's revokeFailFirst holds the first revoke attempt at a 503
 // (an unreachable broker, not merely a slow one) so revokeLapsed is genuinely retrying with

@@ -11,10 +11,10 @@ import * as conversation from "./conversation";
 
 /**
  * assistant-ui converts every message while the runtime is built, so a message it refuses throws
- * in the render of whichever component calls `useExternalStoreRuntime`. While that was the page
- * itself, the boundary the page rendered sat above nothing: the throw escaped to the route's
- * boundary and the viewer lost the header naming the session and the controls for reaching it,
- * not just the transcript.
+ * in the render of whichever component calls `useExternalStoreRuntime`. Were that the page
+ * itself, the boundary the page renders would sit above nothing: the throw would escape to the
+ * route's boundary and the viewer would lose the header naming the session and the controls for
+ * reaching it, not just the transcript.
  *
  * The throw is injected past the frame validator on purpose. Both guards against a known bad
  * shape are tested elsewhere; what this states is that the conversation view survives a

@@ -74,11 +74,10 @@ func main() {
 }
 
 // serve runs the daemon: it always listens and serves, whether or not a machine credential has
-// ever been installed. There is no startup gate on TokenFile/OperatorFile — the brief's contract
-// is that the unit no longer exits without a credential; a login is a separate ceremony
-// (`agent-secrets launcher login`) run against the already-listening socket, and a missing or
-// empty OperatorFile only surfaces later, informatively, the first time Login actually needs it
-// for its login_hint.
+// ever been installed. There is no startup gate on TokenFile/OperatorFile: the unit never exits
+// for want of a credential; a login is a separate ceremony (`agent-secrets launcher login`) run
+// against the already-listening socket, and a missing or empty OperatorFile only surfaces later,
+// informatively, the first time Login actually needs it for its login_hint.
 func serve(cfg config) error {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return errors.New("AGENT_SECRETS_URL is required (the secrets broker, e.g. https://secrets.internal.example)")
