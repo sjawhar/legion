@@ -111,12 +111,13 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 	}
 }
 
-// One row gets one answer on every path: a table-row insert and a whole-document write each drop a
-// blank cell past the table's width, refuse a cell there holding text, and store an accepted row
-// as the same markdown, wherever in the fragment the row stands. Both count the cells as goldmark
-// splits them, so a `|` after an even run of backslashes ends no cell on either path, and markdown
-// that opens another block is no table row to either.
-func TestTableRowInsertAndDocumentWriteAgreeOnCellsPastTheWidth(t *testing.T) {
+// A table-row insert answers as a whole-document write of the same rows does, wherever in the
+// fragment a row stands: both drop a blank cell past the table's width, refuse a cell there
+// holding text, refuse a line the two parsers read as another block, and store an accepted row as
+// the same markdown. Both count the cells as goldmark splits them, so a `|` after an even run of
+// backslashes ends no cell on either path, and a line opening a block that interrupts a paragraph
+// is no table row to either.
+func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 	const table = "| Key | Value |\n| --- | --- |\n| A10 | old |\n"
 	for _, test := range []struct {
 		row string
@@ -145,14 +146,20 @@ func TestTableRowInsertAndDocumentWriteAgreeOnCellsPastTheWidth(t *testing.T) {
 		{row: "\u00a0| A11 | new |", refusal: ErrTableWidth},
 		{row: "| A11 | x |\n| A12 | y |\u3000", refusal: ErrTableWidth},
 		{row: "| A11 | x |\u00a0\n| A12 | y |", refusal: ErrTableWidth},
-		// So is a vertical tab, which goldmark trims from no row.
+		// So are a vertical tab and a form feed, which goldmark's table transformer trims from no row.
 		{row: "| A11 | new |\v", refusal: ErrTableWidth},
+		{row: "| A11 | new |\f", refusal: ErrTableWidth},
+		{row: "\f| A11 | new |", refusal: ErrTableWidth},
 		// The first row's indentation is read as any row's: three spaces are nothing, four or a tab
 		// open indented code, which the browser editor's parser reads after the table.
 		{row: "   | A11 | new |", stored: "| A11 | new |"},
 		{row: "    | A11 | new |", refusal: ErrSchema},
 		{row: "\t| A11 | new |", refusal: ErrSchema},
 		{row: "| A11 | x |\n    | A12 | y |", refusal: ErrSchema},
+		// A line markBlockRows refuses is refused as the upload refuses it, however many cells it
+		// holds: a list item that cannot interrupt a paragraph, here also too wide, is refused as
+		// that block, the refusal walk reading blocks before widths.
+		{row: "2. | a | b |", refusal: ErrSchema},
 		// A line that opens a list or a quote is no table row to either parser, so its marker is no
 		// cell and the insert is not a table-row insert: `- | a |` is written as a list after the
 		// table, and `- | a | b |` must be as well.

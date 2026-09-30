@@ -418,23 +418,22 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 	if width == 0 {
 		return nil, false, nil
 	}
-	// A fragment's blank lines at either end, and the white space its last line ends with, are no
-	// part of a row. Nothing else is trimmed: a space outside ASCII, a vertical tab or a form feed
-	// is a cell's text to goldmark, and the first row's indentation decides whether it is a row at
-	// all (markBlockRows), as on every other line.
-	fragment := strings.TrimRight(markdown, " \t\r\n")
-	for {
-		line, rest, more := strings.Cut(fragment, "\n")
-		if !more || strings.Trim(line, " \t\r") != "" {
-			break
-		}
-		fragment = rest
+	// Blank lines at either end are no rows, and nothing else is trimmed. goldmark's table
+	// transformer trims a row with the Segment trims, whose set is IsSpace's (tab, line feed,
+	// carriage return and space) and not the byte-slice util.TrimLeftSpace's, so a vertical tab, a
+	// form feed or a space outside ASCII is a cell's text; and the first row's indentation decides
+	// whether it is a row at all (markBlockRows), as on every other line.
+	lines := strings.Split(markdown, "\n")
+	blank := func(line string) bool { return strings.Trim(line, " \t\r") == "" }
+	for len(lines) > 0 && blank(lines[0]) {
+		lines = lines[1:]
 	}
-	if fragment == "" {
+	for len(lines) > 0 && blank(lines[len(lines)-1]) {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
 		return nil, false, nil
 	}
-
-	lines := strings.Split(fragment, "\n")
 	for _, line := range lines {
 		cells, ok := tableRowCells(line)
 		if !ok || tableDelimiterRow(cells) {
@@ -442,7 +441,7 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 		}
 	}
 
-	parsed, err := parseStamped(syntheticTableHeader(width)+fragment+"\n", budget)
+	parsed, err := parseStamped(syntheticTableHeader(width)+strings.Join(lines, "\n")+"\n", budget)
 	if wide := (wideRow{}); errors.As(err, &wide) {
 		return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, wide.cells, wide.width)
 	}

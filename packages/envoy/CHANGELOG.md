@@ -44,18 +44,18 @@
   `markdown` answers `INVALID_OP`), naming the row's cells, its table's width and its opening
   words, and both fixes: write a `|` inside a cell as `\|`, or give the header and delimiter rows
   as many cells as the row. A row whose cells past the width are all blank is still read at the
-  table's width. A bare-row insert is now judged by that same rule, in the parse of its rows,
-  where it used to count cells itself first, so it answers as an upload does in five cases. First,
-  it refused any cell past the width as `TABLE_WIDTH`, and now drops blank ones, refusing only
-  text there. Second, it split a row at a `|` after an even run of backslashes, as the browser
-  editor does, and refused `| A11 | new \\| extra |` under two columns as `TABLE_WIDTH`. It now
-  reads that pipe as text, as uploads always have, and stores one cell reading `new \| extra`;
-  the browser editor's reading of such a pipe is LEGION-412. Third, it trimmed Unicode spaces
-  from the fragment's edges, so `| A11 | new |` then U+00A0 was stored as two cells. It now
-  refuses it as three, as an upload does. Fourth, a line opening another block (`- | a | b |`,
-  `> | a | b |`) was counted as a row and refused as `TABLE_WIDTH`. It is now inserted as that
-  block after the table, as `- | a |` already was. Fifth, a first row indented four spaces or a
-  tab is refused as indented code, `INVALID_OP` on `markdown`, as a second row already was. Versions
+  table's width. A bare-row insert now answers every line as an upload of the same rows does,
+  because the same parse judges it; it used to count cells itself first, over a fragment trimmed
+  of Unicode spaces and a first row's indentation. So it drops blank cells past the width and
+  refuses text there, where it refused both. A `|` after an even run of backslashes is text to it,
+  as it always was to uploads, so `| A11 | new \\| extra |` under two columns is stored as one
+  cell reading `new \| extra` where it was refused as `TABLE_WIDTH`; the browser editor's reading
+  of such a pipe is LEGION-412. A space outside ASCII, a vertical tab or a form feed at the
+  fragment's edge is a cell's text, so `| A11 | new |` then U+00A0 is refused as three cells where
+  it was stored as two. A line opening a block that interrupts a paragraph (`- | a | b |`,
+  `> | a | b |`) is inserted as that block, where it was refused as `TABLE_WIDTH`. A line the
+  parser refuses as another block (indented code, `2. | a | b |`) is refused as an upload refuses
+  it, `INVALID_OP` on `markdown`, however many cells it holds and wherever it stands. Versions
   written before 2026-09-19 hold rows with text past their table's width, since the renderer then
   wrote a code span's pipe unescaped; re-uploading one is refused rather than stored short. A
   row's closing `|` after an odd run of backslashes (`| x | y \|`) is now kept as the last cell's
