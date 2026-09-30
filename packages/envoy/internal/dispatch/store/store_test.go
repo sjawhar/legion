@@ -807,6 +807,10 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		refused  bool
 	}{
 		{"an approval ask naming no document", "approval", nil, true},
+		// The JSON value null is what encoding a nil *model.AskApproval writes (encodeJSON, as the
+		// approval-request route writes the column), and it names no document either: ScanAsk
+		// reads it as an approval with no artifact, and answering the ask fails on it.
+		{"an approval ask whose approval is the JSON null", "approval", new("null"), true},
 		{"a question naming a document", "question", new(approval), true},
 		{"an approval ask naming its document", "approval", new(approval), false},
 		{"a question naming none", "question", nil, false},
