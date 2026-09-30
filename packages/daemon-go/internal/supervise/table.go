@@ -412,8 +412,10 @@ func fillTable(t *builder) {
 	t.ignore(onRefused, noSend, unready...)
 	t.ignore(onRefused, noSend, gone...)
 
+	t.row(onLateRefusal, "the agent refused an acknowledged prompt", lateRefused,
+		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateWorking)
 	t.row(onLateRefusal, "the agent refused an acknowledged prompt; retired while a suspension is held, suspend it", lateRefused,
-		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateReady, StateIdle, StateWorking)
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateIdle)
 	t.row(onLateRefusal, "a prompt was refused while no process can be prompted: the mark it set goes",
 		refusedUnprompted, nil, slices.Concat(unready, gone)...)
 
