@@ -17,9 +17,6 @@ confirmation or a new round, as the fingerprint decides (*The reviewer*, below, 
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the implementer's
   simplify pass left final — and records the verdict.
-  The review body carries the pair's `Security:` line (or
-  `Security: no sensitive surface in this diff`), and each inline finding from the Security
-  Guidelines keeps its `Security[<tag>]:` prefix.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head

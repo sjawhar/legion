@@ -68,9 +68,6 @@ and the tester's proof below are both this proof.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
   the implementer's command or drives the same surface independently, and records the verdict in
   `.legion/test.json` as `implementerProof` (`{verdict, how}`).
-  When the change adds or moves an authorization or refusal boundary, the negative control is the
-  unauthorized caller: drive the boundary as the party it must refuse, and record the refusal as
-  the observation.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
   the architect return the issue to the implementer — the agent that developed the change owns
