@@ -19,8 +19,8 @@ Systems, each over that as-of corpus of titles and primary specs:
   W<w>:<m> C and B merged by reciprocal rank fusion (k = 60) over each one's top 200, B weighted w
   F:<m>+<r>, H<w>:<m>+<r>  C's or W<w>'s top 150 reranked (rerank command, on a sample)
 
-Run order (STORE holds internal company text and is kept, mode 0700; SEARCHBENCH_PG is a scratch Postgres 16
-with pgvector, started as bench.py's docstring says):
+Run order (STORE holds internal company text and is kept, mode 0700; SEARCHBENCH_PG is a scratch Postgres 16,
+whose text search the keyword systems use; every vector stays in STORE):
   measured.py labels  --store STORE        labels.py's rules over the session store -> STORE/labels.jsonl
   measured.py export  --store STORE        GET-only reads of production: histories, spec versions, states
   measured.py load    --store STORE        states into SEARCHBENCH_PG for the keyword systems
@@ -337,9 +337,16 @@ class Corpus:
 # load: states into Postgres for the keyword systems
 
 
+def pg():
+    """SEARCHBENCH_PG: a scratch Postgres 16. The keyword systems need only its text search; vectors stay in files."""
+    import psycopg
+
+    return psycopg.connect(bench.PG, autocommit=True)
+
+
 def cmd_load(args):
     c = Corpus(args.store)
-    conn = bench.connect()
+    conn = pg()
     conn.execute(
         """drop table if exists m_interval; drop table if exists m_state;
            create table m_state (id text primary key, key text not null, project text not null, title text not null,
@@ -563,7 +570,7 @@ def cmd_score(args):
     c = Corpus(args.store)
     queries, skipped = scored_queries(args.store)
     texts = query_texts(args.store, queries)
-    conn = bench.connect()
+    conn = pg()
     models = {m: Dense(c, args.store, m) for m in args.models}
     sdir = os.path.join(args.store, "scores")
     os.makedirs(sdir, mode=0o700, exist_ok=True)
