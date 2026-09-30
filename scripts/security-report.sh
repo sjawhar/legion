@@ -54,7 +54,7 @@
 #     zizmor-new marker; no marker means nothing new). Each new₀ finding is `ignored` when the PR's
 #     own patches add a `# zizmor: ignore[<audit>]` line in its file, or add its file name to an
 #     ignore list whose enclosing `rules.<audit>` key is read from .github/zizmor.yml at the PR's
-#     merge commit (a hunk's context rarely reaches the key), `merged with findings` when the PR's
+#     head commit (a hunk's context rarely reaches the key), `merged with findings` when the PR's
 #     last run still reports it new against its base (compared as a multiset, so a repeated finding
 #     counts once per copy), and `fixed` otherwise.
 #   - Security[<tag>]: review threads opened inside the window, with the newest `Accepted:` reply
@@ -316,9 +316,10 @@ def belongs(pr, branch, stamp):
 def config_ignores(pr, patch):
     """The (rule, file name) pairs a PR's .github/zizmor.yml patch adds to ignore lists. Each added
     line is numbered from its hunk header and its enclosing `  <rule>:` key is read from the whole
-    file at the PR's merge commit, since a hunk's three context lines rarely reach the key."""
+    file at the PR's head commit, the file the hunk's line numbers count (the merge commit can carry
+    lines main added above), since a hunk's three context lines rarely reach the key."""
     try:
-        content = gh(f"repos/{repo}/contents/.github/zizmor.yml?ref={pr['merge_commit_sha']}")
+        content = gh(f"repos/{repo}/contents/.github/zizmor.yml?ref={pr['head']['sha']}")
     except NotFound:
         return set()
     lines = base64.b64decode(content["content"]).decode("utf-8").splitlines()

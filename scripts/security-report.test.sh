@@ -180,8 +180,8 @@ add_marker() {
 add_pr() {
   [ -e "$d/pulls.json" ] || echo '[]' > "$d/pulls.json"
   append "$d/pulls.json" . "$(jq -cn --argjson n "$1" --arg ref "$2" --arg created "$3" --arg merged "$4" \
-    '{number: $n, head: {ref: $ref}, created_at: $created, merged_at: $merged, updated_at: $merged,
-      merge_commit_sha: "merge\($n)"}')"
+    '{number: $n, head: {ref: $ref, sha: "head\($n)"}, created_at: $created, merged_at: $merged,
+      updated_at: $merged, merge_commit_sha: "merge\($n)"}')"
 }
 
 # add_file NUMBER FILENAME PATCH
@@ -309,12 +309,12 @@ echo "=== R7. kill: an audit ignored 3 times ==="
 setup r7 "15 days ago"
 pr_with_findings 61 feat-h 6001 6002 '[]' "$(entry artipacked .github/workflows/w.yaml)"
 add_file 61 .github/zizmor.yml $'@@ -1,3 +1,6 @@\n rules:\n+  artipacked:\n+    ignore:\n+      - w.yaml\n   unpinned-uses:\n     config:'
-printf '%s\n' 'rules:' '  artipacked:' '    ignore:' '      - w.yaml' '  unpinned-uses:' '    config:' > "$d/zizmor-merge61.yml"
+printf '%s\n' 'rules:' '  artipacked:' '    ignore:' '      - w.yaml' '  unpinned-uses:' '    config:' > "$d/zizmor-head61.yml"
 # An item appended far below its rule key: the hunk's context never shows `  artipacked:`.
 pr_with_findings 62 feat-i 6011 6012 '[]' "$(entry artipacked .github/workflows/w.yaml)"
 add_file 62 .github/zizmor.yml $'@@ -7,3 +7,4 @@ rules:\n       - c.yaml\n       - d.yaml\n       - e.yaml\n+      - w.yaml'
 printf '%s\n' '# policy' 'rules:' '  artipacked:' '    ignore:' '      - a.yaml' '      - b.yaml' '      - c.yaml' \
-  '      - d.yaml' '      - e.yaml' '      - w.yaml' '  unpinned-uses:' '    config:' > "$d/zizmor-merge62.yml"
+  '      - d.yaml' '      - e.yaml' '      - w.yaml' '  unpinned-uses:' '    config:' > "$d/zizmor-head62.yml"
 pr_with_findings 63 feat-j 6021 6022 '[]' "$(entry artipacked .github/actions/z/action.yml)"
 add_file 63 .github/actions/z/action.yml $'@@ -3,1 +3,1 @@\n+    run: | # zizmor: ignore[artipacked]'
 run_report
@@ -353,6 +353,21 @@ add_run 8203 pull_request feat-o "$(iso '5 days ago - 1 hour')"
 add_findings 8203 "$(findings 79)"
 run_report
 check "a zizmor tool error drops that run: the next run is the first" "$(has "| #82 | 8202 | 8203 | 1 | 1 | 0 | 0 |")"
+
+echo "=== #91. an ignore added on a branch behind main: its rule is read from the PR's head ==="
+setup r91 "15 days ago"
+pr_with_findings 91 feat-p 9101 9102 '[]' "$(entry artipacked .github/workflows/w.yaml)"
+add_file 91 .github/zizmor.yml $'@@ -7,3 +7,4 @@ rules:\n       - c.yaml\n       - d.yaml\n       - e.yaml\n+      - w.yaml'
+printf '%s\n' '# policy' 'rules:' '  artipacked:' '    ignore:' '      - a.yaml' '      - b.yaml' '      - c.yaml' \
+  '      - d.yaml' '      - e.yaml' '      - w.yaml' '  unpinned-uses:' '    config:' > "$d/zizmor-head91.yml"
+# main added two rules above while the branch was open, so the merge commit's line 10 sits under
+# template-injection.
+printf '%s\n' '# policy' 'rules:' '  unpinned-uses:' '    config:' '      policies:' '        "*": hash-pin' \
+  '  template-injection:' '    ignore:' '      - q.yaml' '      - r.yaml' '  artipacked:' '    ignore:' \
+  '      - a.yaml' '      - b.yaml' '      - c.yaml' '      - d.yaml' '      - e.yaml' '      - w.yaml' \
+  > "$d/zizmor-merge91.yml"
+run_report
+check "the ignore counts under its own rule" "$(has "| #91 | 9101 | 9102 | 1 | 0 | 1 | 0 |")"
 
 echo "=== R9. rule 3: a fixed CodeQL alert adds the pull_request trigger ==="
 setup r9 "15 days ago"
