@@ -118,8 +118,8 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
 }) => {
   await setLiveSessions([planner]);
   // The mention's first delivery has to FAIL for a retry to be offered at all: a same-mode
-  // retry of a delivery that landed is a duplicate the stream drops, so the row no longer
-  // carries a Retry (LEGION-271).
+  // retry of a delivery that landed is a repeat that is recognised and dropped, so the row no
+  // longer carries a Retry (LEGION-271).
   await setSessionSendStatus("planner", 404);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Reply behavior" });

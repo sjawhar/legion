@@ -9,9 +9,9 @@ function attempt(overrides: Partial<DeliveryOutcome> = {}): DeliveryOutcome {
   return { state: "failed", createdAt: new Date(now - 60_000).toISOString(), ...overrides };
 }
 
-// LEGION-271. The promise "Retry won't deliver it twice" is only true while the stream still
-// recognises the repeat. Past its duplicate window the retry publishes a second frame — the
-// defect this issue exists to close, reached by acting on a promise that outlived its truth.
+// LEGION-271. The promise "Retry won't deliver it twice" is only true while a repeat is still
+// recognised (`DELIVERY_DUPLICATE_WINDOW_MS`). Past that window the retry is a second delivery —
+// the defect this issue exists to close, reached by acting on a promise that outlived its truth.
 test("a fresh failed attempt can still be promised a safe retry", () => {
   expect(isSafeRetry(attempt(), now)).toBe(true);
 });

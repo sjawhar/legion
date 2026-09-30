@@ -691,8 +691,9 @@ type CommentDelivery struct {
 	Delivery   string  `json:"delivery"`
 	SessionID  *string `json:"session_id"`
 	EnvelopeID *string `json:"envelope_id"`
-	// Duplicate reports that the stream already held this message when the attempt was sent,
-	// so the recipient gained nothing from it. EnvelopeID is then nil.
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil.
 	Duplicate    bool      `json:"duplicate"`
 	State        string    `json:"state"`
 	Error        *string   `json:"error"`
@@ -713,8 +714,8 @@ type CommentDeliveryEventPayload struct {
 	Delivery  string  `json:"delivery"`
 	SessionID *string `json:"session_id"`
 	State     string  `json:"state"`
-	// Duplicate reports that the stream already held this message, so the mentioned session
-	// gained nothing from this attempt.
+	// Duplicate reports that the stream already held this message: an earlier attempt landed, so
+	// this one is a repeat the mentioned session is not handed again.
 	Duplicate bool    `json:"duplicate,omitempty"`
 	Error     string  `json:"error,omitempty"`
 	ReplyID   *string `json:"reply_id"`
@@ -860,9 +861,10 @@ type MessageDelivery struct {
 	Delivery   string  `json:"delivery"`
 	SessionID  string  `json:"session_id"`
 	EnvelopeID *string `json:"envelope_id"`
-	// Duplicate reports that the stream already held this message when the attempt was sent,
-	// so the recipient gained nothing from it. EnvelopeID is then nil: the envelope this send
-	// minted is the one JetStream discarded.
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil: the envelope
+	// this send minted is the one JetStream discarded.
 	Duplicate bool      `json:"duplicate"`
 	State     string    `json:"state"`
 	Error     *string   `json:"error"`

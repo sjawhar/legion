@@ -7,8 +7,9 @@ package contracts
 // Dispatch it is the idempotency key Dispatch supplies (LEGION-271). The source name alone is not
 // enough, because other producers publish under these names with keys of their own shape that two
 // distinct events can share (TestMCPBridge_TwoEventsSharingADedupeKeyBothLand). A deliberate replay
-// inside the stream's 72-hour duplicate window therefore publishes nothing unless it carries a new
-// delivery id.
+// inside the stream's 72-hour duplicate window is therefore stored once unless it carries a new
+// delivery id. Storing is all the MsgId decides: a core-NATS subscriber is handed the replay anyway
+// and recognises it by its dedupe key (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts).
 func DedupeKeyNamesTheUpstreamEvent(item Envelope) bool {
 	switch item.Source {
 	case "github", "slack", "ghostwispr":

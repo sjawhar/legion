@@ -84,7 +84,8 @@ function BroadcastRecipientRow({
   // A pending attempt nobody has come back to. The server frees a claim after a minute
   // (`claimLapsed`), and it judges the claim; this reads the attempt's own timestamp, which is
   // never later than the claim, so at worst the retry is offered a moment early - and a
-  // same-mode retry of a send that landed is dropped by the stream, so early is safe.
+  // same-mode retry of a send that landed is recognised as a repeat and dropped
+  // (`DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`), so early is safe.
   const stranded =
     latest?.state === "pending" && Date.now() - Date.parse(latest.createdAt) > CLAIM_LEASE_MS;
   const capabilities = capabilitiesForTarget(recipient.message.target, liveAgents);
@@ -118,8 +119,8 @@ function BroadcastRecipientRow({
         />
       ) : latest === undefined || stranded ? (
         // Outstanding, and nobody is carrying it. Only the attempt's own mode is offered: the
-        // frame may already have reached the agent, and the stream drops a repeat of the same
-        // mode while it cannot recognise a different one - that would be a second delivery.
+        // frame may already have reached the agent, and a repeat of the same mode is recognised
+        // by its dedupe key while a different mode is a new key - that would be a second delivery.
         <div className="mt-3">
           <button
             className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}

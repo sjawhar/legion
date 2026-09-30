@@ -663,9 +663,10 @@ export interface CommentDelivery {
   readonly delivery: DeliveryCapability;
   readonly session_id: string | null;
   readonly envelope_id: string | null;
-  /** The stream already held this message when the attempt was sent, so the mentioned session
-   *  gained nothing from it; `envelope_id` is then null. Absent on a row written before the
-   *  field existed, which reads as false. */
+  /** The stream already held this message when the attempt was sent: an earlier attempt landed,
+   *  so this one is recognised as a repeat and not handed to the mentioned session again
+   *  (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). `envelope_id` is then null.
+   *  Absent on a row written before the field existed, which reads as false. */
   readonly duplicate?: boolean;
   readonly state: "pending" | "sent" | "failed";
   readonly error: string | null;
@@ -689,8 +690,9 @@ export interface CommentDeliveryEventPayload {
    *  the attempt's claim, and both reply handlers settle the row in the statement that appends
    *  theirs. The attempt row itself reads `pending` between its commit and that outcome. */
   readonly state: "sent" | "failed";
-  /** The stream already held this message, so the mentioned session gained nothing from this
-   *  attempt. Absent means false. */
+  /** The stream already held this message: an earlier attempt landed, so this one is recognised as
+   *  a repeat and not handed to the mentioned session again (`DELIVERY_DUPLICATE_WINDOW_MS`).
+   *  Absent means false. */
   readonly duplicate?: boolean;
   readonly error?: string;
   readonly reply_id: string | null;
@@ -782,19 +784,36 @@ export const MAX_BROADCAST_RECIPIENTS = 100;
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
- * How long the notification stream recognises a repeated delivery as a duplicate, in
- * milliseconds. This is the single source for that window: `bus/stream.go`'s
- * `streamDuplicateWindow` is generated from it (`scripts/gen-go.ts` emits
- * `contracts.DeliveryDuplicateWindow`), and the SPA reads it to decide whether re-sending a
- * failed attempt in its own mode can still be promised not to deliver twice.
+ * How long a repeated delivery is recognised, in milliseconds: the window behind the dashboard's
+ * promise that a same-mode Retry "won't deliver it twice". This comment is where that promise is
+ * stated; every other place that relies on it points here.
  *
- * It equals the stream's retention: past it the stream holds neither the message nor its
- * MsgId, so a same-mode retry publishes a second frame and the agent is handed the same
- * instruction again.
+ * Dispatch keys a send by message and mode (`<message>:<mode>`, `<comment>:<target>:<mode>`), the
+ * same for every attempt, and the listener makes that key, scoped to the recipient
+ * (`agent.<session>.<key>`), the envelope's `dedupe_key`. A same-mode Retry of a send that already
+ * landed therefore repeats that frame's dedupe key, and only that: the listener mints a new
+ * `event_id` for every send. Two things recognise the repeat inside this window, and a recipient
+ * is protected by whichever of them sits between it and the bus:
  *
- * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope publishes
+ * - The notification stream stores a Dispatch frame under a MsgId of its dedupe key and topic, so
+ *   it keeps one copy and answers the repeat as a duplicate, which the attempt records as
+ *   `duplicate`. That protects a session the listener pushes to from the stream. It does not
+ *   protect a session that subscribes over core NATS: JetStream's check applies to the stream's
+ *   copy only, and a core subscriber is handed every publish, repeats included.
+ * - Each host that subscribes over core NATS (the Oh My Pi extension, the Claude Code channel)
+ *   hands its agent at most one frame per dedupe key inside this window, through
+ *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. It holds those keys in memory: a
+ *   host process that restarts after the first frame landed has forgotten it, and a Retry then
+ *   reaches that agent a second time.
+ *
+ * Past the window neither remembers the key, and a same-mode retry is a second delivery, so the
+ * dashboard makes the promise only inside it (`isSafeRetry`). `scripts/gen-go.ts` emits this as
+ * `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's duplicate
+ * window and its retention.
+ *
+ * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope is stored
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
- * window shorter than that lets a GitHub redelivery publish a second copy.
+ * window shorter than that lets a GitHub redelivery be stored, and handed to a host, twice.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -820,10 +839,12 @@ export interface MessageDelivery {
   readonly session_id: string;
   readonly envelope_id: string | null;
   /**
-   * The stream already held this message when the attempt was sent, so the recipient gained
-   * nothing from it. The attempt is still `sent` - it reached the listener - but `envelope_id`
-   * is null, because the envelope this send minted is the one the stream discarded. Absent on a
-   * row written before the field existed, which reads as false.
+   * The stream already held this message when the attempt was sent: an earlier attempt landed,
+   * so this one is recognised as a repeat and not handed to the recipient again
+   * (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). The attempt is still `sent` -
+   * it reached the listener - but `envelope_id` is null, because the stream discarded the
+   * envelope this send minted. Absent on a row written before the field existed, which reads as
+   * false.
    */
   readonly duplicate?: boolean;
   /**
@@ -883,8 +904,9 @@ export interface MessageDeliveryEventPayload {
   readonly target?: string;
   readonly title: string;
   readonly state: "sent" | "failed";
-  /** The stream already held this message, so the recipient gained nothing from this attempt:
-   *  it reached the listener and put nothing new on the session's subject. Absent means false. */
+  /** The stream already held this message: an earlier attempt landed, so this one is recognised as
+   *  a repeat and not handed to the recipient again (`DELIVERY_DUPLICATE_WINDOW_MS`). Absent means
+   *  false. */
   readonly duplicate?: boolean;
   readonly error?: string;
 }

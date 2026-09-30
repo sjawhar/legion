@@ -659,14 +659,21 @@ resolved afresh under that same number, never reported undeliverable unsent.
 
 The idempotency key carries no attempt number: it is `<message>:<mode>` and
 `<comment>:<target>:<mode>`, stable across every attempt of that pair. The listener prefixes the
-recipient (`agent.<session>.<key>`) and the JetStream MsgId appends the topic, so the key's real
-scope is **(message, mode, recipient session)**, and a retry of a send that already landed is a
-duplicate JetStream drops before the agent's subject ever sees it. That is what makes a retry
-after a receipt timeout safe: the listener publishes the envelope before it answers, so an
-answer that misses the client's window says nothing about whether the message landed, and only
-the same key can be recognised as the repeat it is. **This holds for as long as the stream's
-duplicate window, which equals its retention by construction (both are `streamDuplicateWindow`,
-`internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.**
+recipient (`agent.<session>.<key>`) to make the envelope's `dedupe_key`, and the JetStream MsgId
+appends the topic, so the key's real scope is **(message, mode, recipient session)**, and a retry
+of a send that already landed repeats the dedupe key of the frame that landed - and nothing else
+of it, because the listener mints a fresh `event_id` per send. That is what makes a retry after a
+receipt timeout safe: the listener publishes the envelope before it answers, so an answer that
+misses the client's window says nothing about whether the message landed, and only the same key
+can be recognised as the repeat it is. **Who recognises it, for how long, and where that fails is
+stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `packages/contracts/src/dispatch-api.ts`; read
+it there rather than here.** In short: the stream stores one copy and answers the repeat
+`duplicate`, but JetStream's check never stops the publish reaching a core-NATS subscriber, so
+each host that subscribes that way (`pi-envoy`, `claude-envoy`) drops a repeated dedupe key
+itself through `createDeliveryDedupe` in `@legion/envoy-client/delivery`, and forgets it on a
+restart. The stream's duplicate window equals its retention by construction (both are
+`streamDuplicateWindow`, `internal/bus/stream.go`) and is reconciled on every
+`bus.ConnectOwningStream` by `ensureStreamWithConfig`.
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
 the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
 mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it
@@ -677,9 +684,9 @@ attempt pinned to the session the stranded row named.
 
 **The window is one number, and the promise expires with it.** `DELIVERY_DUPLICATE_WINDOW_MS` in
 `packages/contracts` is the single literal: `contracts.DeliveryDuplicateWindow` is generated from
-it for Go, and the dashboard reads it directly. Past that window the stream holds neither the
-message nor its MsgId, so a same-mode retry publishes a second frame - which is why the row
-stores only the CAUSE of a receipt timeout and never the advice. Every delivery surface composes
+it for Go, and the hosts' dedupe and the dashboard read it directly. Past that window neither the
+stream nor a host remembers the key, so a same-mode retry is a second delivery - which is why the
+row stores only the CAUSE of a receipt timeout and never the advice. Every delivery surface composes
 the advice through one predicate, `isSafeRetry` in
 `packages/dispatch/web/src/features/conversation/delivery.ts`: it shows the "retrying is safe"
 sentence, and offers the same-mode **Retry** at all, only for a failed attempt inside the window
@@ -691,11 +698,11 @@ for a receipt timeout, the one cause whose send may already have reached the rec
 Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the string the
 dashboard keys on cannot drift.
 
-An attempt the stream recognised records `duplicate` and no envelope id: it reached the listener
-and put nothing new on the recipient's subject, so it reads as "already delivered" rather than as
-a fresh send. The flag rides the attempt read, the `message.delivery` payload and the comment
-delivery payload, and every surface that renders an attempt - the targeted-message card, the
-comment thread's mention list, and the issue event feed - reads it.
+An attempt the stream recognised records `duplicate` and no envelope id: an earlier attempt
+landed, so this one is a repeat the recipient is not handed again, and it reads as "already
+delivered" rather than as a fresh send. The flag rides the attempt read, the `message.delivery`
+payload and the comment delivery payload, and every surface that renders an attempt - the
+targeted-message card, the comment thread's mention list, and the issue event feed - reads it.
 
 Because the attempt is committed `pending` before its send and names the session that send is
 going to, the session can answer or refuse the frame while it is still in flight - and can answer

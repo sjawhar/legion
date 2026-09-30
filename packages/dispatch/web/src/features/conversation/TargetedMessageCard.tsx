@@ -136,9 +136,10 @@ export function DeliveryStatus({
  *  where a tooltip on a disabled control is unreachable.
  *
  *  Retry re-sends in the attempt's OWN mode, and appears only while `isSafeRetry` holds: that
- *  send carries the same idempotency key, so the stream drops it if the message already landed
- *  - but only inside the stream's duplicate window, and only for an attempt that actually
- *  failed. Offering it otherwise would be offering a second delivery under a promise of none.
+ *  send carries the same idempotency key, so if the message already landed the repeat is
+ *  recognised and dropped - but only inside `DELIVERY_DUPLICATE_WINDOW_MS`, and only for an
+ *  attempt that actually failed. Offering it otherwise would be offering a second delivery under
+ *  a promise of none.
  *  The mode-change actions have no such limit: they are a different key and are honestly
  *  labelled "instead". */
 export function DeliveryRetry({
