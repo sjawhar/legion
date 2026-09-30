@@ -51,17 +51,10 @@ a deliberately broken input and the refusal or failure observed. The surface is
 repository, a real browser, a devN stack, staging, or a local stack with real migrations, one that
 has the resource the change touches — and each `E2E` line carries a **link** to that run,
 screenshot, or e2e; human review does not replace user-facing verification, and a green unit suite
-is not it. A unit or integration test is a regression lock, never proof of a criterion. Sami,
-2026-09-13, verbatim: "They need to test everything in a production-like
-environment before merging, and it is the agent that develops the feature that is responsible
-for doing that. If there's anything blocking that, we need to fix it: if it's infrastructure, we
-need to fix it; if it's tooling, we need to develop it; if it's skills, we need to fix the skills
-... it should not require deploying to production to realize your feature doesn't work."
-Evidence for the rule: in the week of 2026-09-08 three surfaces merged green and were wrong on
-inspection (the Astrolabe IPI stack, Dispatch on ECS, the candidate flow), and on 2026-09-12 six
-deploy slots died on code first executed after merge, including a production-only ECS bootstrap
-the whole staging gate never ran. The implementer's proof and the tester's proof below are both
-this proof.
+is not it. A unit or integration test is a regression lock, never proof of a criterion. The agent
+that develops the change proves it this way before the merge, and whatever blocks that proof is
+fixed, not skipped (*When no surface reaches the changed path*, below). The implementer's proof
+and the tester's proof below are both this proof.
 
 ## The rules every phase's evidence follows
 
@@ -98,8 +91,8 @@ this proof.
   diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
   round closed: nothing applied leaves that head final; applied → the applied head is the final
   head: CI runs on it, the pair runs once on it, and the E2E proof re-runs on it for the surface
-  the simplify diff touched (Sami, 2026-09-13: test on the real surface before merging, no
-  shortcuts — a refactor that "preserves behaviour" is a claim until it is executed). That cost is
+  the simplify diff touched, since a refactor that "preserves behaviour" is a claim until it is
+  executed. That cost is
   why 0-applied is the expected outcome and a pass that applies is spent sparingly. At the applied
   head the implementer re-cites the `CI` line and re-runs its own proof into `E2E (implementer)`,
   and the tester re-runs its proof for the touched surface into `E2E (tester)`, before the
@@ -116,10 +109,8 @@ No surface reaches the changed path is a report to the architect, never a reason
 Say which surface is missing and what it would have to do — a rig that can spawn the role, a
 sandbox that holds the resource, a credential, a command that does not exist yet — and send it to
 the architect with `envoy_publish` to its role topic. The architect creates a child issue in this
-tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. Sami,
-2026-09-13, verbatim: "If there's anything blocking that, we need to fix it: if it's
-infrastructure, we need to fix it; if it's tooling, we need to develop it; if it's skills, we need
-to fix the skills." A code path whose first execution would be after the merge — a deploy
+tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. A code path
+whose first execution would be after the merge — a deploy
 workflow's inline step, a post-merge helper, a production-only resource — is untested until you
 have executed it somewhere production-like; completing with a unit-test-only handoff is the
 failure this rule exists to stop.
