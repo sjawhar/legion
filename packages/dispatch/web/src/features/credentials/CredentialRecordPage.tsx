@@ -25,7 +25,7 @@ function CredentialDecision({ decided }: { decided: CredentialDecisionEvent }): 
       <p className={`font-medium capitalize ${textPrimaryOnCanvas}`}>
         {decided.event} <Timestamp at={decided.at} />
       </p>
-      {decided.credential_id === null ? null : (
+      {!decided.credential_id ? null : (
         <p className={textMutedOnCanvas}>Credential {decided.credential_id}</p>
       )}
     </div>
