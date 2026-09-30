@@ -6,7 +6,7 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
-      # Every skill: pi-envoy's skills guard (src/skills-guard.test.ts) reads them all.
+      # Every skill: pi-envoy ships them, and its skills-guard test checks their sizes and links.
       - "skills/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
