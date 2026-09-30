@@ -230,17 +230,6 @@ function ArchitectureTreeView({
     pendingFocus.current = level.id;
     update({ component: level.parent, view: null });
   };
-  const openFocused = () => {
-    const id = focusedRowId();
-    if (id === undefined) {
-      return;
-    }
-    if (hasChildren(id)) {
-      descend();
-    } else {
-      rowAround(document.activeElement)?.querySelector("a")?.click();
-    }
-  };
   useKeymapScope("architecture");
   useKeymap("architecture", [
     // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
@@ -266,52 +255,40 @@ function ArchitectureTreeView({
       when: () => rowAround(document.activeElement) !== null,
     },
     {
+      // Both keys do the same thing, so the palette offers it; a row presses Enter.
       id: "open",
-      keys: "o",
+      keys: ["Enter", "o"],
       label: "Open the focused component: its children, else its details",
-      run: openFocused,
+      palette: true,
+      run: () => {
+        const id = focusedRowId();
+        if (id === undefined) {
+          return;
+        }
+        if (hasChildren(id)) {
+          descend();
+        } else {
+          rowAround(document.activeElement)?.querySelector("a")?.click();
+        }
+      },
       when: () => document.activeElement?.matches(ROW_SELECTOR) === true,
     },
     {
-      // Out of the palette, where `open` above is already the row for the same action.
-      id: "open-enter",
-      keys: "Enter",
-      label: "Open the focused component from its row",
-      palette: false,
-      run: openFocused,
-      when: () => document.activeElement?.matches(ROW_SELECTOR) === true,
-    },
-    {
-      // Out of the palette: where the focused row has children `o`'s Open row already goes into
-      // them, and on a leaf this row would do nothing.
+      // Out of the palette: on a row with children `open` above already goes into them, and on
+      // a leaf this row would do nothing.
       id: "descend",
-      keys: "l",
+      keys: ["l", "ArrowRight"],
       label: "Into the focused component's children",
       palette: false,
       run: descend,
       when: () => rowAround(document.activeElement) !== null,
     },
     {
-      // The arrows are the letters' twins, so neither is a second palette row.
-      id: "descend-arrow",
-      keys: "ArrowRight",
-      label: "Into the focused component's children (arrow key)",
-      palette: false,
-      run: descend,
-      when: () => rowAround(document.activeElement) !== null,
-    },
-    {
+      // Both keys do the same thing, and its `when` needs no focused row, so it is a row.
       id: "ascend",
-      keys: "h",
+      keys: ["h", "ArrowLeft"],
       label: "Up one level",
-      run: ascend,
-      when: () => level !== undefined,
-    },
-    {
-      id: "ascend-arrow",
-      keys: "ArrowLeft",
-      label: "Up one level (arrow key)",
-      palette: false,
+      palette: true,
       run: ascend,
       when: () => level !== undefined,
     },

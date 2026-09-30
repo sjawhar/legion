@@ -398,11 +398,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const routeProject = routeProjectOf(location.pathname);
   useKeymap("global", [
     {
+      // Opens only: while the palette is open the `dialog` scope is the only one consulted, and
+      // the palette's own `$mod+k` binding closes it.
       id: "search",
       inEditable: true,
       keys: "$mod+k",
       label: "Search and actions",
-      run: () => setPaletteMode((open) => (open === null ? "all" : null)),
+      run: () => setPaletteMode("all"),
     },
     {
       // No row: chosen from `$mod+k`'s palette it would only reopen that palette with its actions

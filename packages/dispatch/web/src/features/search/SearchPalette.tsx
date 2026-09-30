@@ -44,7 +44,6 @@ import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
 const emptyResults: SearchResult[] = [];
-const emptyActions: KeymapAction[] = [];
 const emptyProjects: Project[] = [];
 const ACTIONS_GROUP_ID = "search-group-actions";
 const PROJECTS_GROUP_ID = "search-group-projects";
@@ -319,6 +318,10 @@ export function SearchPalette({
   // whatever opened it: run inside the palette, with focus in its input, it would act on nothing,
   // and a row that moves focus would have its move undone by that cleanup a moment later.
   const pendingAction = useRef<(() => void) | null>(null);
+  // The last `/` search, which `/` reopens on as `main`'s always-mounted palette did: its hits do
+  // not depend on the page. `⌘K` and `g p` open empty, since a query left there would filter a
+  // new page's actions, or its projects, down to nothing.
+  const lastSearch = useRef("");
   // On the commit that closes the palette React runs every passive-effect cleanup, the unmounted
   // palette's `useDialog` among them, before any passive-effect setup, so focus is back by the
   // time this effect runs the chosen row.
@@ -334,42 +337,55 @@ export function SearchPalette({
   if (mode === null) {
     return null;
   }
-  // Mounted once per open, so each open starts with an empty query, its first row highlighted and
-  // the rows of the page it opened over; and a closed palette holds no search of its own.
+  // Mounted once per open, so each open starts on its first row with the rows of the page it
+  // opened over, and a closed palette holds no search of its own.
   return (
     <PaletteDialog
+      initialQuery={mode === "search" ? lastSearch.current : ""}
       key={mode}
       mode={mode}
       onAction={(run) => {
         pendingAction.current = run;
       }}
       onClose={onClose}
+      onQuery={(query) => {
+        if (mode === "search") {
+          lastSearch.current = query;
+        }
+      }}
     />
   );
 }
 
 function PaletteDialog({
+  initialQuery,
   mode,
   onAction,
   onClose,
+  onQuery,
 }: {
+  initialQuery: string;
   mode: PaletteMode;
   onAction: (run: () => void) => void;
   onClose: () => void;
+  onQuery: (query: string) => void;
 }): ReactNode {
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
+  const [debouncedQuery, setDebouncedQuery] = useState(() => initialQuery.trim());
   const [activeId, setActiveId] = useState<string | null>(null);
+  // A query the open starts with is selected when the input first takes focus, so typing
+  // replaces it and Enter still opens its highlighted hit.
+  const selectOnFocus = useRef(initialQuery !== "");
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   // The rows this open offers, decided on its first render, while focus is still on whatever
   // opened the palette, since `useDialog` moves it into the input after that commit. Read any
   // later and a `when()` that asks what is focused would answer "the palette", withdrawing every
   // row bound to the card, row or control the reader was actually on.
-  const [actions] = useState(() => (mode === "all" ? appKeymap.actions() : emptyActions));
+  const [actions] = useState(() => (mode === "all" ? appKeymap.actions() : []));
   const dialog = useDialog<HTMLDivElement>({ initialFocusRef: inputRef, onClose, open: true });
-  // The global `$mod+k` toggle is masked while any dialog is open; the palette keeps the key as
-  // its own close so pressing it twice still opens and closes.
+  // Every global key is masked while any dialog is open; the palette keeps `$mod+k` as its own
+  // close, so pressing it twice still opens and closes.
   useKeymap(DIALOG_SCOPE, [
     {
       id: "search-close",
@@ -418,9 +434,10 @@ function PaletteDialog({
           }))
       : [];
   // The hits answer the query in the box, so a query still in flight shows none: the message
-  // below the list says which of "type more", "searching", "failed" and "nothing" it is.
+  // below the list says which of "type more", "searching", "failed" and "nothing" it is. A
+  // refresh that fails keeps the answer the query already has, and so do the hits.
   const waitingForQuery = queryEnabled && debouncedQuery !== searchText;
-  const showHits = queryEnabled && !waitingForQuery && !search.isPending && !search.isError;
+  const showHits = queryEnabled && !waitingForQuery && search.data !== undefined;
   const hitGroups = showHits
     ? groups.map(({ owner, results: ownerResults }) => ({
         owner,
@@ -470,11 +487,23 @@ function PaletteDialog({
   }
   // Focus stays in the input while the arrows move the highlight (`aria-activedescendant`), so
   // the list scrolls the highlighted row into its own view: an issue page offers more rows than
-  // the list's height holds.
+  // the list's height holds. It does again whenever the list's own height changes (the window
+  // shrinks, or the message under it grows), since the row did not move but its view did.
   useLayoutEffect(() => {
-    if (shownId !== null) {
-      document.getElementById(shownId)?.scrollIntoView({ block: "nearest" });
+    if (shownId === null) {
+      return;
     }
+    const keepInView = () => {
+      document.getElementById(shownId)?.scrollIntoView({ block: "nearest" });
+    };
+    keepInView();
+    const list = document.getElementById("search-results");
+    if (list === null) {
+      return;
+    }
+    const sizes = new ResizeObserver(keepInView);
+    sizes.observe(list);
+    return () => sizes.disconnect();
   }, [shownId]);
 
   useCloseOnNavigation(true, onClose);
@@ -507,14 +536,15 @@ function PaletteDialog({
   return (
     <>
       <div aria-hidden="true" className={`fixed inset-0 z-40 ${backdrop50}`} onClick={onClose} />
-      <div className="pointer-events-none fixed inset-x-0 top-12 z-50 flex justify-center xl:top-20 xl:px-4">
-        {/* A column no taller than the screen below its top offset (and a 1rem foot margin from
-            `xl`), so the list, the one part that scrolls, gives way first and the input, the
-            message and the key hints stay in view on a short window. */}
+      {/* The wrapper holds the palette's place: below the top bar, to the screen's foot (1rem
+          short of it from `xl`). The dialog is a column no taller than that, in which only the
+          list scrolls, and the list keeps one row's height, so a short window cuts the key hints
+          and then the message rather than the row the reader is on. */}
+      <div className="pointer-events-none fixed inset-x-0 top-12 bottom-0 z-50 flex items-start justify-center xl:top-20 xl:bottom-4 xl:px-4">
         <div
           aria-label="Search"
           aria-modal="true"
-          className={`pointer-events-auto flex max-h-[calc(100dvh-3rem)] w-full flex-col overflow-hidden rounded-b-lg border shadow-2xl xl:max-h-[calc(100dvh-6rem)] xl:max-w-2xl xl:rounded-lg ${card} ${borderDefault}`}
+          className={`pointer-events-auto flex max-h-full w-full flex-col overflow-hidden rounded-b-lg border shadow-2xl xl:max-w-2xl xl:rounded-lg ${card} ${borderDefault}`}
           ref={dialog.containerRef}
           role="dialog"
         >
@@ -527,8 +557,15 @@ function PaletteDialog({
               className={`block w-full rounded-lg border px-3 py-2 text-sm outline-none ${inputClasses(true)}`}
               onChange={(event) => {
                 setQuery(event.target.value);
+                onQuery(event.target.value);
                 // A new query re-ranks the list, so the highlight returns to its head.
                 setActiveId(null);
+              }}
+              onFocus={(event) => {
+                if (selectOnFocus.current) {
+                  selectOnFocus.current = false;
+                  event.currentTarget.select();
+                }
               }}
               onKeyDown={handleKeyDown}
               placeholder={mode === "projects" ? "Go to project" : "Search Dispatch"}
@@ -540,7 +577,7 @@ function PaletteDialog({
           </div>
           {rows.length === 0 ? null : (
             <div
-              className="max-h-[60vh] min-h-0 flex-1 overflow-y-auto"
+              className="max-h-[60vh] min-h-20 flex-1 overflow-y-auto"
               id="search-results"
               role="listbox"
             >
@@ -652,7 +689,7 @@ function PaletteDialog({
             </p>
           ) : waitingForQuery || search.isPending ? (
             <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>Searching…</p>
-          ) : search.isError ? (
+          ) : search.isError && search.data === undefined ? (
             <div className="shrink-0 p-3">
               <QueryError
                 message="Search failed."

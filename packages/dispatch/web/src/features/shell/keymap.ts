@@ -35,9 +35,12 @@ export interface KeyBinding {
   /** Fires while a control that takes typed text has focus: a `TEXTAREA`, a `SELECT`, a
    *  contentEditable element, or a text-entry `INPUT`. */
   inEditable?: boolean;
-  /** Whether `⌘K` offers this binding as an action; default `true`. Keys that walk a list with
-   *  the row in hand set `false`, as does a second key for an action that already has a row; any
-   *  other binding that sets it says why beside it. */
+  /** Whether `⌘K` offers this binding as an action. The default is `true` for a binding with one
+   *  key or none, and `false` for one with several: a row presses only its first key, and such a
+   *  binding's `run` may pick what it does by the key pressed (the arrows, `1`–`9`), so one whose
+   *  keys all do the same thing says `true`. Keys that walk a list with the row in hand set
+   *  `false`, as does a second key for an action that already has a row; any other binding that
+   *  sets it says why beside it. */
   palette?: boolean;
 }
 
@@ -227,9 +230,8 @@ export interface KeymapOptions {
 export interface Keymap {
   /**
    * The palette's rows: every enabled, palette-eligible binding of the scopes beneath the
-   * innermost dialog, innermost scope first. Left out: a binding with `palette: false`, one that
-   * fires in an editable, and one with more than one key alternative, whose `run` may pick what
-   * it does by the key pressed (the arrows, `1`–`9`) where a row presses only its first. A row
+   * innermost dialog, innermost scope first. Left out: a binding whose `palette` is `false`
+   * (unset, the default for a binding with several keys) and one that fires in an editable. A row
    * runs its binding only if the binding is still registered and its `when()` still holds when
    * the row is chosen.
    */
@@ -362,9 +364,8 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
           const keys = keysOf(binding);
           if (
             registration.scope !== scope ||
-            binding.palette === false ||
+            !(binding.palette ?? keys.length <= 1) ||
             binding.inEditable === true ||
-            keys.length > 1 ||
             binding.when?.() === false
           ) {
             continue;
