@@ -273,6 +273,44 @@ func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
 	}, nil), http.StatusForbidden, claim.InvalidSecret.Message)
 }
 
+// An operator's suspend of an agent in a turn is accepted and held for the turn's end
+// (supervise.ErrSuspendWaits), so the turn is not cut off: the route answers 202 with the claim
+// still working, and the claim is suspended once its turn ends.
+func TestTheOperatorsSuspendOfAnAgentInATurnWaitsForTheTurnToEnd(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	registered := h.registered(h.bootToken(architectToken), "ses_architect")
+	if recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: architectToken, SessionID: "ses_architect", Secret: registered.Secret, Generation: 1,
+	}, nil); recorder.Code != http.StatusNoContent {
+		t.Fatalf("ready = %d; body %s", recorder.Code, recorder.Body)
+	}
+	machine, ok := h.supervisor.Machine(architectToken)
+	if !ok {
+		t.Fatal("no machine for the architect")
+	}
+	if err := machine.Handle(h.ctx, supervise.StreamTurnStart{Claim: architectToken}); err != nil {
+		t.Fatalf("start a turn: %v", err)
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("suspend mid-turn = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.State != string(supervise.StateWorking) || len(h.runtime.CallsOf("Suspend")) != 0 {
+		t.Fatalf("suspend mid-turn answered %+v with %d suspensions, want the claim still working and none yet", got, len(h.runtime.CallsOf("Suspend")))
+	}
+	if err := machine.Handle(h.ctx, supervise.StreamTurnEnd{Claim: architectToken}); err != nil {
+		t.Fatalf("end the turn: %v", err)
+	}
+	if state := machine.Claim().State; state != supervise.StateSuspended || len(h.runtime.CallsOf("Suspend")) != 1 {
+		t.Fatalf("after the turn the architect is %s with %d suspensions, want suspended once", state, len(h.runtime.CallsOf("Suspend")))
+	}
+}
+
 // A tree no workflow issue backs — one the operator spawned — has no linger to close it, so the
 // operator closes it: close ends the tree's root claim, here its only claim, whatever its state, as
 // the workflow's tree_close does. Its Sandbox and tree volume would otherwise outlive every use

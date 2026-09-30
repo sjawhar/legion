@@ -446,7 +446,14 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			h.reach(state)
 			loc := h.locator()
 
-			h.must(RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing"})
+			request := RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing"}
+			if state != StateWorking {
+				h.must(request)
+			} else if err := h.handle(request); !errors.Is(err, ErrSuspendWaits) {
+				t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+			} else {
+				h.must(StreamTurnEnd{Claim: testToken})
+			}
 
 			if lines := h.logs.lines(`msg="supervise: suspended"`, "claim="+string(testToken), `reason="LEGION-208 left implementing"`); len(lines) != 1 {
 				t.Errorf("suspend lines %q, want one naming the claim and the reason", lines)
@@ -463,7 +470,7 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 				t.Errorf("stored %+v, want the suspension persisted", stored)
 			}
 			if state == StateWorking && c.Pending != nil {
-				t.Errorf("pending %+v, want the interrupted turn's delivery retired", c.Pending)
+				t.Errorf("pending %+v, want the turn's delivery retired", c.Pending)
 			}
 		})
 	}

@@ -203,7 +203,10 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 }
 
 // claimRequest is one operator request on an existing claim: event builds the request the claim's
-// machine is posted, or answers the caller itself and reports false.
+// machine is posted, or answers the caller itself and reports false. A suspension of an agent in a
+// turn is held for the turn's end (supervise.ErrSuspendWaits), which is not a refusal: it answers
+// 202 with the claim as it waits, still working, and the claim is suspended when the turn ends or
+// at the stop timeout.
 func (s *server) claimRequest(request string, event func(http.ResponseWriter, *http.Request, supervise.Claim) (supervise.Event, bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := claim.Token(r.PathValue("token"))
@@ -216,11 +219,14 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 		if !ok {
 			return
 		}
-		if err := m.Handle(context.WithoutCancel(r.Context()), ev); err != nil {
+		status := http.StatusOK
+		if err := m.Handle(context.WithoutCancel(r.Context()), ev); errors.Is(err, supervise.ErrSuspendWaits) {
+			status = http.StatusAccepted
+		} else if err != nil {
 			s.operatorFailure(w, request, token, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, operatorView(m.Claim()))
+		writeJSON(w, status, operatorView(m.Claim()))
 	}
 }
 

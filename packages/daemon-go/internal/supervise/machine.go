@@ -168,6 +168,9 @@ type Timeouts struct {
 	RPC time.Duration
 	// Probe is how soon an uncertain process is probed again (probe_interval_seconds).
 	Probe time.Duration
+	// Stop is how long a suspension that arrives while the agent is in a turn waits for that turn
+	// to end before it stops the process anyway (worker_stop_timeout_seconds).
+	Stop time.Duration
 }
 
 // Deps is what a machine is built from.
@@ -230,6 +233,7 @@ func (d Deps) check() error {
 		{"Timeouts.Boot", d.Timeouts.Boot},
 		{"Timeouts.RPC", d.Timeouts.RPC},
 		{"Timeouts.Probe", d.Timeouts.Probe},
+		{"Timeouts.Stop", d.Timeouts.Stop},
 	} {
 		if wait.value <= 0 {
 			return fmt.Errorf("supervise: %s must be positive, got %s", wait.name, wait.value)
@@ -264,6 +268,14 @@ func (e *RefusedError) Unwrap() error { return e.Err }
 // asks again later.
 var ErrDeliveryPending = errors.New("a delivery is already pending")
 
+// ErrSuspendWaits answers a suspension that arrived while the agent is in a turn: it is held until
+// that turn ends, or until the stop timeout (Timeouts.Stop) runs out, and then stops the process.
+// Stopping the agent mid-turn would cut off whatever the turn is doing, and a worker's turn is
+// where it reports its phase complete — the report that asked for this suspension. It is a wait,
+// not a refusal: the suspension happens without being asked again, and a caller that holds the
+// request durably asks again later, when the claim answers nil once it is suspended.
+var ErrSuspendWaits = errors.New("the suspension waits for the agent's turn to end")
+
 // ErrRootStop is a stop of the tree's root claim that is not its tree's close, refused in every
 // state: the root ends only with its tree. The refusal adds what stops the root's process instead,
 // where one runs.
@@ -296,6 +308,10 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
+	// deferred is a suspension that arrived while the agent was in a turn, held until the turn ends
+	// or its stop timeout (TimerSuspend) runs out (suspendAfterTurn). It is held only while the
+	// claim is working, and in memory only: whoever asked for it asks again after a restart.
+	deferred *RequestSuspend
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -358,7 +374,8 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // Handle is one event: fenced, then looked up in the transition table, then acted on. A request
 // the claim's state does not allow is refused with a RefusedError; a fenced request is refused
 // with the claim refusal it violates (claim.StaleGeneration, claim.SameAgentRefusal). Any other
-// event that is stale is logged once and dropped.
+// event that is stale is logged once and dropped. A suspension of a claim whose agent is in a turn
+// answers ErrSuspendWaits: it is held for the turn's end (suspendAfterTurn).
 //
 // Handle returns when the decision is made, which includes the runtime call it makes: a stop
 // waits out its grace, a resume waits out the previous incarnation. A caller feeding many claims
@@ -424,7 +441,9 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 
 // StartedBy records the outbox row of the start being run against this claim, so a stop written
 // before it can be told apart from one written after. A stop is retried until the runtime takes
-// it, and a retry that lands after this start would suspend the run this start began.
+// it, and a retry that lands after this start would suspend the run this start began. A suspension
+// waiting for the agent's turn (suspendAfterTurn) is such a stop: the start hands the claim work
+// again, and the suspension is dropped rather than run when the turn ends.
 func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -432,6 +451,11 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 		return nil
 	}
 	m.claim.LastStartRow = row
+	if m.deferred != nil {
+		m.log.Info("supervise: a start supersedes the suspension waiting for the agent's turn", "row", row,
+			"reason", m.deferred.Reason)
+		m.dropDeferred()
+	}
 	return m.persist(ctx)
 }
 
@@ -661,11 +685,23 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 // is spent. A resume that found the tree volume lost is the exception (relaunchFresh). A task whose
 // turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
 // and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
+// A process that dies while a suspension waits for its turn (suspendAfterTurn) is not relaunched:
+// nothing is left to wait for, so the claim is suspended, whatever the runtime answers, as a
+// failed claim is (fail), and nothing is charged.
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
 	if err := m.interrupted(ctx); err != nil {
 		return err
+	}
+	if request := m.deferred; request != nil {
+		m.dropDeferred()
+		incarnation := m.claim.Locator.Incarnation
+		if err := m.suspendProcess(ctx); err != nil {
+			m.log.Error("supervise: could not suspend the dead process with the runtime; suspending its claim anyway",
+				"incarnation", incarnation, "error", err)
+		}
+		return m.suspendedFor(ctx, *request)
 	}
 	if m.chargeDeath() {
 		return m.fail(ctx, "deaths with work outstanding ran out")
@@ -741,6 +777,42 @@ func (m *Machine) suspendProcess(ctx context.Context) error {
 	return nil
 }
 
+// suspendNow stops the claim's process for request and keeps its session.
+func (m *Machine) suspendNow(ctx context.Context, request RequestSuspend) error {
+	if err := m.suspendProcess(ctx); err != nil {
+		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
+	}
+	return m.suspendedFor(ctx, request)
+}
+
+// suspendedFor moves the claim to suspended once request's stop has ended its process, and says
+// why.
+func (m *Machine) suspendedFor(ctx context.Context, request RequestSuspend) error {
+	if err := m.suspended(ctx); err != nil {
+		return err
+	}
+	m.log.Info("supervise: suspended", "reason", request.Reason)
+	return nil
+}
+
+// suspendDeferred runs the suspension that waited for the agent's turn (suspendAfterTurn). Its
+// wait is over whether or not the process stops: one that could not be stopped is asked for
+// again by whoever holds the suspension.
+func (m *Machine) suspendDeferred(ctx context.Context) error {
+	request := m.deferred
+	if request == nil {
+		return fmt.Errorf("supervise: no suspension of %s waits for its turn", m.claim.Token)
+	}
+	m.dropDeferred()
+	return m.suspendNow(ctx, *request)
+}
+
+// dropDeferred ends a suspension's wait for the agent's turn without running it.
+func (m *Machine) dropDeferred() {
+	m.deferred = nil
+	m.disarm(TimerSuspend)
+}
+
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.
 func (m *Machine) retire(ctx context.Context) error {
 	m.letGo()
@@ -748,13 +820,14 @@ func (m *Machine) retire(ctx context.Context) error {
 	return m.persist(ctx)
 }
 
-// letGo ends what the machine had with the claim's process: no timer watches it and no send talks
-// to it any more, and the process the claim records, when it records one, moves into previous —
-// the claim no longer runs it (it was stopped, found dead, or left behind), and the next launch of
-// the same session waits it out.
+// letGo ends what the machine had with the claim's process: no timer watches it, no send talks to
+// it and no suspension waits for its turn any more, and the process the claim records, when it
+// records one, moves into previous — the claim no longer runs it (it was stopped, found dead, or
+// left behind), and the next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.forgetSend()
+	m.deferred = nil
 	if e := m.claim.Enrollment; e != nil {
 		m.revoke(*e)
 		m.claim.Enrollment = nil

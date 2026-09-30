@@ -109,9 +109,9 @@ func TestATurnOfTheAgentsOwnDoesNotClearTheDeathsOfATaskItNeverRan(t *testing.T)
 	h.wantBudgets(Budgets{Deaths: 1})
 }
 
-// A task that ends some other way than its turn's end — the suspension a transition sends, which
-// can arrive before the worker's handoff turn has ended — takes its deaths with it: the claim's
-// next round starts its count afresh.
+// A task that ends some other way than its turn's end — the suspension a transition sends, run at
+// the stop timeout when the worker's handoff turn does not end — takes its deaths with it: the
+// claim's next round starts its count afresh.
 func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -122,7 +122,11 @@ func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
 		h.relaunched()
 		h.must(StreamTurnStart{Claim: testToken})
 	}
-	h.must(RequestSuspend{Claim: testToken})
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+	}
+	h.advance(testStop)
+	h.wantState(StateSuspended)
 
 	h.must(RequestDeliver{Claim: testToken, Task: "round two", Phase: "implementing", Generation: 6})
 	h.relaunched()
@@ -361,7 +365,7 @@ func TestAStartedTurnResetsBothPromptBudgets(t *testing.T) {
 func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 	h := newBareHarness(t)
 	h.deps.Limits = Limits{LaunchFailures: 1, PromptFailures: 1, PromptRetires: 1}
-	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe}
+	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, Stop: testStop}
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +391,7 @@ func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 		"RegistrationIntervals": func(d *Deps) { d.Timeouts.RegistrationIntervals = 0 },
 		"RPC":                   func(d *Deps) { d.Timeouts.RPC = 0 },
 		"Probe":                 func(d *Deps) { d.Timeouts.Probe = 0 },
+		"Stop":                  func(d *Deps) { d.Timeouts.Stop = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newBareHarness(t)

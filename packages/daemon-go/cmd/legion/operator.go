@@ -95,7 +95,8 @@ func (c *operatorCall) connect() (operator, bool) {
 // The request carries no deadline of its own. What it asks for may wait on the runtime — a suspend
 // or stop waits out the worker's stop grace, a resume that and a launch — and every step is
 // bounded by the daemon's configuration, which this command may not have read; a signal to this
-// process ends the wait.
+// process ends the wait. A suspend of an agent in a turn is answered at once, 202 with the claim
+// still working: the daemon holds it for the turn's end, within the stop timeout.
 func (c *operatorCall) send(ctx context.Context, op operator, method, path string, body any, print func(io.Writer, []byte) error) int {
 	status, answer, err := op.do(ctx, method, path, body)
 	if err != nil {
