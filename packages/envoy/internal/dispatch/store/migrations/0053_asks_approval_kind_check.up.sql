@@ -9,11 +9,17 @@
 -- at version 0, whose answer failed the uuid cast. A value that does not decode, such as a
 -- version of 1.5 or a name of 5, fails every read of the ask, the Inbox that lists it among them,
 -- and docs.ApprovalAskAt reads every open approval ask of a document on each version write, so
--- one such row also stops the document taking versions. The check therefore admits on an approval
--- ask only an approval in the shape the approval-request route writes: artifact_id as Postgres
--- writes a uuid (lowercase hex text, which docs.ApprovalAskAt compares as text), name a string,
--- and version a JSON number written as a whole number from 1 of at most ten digits, so it always
--- decodes into the int model.AskApproval holds. On every other kind it admits only SQL null.
+-- one such row also stops the document taking versions. On an approval ask the check admits only
+-- an approval whose three keys hold what the approval-request route writes: artifact_id as
+-- Postgres writes a uuid (lowercase hex text, which docs.ApprovalAskAt compares as text), name a
+-- string, and version a JSON number written as a whole number from 1 of at most ten digits, which
+-- an int holds. So it refuses every approval whose known keys hold the wrong type, which is what a
+-- mistaken hand edit writes. It does not guarantee a decode: encoding/json matches keys to fields
+-- ignoring case, Unicode folding included, so "Version": 1.5 or "verſion": 1.5 beside "version"
+-- still reaches AskApproval.Version, and it fails on a value nested more than 10,000 deep under
+-- any key. Refusing every key but the three would close that; dispatch://LEGION-429 holds that
+-- check and why it waits on a count of production rows. On every other kind the check admits
+-- only SQL null.
 --
 -- Adding the constraint validates every existing row under an ACCESS EXCLUSIVE lock on asks,
 -- which the runner holds until its transaction commits. The lock timeout bounds the wait for that
