@@ -3,7 +3,37 @@
 
 package helper
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential: a session registered while
+// the helper holds no credential keeps retrying its enrollment with a backoff that grows to a
+// minute. The login that installs a credential must wake that retry, so the session can sign
+// within about a second of the login instead of whenever its backoff comes round.
+func TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential(t *testing.T) {
+	r := newRig(t, "")
+	if reg := r.call(t, Request{Op: "register"}); !reg.OK || reg.Code != CodeNoCredential {
+		t.Fatalf("register with no credential: %+v", reg)
+	}
+	// Without a credential each attempt fails at once: at 0 s, 1 s and 3 s. The next is due at 7 s,
+	// well over the bound below, so only a wake can enroll the session in time.
+	time.Sleep(3500 * time.Millisecond)
+	r.login(t)
+	loggedIn := time.Now()
+	for {
+		signed := r.call(t, Request{Op: "sign", Method: "GET", URL: "https://secrets.test/v1/enrollments/self"})
+		if signed.OK {
+			t.Logf("the session signed %s after the login", time.Since(loggedIn))
+			return
+		}
+		if time.Since(loggedIn) > time.Second {
+			t.Fatalf("sign %s after the login: %+v; the login must wake the session's enrollment", time.Since(loggedIn), signed)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
 
 // TestSignAnswersNoCredentialWhileTheHelperHoldsNone: sign and sign-request for a registered
 // session with no enrollment answer NO_CREDENTIAL while the helper holds no launcher credential

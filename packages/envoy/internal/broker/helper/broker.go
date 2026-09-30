@@ -58,6 +58,9 @@ type Broker struct {
 	cred    atomic.Pointer[machineCredential]
 	loginMu sync.Mutex                 // one login at a time
 	login   atomic.Pointer[loginState] // pending login: code, pendingID, state
+
+	installedMu sync.Mutex
+	installed   chan struct{} // closed, then replaced, each time a credential is installed
 }
 
 // BrokerError is a non-success answer, with the contract's code.
@@ -187,6 +190,30 @@ func (b *Broker) HasCredential() bool {
 	return b.cred.Load() != nil
 }
 
+// CredentialInstalled returns a channel that closes the next time a machine login installs a
+// credential, so a retry that failed for want of one can try again at once rather than when its
+// backoff comes round.
+func (b *Broker) CredentialInstalled() <-chan struct{} {
+	b.installedMu.Lock()
+	defer b.installedMu.Unlock()
+	if b.installed == nil {
+		b.installed = make(chan struct{})
+	}
+	return b.installed
+}
+
+// installCredential makes cred the helper's launcher credential, then wakes every waiter on
+// CredentialInstalled.
+func (b *Broker) installCredential(cred *machineCredential) {
+	b.cred.Store(cred)
+	b.installedMu.Lock()
+	defer b.installedMu.Unlock()
+	if b.installed != nil {
+		close(b.installed)
+	}
+	b.installed = make(chan struct{})
+}
+
 // pollLogin polls a pending machine login until a human decides it, backing off from 2s to 10s
 // between attempts. On "issued" it installs the credential (key and id only — never written to
 // disk); on "denied" or "expired" it records the terminal state and leaves cred untouched.
@@ -197,7 +224,7 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
 		if state, credentialID, ok := b.readLoginStatus(ctx, pendingID); ok {
 			switch state {
 			case "issued":
-				b.cred.Store(&machineCredential{key: key, id: credentialID})
+				b.installCredential(&machineCredential{key: key, id: credentialID})
 				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: "issued"})
 				return
 			case "denied", "expired":

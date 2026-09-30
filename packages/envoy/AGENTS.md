@@ -1397,9 +1397,12 @@ or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but c
 for callers that choose between the broker and another backend. A helper holding no launcher
 credential, from every restart until the operator logs the machine in, enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
-with the same not-logged-in notice. `agent-secrets launcher login-status`, which the helper
-answers, exits 0 only for an issued login whose credential the helper still holds; once the broker
-refuses it (401 `LAUNCHER_INVALID`, expired or revoked) the login reads `expired`.
+with the same not-logged-in notice naming `agent-secrets launcher login`. The login that installs
+a credential wakes every registered session's enrollment retry, so those sessions reach the broker
+within about a second of it rather than when a backoff of up to a minute comes round.
+`agent-secrets launcher login-status`, which the helper answers, exits 0 only for an issued login
+whose credential the helper still holds; once the broker refuses it (401 `LAUNCHER_INVALID`,
+expired or revoked) the login reads `expired`.
 `register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles
 launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that
 login-status says `issued`, once the pinned release carries that answer and the helper has

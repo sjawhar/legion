@@ -354,13 +354,20 @@ func (s *Server) adopt(ctx context.Context, sess *Session, priorID string) {
 // starts at start and doubles toward maxDelay after each failure (start == maxDelay gives a
 // caller a fixed delay instead of a growing one); attempts caps the number of tries (0 means
 // unlimited), and try's last permitted attempt failing ends the loop at once, without waiting.
-// onFail runs after every failed attempt with its 1-based number, the error, the delay before
-// the next attempt (meaningless once retrying is false), and whether the loop is about to
-// retry, so a caller expresses only what it retries — its logging and any per-failure side
-// effect — not how retrying works. Returns whether try eventually succeeded.
-func retryUntilStop(ctx context.Context, stop <-chan struct{}, attempts int, start, maxDelay time.Duration, onFail func(attempt int, err error, delay time.Duration, retrying bool), try func() error) bool {
+// wake, when non-nil, gives a channel taken before each attempt: its closing cuts the wait short
+// and starts the backoff over, so a retry that failed for want of something retries the moment
+// it arrives (the broker's CredentialInstalled). onFail runs after every failed attempt with its
+// 1-based number, the error, the delay before the next attempt (meaningless once retrying is
+// false), and whether the loop is about to retry, so a caller expresses only what it retries —
+// its logging and any per-failure side effect — not how retrying works. Returns whether try
+// eventually succeeded.
+func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-chan struct{}, attempts int, start, maxDelay time.Duration, onFail func(attempt int, err error, delay time.Duration, retrying bool), try func() error) bool {
 	delay := start
 	for attempt := 1; attempts <= 0 || attempt <= attempts; attempt++ {
+		var woken <-chan struct{}
+		if wake != nil {
+			woken = wake()
+		}
 		err := try()
 		if err == nil {
 			return true
@@ -372,12 +379,14 @@ func retryUntilStop(ctx context.Context, stop <-chan struct{}, attempts int, sta
 		}
 		select {
 		case <-time.After(delay):
+			delay = min(delay*2, maxDelay)
+		case <-woken:
+			delay = start
 		case <-stop:
 			return false
 		case <-ctx.Done():
 			return false
 		}
-		delay = min(delay*2, maxDelay)
 	}
 	return false
 }
@@ -422,7 +431,9 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session, priorID string) 
 	for {
 		var id string
 		var lease time.Time
-		enrolled := retryUntilStop(ctx, sess.stop, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		// A login wakes the retry, so a session registered before it enrolls within about a second
+		// rather than when a backoff of up to a minute comes round.
+		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			sess.setError(err.Error())
 			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID, "error", err, "in", delay)
 		}, func() error {
@@ -483,9 +494,10 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 // session ends, or ctx is done. Backoff matches enrollLoop's: 1 s doubling to a 1-minute cap,
 // retried indefinitely rather than a fixed number of times — giving up would hand the dead id
 // straight back to the broker's idempotent-enroll conflict path, which can keep answering it
-// forever. Returns false only when the session ended or ctx was canceled first.
+// forever — and, like enrollLoop's, woken by a login, since a revoke needs the credential too.
+// Returns false only when the session ended or ctx was canceled first.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
-	return retryUntilStop(ctx, sess.stop, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	return retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
 	}, func() error {
 		return s.Broker.Revoke(ctx, id)
@@ -516,7 +528,7 @@ func (s *Server) retire(ctx context.Context, sess *Session, why string) {
 }
 
 func (s *Server) revoke(ctx context.Context, id string) {
-	retryUntilStop(ctx, nil, 3, 2*time.Second, 2*time.Second, func(attempt int, err error, delay time.Duration, retrying bool) {
+	retryUntilStop(ctx, nil, nil, 3, 2*time.Second, 2*time.Second, func(attempt int, err error, delay time.Duration, retrying bool) {
 		if !retrying {
 			s.Log.Warn("revoke failed; the lease lapses on its own", "enrollment_id", id, "error", err)
 		}

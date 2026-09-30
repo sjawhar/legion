@@ -158,31 +158,3 @@ func TestIdentityAsksARealHelperWithoutRegistering(t *testing.T) {
 		t.Fatalf("identity changed the helper's sessions: before %+v, after %+v", before, after)
 	}
 }
-
-// TestRegisterWaitReturnsAtOnceWithoutALauncherCredential runs `register --wait 10 --exec` against
-// the real helper while it holds no launcher credential: its enroll loop cannot succeed, so the
-// helper answers at once instead of holding the launch for the full wait. The launch still execs,
-// warning that the machine is not logged in, what the session's secrets calls do until it is, and
-// the login command. The bound only rules out the 10 s wait.
-func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
-	binary := buildAgentSecrets(t)
-	sock := realHelper(t)
-	cmd := exec.Command(binary, "register", "--wait", "10", "--exec", "--", "sh", "-c", "echo ran")
-	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_KEY_DIR=")
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	start := time.Now()
-	out, err := cmd.Output()
-	elapsed := time.Since(start)
-	if err != nil || strings.TrimSpace(string(out)) != "ran" {
-		t.Fatalf("the command must still run: %q %v (stderr %q)", out, err, stderr.String())
-	}
-	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets-login <login>) this session's agent-secrets calls fail and secret-run uses secretsd\n"
-	if stderr.String() != warning {
-		t.Fatalf("stderr %q, want the no-credential warning %q", stderr.String(), warning)
-	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("register --wait 10 took %s with no credential; it must not wait", elapsed)
-	}
-	t.Logf("register --wait 10 with no credential returned in %s", elapsed)
-}

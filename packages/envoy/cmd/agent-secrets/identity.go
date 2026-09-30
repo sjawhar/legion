@@ -165,7 +165,7 @@ func cmdIdentity(args []string, stdout, stderr io.Writer) int {
 	case resp.Code == helper.CodeNotASession:
 		return 1
 	case resp.Code == helper.CodeNoCredential:
-		reportError(stderr, "agent-secrets identity", errNoCredential)
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", errNoCredential)
 		return 1
 	default:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s answered %s: %s; not an agent session\n", sock, resp.Code, resp.Error)
