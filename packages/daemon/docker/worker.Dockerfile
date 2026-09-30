@@ -15,14 +15,13 @@
 # /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node 24 LTS with npm and
-# corepack's pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last two RUNs
-# gate the publish,
-# as the runtime user: the first checks every binary runs on the base, proves jj accepts the image's git
-# with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
-# daemon's two plus the session-storage probe) through `legion probe-image`; the last runs the Go
-# `legion version` and the Go `legion probe-image`, which runs the same three probes, holds the plugin
-# to the Go daemon API contract, prints the OK line the Go daemon's probe Sandbox reads, and checks that
-# every toolchain command runs as the runtime user. A broken image never publishes.
+# corepack's pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last two RUNs gate
+# the publish, as the runtime user: the first checks every binary runs on the base, proves jj accepts
+# the image's git with a network-free `jj git clone` of a scratch repository, and executes the three
+# launch probes (the daemon's two plus the session-storage probe) through `legion probe-image`; the last
+# runs the Go `legion version` and the Go `legion probe-image`, which runs the same three probes, holds
+# the plugin to the Go daemon API contract, prints the OK line the Go daemon's probe Sandbox reads, and
+# checks that every toolchain command runs as the runtime user. A broken image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
