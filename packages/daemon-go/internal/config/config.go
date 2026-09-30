@@ -128,8 +128,9 @@ type Config struct {
 	Linger         time.Duration
 	ReviewRoundCap int
 	MaxFixAttempts int
-	// ControllerWakeInterval is how often the daemon wakes a registered controller, whatever the
-	// slots (`controller_wake_interval_seconds`, an hour by default).
+	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
+	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
+	// admission's rule (admit.Admission.wakeController and its callers).
 	ControllerWakeInterval time.Duration
 }
 

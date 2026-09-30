@@ -170,10 +170,9 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // The controller notices no architect is told of. A triage notice's root is unrecorded, so no
 // architect owns it; a slot-free notice names the root whose slot admission released while no
 // waiting root took it, and the controller picks the next root to hand to Legion. A todo notice
-// names an issue not handed to Legion that Dispatch shows in `todo` while a slot stands free, a new
-// candidate for that walk; a tick is the daemon's periodic wake whatever the slots, whose issue is
-// the project key, so the controller rechecks a tree waiting on a root claim, walks again, and
-// posts the day's report even when nothing else happens.
+// names an issue not handed to Legion that changed in `todo`, a new candidate for that walk; a
+// tick is the daemon's periodic wake, whose issue is the project key. When admission sends each
+// is its rule (admit.Admission.wakeController and its callers).
 const (
 	TriageNotice   NoticeKind = "triage"
 	SlotFreeNotice NoticeKind = "slot-free"

@@ -91,7 +91,8 @@ Envoy hands an Oh My Pi session no retained copy of a notice published before it
 hold, a tree architect's failed claim, a new triage root, or a freed slot from while no controller
 ran never arrives as a wake. `legion controller start` opens your first turn with a start message
 (`Legion controller start: …`), so every start and restart runs this procedure with nothing typed.
-At every start, before anything else:
+At every start, after the claim recheck ([Turn discipline](#turn-discipline)) and before anything
+else:
 
 1. Read `legion state --json` and handle each issue whose `issues.<KEY>.phase` is `held` (its
    `issues.<KEY>.holdReason` is `escalated` when its architect sent it to you, and absent while the
@@ -138,8 +139,8 @@ off an admitted tree does not stop it.
 
 A Go root architect whose claim on its root issue was refused starts nothing and waits, holding
 its slot, until the claim is free; nothing tells it when a session holder lets go without
-replying. So at every turn (every start and every wake, the daemon's `tick` included, which comes
-on its interval even with every slot taken), before anything else the turn does, read each root in
+replying. So every turn rechecks them ([Turn discipline](#turn-discipline)), the daemon's `tick`
+included, which comes on its interval even with every slot taken: read each root in
 `admission.active` whose `issues.<KEY>.phase` is still `admitted` with `dispatch_read`. When its
 `Claimed by:` line is `nobody` or ends `· not running`, tell that tree's architect to claim again
 with `envoy_publish` to `notifications.role.` followed by its claim token,
@@ -301,8 +302,10 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 - **Direct user message always first.** If this turn includes a direct user message, answer
   it before handling every other wake.
 - **One wake = one turn.** Handle exactly the wake's implication, then end the turn. Never
-  poll, idle-loop, or wait for another event. The one addition: your first turn of each UTC day,
-  whatever woke you, also posts the day's report ([Daily report](#daily-report-go-daemon)).
+  poll, idle-loop, or wait for another event. Two additions, after any direct user message: every
+  turn under the Go daemon first rechecks the [trees waiting on a root
+  claim](#trees-waiting-on-a-root-claim-go-daemon), and your first turn of each UTC day, whatever
+  woke you, also posts the day's report ([Daily report](#daily-report-go-daemon)).
 - **Wakes are advisory.** Before any side effect, verify the current daemon state and the
   relevant Dispatch issue. A stale or duplicate wake may cost a read, never a wrong action.
 - **Controller state is disposable.** Do not reconstruct or preserve local controller

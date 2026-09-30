@@ -86,9 +86,8 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 
 // ControllerTick is the daemon's periodic wake for the project's controller, applied as a
 // synthetic fact every `controller_wake_interval_seconds` and never decoded from an event.
-// Admission is the only handler that acts on it: while a controller is registered, whatever the
-// slots, it wakes the controller to recheck trees waiting on a root claim, walk for work, and post
-// the day's report.
+// Admission is the only handler that acts on it; when it wakes the controller is admission's rule
+// (admit.Admission.wakeController and its callers).
 type ControllerTick struct{}
 
 func (ControllerTick) isFact() {}
