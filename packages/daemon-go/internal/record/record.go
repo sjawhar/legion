@@ -93,6 +93,10 @@ type PhaseRow struct {
 	// reported for the round that carried one, kept until the round ends, since the reviewer's
 	// completion can come after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
+	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
+	// then. The reviewer's orders the reviews its round receives: one submitted after it is the
+	// reviewer's answer to a round it left undecided (workflow's tellStuckReview).
+	CompletedAt time.Time
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,

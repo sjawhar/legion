@@ -500,6 +500,10 @@ notice_needle() { printf 'summary: %s on %s' "$1" "$2"; }
 notice_deliveries() {
   { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -cF -- "$3" || true
 }
+# architect_messages ISSUE ROLE counts the Envoy messages in the claim's session that ISSUE's
+# architect sent: the listener renders each with a reply_role naming its sender's role topic
+# (envoy-client's delivery.ts), which the proof's own steer and every other sender do not carry.
+architect_messages() { notice_deliveries "$1" "$2" "notifications.role.$(claim_token "$1" architect)"; }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
 # worker_sessions SESSIONS prints each phase-worker session file under SESSIONS and the role it
 # claims, tab-separated. A session's role is its newest Envoy role claim; an architect or controller

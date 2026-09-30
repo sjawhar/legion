@@ -532,6 +532,38 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 	}
 }
 
+// A round the retry restores to reviewing that its reviewer completed before the hold, and that no
+// review decides, is stuck as it was: the architect is told again, and the restarted reviewer's task
+// says why, so it submits the decision rather than reviewing afresh.
+func TestARetryOfAStuckRoundTellsTheArchitectAndTheReviewer(t *testing.T) {
+	pool := migratedPool(t)
+	seedReviewOf(t, pool, "c0ffee", "green")
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+	for i, fact := range []intake.Fact{
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
+		intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
+		intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
+	} {
+		if result := apply(fmt.Sprintf("stuck-%d", i), fact); result.Refusal != nil {
+			t.Fatalf("fact %d (%T) was refused: %+v", i, fact, result.Refusal)
+		}
+	}
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("the issue is in %s, want reviewing", got)
+	}
+	if got := reviewStuckNotices(t, pool); len(got) != 2 {
+		t.Fatalf("the architect was told %d times (%+v), want twice: at the completion and at the retry", len(got), got)
+	}
+	var task string
+	if err := pool.QueryRow(t.Context(), `select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'
+		and payload->>'role' = 'reviewer' order by id desc limit 1`).Scan(&task); err != nil {
+		t.Fatalf("read the reviewer's retry task: %v", err)
+	}
+	if !strings.Contains(task, "retry held phase") || !strings.Contains(task, "no review that decides it") || !strings.Contains(task, "c0ffee") {
+		t.Fatalf("the reviewer's retry task = %q, want the retry and why its round is stuck, naming head c0ffee", task)
+	}
+}
+
 // A round ends only on a review that decides it: an APPROVE of the head or a REQUEST_CHANGES. A
 // reviewer that completes its round with none - it submitted a COMMENT, a review in any other
 // state, or no review at all - leaves the issue in reviewing with nothing on its way to end it, so
@@ -542,22 +574,33 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 // completion is still to come. A deciding review from the same round still ends it, as always.
 func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 	const reviewApp = "legion-reviewer[bot]"
+	// testEngine's clock applies the completion at midnight; GitHub stamps each review's submission.
+	early, late := time.Date(2026, 9, 22, 23, 59, 0, 0, time.UTC), time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		name     string
-		before   []string
-		after    []intake.PullRequestReview
-		told     int
+		name   string
+		before []string
+		after  []intake.PullRequestReview
+		told   int
+		// ended is the phase the reviews after the completion end the round in; empty, they leave it
+		// in reviewing and a deciding review ends it.
+		ended    phase.Phase
 		decision string
 		want     phase.Phase
 	}{
 		{name: "a COMMENT, then the reviewer completes", before: []string{"commented"}, told: 1, decision: "approved", want: phase.Retro},
 		{name: "no review at all", told: 1, decision: "approved", want: phase.Retro},
 		{name: "a dismissed review, then the reviewer completes", before: []string{"dismissed"}, told: 1, decision: "changes_requested", want: phase.Implementing},
-		{name: "the reviewer completes, then its COMMENT", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought"}},
+		{name: "the reviewer completes, then its COMMENT submitted after the completion", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought", SubmittedAt: late}},
 			told: 2, decision: "changes_requested", want: phase.Implementing},
-		{name: "the reviewer completes, then its reply on a review thread", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp}},
+		{name: "the reviewer completes, then its COMMENT submitted before the completion, delivered after", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought", SubmittedAt: early}},
+			told: 1, decision: "changes_requested", want: phase.Implementing},
+		{name: "the reviewer completes, then its COMMENT with no submission time", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought"}},
 			told: 1, decision: "approved", want: phase.Retro},
-		{name: "the reviewer completes, then another account's COMMENT", after: []intake.PullRequestReview{{State: "commented", Author: "a-human", Body: "a thought"}},
+		{name: "the reviewer completes, then its approval submitted before the completion, delivered after", after: []intake.PullRequestReview{{State: "approved", Author: reviewApp, Body: "ship it", SubmittedAt: early}},
+			told: 1, ended: phase.Retro},
+		{name: "the reviewer completes, then its reply on a review thread", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, SubmittedAt: late}},
+			told: 1, decision: "approved", want: phase.Retro},
+		{name: "the reviewer completes, then another account's COMMENT", after: []intake.PullRequestReview{{State: "commented", Author: "a-human", Body: "a thought", SubmittedAt: late}},
 			told: 1, decision: "approved", want: phase.Retro},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -584,8 +627,12 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 			for i, after := range tc.after {
 				review(fmt.Sprintf("after-%d", i), after)
 			}
-			if got := issuePhase(t, pool); got != phase.Reviewing {
-				t.Fatalf("the issue is in %s, want reviewing: nothing decided the round", got)
+			wantPhase := tc.ended
+			if wantPhase == "" {
+				wantPhase = phase.Reviewing
+			}
+			if got := issuePhase(t, pool); got != wantPhase {
+				t.Fatalf("after the reviews that followed the completion the issue is in %s, want %s", got, wantPhase)
 			}
 			told := reviewStuckNotices(t, pool)
 			if len(told) != tc.told {
@@ -596,7 +643,10 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 					t.Fatalf("notice %+v, want the reviewer's reviewing round, naming head c0ffee", notice)
 				}
 			}
-			review("decides", intake.PullRequestReview{State: tc.decision, Author: reviewApp, Body: "the decision"})
+			if tc.ended != "" {
+				return
+			}
+			review("decides", intake.PullRequestReview{State: tc.decision, Author: reviewApp, Body: "the decision", SubmittedAt: late})
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("after the %s review the issue is in %s, want %s", tc.decision, got, tc.want)
 			}

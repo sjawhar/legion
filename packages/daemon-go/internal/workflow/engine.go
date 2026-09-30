@@ -286,7 +286,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 		row.LastHandoff = fact.Commit
 	}
-	row.Claim, row.HandoffCommit, row.Verdict, row.Summary = fact.Claim, fact.Commit, fact.Verdict, fact.Summary
+	row.Claim, row.HandoffCommit, row.Verdict, row.Summary, row.CompletedAt = fact.Claim, fact.Commit, fact.Verdict, fact.Summary, e.now()
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -586,7 +586,9 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	// A review round held open may already have both of its halves: the reviewer completed before
 	// the hold, and its review was recorded while held. The round ends here, and the reviewer is
 	// started only if it is still open - a second completion of the same commit would be refused as
-	// not new.
+	// not new. A round its reviewer completed that no decision ends is stuck (stuckReview): the
+	// architect is told, and the reviewer's task says why, so the restarted reviewer decides it.
+	reason := "retry held phase"
 	if from == phase.Reviewing {
 		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
 		if err != nil {
@@ -598,8 +600,18 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 		if issue, err = e.store.Issue(ctx, tx, issue.Key); err != nil || issue == nil || issue.Phase != phase.Reviewing {
 			return intake.Result{}, err
 		}
+		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if stuck := stuckReview(*issue, reviewer, pr); stuck != "" {
+			if err := e.tellStuckReview(ctx, tx, *issue, reviewer, pr, ""); err != nil {
+				return intake.Result{}, err
+			}
+			reason += ": " + stuck
+		}
 	}
-	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
+	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, reason))
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {

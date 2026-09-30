@@ -104,13 +104,14 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil {
 		return intake.Result{}, err
 	}
-	// A review the reviewer submitted (the review App's, with a body) is its own act, and every one
-	// that leaves a round it completed stuck is told: it may be the answer to the architect's request
-	// for a decision. GitHub records each reply on a review thread as a review with no body, which
-	// answers nothing; such a reply, and anyone else's review, tells only when it changes why the
-	// round is stuck.
+	// A review the reviewer submitted after completing its round (the review App's, with a body,
+	// submitted after the completion was applied) is its answer to a round it left undecided, and
+	// every one that leaves the round stuck is told. Anything else tells only when it changes why
+	// the round is stuck: a review submitted before the completion but delivered after it, since the
+	// completion comes through the API and the review by webhook; a reply on a review thread, which
+	// GitHub records as a review with no body; a review with no submission time; anyone else's.
 	before := ""
-	if !e.byReviewApp(fact.Author) || fact.Body == "" {
+	if !e.byReviewApp(fact.Author) || fact.Body == "" || !fact.SubmittedAt.After(reviewer.CompletedAt) {
 		before = stuckReview(*issue, reviewer, pr)
 	}
 	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
