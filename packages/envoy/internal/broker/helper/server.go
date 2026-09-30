@@ -179,12 +179,13 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 // in Error, so a launcher can say what the session will do. The credential is read once, before
 // the wait, and that one reading decides both: an unenrolled session's reply says NO_CREDENTIAL
 // exactly when the wait was skipped for want of a credential, whatever a login or a refusal
-// changed meanwhile.
+// changed meanwhile. A session whose enrollment lapsed waits for its re-enrollment, since a lapse
+// reopens its ready channel (markLapsed).
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	if wait > 0 && credential {
 		select {
-		case <-sess.ready:
+		case <-sess.readyCh():
 		case <-time.After(wait):
 		case <-sess.stop:
 		}
@@ -199,12 +200,17 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 // notEnrolled answers sign or sign-request for a registered session with no enrollment yet: it is
 // enrolling (NOT_ENROLLED) while the helper holds a launcher credential, and without one the
 // helper enrolls no one until a human logs it in, so the session has no broker identity
-// (NO_CREDENTIAL).
+// (NO_CREDENTIAL). NOT_ENROLLED names the last attempt's failure when there is one: an enroll
+// error, or a lapse's refused renew (markLapsed).
 func (s *Server) notEnrolled(sess *Session) Response {
 	if !s.Broker.HasCredential() {
 		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
 	}
-	return Response{Code: CodeNotEnrolled, Error: "this session is not enrolled with the broker yet; last attempt: " + sess.LastError()}
+	msg := "this session is not enrolled with the broker yet"
+	if last := sess.LastError(); last != "" {
+		msg += "; last attempt: " + last
+	}
+	return Response{Code: CodeNotEnrolled, Error: msg}
 }
 
 // resolveDescendant keeps peer's pidfd open through Registry.Root's ancestry walk, exactly like
@@ -404,10 +410,10 @@ func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-cha
 // broker's idempotent-enroll conflict path can otherwise keep answering the same dead id forever
 // (a base-branch bug tracked separately). Revoking first, with revokeLapsed's
 // retry-until-gone loop, makes the old row's absence (or the session ending first) a
-// precondition of the enroll attempt rather than a race with it; the lapsed id stays on the
-// session's record until then, so a helper restart meanwhile still revokes it. A session that
-// ends before that revoke succeeds still gets its revoke: revokeLapsed hands the id on (see its
-// comment).
+// precondition of the enroll attempt rather than a race with it; while the session lives the
+// lapsed id stays on its record until then, so a helper restart meanwhile still revokes it. A
+// session that ends before that revoke succeeds hands the id to the bounded revoke (revokeLapsed),
+// and if that fails too the id ends with its lease.
 func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 	for {
 		if lapsed := sess.lapsed(); lapsed != "" {
@@ -458,7 +464,7 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 		next, err := s.Broker.Renew(ctx, sess)
 		var be *BrokerError
 		if errors.As(err, &be) && be.Status == http.StatusUnauthorized {
-			id := sess.markLapsed()
+			id := sess.markLapsed("the broker refused this session's renew (" + be.Code + "); enrolling again")
 			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID, "code", be.Code, "enrollment_id", id)
 			return true
 		}
@@ -479,8 +485,10 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 // Returns false only when the session ended or ctx was canceled first. A session that ends
 // mid-backoff cannot leave the id to retire, which revokes only sess.EnrollmentID(), and a
 // lapsed id is never that. So the id goes to the same bounded, independent revoke retire uses,
-// decoupled from the session. ctx done means the whole daemon is exiting, and nothing further is
-// attempted.
+// decoupled from the session: three tries, 2 s apart. They need a launcher credential like any
+// revoke, so before a login they fail, and the id is left to its lease; nothing renews that row
+// again, since the session's key went with it. ctx done means the whole daemon is exiting, and
+// nothing further is attempted.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
 	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
@@ -552,14 +560,15 @@ func (s *Server) save() {
 // its lapsed id (setLapsed), so its own enrollLoop revokes that id before enrolling the fresh
 // key, exactly as after a refused renew: the real broker's idempotent-enroll conflict is keyed on
 // (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of the old row's revoke
-// can be refused outright (409 ALREADY_ENROLLED) even though it carries a fresh key. The lapsed
-// id is on the session's record from the save below until the revoke lands, so a second restart
-// before then — a restart discards the launcher credential, so before the next login no revoke
-// can succeed — still revokes it. That revoke runs inside the one goroutine adopt starts for the
-// re-pinned session, never on this loop's own goroutine, so one session waiting on its own revoke
-// never blocks Recover from moving on to the next recorded session. Should that session end while
-// the revoke is still retrying, revokeLapsed hands the id to the bounded independent revoke
-// instead of abandoning it (see its doc comment).
+// can be refused outright (409 ALREADY_ENROLLED) even though it carries a fresh key. While the
+// re-pinned session lives, the lapsed id is on its record from the save below until the revoke
+// lands, so a second restart before then — a restart discards the launcher credential, so before
+// the next login no revoke can succeed — still revokes it. That revoke runs inside the one
+// goroutine adopt starts for the re-pinned session, never on this loop's own goroutine, so one
+// session waiting on its own revoke never blocks Recover from moving on to the next recorded
+// session. Should that session end while the revoke is still retrying, its record goes with it,
+// and revokeLapsed hands the id to the bounded independent revoke; before a login those three
+// tries cannot succeed either, and the id ends with its lease (see revokeLapsed's doc comment).
 func (s *Server) Recover(ctx context.Context) {
 	recs, err := LoadRecords(s.Registry.path)
 	if err != nil {
