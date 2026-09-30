@@ -102,6 +102,7 @@ export function SnoozeControl({
         <select
           aria-label={`Snooze ${label}`}
           className={badgeSelectOverlay}
+          data-inbox-snooze=""
           onChange={(event) => {
             const preset = SNOOZE_PRESETS.find((option) => option.id === event.target.value);
             if (preset !== undefined) write.submit(preset.until(new Date()));

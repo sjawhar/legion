@@ -554,6 +554,67 @@ test("the header checkbox selects and clears only the rows the filters match, by
   }
 });
 
+// Select-all ticks rows in `toggleMatching`'s order, and the chips name the selection in the order
+// it was ticked, so the two agree only if the set it walks is ordered the way the page shows it.
+// The registry's own order is not that order, which is what this seeds.
+test("select-all ticks the rows in the order the page shows them, not the order the registry lists them", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the order rule");
+  const session = (id: string, title: string): FakeSession => ({
+    capabilities: ["aside", "btw"],
+    dir: `/workspaces/${id}`,
+    machine_id: "build-host",
+    roles: ["planner"],
+    session_id: `${id}-session`,
+    title,
+  });
+  // Each speaks on an issue, oldest first, so the page lists them newest-activity-first - Alpha,
+  // Mid, Zeta - while the registry is seeded in the opposite order, which is the order select-all
+  // used to walk.
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Ordering" });
+  for (const id of ["zeta", "mid", "alpha"]) {
+    await createComment(
+      issue.key,
+      { body: `${id} reporting.` },
+      { actor: { id: `${id}-session`, kind: "session" }, as: "agent" }
+    );
+  }
+  await setLiveSessions([
+    session("zeta", "Zeta"),
+    session("mid", "Mid"),
+    session("alpha", "Alpha"),
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    await expect(agents.locator("article h2")).toHaveText(["Alpha", "Mid", "Zeta"]);
+
+    // A pin is the reader's own, held in the browser, so it reorders the rows and nothing the
+    // server sends knows about it: the rendered order and the listed order now differ for sure.
+    await agents.getByRole("button", { name: "Pin Zeta" }).click();
+    await expect(agents.locator("article h2")).toHaveText(["Zeta", "Alpha", "Mid"]);
+
+    await agents.getByRole("checkbox", { name: "Select all matching agents" }).check();
+    const chips = page
+      .getByRole("region", { name: "Broadcast" })
+      .getByRole("list", { name: "Selected agents" })
+      .getByRole("button");
+    await expect(chips).toHaveText(["Zeta ✕", "Alpha ✕", "Mid ✕"]);
+
+    // The composer speaks for the same set, in the same order the rows are in.
+    await expect(
+      page.getByRole("region", { name: "Broadcast" }).getByRole("button", { name: "Send to 3" })
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
 test("the header checkbox stays under the pointer on a phone when its click opens the composer", async ({
   browser,
 }, testInfo) => {

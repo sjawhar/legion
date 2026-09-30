@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -34,6 +35,7 @@ import {
   connectionDotConnecting,
   dangerText,
   disclosureButtonText,
+  focusVisibleRing,
   inputClasses,
   linkHoverText,
   linkText,
@@ -51,6 +53,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import type { CarriedDraft } from "../conversation/MentionComposer";
 import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
@@ -63,9 +66,14 @@ import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
-
 import { deliveryAttempts } from "./attempts";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
+import {
+  AGENT_ROW_SELECTOR,
+  ISSUE_PICKER_SELECTOR,
+  leaveAgentComposer,
+  useAgentsKeymap,
+} from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
@@ -498,20 +506,143 @@ function AgentMessageList({
 function AgentMessageComposer({
   agent,
   onCancelReply,
+  onClose,
   replyTo,
 }: {
   agent: Agent;
   onCancelReply: () => void;
+  /** One level out of the composer: the row it belongs to takes focus. The composer calls it on
+   *  Escape from an untouched draft and on Discard - and also right after a successful send,
+   *  which is NOT one level out; that case is filtered below. */
+  onClose: () => void;
   replyTo: AgentReply | null;
 }): ReactNode {
   const queryClient = useQueryClient();
   const [issueKey, setIssueKey] = useState("");
   const [issuePickerOpen, setIssuePickerOpen] = useState(false);
+  // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's
+  // `onSuccess`), and a reader who has just sent a message is still writing to this agent: moving
+  // focus to the row would turn their next letters into `x` / `i` / `Shift+P` shortcuts. The flag
+  // is set on the way past `onSent` and consumed by the `onClose` that follows it.
+  const sentJustNow = useRef(false);
+  const box = useRef<HTMLDivElement>(null);
+  // `MentionComposer` disables its textarea while a send is in flight (`disabled={save.isPending}`),
+  // and a disabled field hands focus back to the document. The reader is still writing to this
+  // agent, so focus returns the moment React re-enables the field - watched, rather than guessed
+  // at with a frame or a timer, because the write's latency is the server's.
+  const refocusWatcher = useRef<MutationObserver | null>(null);
+  useEffect(() => () => refocusWatcher.current?.disconnect(), []);
+  /** Only the focus the disable took is the composer's to give back: through the whole round trip
+   *  it sits on the document, so a reader who has clicked something else in the meantime keeps
+   *  where they went - otherwise the next keys, `Ctrl+Enter` included, would land in the composer
+   *  they have already sent from, addressed to another agent. */
+  const refocusComposer = () => {
+    const field = box.current?.querySelector("textarea");
+    if (field === null || field === undefined) return;
+    const takeBack = () => {
+      const active = document.activeElement;
+      if (active === null || active === document.body) field.focus();
+    };
+    refocusWatcher.current?.disconnect();
+    if (!field.disabled) {
+      takeBack();
+      return;
+    }
+    const watcher = new MutationObserver(() => {
+      if (field.disabled) return;
+      watcher.disconnect();
+      takeBack();
+    });
+    watcher.observe(field, { attributeFilter: ["disabled"] });
+    refocusWatcher.current = watcher;
+  };
+  /** The draft as the composer last held it - body and accepted mentions together - so a pick
+   *  that remounts it to change the message's owner hands the reader's work to the new
+   *  instance rather than dropping it. Opaque here: it is handed back as it was given. */
+  const carried = useRef<CarriedDraft | undefined>(undefined);
+  const keepCarry = useCallback((draft: CarriedDraft) => {
+    carried.current = draft;
+  }, []);
+  /** What the picker's selection reads while it is open, which is the reader's until they commit
+   *  it: the select's own keys move it, `Enter`, or a pick made with the pointer or in the native
+   *  popup, takes it, and leaving the select without committing puts it back on `issueKey`. */
+  const [pendingIssue, setPendingIssue] = useState(issueKey);
+  /** Whether the change arriving now is a key on the select stepping its selection, which only
+   *  moves it: `Enter` is the pick. The test is the task the change arrives in, not the key.
+   *  Chromium, Firefox and WebKit all step a closed select from the key event's own default
+   *  action - the arrows, `Home`/`End` and the page keys from `keydown`, type-ahead from
+   *  `keypress` - and dispatch `change` in that same task. A key that opens the native popup
+   *  instead (the arrows on macOS; `Alt+ArrowDown` in Chromium and Firefox on Linux) steps
+   *  nothing, and the pick then made in the popup arrives in a later task, as a pointer's does:
+   *  that is a pick made, and it commits at once. So each key on the select marks the flag and
+   *  the next task clears it. */
+  const movedByKeyboard = useRef(false);
+  const markKeyStep = () => {
+    movedByKeyboard.current = true;
+    setTimeout(() => {
+      movedByKeyboard.current = false;
+    }, 0);
+  };
+  /** Bumped by every commit, the issue changed or not, since every commit unmounts the select the
+   *  reader is in. The hand-off keys on it rather than on `issueKey`, which re-confirming the
+   *  issue already held leaves alone. */
+  const [commits, setCommits] = useState(0);
+  const commitIssue = (value: string) => {
+    setIssueKey(value);
+    setIssuePickerOpen(false);
+    setCommits((count) => count + 1);
+  };
+  // A layout effect, so the frame the commit paints already has the field focused rather than
+  // the document: the reader's next keystroke is the message, whichever hand made the pick. When
+  // the pick changes the channel the composer remounts in that same commit, and the field this
+  // finds is the new instance's.
+  useLayoutEffect(() => {
+    if (commits === 0) return;
+    box.current?.querySelector("textarea")?.focus();
+  }, [commits]);
   const issues = useQuery({
     enabled: issuePickerOpen,
     queryFn: () => api.listIssues({ open: true }),
     queryKey: ["agents", "issue-picker"],
   });
+  // The picker exists to be used, so opening it hands over the control inside it - the same
+  // move `MultiSelect` makes with its search box. It is what `i` needs (a key that opened
+  // something no keystroke could then reach would be a dead end) and what a pointer wants too,
+  // and it waits for the list rather than a frame, since the select renders only once the read
+  // lands.
+  //
+  // That wait is the whole latency of `GET /issues`, and a reader who has roved on in the
+  // meantime keeps where they went - `takeBack`'s rule above, widened to the row this composer
+  // belongs to: focus is the picker's to take only while it is still where the open left it.
+  // Once per open, so a refetch behind the reader never pulls them back either.
+  const issueSelect = useRef<HTMLSelectElement>(null);
+  const pickerTookFocus = useRef(false);
+  useEffect(() => {
+    if (!issuePickerOpen) return;
+    setPendingIssue(issueKey);
+  }, [issueKey, issuePickerOpen]);
+  useEffect(() => {
+    if (!issuePickerOpen) {
+      pickerTookFocus.current = false;
+      return;
+    }
+    // The list is the dependency that matters: the select renders only once it lands.
+    if (issues.data === undefined || pickerTookFocus.current || issueSelect.current === null) {
+      return;
+    }
+    // Where the open can have left focus, named: the row `i` was pressed on, the toggle a
+    // pointer clicked, or nothing at all. A reader who has gone on - to another row, or into
+    // this composer's own field - keeps where they went.
+    const active = document.activeElement;
+    const openedOn =
+      active === null ||
+      active === document.body ||
+      active === box.current?.closest(AGENT_ROW_SELECTOR) ||
+      (active instanceof Element && active.matches(ISSUE_PICKER_SELECTOR));
+    if (!openedOn) return;
+    pickerTookFocus.current = true;
+    issueSelect.current.focus();
+  }, [issuePickerOpen, issues.data]);
   // Replies retain their parent owner: issue-attached legacy messages stay on that issue's
   // message route, while issue-less roots keep the S3-deferred direct session channel.
   const replyIssueKey = replyTo?.issueKey;
@@ -522,12 +653,13 @@ function AgentMessageComposer({
     : { issueKey: replyIssueKey ?? issueKey, kind: "issue" as const };
 
   return (
-    <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
+    <div className={`mt-3 border-t pt-3 ${borderDefault}`} ref={box}>
       {replyTo === null ? (
         <button
           aria-expanded={issuePickerOpen}
           aria-label="Choose issue"
           className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+          data-agent-issue-picker=""
           onClick={() => setIssuePickerOpen((open) => !open)}
           type="button"
         >
@@ -548,11 +680,34 @@ function AgentMessageComposer({
               <select
                 aria-label="Issue"
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
-                onChange={(event) => {
-                  setIssueKey(event.target.value);
-                  setIssuePickerOpen(false);
+                onBlur={() => {
+                  // A step is not a pick until `Enter`, so leaving the select any other way -
+                  // Tab, Shift+Tab, a click elsewhere - drops it, as Escape does: the open select
+                  // never shows an issue the message is not addressed to.
+                  setPendingIssue(issueKey);
                 }}
-                value={issueKey}
+                onChange={(event) => {
+                  setPendingIssue(event.target.value);
+                  // A step from the select's own keys only moves the selection, so a keyboard
+                  // reader can pass the first option to reach the second; `Enter` below is the
+                  // pick. Any other change - a pointer's, or one made in the native popup - is a
+                  // pick already made.
+                  if (movedByKeyboard.current) return;
+                  commitIssue(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    // The commit is this key's, and it stops here: left to bubble it would land
+                    // in the message the pick just addressed, as a newline at its top.
+                    event.preventDefault();
+                    commitIssue(event.currentTarget.value);
+                    return;
+                  }
+                  markKeyStep();
+                }}
+                onKeyPress={markKeyStep}
+                ref={issueSelect}
+                value={pendingIssue}
               >
                 <option value="">No issue</option>
                 {issues.data.map((issue) => (
@@ -571,14 +726,29 @@ function AgentMessageComposer({
             ? undefined
             : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
         }
-        key={useDirectChannel ? `session:${agent.session_id}` : `issue:${issueKey}`}
+        carried={carried.current}
+        onCarry={keepCarry}
+        // The channel decides which mention the message needs - an issue comment reaches this
+        // agent by mentioning it, a direct message does not - so the composer is remounted when
+        // the channel changes, and only then; one issue to another keeps the same instance. The
+        // pick carries the reader's draft across that remount (`carried`).
+        key={useDirectChannel ? "session" : "issue"}
         onCancelReply={onCancelReply}
-        onClose={onCancelReply}
+        onClose={() => {
+          if (sentJustNow.current) {
+            sentJustNow.current = false;
+            return;
+          }
+          onClose();
+        }}
         onSent={() => {
+          sentJustNow.current = true;
           onCancelReply();
           void queryClient.invalidateQueries({
             queryKey: agentMessagesQuery(agent.session_id).queryKey,
           });
+          // Focus went to the document when the field disabled itself; take it back.
+          refocusComposer();
         }}
         owner={composerOwner}
         replyTo={replyTo?.target ?? null}
@@ -645,13 +815,21 @@ function AgentRow({
   const detailsId = useId();
 
   return (
-    <article className={`rounded-xl border ${card} ${borderDefault}`}>
+    <article
+      className={`rounded-xl border outline-none focus-visible:ring-2 ${card} ${borderDefault} ${focusVisibleRing}`}
+      data-agent-row={agent.session_id}
+      // The issue picker renders only while this row is not answering a message, and a collapsed
+      // row has no picker in the DOM at all, so the row itself carries whether `i` can act.
+      data-agent-can-pick-issue={replyTo === null ? "" : undefined}
+      tabIndex={-1}
+    >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
         <div className="flex min-w-0 flex-auto flex-wrap items-center gap-x-2 md:flex-nowrap">
           <input
             aria-label={`Select ${label} for broadcast`}
             checked={selected}
             className={`size-4 shrink-0 ${checkboxAccent}`}
+            data-agent-select=""
             onChange={(event) => onSelect(event.target.checked)}
             type="checkbox"
           />
@@ -661,6 +839,7 @@ function AgentRow({
               aria-controls={detailsId}
               aria-expanded={expanded}
               className={`flex min-h-11 max-w-full items-center gap-1 text-left md:min-h-8 ${textPrimaryOnCanvas}`}
+              data-agent-toggle=""
               onClick={() => setExpanded((open) => !open)}
               title={label}
               type="button"
@@ -734,12 +913,15 @@ function AgentRow({
               wording="Waiting on agent"
             />
           )}
-          <PinButton
-            label={pinned ? `Unpin ${label}` : `Pin ${label}`}
-            onClick={onPin}
-            pinned={pinned}
-            title={pinned ? "Unpin agent" : "Pin agent"}
-          />
+          {/* `contents` so the keymap has a handle on the pin without a box in the flex row. */}
+          <span className="contents" data-agent-pin="">
+            <PinButton
+              label={pinned ? `Unpin ${label}` : `Pin ${label}`}
+              onClick={onPin}
+              pinned={pinned}
+              title={pinned ? "Unpin agent" : "Pin agent"}
+            />
+          </span>
         </div>
       </div>
       {expanded ? (
@@ -755,11 +937,14 @@ function AgentRow({
             </span>
           </div>
           <AgentMessageList agent={agent} liveAgents={liveAgents} onReply={setReplyTo} />
-          <AgentMessageComposer
-            agent={agent}
-            onCancelReply={() => setReplyTo(null)}
-            replyTo={replyTo}
-          />
+          <div data-agent-composer="">
+            <AgentMessageComposer
+              agent={agent}
+              onCancelReply={() => setReplyTo(null)}
+              onClose={leaveAgentComposer}
+              replyTo={replyTo}
+            />
+          </div>
         </div>
       ) : null}
     </article>
@@ -1180,15 +1365,19 @@ export function AgentsPage(): ReactNode {
   // successful send clears it.
   const [draft, setDraft] = useState("");
   const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
-  const matching = filterAgents(agents, filters);
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
   const { active, quiet, inactive } = partitionAgents(
-    matching,
+    filterAgents(agents, filters),
     pinned,
     needsYouBySession,
     Date.now()
   );
+  // The rows the filters match, in the order the page shows them - the open list, then each fold.
+  // Select-all ticks this set in order and the composer names the selection in tick order, so a
+  // set ordered any other way (the registry's own, say) would name the recipients in an order the
+  // reader never sees, and send them in it.
+  const matching = [...active, ...quiet, ...inactive];
   const togglePin = (sessionID: string) => {
     const next = pinned.includes(sessionID)
       ? pinned.filter((candidate) => candidate !== sessionID)
@@ -1203,12 +1392,14 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
+  const listRef = useRef<HTMLElement>(null);
+  useAgentsKeymap(listRef);
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;
 
   return (
-    <section aria-label="Agents">
+    <section aria-label="Agents" ref={listRef}>
       <header className={`mb-5 border-b pb-4 ${borderDefault}`}>
         <h1 className={`text-[22px] font-semibold tracking-tight ${textPrimaryOnCanvas}`}>
           Agents

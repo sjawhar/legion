@@ -18,6 +18,7 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 | Host rollout helper | `scripts/sync-host.sh` | sync packed release tarball to remote host                         |
 | Dispatch tools | `src/server.ts` (`dispatch_*` in the `tool` map), `@legion/contracts` (`dispatchToolSpecs`, `zodSchemaApi`), `@legion/envoy-client/dispatch-*` | Native tools are present when `resolveDispatchConfig` resolves URL and bearer token; an invalid `envoy.json` leaves Envoy loaded, logs a warning, and omits Dispatch tools. Build every host schema from `spec.arguments(zodSchemaApi(tool.schema))`; return `DispatchToolResult.details` as OpenCode tool metadata; no tool result subscribes the session to an issue (whole-issue subscription is the agent's own `envoy_subscribe`; a write follows only the ask it touched). |
 | Bundled legion skills | `src/server.ts` `config` hook | OpenCode never scans plugin package dirs for skills; the hook pushes the package's `skills/` onto `config.skills.paths` (staged from repo-root `skills/` at prepack, removed postpack). Repo checkouts resolve `<repo>/skills` instead. |
+| dispatch-first skill | `src/server.ts` `config` hook | With Dispatch configured, the hook pushes `skills/dispatch-first/SKILL.md` onto `config.instructions`; OpenCode reads instruction files into the main loop's system prompt on every request and leaves them out of title and compaction requests. A missing file throws at plugin load, naming it. |
 
 ## Critical conventions
 

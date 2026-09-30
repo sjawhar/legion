@@ -436,6 +436,36 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	}
 }
 
+// TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone covers a 401 LAUNCHER_INVALID that
+// answers a call signed with a credential another login has since replaced (a session's enroll
+// retry in flight while the operator logs in again): it clears nothing, since the credential it
+// rejects is no longer the one installed, and the new login still reports "issued".
+func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "sjawhar")
+	old := b.cred.Load()
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.cred.Load() != old && b.LoginStatus().State == "issued" })
+	fresh := b.cred.Load()
+
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	if err := b.clearOnInvalid(old, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatalf("a rejected credential still reports the login command to its caller: %v", err)
+	}
+	if b.cred.Load() != fresh || b.LoginStatus().State != "issued" {
+		t.Fatalf("a late rejection of the replaced credential changed the new login: cred replaced %v, state %q", b.cred.Load() != fresh, b.LoginStatus().State)
+	}
+
+	if err := b.clearOnInvalid(fresh, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatal(err)
+	}
+	if b.cred.Load() != nil || b.LoginStatus().State == "issued" {
+		t.Fatalf("rejecting the installed credential must clear it and end its login: state %q", b.LoginStatus().State)
+	}
+}
+
 // TestDeniedAndExpiredLoginsSurfaceTheirState drives the fake through both terminal non-issued
 // outcomes and confirms a later Login, once the prior one is no longer pending, starts completely
 // fresh rather than reusing the denied/expired attempt's key.

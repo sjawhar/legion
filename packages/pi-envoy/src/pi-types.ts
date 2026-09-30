@@ -156,6 +156,16 @@ export interface ResourcesDiscoverResult {
   readonly skillPaths?: readonly string[];
 }
 
+/** The messages one provider request is about to carry: a copy made for that request alone. */
+export interface ContextEvent {
+  readonly messages: readonly unknown[];
+}
+
+/** Replacement messages for that one request; Oh My Pi stores none of them in the session. */
+export interface ContextEventResult {
+  readonly messages?: readonly unknown[];
+}
+
 /**
  * Payload and result type of every host event these extensions subscribe to.
  * OMP declares `on` as one overload per event name; mirroring that here keeps a
@@ -182,6 +192,8 @@ export interface PiEventContract {
   readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_update: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_end: { readonly event: MessageStartEvent; readonly result: undefined };
+  /** Every provider request the session's agent loop sends, each turn and each tool round. */
+  readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
   readonly session_stop: {
     readonly event: SessionStopEvent;
     readonly result: SessionStopEventResult;

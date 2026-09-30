@@ -147,10 +147,12 @@ export default defineConfig({
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "iphone", use: { ...devices["iPhone 13"], browserName: "chromium" } },
-    // A caret beside a collaborator's cursor behaves per engine, so that spec also runs in WebKit.
+    // A caret beside a collaborator's cursor behaves per engine, and the issue picker's
+    // keyboard-step rule rests on each engine dispatching a closed select's `change` in the key's
+    // own task, so those two specs also run in WebKit.
     {
       name: "webkit",
-      testMatch: /collab-cursor\.e2e\.ts/,
+      testMatch: /(collab-cursor|keyboard-agents-picker)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks) also runs in WebKit,
@@ -162,10 +164,11 @@ export default defineConfig({
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
-    // so that spec also runs in Firefox.
+    // and the issue picker's keyboard-step rule rests on the engine's select dispatch, so those two
+    // specs also run in Firefox.
     {
       name: "firefox",
-      testMatch: /code-line-replace\.e2e\.ts/,
+      testMatch: /(code-line-replace|keyboard-agents-picker)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
   ],

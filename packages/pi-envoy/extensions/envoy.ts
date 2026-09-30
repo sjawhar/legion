@@ -32,6 +32,10 @@ import {
   resolveDispatchConfig,
 } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
+import {
+  dispatchFirstSkillFile,
+  readDispatchFirstContext,
+} from "@legion/envoy-client/dispatch-first";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
   createFollowAnnouncer,
@@ -58,6 +62,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { AgentStreamPublisher } from "../src/agent-stream";
+import { withDispatchFirst } from "../src/dispatch-first";
 import {
   type ConfirmedUserTurn,
   confirmUserTurn,
@@ -321,6 +326,9 @@ function resolveSkillsDirectory(): string {
   return found;
 }
 const SKILLS_DIRECTORY = resolveSkillsDirectory();
+// Read once at load, so a plugin packed without the skill fails to load naming the file. A throw
+// inside the `context` handler would not do that: Oh My Pi catches it and sends the request anyway.
+const DISPATCH_FIRST_CONTEXT = readDispatchFirstContext(dispatchFirstSkillFile(SKILLS_DIRECTORY));
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -1526,6 +1534,12 @@ export default function envoyExtension(pi: PiApi): void {
         },
       });
     }
+    // Every session with the Dispatch tools, Legion panes and `task` subagents included, carries
+    // the dispatch-first skill on every request: any of them can file, ask, or start work.
+    pi.on("context", async (event) => {
+      const messages = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
+      return messages === undefined ? undefined : { messages };
+    });
   }
 
   registerEnvoyWhoamiCommand(pi, replyAddress);

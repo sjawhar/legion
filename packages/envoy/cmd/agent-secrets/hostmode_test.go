@@ -29,7 +29,10 @@ import (
 // TestBuildSignerSelectsMode covers the Signer abstraction's mode selection: file mode when
 // AGENT_SECRETS_KEY_DIR has a readable key.pem, helper mode when it doesn't but
 // AGENT_SECRETS_HELPER_SOCK is set, and an error naming both variables when neither is usable.
+// XDG_RUNTIME_DIR points at an empty directory so a helper running on the test machine, at the
+// default socket buildSigner falls back to, cannot change the answer.
 func TestBuildSignerSelectsMode(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AGENT_SECRETS_KEY_DIR", "")
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
 	if _, _, err := buildSigner(); err == nil ||
@@ -73,6 +76,7 @@ func TestBuildSignerNamesTheEnrollmentErrorDiagnostic(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "enrollment")); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AGENT_SECRETS_KEY_DIR", dir)
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
 
@@ -86,6 +90,65 @@ func TestBuildSignerNamesTheEnrollmentErrorDiagnostic(t *testing.T) {
 	_, _, err := buildSigner()
 	if err == nil || !strings.Contains(err.Error(), "enrollment.error") || !strings.Contains(err.Error(), "postgres unreachable") {
 		t.Fatalf("a missing enrollment names the error file and its content: %v", err)
+	}
+}
+
+// TestBuildSignerFallsBackToTheRuntimeDirDefaults covers a process whose AGENT_SECRETS_* were
+// stripped (omp's eval kernel starts with a filtered environment): with both variables unset,
+// buildSigner still finds a box's key dir at $XDG_RUNTIME_DIR/agent-secrets and a host's helper
+// socket at $XDG_RUNTIME_DIR/agent-secrets/helper.sock, and falls back to neither when its file
+// is not there.
+func TestBuildSignerFallsBackToTheRuntimeDirDefaults(t *testing.T) {
+	t.Setenv("AGENT_SECRETS_KEY_DIR", "")
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
+
+	runtime := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtime)
+	if _, _, err := buildSigner(); err == nil || !strings.Contains(err.Error(), "no session identity") {
+		t.Fatalf("an empty runtime dir is no identity: %v", err)
+	}
+
+	copyKeyDir(t, newKeyDir(t), filepath.Join(runtime, "agent-secrets"))
+	id, signer, err := buildSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := signer.(*fileSigner); !ok || id != testEnrollmentID {
+		t.Fatalf("the default key dir means file mode: %T %q", signer, id)
+	}
+
+	hostRuntime := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", hostRuntime)
+	sock := filepath.Join(hostRuntime, "agent-secrets", "helper.sock")
+	fakeHelperAt(t, sock, helper.Response{OK: true, Proof: "eyJ.fake.proof"})
+	_, signer, err = buildSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hs, ok := signer.(*helperSigner); !ok || hs.sock != sock {
+		t.Fatalf("the default socket means helper mode on %s: %#v", sock, signer)
+	}
+}
+
+// copyKeyDir copies a key dir fixture's key.pem and enrollment into dst.
+func copyKeyDir(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"key.pem", "enrollment"} {
+		copyFile(t, filepath.Join(src, name), filepath.Join(dst, name))
+	}
+}
+
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -129,6 +192,15 @@ func TestFileSignerMatchesWhatProofVerifyExpects(t *testing.T) {
 func fakeHelper(t *testing.T, canned helper.Response) (string, <-chan helper.Request) {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "h.sock")
+	return sock, fakeHelperAt(t, sock, canned)
+}
+
+// fakeHelperAt is fakeHelper listening at a path the caller chooses (a default socket path, say).
+func fakeHelperAt(t *testing.T, sock string, canned helper.Response) <-chan helper.Request {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +222,7 @@ func fakeHelper(t *testing.T, canned helper.Response) (string, <-chan helper.Req
 			conn.Close()
 		}
 	}()
-	return sock, reqs
+	return reqs
 }
 
 // TestHelperSignerAsksTheHelper covers both a granted proof and the helper's error code
@@ -221,6 +293,35 @@ func TestRegisterWithoutExecExitsOneWhenWaitedButNotEnrolled(t *testing.T) {
 	code := cmdRegister([]string{"--wait", "1"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("register --wait, not enrolled: exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestRegisterExecWarnsWhenWaitedButNotEnrolled covers the --exec half of "--wait was given and
+// state isn't enrolled": the launch still goes ahead (--exec never blocks a launch on the
+// broker), but it says so on stderr, since the agent then starts with a session whose secrets
+// calls fail until the helper enrolls it. Subprocess: --exec replaces the process image.
+func TestRegisterExecWarnsWhenWaitedButNotEnrolled(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock, _ := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", State: "enrolling", Error: "waiting on approver"})
+	cmd := exec.Command(binary, "register", "--wait", "1", "--exec", "--", "sh", "-c", "echo ran")
+	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "ran" {
+		t.Fatalf("the command must still run: %q %v (stderr %q)", out, err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not enrolled") || !strings.Contains(stderr.String(), "waiting on approver") {
+		t.Fatalf("a warning names the unfinished enrollment and its last error: %q", stderr.String())
+	}
+
+	// Without --wait nothing was asked to finish, so a launch says nothing.
+	cmd = exec.Command(binary, "register", "--exec", "--", "sh", "-c", "echo ran")
+	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock)
+	stderr.Reset()
+	cmd.Stderr = &stderr
+	if out, err := cmd.Output(); err != nil || strings.TrimSpace(string(out)) != "ran" || stderr.Len() != 0 {
+		t.Fatalf("register --exec without --wait: %q %v, stderr %q", out, err, stderr.String())
 	}
 }
 
@@ -372,5 +473,158 @@ func TestSignEnrollmentRefusedInHelperMode(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "helper") {
 		t.Fatalf("refusal must explain helper mode signs only its own enrollment: %q", stderr.String())
+	}
+}
+
+// TestIdentity covers `agent-secrets identity`, the local test every caller that chooses between
+// the broker and secretsd asks: exit 0 for a box key dir holding key.pem or a fresh
+// enrollment.pending, and for a process the helper's sign op recognizes (OK: enrolled;
+// NOT_ENROLLED: enrolling); exit 1 otherwise. A helper that cannot be asked — a socket nothing
+// listens on, a socket absent although the helper's unit is installed, or no answer within 2 s —
+// is also exit 1, with a notice on stderr; with nothing there at all it is silent. It never
+// prints to stdout, since callers run it in front of a command whose stdout is the caller's.
+// Every case runs twice: once with the paths named by AGENT_SECRETS_KEY_DIR and
+// AGENT_SECRETS_HELPER_SOCK, once with both unset and the files at the $XDG_RUNTIME_DIR defaults.
+func TestIdentity(t *testing.T) {
+	type paths struct{ home, keyDir, sock string }
+	// namedNotice: the notice appears only when AGENT_SECRETS_HELPER_SOCK names the absent socket,
+	// since an explicit path says a helper was expected there.
+	cases := []struct {
+		name        string
+		setup       func(t *testing.T, p paths)
+		exit        int
+		notice      bool
+		namedNotice bool
+		slow        bool
+	}{
+		{name: "key.pem", setup: func(t *testing.T, p paths) { copyKeyDir(t, newKeyDir(t), p.keyDir) }, exit: 0},
+		{name: "fresh marker", setup: func(t *testing.T, p paths) { writePendingMarker(t, p.keyDir, 0) }, exit: 0},
+		{name: "stale marker", setup: func(t *testing.T, p paths) { writePendingMarker(t, p.keyDir, 200*time.Second) }, exit: 1, namedNotice: true},
+		{name: "helper OK", setup: func(t *testing.T, p paths) {
+			fakeHelperAt(t, p.sock, helper.Response{OK: true, Proof: "eyJ.fake.proof", EnrollmentID: "enr-h"})
+		}, exit: 0},
+		{name: "helper NOT_ENROLLED", setup: func(t *testing.T, p paths) {
+			fakeHelperAt(t, p.sock, helper.Response{Code: helper.CodeNotEnrolled, Error: "not enrolled yet"})
+		}, exit: 0},
+		{name: "helper NOT_A_SESSION", setup: func(t *testing.T, p paths) {
+			fakeHelperAt(t, p.sock, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered host session"})
+		}, exit: 1},
+		{name: "nothing listening", setup: func(t *testing.T, p paths) { staleSocketAt(t, p.sock) }, exit: 1, notice: true},
+		{name: "unit installed, no socket", setup: func(t *testing.T, p paths) { installHelperUnit(t, p.home) }, exit: 1, notice: true},
+		{name: "helper never answers", setup: func(t *testing.T, p paths) { silentHelperAt(t, p.sock) }, exit: 1, notice: true, slow: true},
+		{name: "nothing", setup: func(t *testing.T, p paths) {}, exit: 1, namedNotice: true},
+	}
+	for _, mode := range []string{"named", "defaults"} {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				runtime := t.TempDir()
+				p := paths{home: t.TempDir()}
+				t.Setenv("HOME", p.home)
+				t.Setenv("XDG_RUNTIME_DIR", runtime)
+				if mode == "named" {
+					p.keyDir = filepath.Join(t.TempDir(), "keys")
+					p.sock = filepath.Join(t.TempDir(), "h.sock")
+					t.Setenv("AGENT_SECRETS_KEY_DIR", p.keyDir)
+					t.Setenv("AGENT_SECRETS_HELPER_SOCK", p.sock)
+				} else {
+					p.keyDir = filepath.Join(runtime, "agent-secrets")
+					p.sock = filepath.Join(runtime, "agent-secrets", "helper.sock")
+					t.Setenv("AGENT_SECRETS_KEY_DIR", "")
+					t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
+				}
+				tc.setup(t, p)
+
+				var stdout, stderr bytes.Buffer
+				start := time.Now()
+				code := cmdIdentity(nil, &stdout, &stderr)
+				elapsed := time.Since(start)
+				if code != tc.exit {
+					t.Fatalf("exit %d, want %d (stderr %q)", code, tc.exit, stderr.String())
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("identity printed to stdout: %q", stdout.String())
+				}
+				want := "agent-secrets: helper unreachable at " + p.sock + "; not an agent session"
+				notice := tc.notice || (tc.namedNotice && mode == "named")
+				if notice && !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr %q, want the notice %q", stderr.String(), want)
+				}
+				if !notice && stderr.Len() != 0 {
+					t.Fatalf("stderr %q, want nothing", stderr.String())
+				}
+				if tc.slow && (elapsed < 1500*time.Millisecond || elapsed > 4*time.Second) {
+					t.Fatalf("a helper that never answers is given up on after about 2 s, took %s", elapsed)
+				}
+				if !tc.slow && elapsed > 5*time.Second {
+					t.Fatalf("identity took %s; only a silent helper may hold it up", elapsed)
+				}
+			})
+		}
+	}
+
+	t.Run("arguments", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := cmdIdentity([]string{"extra"}, &stdout, &stderr); code != exitUsageError {
+			t.Fatalf("identity with an argument: exit %d, want %d", code, exitUsageError)
+		}
+	})
+}
+
+// staleSocketAt leaves a socket file at sock that nothing listens on: the state a helper killed
+// outright leaves behind (a clean stop removes the file), which refuses every connection.
+func staleSocketAt(t *testing.T, sock string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.SetUnlinkOnClose(false)
+	ln.Close()
+}
+
+// silentHelperAt accepts connections at sock and never answers one.
+func silentHelperAt(t *testing.T, sock string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var held []net.Conn
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.AcceptUnix()
+			if err != nil {
+				return
+			}
+			held = append(held, conn)
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-done
+		for _, c := range held {
+			c.Close()
+		}
+	})
+}
+
+// installHelperUnit writes the helper's user unit under home, the file whose presence says the
+// helper is installed on this machine.
+func installHelperUnit(t *testing.T, home string) {
+	t.Helper()
+	unit := filepath.Join(home, ".config", "systemd", "user", "agent-secrets-helper.service")
+	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unit, []byte("[Service]\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
