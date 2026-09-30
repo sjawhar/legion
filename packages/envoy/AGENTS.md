@@ -109,9 +109,9 @@ an existing document (`POST /api/v1/issues/{key}/artifacts`,
 accepting a suggestion always name one through `NamedVersion`; and `POST /edits` names one through
 `NamedVersion` when it is sent with a `summary` and its `changed` is true. That `changed` comes from
 `nodeToken`, which counts marks, so an edit that only drops an anchor qualifies. Without a `summary`
-that edit writes nothing, because `SnapshotVersion` compares renderings. The edit route should
-write a version only when the rendered markdown changed, keeping `changed` as what it reports to
-the agent, with the upload route weighed by the same rule (LEGION-260).
+that edit writes nothing, because `SnapshotVersion` compares renderings. LEGION-260 is open to make
+the edit route write a version only when the rendered markdown changed, keeping `changed` as what it
+reports to the agent, with the upload route weighed by the same rule.
 `pmdoc.Render` renders a document without its anchor marks, so an escape is decided over a whole run
 and `snake_case` never becomes `snake\_case` because a mark starts inside it; an anchored comment's
 or ask's `SnapshotVersion` compares that same rendering with the latest version's markdown, so
@@ -1621,7 +1621,7 @@ carries `eid`) from a launcher proof (payload carries `lid`, never both or neith
 checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint matching the stored one,
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
 thing that moves pending state, since every decision comes from a WebAuthn assertion rather than
-a Dispatch ask (`BROKER_SWEEP_SECONDS`): every tick it expires overdue pending `agent_secret`
+a Dispatch ask: every `BROKER_SWEEP_SECONDS` tick it expires overdue pending `agent_secret`
 requests (waking each one's owner through the Envoy wake seam), overdue pending machine logins,
 and abandoned WebAuthn registration/endorsement ceremonies, reading fresh from Postgres every time
 so a restart resumes exactly where the rows are.

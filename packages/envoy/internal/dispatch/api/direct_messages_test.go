@@ -374,10 +374,10 @@ func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T)
 // Clear outright and puts their count back up. The second read pins the keying itself, which
 // packages/envoy/AGENTS.md records as a known inconsistency: a future backfill that normalises
 // user_agent_state turns it red on purpose, as the invariant asking to be decided again rather
-// than a fault in the change that trips it. Why the write must stay raw
-// is held by neither assertion, since canonicalising the write and the state query's read
-// together is self-consistent and green: a Dispatch image predating user_agent_read wrote
-// cleared_before under the raw actor id and must still read it back across a rolling deploy.
+// than a fault in the change that trips it. Why the write must stay raw is held by neither
+// assertion, since canonicalising the write and the state query's read together is
+// self-consistent and green: a Dispatch image predating user_agent_read wrote cleared_before under
+// the raw actor id and must still read it back across a rolling deploy.
 func TestClearIsKeyedOnTheRawActorID(t *testing.T) {
 	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
 	first := decodeBody[model.Message](t, reply("On it."))

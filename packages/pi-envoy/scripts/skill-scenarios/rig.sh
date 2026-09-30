@@ -42,8 +42,9 @@
 #
 # Each run's agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), under the label's own
 # HOME and profile (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), in a tmux
-# session on the work directory's own tmux server (`tmux -S <work>/tmux.sock attach -t <session>`
-# watches one), with `env -i` and only the variables its pane file names, TMPDIR its run's own. A
+# session on the work directory's own tmux server (`tmux -S <work>/tmux.sock attach -t
+# skill-scenarios-<digest>-<run>` watches one, <run> being <scenario>-<label>-<n>), with `env -i`
+# and only the variables its pane file names, TMPDIR its run's own. A
 # `gh` stand-in is first on every run's PATH, so no run reaches GitHub. Every container and tmux
 # session a work directory starts carries its digest in its name. An agent can still write the
 # machine's /tmp, which every run shares and nothing here cleans: two concurrent runs can meet in a
@@ -194,21 +195,25 @@ EOF
   tmux kill-session -t "=$session" 2>/dev/null || true
 }
 
-# stop_working_under DIR SIGKILLs every process but this shell whose working directory is under DIR:
-# an agent and every command it runs work in its run directory. The tmux server is not among them,
-# although its command line names the run that started it (so lib/rig.sh's run_processes would pick
-# it), and it serves the work directory's other sessions.
+# stop_run_processes DIR SIGKILLs every process whose environment names a run at or under DIR in
+# SKILL_SCENARIO_RUN: an agent gets it from its pane file and every command it runs inherits it.
+# A process that merely works under DIR, such as a developer's shell watching a run, has none, and
+# a process of another user's cannot be read, so neither is touched.
 # shellcheck disable=SC2329 # the exit traps run it
-stop_working_under() {
-  local p cwd
+stop_run_processes() {
+  local p var
   for p in /proc/[0-9]*; do
-    cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
-    case "$cwd/" in
-    "$1"/*)
-      p=${p#/proc/}
-      [ "$p" = "$$" ] || [ "$p" = "$BASHPID" ] || kill -KILL "$p" 2>/dev/null || true
-      ;;
-    esac
+    [ "${p#/proc/}" != "$$" ] && [ "${p#/proc/}" != "$BASHPID" ] && [ -r "$p/environ" ] || continue
+    {
+      while IFS= read -r -d '' var; do
+        case $var in
+        "SKILL_SCENARIO_RUN=$1" | "SKILL_SCENARIO_RUN=$1"/*)
+          kill -KILL "${p#/proc/}" 2>/dev/null || true
+          break
+          ;;
+        esac
+      done <"$p/environ"
+    } 2>/dev/null || true
   done
 }
 
@@ -218,7 +223,7 @@ stop_working_under() {
 stop_run() {
   [ -z "$session" ] || tmux kill-session -t "=$session" 2>/dev/null || true
   stop_tree "$daemon_pid"
-  [ -z "$R" ] || stop_working_under "$R"
+  [ -z "$R" ] || stop_run_processes "$R"
 }
 
 # on_exit HANDLER runs HANDLER at the command's exit, INT, TERM and HUP included.
@@ -536,7 +541,7 @@ stop_batch() {
   for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null || true); do
     case $s in "$tag-$batch_scenario"-*) tmux kill-session -t "=$s" 2>/dev/null || true ;; esac
   done
-  stop_working_under "$work/runs"
+  stop_run_processes "$work/runs"
   services_down
 }
 

@@ -1058,13 +1058,12 @@ func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T
 	}
 }
 
-// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent: a legacy open anchored ask
-// whose ask.opened event has been pruned is still readable through GET
-// /api/v1/asks/{id} (attachOpenedEventIDs falls back across
-// ask.opened/answered/resolved/edited), and the anchor-refresh cascade must find it the same
-// way: a stricter ask.opened-only lookup there would abort the whole document mutation with a
-// load error when that row's anchor needs refreshing. Both paths share attachOpenedEventIDs's
-// fallback (events.OpenedEventIDs).
+// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent: a legacy open anchored ask whose
+// ask.opened event has been pruned is still readable through GET /api/v1/asks/{id}
+// (attachOpenedEventIDs falls back across ask.opened/answered/resolved/edited), and the
+// anchor-refresh cascade must find it the same way: a stricter ask.opened-only lookup there would
+// abort the whole document mutation with a load error when that row's anchor needs refreshing.
+// Both paths share attachOpenedEventIDs's fallback (events.OpenedEventIDs).
 func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Legacy ask fallback", "The quick brown fox")

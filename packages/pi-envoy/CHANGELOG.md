@@ -2,15 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
-  quote or attribution that came with it; every rule, command and example stays, and a decision
-  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules
-  deployment instructions never override: no deferrals, bringing the base in only on a real
-  conflict or a retarget, the implementer's own proof on a production-like surface before the
-  merge, and the implementer's production check after it.
-
 ### Added
 
 - Every session with the Dispatch tools, Legion panes and `task` subagents included, now carries the
@@ -59,6 +50,12 @@
 
 ### Changed
 
+- The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
+  quote or attribution that came with it; every rule, command and example stays, and a decision
+  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules
+  deployment instructions never override: no deferrals, bringing the base in only on a real
+  conflict or a retarget, the implementer's own proof on a production-like surface before the
+  merge, and the implementer's production check after it.
 - The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
   in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
   threshold, where the 75 KB single file used to reach agents with its middle cut out.
