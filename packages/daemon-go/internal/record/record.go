@@ -41,7 +41,11 @@ func (p ClassifiedPush) MayChangeCode() bool {
 	return !p.HandoffOnly || p.Forced
 }
 
-// Issue is one durable workflow record. Status is the last Dispatch status the daemon observed.
+// Issue is one durable workflow record. Status is the issue's lifecycle status as the daemon holds
+// it: set when the daemon queues a status write, and set again from each Dispatch event or boot
+// listing that changes the status Dispatch shows, the daemon's own echoes included, except a
+// session's write the daemon sets back (sessionStatusWrite), which leaves it. While a chain of
+// writes is queued, it can briefly hold an earlier write's echo.
 type Issue struct {
 	Key                 string
 	Tree                string
@@ -59,6 +63,10 @@ type Issue struct {
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
+	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
+	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole
+	// issue, so only an event whose status differs from it writes a status.
+	DispatchStatus string
 }
 
 // Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.
@@ -259,6 +267,10 @@ type Store interface {
 	// so a dropped row is delivered only when the drop lands during its publish, a duplicate the
 	// fresh catch-up follows.
 	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
+	// DropStatusWrites deletes every Dispatch status write of issue the outbox still holds, a row
+	// the runner has leased included; one mid-attempt can still reach Dispatch, and its finish then
+	// finds nothing to delete.
+	DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string) error
 	// OutboxLeased reports whether row id is still in the outbox under leaseToken: false once
 	// another transaction deleted it while the runner held it (DropCatchUps).
 	OutboxLeased(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) (bool, error)

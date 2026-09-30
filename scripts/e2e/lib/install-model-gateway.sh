@@ -16,6 +16,7 @@
 #                         HOME, session bus address and XDG base directories for that one command
 #   <dir>/hawk-token.log  one line per invocation, one per mint, one per call that got no key and
 #                         why, and hawk-token's own stderr
+#   <dir>/hawk-token.calls   one line per call and its outcome, read by lib/model-gateway-unserved.sh
 #   <cache-dir>/hawk-token.key   the minted key, 0600, kept until shortly before it expires
 #   <cache-dir>/hawk-token.key.lock   the lock one call holds while it mints
 #   the profile's agent/models.yml and agent/config.yml (see the heredocs below)
@@ -164,9 +165,19 @@ done
 # minting, and logs why rather than dying mid-write. The installer's own call (--preflight) is in no
 # agent's ten seconds, and is where hawk-token's first-run build (in the foreground, about a minute)
 # happens on a fresh machine, so that one call has no deadline.
+#
+# Every agent's call appends its outcome to the record, one tab-separated line: time, caller pid,
+# caller working directory, agent, outcome and detail. What each field holds, and the values agent
+# and outcome take, is stated once, in lib/model-gateway-unserved.sh's header.
+# The installer's preflight is no agent, so it is not recorded; a call that gets no key also says
+# why on stderr, which is where the installer reads it. A caller whose environment names
+# MODEL_GATEWAY_CALLS_FILE gets its line there too: that is for a harness that runs one agent per
+# run and names a file of that run's own, which does not exist before the run
+# (lib/model-gateway-unserved.sh --record).
 EOF
   printf 'log=%q\n' "$log"
   printf 'cache=%q\n' "$cache_dir/hawk-token.key"
+  printf 'record=%q\n' "$dest/hawk-token.calls"
   printf 'flock=%q\n' "$flock"
   printf 'timeout=%q\n' "$timeout"
   words=$(printf '%q ' "${unsets[@]}" "${sets[@]}" "$hawk_token")
@@ -189,9 +200,11 @@ case "${1-}" in
 esac
 set -o pipefail
 umask 077
-# The call's clock starts with its own process, which /bin/sh starts within milliseconds of Oh My
-# Pi starting the command; under load bash can then take half a second to reach this line. The
-# clock is read without a fork, since each fork there costs tens of milliseconds more.
+# The call's clock starts with its own process: the profile names it `!exec <path>`, so the /bin/sh
+# Oh My Pi starts execs this file, and its process start is that of Oh My Pi's call. Its PPID, the
+# pid the log names, is the Oh My Pi process that ran the call (measured on 18.2.9: a child of the
+# agent's own omp, not the agent's pid). Under load bash can take half a second to reach this line.
+# The clock is read without a fork, since each fork there costs tens of milliseconds more.
 read -r stat </proc/self/stat
 read -r -a fields <<<"${stat##*) }"
 read -r uptime _ </proc/uptime
@@ -199,32 +212,54 @@ read -r uptime _ </proc/uptime
 started_us=$((${EPOCHREALTIME/[.,]/} - (${uptime/./}0 - ${fields[19]}0) * 1000))
 left_ms() { left=$((deadline_ms - (${EPOCHREALTIME/[.,]/} - started_us) / 1000)); }
 TZ=UTC printf '%(%FT%TZ)T invoked by pid %s\n' -1 "$PPID" >>"$log"
+# PWD names the directory Oh My Pi ran the call in, physically.
+cd -P . || exit
+# The caller as the record's agent field names it (lib/model-gateway-unserved.sh's header).
+agent=${LEGION_ROLE:-}${LEGION_ROLE:+${LEGION_GENERATION:+/$LEGION_GENERATION}}
+agent=${agent:--}
+# record OUTCOME DETAIL appends an agent's call to the record, and to the caller's
+# MODEL_GATEWAY_CALLS_FILE when its environment names one. No field is empty: read splits on runs
+# of tabs.
+record() {
+  [ -z "$preflight" ] || return 0
+  local at line detail=${2//[$'\t\n']/ }
+  TZ=UTC printf -v at '%(%FT%TZ)T' -1
+  printf -v line '%s\t%s\t%s\t%s\t%s\t%s' "$at" "$PPID" "${PWD//[$'\t\n']/ }" "${agent//[$'\t\n']/ }" "$1" "${detail:--}"
+  printf '%s\n' "$line" >>"$record"
+  [ -z "${MODEL_GATEWAY_CALLS_FILE:-}" ] || printf '%s\n' "$line" >>"$MODEL_GATEWAY_CALLS_FILE"
+}
 # serve_kept ends the call with the kept key while the key is inside its window.
 serve_kept() {
   local kept_until key
   [ -s "$cache" ] || return 0
   read -r kept_until key <"$cache"
   [ "$EPOCHSECONDS" -lt "$kept_until" ] || return 0
+  record served "the kept key"
   printf '%s\n' "$key"
   exit 0
 }
-# no_key DETAIL logs why this call gets no key, and ends it.
+# no_key OUTCOME DETAIL records, logs and says on stderr why this call gets no key, and ends it.
 no_key() {
-  TZ=UTC printf '%(%FT%TZ)T no key for pid %s: %s\n' -1 "$PPID" "$1" >>"$log"
+  record "$1" "$2"
+  TZ=UTC printf '%(%FT%TZ)T no key for pid %s (%s): %s\n' -1 "$PPID" "$1" "$2" >>"$log"
+  printf 'hawk-token key command: no key (%s): %s\n' "$1" "$2" >&2
   exit 1
 }
 serve_kept
 exec {lock}>>"$cache.lock"
 if [ -n "$preflight" ]; then
-  "$flock" "$lock"
+  "$flock" "$lock" || no_key failed "flock exited $?"
 else
   left_ms
-  [ "$left" -gt 0 ] || no_key "reached the lock after $((deadline_ms - left)) ms, past the call's $deadline_ms ms"
+  [ "$left" -gt 0 ] || no_key timeout "reached the lock after $((deadline_ms - left)) ms, past the call's $deadline_ms ms"
   printf -v wait_s '%d.%03d' $((left / 1000)) $((left % 1000))
-  if ! "$flock" -w "$wait_s" "$lock"; then
+  lock_status=0
+  "$flock" -w "$wait_s" "$lock" || lock_status=$?
+  if [ "$lock_status" = 1 ]; then
     left_ms
-    no_key "waited $((deadline_ms - left)) ms for another call's mint, past the call's $deadline_ms ms"
+    no_key timeout "waited $((deadline_ms - left)) ms for another call's mint, past the call's $deadline_ms ms"
   fi
+  [ "$lock_status" = 0 ] || no_key failed "flock exited $lock_status"
 fi
 # The call that held the lock may have kept a key while this one waited.
 serve_kept
@@ -236,7 +271,7 @@ if [ -n "$preflight" ]; then
   key=$(/usr/bin/env "${command[@]}" 2>"$err" {lock}>&-) || status=$?
 else
   left_ms
-  [ "$left" -ge "$min_mint_ms" ] || no_key "waited $((deadline_ms - left)) ms for another call's mint and took the lock with $left ms of the call's $deadline_ms ms left, under the $min_mint_ms ms a mint needs"
+  [ "$left" -ge "$min_mint_ms" ] || no_key timeout "waited $((deadline_ms - left)) ms for another call's mint and took the lock with $left ms of the call's $deadline_ms ms left, under the $min_mint_ms ms a mint needs"
   printf -v mint_s '%d.%03d' $((left / 1000)) $((left % 1000))
   key=$("$timeout" --kill-after=0.2 "$mint_s" /usr/bin/env "${command[@]}" 2>"$err" {lock}>&-) || status=$?
 fi
@@ -245,9 +280,20 @@ mapfile -t errlines <"$err"
 if [ "$status" != 0 ] || [ -z "$key" ]; then
   left_ms
   if [ -z "$preflight" ] && { [ "$status" = 124 ] || [ "$left" -le 0 ]; }; then
-    no_key "the mint ran past the call's $deadline_ms ms and was stopped (exit $status)"
+    no_key timeout "the mint ran past the call's $deadline_ms ms and was stopped (exit $status)"
   fi
-  no_key "hawk-token exited $status without a key"
+  [ "$status" -le 128 ] || no_key killed "a signal ended the mint (exit $status) with $left ms of the call's $deadline_ms ms left"
+  # The operator's hawk-token wrapper names its budget when it gives up (in <spent> ms of a <budget>
+  # ms budget) but exits 1 either way, so only its wording tells a spent budget from a refused login.
+  # A hawk-token that words it otherwise has a spent budget recorded as failed, never as a starve.
+  why=
+  for line in "${errlines[@]}"; do
+    if [[ $line =~ in\ ([0-9]+)\ ms\ of\ a\ ([0-9]+)\ ms\ budget ]] && ((BASH_REMATCH[1] >= BASH_REMATCH[2])); then
+      no_key timeout "$line"
+    fi
+    [[ ! $line =~ [^[:space:]] ]] || why=$line
+  done
+  no_key failed "hawk-token exited $status without a key: ${why:-no output}"
 fi
 payload=${key#*.}
 payload=${payload%%.*}
@@ -256,22 +302,30 @@ while [ $((${#payload} % 4)) != 0 ]; do payload+='='; done
 exp=$(printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r '.exp // empty | numbers | floor' 2>/dev/null) || exp=
 if [ -n "$exp" ]; then kept_until=$((exp - margin)); else kept_until=$((EPOCHSECONDS + window)); fi
 printf '%s %s\n' "$kept_until" "$key" >"$cache.tmp" && mv -f "$cache.tmp" "$cache"
-TZ=UTC printf '%(%FT%TZ)T minted a key for pid %s in %s ms, kept until %(%FT%TZ)T\n' -1 "$PPID" "$(((${EPOCHREALTIME/[.,]/} - started_us) / 1000))" "$kept_until" >>"$log"
+elapsed_ms=$(((${EPOCHREALTIME/[.,]/} - started_us) / 1000))
+TZ=UTC printf '%(%FT%TZ)T minted a key for pid %s in %s ms, kept until %(%FT%TZ)T\n' -1 "$PPID" "$elapsed_ms" "$kept_until" >>"$log"
+record served "minted in $elapsed_ms ms"
 printf '%s\n' "$key"
 EOF
 } >"$key_command"
 chmod 0700 "$key_command"
 
-# The preflight mint: the value is checked for a JWT's shape and never printed.
+# The preflight mint: the value is checked for a JWT's shape and never printed. A call that gets no
+# key says why on stderr.
 status=0
-key=$("$key_command" --preflight) || status=$?
-if [ "$status" != 0 ] || ! [[ "$key" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
-  why=$(grep -v -e '^[0-9TZ:-]* invoked by pid' -e '^[0-9TZ:-]* minted a key for pid' -e '^[0-9TZ:-]* no key for pid' "$log" | grep -v '^[[:space:]]*$' | tail -1 || true)
+key=$("$key_command" --preflight 2>"$cache_dir/hawk-token.preflight") || status=$?
+reason=$(<"$cache_dir/hawk-token.preflight")
+rm -f "$cache_dir/hawk-token.preflight"
+if [ "$status" != 0 ]; then
   unset key
   if grep -qi keyring "$log"; then
-    fail "the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the unlock-keyring skill) and rerun. hawk-token: $why"
+    fail "the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the unlock-keyring skill) and rerun ($reason; log: $log)"
   fi
-  fail "$key_command (hawk-token) exited $status without a gateway key; hawk-token: ${why:-no output} (log: $log)"
+  fail "the preflight got no gateway key: ${reason:-$key_command exited $status and said nothing} (log: $log)"
+fi
+if ! [[ "$key" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+  unset key
+  fail "$key_command printed something other than one JWT (log: $log)"
 fi
 unset key
 
@@ -279,13 +333,14 @@ mkdir -p "$agent"
 cat >"$agent/models.yml" <<EOF
 # Written by scripts/e2e/lib/install-model-gateway.sh: anthropic through the Hawk model gateway,
 # keyed by the operator's hawk login. The gateway reads the key from x-api-key; OMP caches the
-# command's value for the process and runs it again on a 401.
+# command's value for the process and runs it again on a 401. OMP runs a !command through
+# /bin/sh -c, so exec makes the key command the process OMP started.
 providers:
   anthropic:
     baseUrl: $gateway
-    apiKey: "!$key_command"
+    apiKey: "!exec $key_command"
     headers:
-      X-Api-Key: "!$key_command"
+      X-Api-Key: "!exec $key_command"
 EOF
 cat >"$agent/config.yml" <<EOF
 # Written by scripts/e2e/lib/install-model-gateway.sh. The gateway is the one model route, and Oh

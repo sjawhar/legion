@@ -70,6 +70,14 @@
   `agentstream.<session id>.control`, and a session that hears nothing for thirty seconds goes
   quiet — and a viewer's replay is answered from a bounded in-memory ring (200 messages, 512 KiB)
   that never leaves the process. Nothing about it is written to Dispatch's database.
+- The dispatch skill's documents reference says a `|` in a table cell, inside inline code and
+  links too, is written `\|`, and that a row holding text in a cell past its table's width is
+  refused on every write path rather than stored short, naming each path's error code. Its
+  document-edits reference says how an insert at a table-cell quote decides it holds table rows,
+  in three steps: every line yields a cell and an unescaped `|` and none is a delimiter row of
+  three hyphens or more a cell; what the rows parse refuses is refused; and the rows are inserted
+  only when that parse reads one table holding every line. Any other fragment, such as
+  `- | a | b |`, is read on its own as blocks.
 
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask

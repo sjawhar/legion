@@ -210,3 +210,67 @@ func TestSetextLookAheadReadsEachLineOnce(t *testing.T) {
 		})
 	}
 }
+
+// A cell ends at every `|` not written `\|`, inside code and links too, and goldmark drops the cells
+// a body row holds past its delimiter row's, which the browser editor's parser keeps: a row whose
+// code span holds a bare `|` lost the rest of its text when it was stored. Such a row is refused,
+// in a container and after text in its paragraph too, naming what it holds and both ways to write
+// it; written `\|`, the same row is read whole.
+func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
+	const row = "| `runtime.ts` | Hold `x: Promise<void> | undefined`; every caller waits. |\n"
+	for _, markdown := range []string{
+		"| File | Rule |\n| --- | --- |\n" + row,
+		"> | File | Rule |\n> | --- | --- |\n> " + row,
+		"- | File | Rule |\n  | --- | --- |\n  " + row,
+		"text\n| File | Rule |\n| --- | --- |\n" + row,
+	} {
+		_, err := ParseForWrite(markdown, nil)
+		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "3 cells where its table has 2") || !strings.Contains(err.Error(), `as \|`) || !strings.Contains(err.Error(), "as many cells as the row") {
+			t.Errorf("ParseForWrite(%q) = %v, want a schema refusal naming the row's 3 cells and both ways to write it", markdown, err)
+		}
+	}
+	if _, err := ParseForWrite("| a | b |\n| - | - |\n| 1 | 2 | 3 |\n", nil); !errors.Is(err, ErrSchema) {
+		t.Errorf("a row of three plain cells under two = %v, want a schema refusal", err)
+	}
+	// The refusal quotes the row as its author wrote it, so its backslashes are not doubled.
+	if _, err := ParseForWrite("| a | b |\n| - | - |\n| p | q | z \\|\n", nil); err == nil || !strings.Contains(err.Error(), `written "| p | q | z \|"`) {
+		t.Errorf("a row holding a backslash is refused with %v, want it quoted as written", err)
+	}
+	// Past the table's width goldmark drops only blank cells here, and the text is all kept.
+	blank, err := ParseForWrite("| a | b |\n| - | - |\n| x | y | |\n", nil)
+	if err != nil {
+		t.Fatalf("a row whose third cell is blank = %v, want it read", err)
+	}
+	if cells := len(blank.Children[0].Children[1].Children); cells != 2 {
+		t.Errorf("a row whose third cell is blank reads as %d cells, want the table's 2", cells)
+	}
+	doc, err := ParseForWrite("| File | Rule |\n| --- | --- |\n"+strings.Replace(row, "> | undefined", "> \\| undefined", 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := textContent(doc.Children[0].Children[1].Children[1]); got != "Hold x: Promise<void> | undefined; every caller waits." {
+		t.Errorf("the row written with \\| holds %q in its second cell, want the whole text", got)
+	}
+}
+
+// Goldmark drops a row's closing pipe whatever stands before it, so `| x | y \|` read `y \`, where
+// the browser editor's parser reads a closing pipe an odd run of backslashes escapes as the last
+// cell's text. After an even run the pipe closes the row in both.
+func TestParseKeepsAnEscapedClosingPipeInTheLastCell(t *testing.T) {
+	for markdown, want := range map[string][2]string{
+		"| a | b |\n| - | - |\n| x | y \\|\n":     {"b", "y |"},
+		"| a | b \\|\n| - | - |\n| x | y |\n":     {"b |", "y"},
+		"| a | b |\n| - | - |\n| x | y \\\\\\|\n": {"b", "y \\|"},
+		"| a | b |\n| - | - |\n| x | y \\\\|\n":   {"b", "y \\"},
+	} {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Errorf("Parse(%q) = %v", markdown, err)
+			continue
+		}
+		table := doc.Children[0]
+		if got := [2]string{textContent(table.Children[0].Children[1]), textContent(table.Children[1].Children[1])}; got != want {
+			t.Errorf("Parse(%q) second cells = %q, want %q", markdown, got, want)
+		}
+	}
+}
