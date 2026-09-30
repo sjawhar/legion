@@ -15,7 +15,7 @@ jobs:
     uses: ./.github/workflows/worker-image.yaml
     permissions:
       contents: read
-      packages: write
+      packages: read
     with:
       cli_version: ""
 
