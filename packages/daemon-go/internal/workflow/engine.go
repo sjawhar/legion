@@ -168,8 +168,11 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return false, err
 	}
-	if err := e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: issue.Status, ObservedStatus: fact.Status}); err != nil || agent {
-		return true, err
+	if err := e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: issue.Status, ObservedStatus: fact.Status}); err != nil {
+		return false, err
+	}
+	if agent {
+		return true, nil
 	}
 	return true, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "status-reasserted", Role: claim.RoleArchitect, Reason: fmt.Sprintf(
 		"session %s set %s to %s, and the daemon set it back to %s: a session with no claim in the tree neither ends nor parks it; a person does, from the Dispatch dashboard, and so does the controller's legion status",
