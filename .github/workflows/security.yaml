@@ -58,7 +58,8 @@ jobs:
       #
       # One flag per check, from the base's window file on a pull request or merge group and from
       # the tree's own (main's) otherwise, so a promotion takes effect on main from its merge and a
-      # pull request cannot make its own check report-only again by editing the file. A missing
+      # pull request cannot make its own check report-only again by editing the file (it can by
+      # editing this workflow or its scripts, which its run executes; review catches that). A missing
       # file reads as report-only (a base from before the file landed); a file that is there sets a
       # check report-only only where it says true, and each check it fails to set is blocking; the
       # step summary and an annotation name each problem (.github/scripts/security-run.sh

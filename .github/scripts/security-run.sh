@@ -33,7 +33,9 @@
 # as it is at commit REV (fetched from origin at depth 1 when absent), which is how a pull request
 # or merge group reads its base's flags rather than its own: a promotion takes effect on main from
 # its merge, its own pull request's run stays report-only, and a pull request cannot make its own
-# check report-only again by editing the file.
+# check report-only again by editing the file. That boundary is the file's alone: a pull_request
+# run executes the pull request's own copy of the workflow and of this script, so a pull request
+# that edits either can make its own run report-only, and review is what catches it.
 #
 # window-check — a pull request's or merge group's own copy of the file, which the window job
 # validates and never obeys: it exits 1 naming each problem window-flags would note, a key that

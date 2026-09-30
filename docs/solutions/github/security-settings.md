@@ -85,22 +85,24 @@ since then neither scanner job runs, and on a flag the `window` job never produc
 A pull request or merge group reads the flags from its base's copy of the file, not its own; a
 push to `main` and the daily run read `main`'s. So a promotion takes effect on `main` from its
 merge, the promotion pull request's own run stays report-only, and a pull request that sets a
-promoted check back to `true` is still judged by the base's `false`.
+promoted check back to `true` is still judged by the base's `false`. That holds for the file
+alone: a `pull_request` run executes the pull request's own copy of `security.yaml` and of the
+scripts it calls (`.github/scripts/security-run.sh`, `.github/scripts/zizmor-findings.sh`), so a
+pull request that edits them can make its own run report-only, and review is what stands in its
+way.
 
-The window is 14 days from the workflow's first run on `main`, which `scripts/security-report.sh`
-reads one day at a time from the workflow's creation, so GitHub's 1,000-result cap on a filtered
-run listing cannot move it as `main`'s runs pile up. The report
-prints the window's numbers: `main`'s daily runs, the merged pull requests' new zizmor findings
-and whether each was fixed or ignored, tool errors, CodeQL alert counts, secret-scanning alert
-counts, and the `Security[<tag>]:` review threads per rubric row. Once the window has closed it
-ends in a `DECISION:` block with a line per check, decided on its own; its header carries the
-rules. The daily scheduled run runs it, and while any check is still report-only the block makes
-that run fail, which is the signal to open the promotion pull request that applies the decision
-and sets each promoted check's flag to `false`. A check already set to `false` reads as `already
-blocking` and is not decided again. The dependency scanners are promoted only when `main`'s newest
-run has none of the findings their Gate fails on, osv findings with a fix and reachable govulncheck
-findings; the report names both counts, since promoting a gate that fails on `main` would fail
-every pull request.
+The window is 14 days from the workflow's first run on `main`. `scripts/security-report.sh`
+prints the window's numbers: `main`'s runs inside the window, the merged pull requests' new
+zizmor findings and whether each was fixed or ignored, tool errors, CodeQL alert counts,
+secret-scanning alert counts, and the `Security[<tag>]:` review threads per rubric row. Once the
+window has closed it ends in a `DECISION:` block with a line per check, decided on its own; its
+header carries the rules. The daily scheduled run runs it, and while any check is still
+report-only the block makes that run fail, which is the signal to open the promotion pull request
+that applies the decision and sets each promoted check's flag to `false`. A check `main`'s file no
+longer sets to `true` reads as `already blocking` and is not decided again. The dependency
+scanners are promoted only when `main`'s newest run has none of the findings their Gate fails on,
+osv findings with a fix and reachable govulncheck findings; the report names both counts, since
+promoting a gate that fails on `main` would fail every pull request.
 
 Rule 4 counts a `Security[<tag>]:` review thread and its `Accepted:` reply only from a
 collaborator with write, maintain or admin access, or from a GitHub App bot, and the report names
