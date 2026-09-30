@@ -211,8 +211,9 @@ when a file is named other than `<version>_<name>.up.sql` or `<version>_<name>.d
 is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
 embedded whole (`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` says why), so a name beginning with
 `_` or `.` is refused like any other. An editor's swap file therefore stops a locally built
-`envoy-dispatch` from booting, and fails the store's tests, until it is gone; Vim writes its swap
-file beside the file it edits by default. Versions are applied by number, not by file name, and
+`envoy-dispatch` from booting, and fails the store's tests, until it is removed, and a binary built
+while it was there keeps refusing to boot until it is rebuilt; Vim writes its swap file beside the
+file it edits by default. Versions are applied by number, not by file name, and
 the store's tests require every file on disk to be embedded (`TestEveryMigrationFileIsEmbedded`)
 and the versions to run 1 to N with no gap (`TestMigrationSetIsNumberedOneToN`), both reading
 file names alone, so take the next free number on `main`.
