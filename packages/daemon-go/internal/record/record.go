@@ -104,7 +104,7 @@ type PhaseRow struct {
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
 	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
 	// reviewersAnswer and answerSkew), and is read only for a round whose HandoffCommit is set. It can
-	// be stale: a daemon older than migration 0025 writes a completion without it, and
+	// be stale: a daemon older than migration 0026 writes a completion without it, and
 	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
 	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
 	CompletedAt time.Time

@@ -1,4 +1,4 @@
--- 0025_phase_completed_at.up.sql — when the workflow applied a role's completion of its current
+-- 0026_phase_completed_at.up.sql — when the workflow applied a role's completion of its current
 -- phase (record.PhaseRow.CompletedAt).
 --
 -- A reviewer's completion arrives through the API and its review by webhook, in either order, so a
