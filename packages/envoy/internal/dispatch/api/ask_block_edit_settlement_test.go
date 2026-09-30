@@ -118,9 +118,15 @@ func awaitSettledVersion(t *testing.T, published <-chan model.Event, artifactID 
 			if !ok {
 				t.Fatalf("the event stream closed before version %d of %s was published", number, artifactID)
 			}
-			payload, _ := event.Payload.(map[string]any)
-			version, _ := payload["version"].(model.Version)
-			if event.Type == "artifact.version" && payload["artifact_id"] == artifactID && version.Number == number {
+			if event.Type != "artifact.version" {
+				continue
+			}
+			payload, isMap := event.Payload.(map[string]any)
+			version, isVersion := payload["version"].(model.Version)
+			if !isMap || !isVersion {
+				t.Fatalf("artifact.version payload = %#v, want the map ArtifactVersionEventPayload builds", event.Payload)
+			}
+			if payload["artifact_id"] == artifactID && version.Number == number {
 				return
 			}
 		case <-deadline:
