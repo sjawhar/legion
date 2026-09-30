@@ -33,6 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
+| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), and the watch that names the lock a timed-out migration wanted |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
@@ -597,6 +598,16 @@ one it runs. Both separate pools zero `MinConns` and `MinIdleConns`, so a floor 
 shared pool cannot become a target a one- or four-connection pool can never reach, and both
 are deliberately unguarded — a load or a probe taken under an open transaction must be served,
 not refused, and a separate pool cannot close the cycle the guard prevents.
+
+The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
+applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`
+(five seconds), after the runner's advisory lock, so a migration queued behind a long transaction
+fails the boot rather than holding every read and write of its table behind its request. While
+the migration runs, its lock watch reads `pg_locks` for the transaction's backend every 200 ms on
+a connection it dials from that backend's own configuration (`pgx.Conn.Config`) at its first
+reading and closes when the migration ends, so a migration faster than one reading dials nothing.
+The watch's last reading is how the failure names the lock and its holders: Postgres's own error
+says only `canceling statement due to lock timeout`.
 
 Everywhere else a read runs through the transaction it is already inside: the issue state an
 anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor

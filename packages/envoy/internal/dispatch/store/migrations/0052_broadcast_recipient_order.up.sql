@@ -12,7 +12,9 @@
 -- The migration builds no index, so it takes no write lock for the length of an index build: the
 -- runner applies each file in one transaction, and an ordinary index build on the hot messages
 -- table would hold writes until that transaction commits. The ADD COLUMN is metadata-only, but it
--- still takes a brief ACCESS EXCLUSIVE lock on messages. Nothing in this repository sets
--- lock_timeout, so that lock waits behind any long-running transaction on messages, and everything
--- queued behind it waits too, as with every migration here.
+-- still takes a brief ACCESS EXCLUSIVE lock on messages, and every read and write of messages
+-- queues behind the request for it while it waits. The runner bounds that wait at
+-- pgmigrate.LockTimeout (five seconds) on every migration it applies, so a migration queued
+-- behind a long transaction on messages fails the deploy, naming the lock, instead of holding
+-- every caller of messages behind it for as long as that transaction lives.
 alter table messages add column broadcast_position integer;

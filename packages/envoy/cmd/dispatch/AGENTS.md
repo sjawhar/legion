@@ -9,9 +9,11 @@ OAuth, and the GitHub REST/GraphQL proxy.
 `pgxpool.Pool` at `store.sharedPoolSize` connections — the size is a property of
 Dispatch rather than of the URL or the task's CPU allotment, and a `DATABASE_URL`
 carrying `pool_max_conns` is refused at open rather than silently overridden —
-applies embedded migrations from `internal/dispatch/store/migrations`, then
-starts HTTP serving. The Postgres store contains users, native issues,
-artifacts, document updates, and the event outbox.
+applies embedded migrations from `internal/dispatch/store/migrations` (refusing
+the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
+every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
+migrations"), then starts HTTP serving. The Postgres store contains users,
+native issues, artifacts, document updates, and the event outbox.
 
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through
