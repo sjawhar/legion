@@ -6,7 +6,7 @@
 # node's instance role is its key), Google, and the local servers Oh My Pi uses with no key.
 # Records merge key by key across settings layers, so every role Legion's prompts reach is named:
 # the shipped review, oracle and deep-worker agents' @review, @oracle and @deep, and the bundled
-# scout's @smol. deep-worker writes the implementer's code, on the model that wrote it before.
+# scout's @smol and reviewer's @slow.
 enabledModels:
   - anthropic/*-legion
 disabledProviders:

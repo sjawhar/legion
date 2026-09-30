@@ -874,10 +874,9 @@ claim's pod and the image probe's.
   may not set, since they decide where Oh My Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` as `@oracle`, both
   review agents as `@review`, and `deep-worker`, which writes the implementer's code, as `@deep`.
-  The operator maps all three roles (`oracle`, `review`, `deep`). The boot gate refuses, by agent,
-  any whose role the operator's settings (`modelRoles`, or `task.agentModelOverrides`) leave
-  unconfigured, or whose model's key does not work, because Oh My Pi's task tool would quietly run
-  it on the parent session's model: a route without `deep` refuses the boot naming `deep-worker`.
+  The boot gate refuses, by agent, any whose role the operator's settings (`modelRoles`, or
+  `task.agentModelOverrides`) leave unconfigured, or whose model's key does not work, because Oh My
+  Pi's task tool would quietly run it on the parent session's model.
   The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is
   `@smol` and `reviewer` is `@slow`. `smol` and `slow`, left unset in every layer, inherit the
   default role's model, which the gate accepts. Settings records merge

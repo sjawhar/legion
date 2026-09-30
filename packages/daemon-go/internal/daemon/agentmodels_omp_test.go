@@ -153,7 +153,7 @@ func shippedPromptPlugin(t *testing.T, dir string) string {
 // prompts, the image probe passes a route that gives every role Legion's shipped agents name a
 // model, and refuses one that leaves `deep` unset, naming deep-worker and the role prompt that
 // dispatches it: the task tool would otherwise run every coding task on the implementer's own
-// model without a word. A plugin that ships no deep-worker is refused by name on either route.
+// model without a word.
 func TestTheImageProbeRequiresTheDeepRoleOfTheShippedDeepWorker(t *testing.T) {
 	omp := testbin.OMP(t)
 	references, err := promptrefs.Roles(daemonTestRolePromptsDir(t))

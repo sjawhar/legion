@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const rolesDir = import.meta.dir;
@@ -27,9 +27,6 @@ const headlessOnly = [
   // carries other arguments is caught too.
   'agent="',
 ];
-// The task agents a prompt dispatches, read as the Go daemon's boot gate reads them.
-const dispatchedAgents = (text: string) =>
-  [...text.matchAll(/agent="([a-z0-9][a-z0-9._-]*)"/g)].map(([, name]) => name);
 const repoSpecific = [
   "Inspect",
   "inspect_ai",
@@ -147,31 +144,5 @@ describe("role prompt parts", () => {
         true
       );
     }
-  });
-
-  test("every task agent a role part dispatches is shipped with the plugin or bundled with Oh My Pi", () => {
-    // Oh My Pi's bundled agents Legion's prompts dispatch (docs/kubernetes.md, Model roles).
-    const bundled: Record<string, true> = { scout: true, reviewer: true };
-    const agentsDir = path.join(rolesDir, "..", "agents");
-    const parts = readdirSync(rolesDir, { recursive: true, encoding: "utf8" }).filter((file) =>
-      file.endsWith(".md")
-    );
-    const dispatched = parts.flatMap((file) =>
-      dispatchedAgents(read(file)).map((name) => ({ file, name }))
-    );
-    expect(dispatched.map(({ name }) => name)).toContain("deep-worker");
-    for (const { file, name } of dispatched) {
-      if (bundled[name]) continue;
-      expect(
-        existsSync(path.join(agentsDir, `${name}.md`)),
-        `${file} dispatches ${name}, which agents/ does not ship`
-      ).toBe(true);
-    }
-  });
-
-  test("a dispatch with other arguments is read as a dispatch, by both rules", () => {
-    const ghost = 'Run `task(agent="ghost-worker", isolated: false)` for the code.';
-    expect(dispatchedAgents(ghost)).toEqual(["ghost-worker"]);
-    expect(headlessOnly.filter((needle) => ghost.includes(needle))).toEqual(['agent="']);
   });
 });

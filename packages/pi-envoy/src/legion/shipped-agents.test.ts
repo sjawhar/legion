@@ -28,3 +28,18 @@ test.each(agents)("%s declares its model only as role aliases", (file) => {
     }
   }
 });
+
+// Oh My Pi runs a task agent in the background, returning before it finishes, unless the agent is
+// `blocking` (task/index.ts at the pin). An agent whose tools can edit the working copy must be
+// waited for, or its caller checks and commits a tree the agent is still changing.
+test.each(agents)("%s is blocking when its tools can edit files", (file) => {
+  const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(join(agentsDir, file), "utf8"));
+  if (!frontmatter) throw new Error(`${file} has no frontmatter`);
+  const { tools, blocking } = Bun.YAML.parse(frontmatter[1]) as {
+    tools?: string;
+    blocking?: unknown;
+  };
+  const named = (tools ?? "").split(",").map((tool) => tool.trim());
+  if (named.includes("edit") || named.includes("write"))
+    expect(blocking, `${file} can edit files`).toBe(true);
+});
