@@ -208,15 +208,16 @@ already applied), when a file is named other than `<version>_<name>.up.sql` or
 `<version>_<name>.down.sql` (a `.down.sql` is a rollback script an operator runs by hand, and needs
 its `.up.sql`), when a version is not decimal digits from 1 to 2147483647, and when a file cannot
 be read. Versions are applied by number, not by file name, and the store's tests require them to
-run 1 to N with no gap (`TestMigrateRecordsEveryVersionContiguously`), so take the next free number
-on `main`.
+run 1 to N with no gap (`TestMigrationSetIsNumberedOneToN`, which reads file names alone), so take
+the next free number on `main`.
 
-Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, set with
-`SET LOCAL lock_timeout` once the runner holds its advisory lock), so a migration queued behind a
-long transaction fails the boot instead of holding every read and write of its table behind its
-request. The failure names the migration, the lock it wanted, the sessions it was queued behind,
-and the `pg_stat_activity` query that lists the holders; end the holder or let it finish and start
-the server again. A migration that needs another bound sets its own `SET LOCAL lock_timeout`.
+Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which
+`pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a
+migration queued behind a long transaction fails the boot instead of holding every read and write
+of its table behind its request. The failure names the migration, the lock it wanted, the sessions
+it was queued behind, and the `pg_stat_activity` query that lists the holders; end the holder or
+let it finish and start the server again. A migration that needs another bound sets its own
+`SET LOCAL lock_timeout`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

@@ -49,11 +49,6 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	if err != nil {
 		return fmt.Errorf("migrations refused, none applied: %w", err)
 	}
-	watchPool, err := pgmigrate.OpenWatchPool(ctx, s.Pool.Config())
-	if err != nil {
-		return err
-	}
-	defer watchPool.Close()
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -61,9 +56,6 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, int64(8330001)); err != nil {
 		return fmt.Errorf("lock migrations: %w", err)
-	}
-	if err := pgmigrate.BoundLockWaits(ctx, tx); err != nil {
-		return err
 	}
 	if _, err := tx.Exec(ctx, `create table if not exists broker_schema_migrations (version integer primary key, applied_at timestamptz not null default now())`); err != nil {
 		return err
@@ -76,7 +68,7 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 		if applied {
 			continue
 		}
-		if err := pgmigrate.Exec(ctx, tx, watchPool, migration); err != nil {
+		if err := pgmigrate.Exec(ctx, tx, migration); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `insert into broker_schema_migrations (version) values ($1)`, migration.Version); err != nil {

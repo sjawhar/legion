@@ -3,9 +3,9 @@
 // applied migration by its version alone and apply every version they have not recorded, so both
 // trust the set they embed to give each version one file, and both run a migration's statements
 // under locks that production's reads and writes queue behind. Load refuses a set either runner
-// would apply other than as written, before the runner opens a transaction; LockTimeout bounds
-// every lock wait a migration makes; and a Watch names the lock a migration gave up on and the
-// session that held it.
+// would apply other than as written, before the runner opens a transaction; Exec applies each
+// migration with its lock waits bounded by LockTimeout, and names the lock a migration gave up on
+// and the sessions that held it.
 package pgmigrate
 
 import (
@@ -43,8 +43,8 @@ type Migration struct {
 // It reports every problem it finds and returns no migration when it finds one, so a runner that
 // calls it before opening a transaction applies nothing from a set it refuses. The order is the
 // versions', never the file names': 9_a.up.sql runs before 0010_b.up.sql. Versions need not be
-// contiguous; whether a repository lets a set skip a number is a rule about how it hands numbers
-// out, which a store's own tests state.
+// contiguous for a runner to apply them; that a set skips no number is the repository's rule
+// about handing numbers out, which pgmigratetest.CheckNumberedOneToN holds both stores' sets to.
 func Load(fsys fs.FS, dir string) ([]Migration, error) {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {

@@ -599,15 +599,15 @@ shared pool cannot become a target a one- or four-connection pool can never reac
 are deliberately unguarded — a load or a probe taken under an open transaction must be served,
 not refused, and a separate pool cannot close the cycle the guard prevents.
 
-The migration runner takes one more connection of its own the same way. While a migration's
-transaction waits for a lock, the lock watch (`pgmigrate.Exec`) reads `pg_locks` for that
-transaction's backend every 200 ms on a one-connection pool `pgmigrate.OpenWatchPool` copies from
-the shared pool's configuration, and `Migrate` closes it when it returns. Every migration's
-transaction sets `lock_timeout` to `pgmigrate.LockTimeout` (five seconds) after it takes the
-runner's advisory lock, so a migration queued behind a long transaction fails the boot rather than
-holding every read and write of its table behind its request, and the watch's last reading is how
-the failure names the lock and its holders: Postgres's own error says only `canceling statement
-due to lock timeout`.
+The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
+applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`
+(five seconds), after the runner's advisory lock, so a migration queued behind a long transaction
+fails the boot rather than holding every read and write of its table behind its request. While
+the migration runs, its lock watch reads `pg_locks` for the transaction's backend every 200 ms on
+a connection it dials from that backend's own configuration (`pgx.Conn.Config`) at its first
+reading and closes when the migration ends, so a migration faster than one reading dials nothing.
+The watch's last reading is how the failure names the lock and its holders: Postgres's own error
+says only `canceling statement due to lock timeout`.
 
 Everywhere else a read runs through the transaction it is already inside: the issue state an
 anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"io/fs"
 	"net/url"
 	"os"
 	"reflect"
@@ -13,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
+	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -286,33 +287,14 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		where connamespace = current_schema()::regnamespace
 	`, []string{"artifacts_issue_key_slug_key"})
 
-	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
-	if err != nil {
-		t.Fatalf("list embedded migrations: %v", err)
-	}
-	var recordedMigrations int
-	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&recordedMigrations); err != nil {
-		t.Fatalf("count migrations: %v", err)
-	}
-	if recordedMigrations != len(files) {
-		t.Errorf("recorded migrations: got %d, want %d", recordedMigrations, len(files))
-	}
+	assertRecordsEveryVersion(t, ctx, store)
 }
 
-// The set is numbered 1 to N with no gap, and the runner records every one of them. Load does not
-// require contiguity, since the runner does not depend on it; this test does, because a gap is how
-// a migration comes to run in two orders. A branch that takes a number ahead of one not yet on
-// main (0054 while another pull request holds 0053) is green without this test; if it merges
-// first, production applies 0054, and the 0053 that merges after it runs after 0054 there while
-// every fresh database runs it before. The strictness costs such a branch a red run until the
-// lower number lands; that is the price of every database applying one order.
-func TestMigrateRecordsEveryVersionContiguously(t *testing.T) {
-	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
+// Dispatch's set is numbered 1 to N with none missing; pgmigratetest.CheckNumberedOneToN says why.
+func TestMigrationSetIsNumberedOneToN(t *testing.T) {
+	if err := pgmigratetest.CheckNumberedOneToN(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
 	}
-	assertContiguousVersions(t, ctx, store)
 }
 
 func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
@@ -332,7 +314,7 @@ func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate past a hand-recorded version: %v", err)
 	}
-	assertContiguousVersions(t, ctx, store)
+	assertRecordsEveryVersion(t, ctx, store)
 	var appliedAt time.Time
 	if err := store.Pool.QueryRow(ctx, `select applied_at from schema_migrations where version = 8`).Scan(&appliedAt); err != nil {
 		t.Fatalf("read version 8 after migrate: %v", err)
@@ -342,34 +324,28 @@ func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
 	}
 }
 
-func assertContiguousVersions(t *testing.T, ctx context.Context, store *Store) {
+// assertRecordsEveryVersion checks that schema_migrations holds exactly the versions of the
+// embedded set.
+func assertRecordsEveryVersion(t *testing.T, ctx context.Context, store *Store) {
 	t.Helper()
-	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
-		t.Fatalf("list embedded migrations: %v", err)
+		t.Fatalf("load migrations: %v", err)
 	}
 	rows, err := store.Pool.Query(ctx, "select version from schema_migrations order by version")
 	if err != nil {
 		t.Fatalf("list recorded migrations: %v", err)
 	}
-	defer rows.Close()
-	var versions []int
-	for rows.Next() {
-		var version int
-		if err := rows.Scan(&version); err != nil {
-			t.Fatalf("scan recorded migration: %v", err)
-		}
-		versions = append(versions, version)
+	recorded, err := pgx.CollectRows(rows, pgx.RowTo[int])
+	if err != nil {
+		t.Fatalf("read recorded migrations: %v", err)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate recorded migrations: %v", err)
+	want := make([]int, len(migrations))
+	for i, migration := range migrations {
+		want[i] = migration.Version
 	}
-	want := make([]int, len(files))
-	for i := range want {
-		want[i] = i + 1
-	}
-	if !reflect.DeepEqual(versions, want) {
-		t.Errorf("recorded versions = %v, want 1 to %d with none missing: a gap lets a lower number merge after a higher one and run after it in production, before it everywhere else; take the next free number on main", versions, len(files))
+	if !reflect.DeepEqual(recorded, want) {
+		t.Errorf("recorded versions = %v, want every embedded version %v", recorded, want)
 	}
 }
 
@@ -438,16 +414,11 @@ func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	if err != nil {
 		t.Fatalf("load migrations: %v", err)
 	}
-	watchPool, err := pgmigrate.OpenWatchPool(ctx, store.Pool.Config())
-	if err != nil {
-		t.Fatalf("open lock watch pool: %v", err)
-	}
-	defer watchPool.Close()
 	for _, migration := range migrations {
 		if migration.Version > maxVersion {
 			break
 		}
-		if err := store.applyMigration(ctx, watchPool, migration); err != nil {
+		if err := store.applyMigration(ctx, migration); err != nil {
 			t.Fatalf("apply %s: %v", migration.Name, err)
 		}
 	}
