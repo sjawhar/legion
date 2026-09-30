@@ -69,9 +69,12 @@ is the post-merge path, never the pre-merge one.
 ## Reusable-workflow caller permissions and secrets
 
 When `release.yaml` calls `worker-image.yaml` with `uses:`, the **caller job's** permissions must
-cover everything the callee declares — job-level `permissions:` on the calling job replace the
-workflow-level set for that job, so put the full set there (`contents: write`, `packages: write`,
-`id-token: write`) rather than widening the top-level block for every job in the file.
+cover every scope the callee declares — job-level `permissions:` on the calling job replace the
+workflow-level set for that job, so put the callee's set there (`contents: read` and
+`packages: write` for `worker-image.yaml`) rather than widening the top-level block for every job
+in the file. The step that appends the image digest to the CLI release needs `contents: write`, so
+it runs in `release.yaml`'s own `worker_image_release_note` job; the called workflow, which also
+builds PR-authored code on `pull_request`, never gets that scope.
 
 `secrets: inherit` is not needed when the callee reads only `secrets.GITHUB_TOKEN`: a called
 workflow receives `GITHUB_TOKEN` automatically. `inherit` hands the callee every repository secret

@@ -214,13 +214,38 @@ jobs:
     # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
     # PR-authored Dockerfile. Job-level permissions replace the top-level set for this job and must
-    # cover everything the called workflow declares (packages: write is for the ghcr.io push).
+    # cover every scope the called workflow declares: contents: read, and packages: write for the
+    # ghcr.io push. The release note, the one step needing contents: write, is
+    # worker_image_release_note below.
     permissions:
-      contents: write
+      contents: read
       packages: write
     with:
       cli_version: ${{ needs.cli.outputs.version }}
-      release_tag: ${{ needs.cli.outputs.release_tag }}
+
+  worker_image_release_note:
+    needs: [cli, worker_image]
+    if: needs.worker_image.result == 'success' && needs.cli.outputs.release_tag != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # gh release edit
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IMAGE: ${{ needs.worker_image.outputs.image }}
+      DIGEST: ${{ needs.worker_image.outputs.digest }}
+      RELEASE_TAG: ${{ needs.cli.outputs.release_tag }}
+    steps:
+      - name: Append the worker image digest to the CLI release
+        run: |
+          test -n "$DIGEST"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
+          if grep -q "$DIGEST" body.md; then
+            echo "Release $RELEASE_TAG already lists $DIGEST"
+            exit 0
+          fi
+          # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
+          printf '\n\n## Worker image\n\n`%s@%s`\n' "$IMAGE" "$DIGEST" >> body.md
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
 
   envoy_plugin:
     needs: [changes, cli]
