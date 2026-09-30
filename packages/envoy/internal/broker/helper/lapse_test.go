@@ -20,11 +20,10 @@ import (
 
 // lapseRig is a logged-in rig whose one session (this test process) enrolls and then has its
 // first renew refused (the fake's refuseRenewNext: 401 LEASE_EXPIRED, whenever that renew comes).
-// Nothing here races a lease's wall clock. The first enrollment's lease is short only so that its
-// renew comes soon (at MinRenew, 50 ms), and every later enrollment gets an hour, so the
-// re-enrollment a test waits for can never lapse again underneath it. The fake then answers
-// failRevokes revokes of the lapsed id with a 503; all callers fail at least the first, so the
-// hour is set well before any re-enrollment.
+// Nothing here races a lease's wall clock. The first enrollment's lease is short (the fake's
+// nextLease) only so that its renew comes soon (at MinRenew, 50 ms), and every later enrollment
+// gets the fake's 900 s default, so the re-enrollment a test waits for can never lapse again
+// underneath it. The fake then answers failRevokes revokes of the lapsed id with a 503.
 //
 // lapseRig returns once the first of those revokes has been answered. It returns the rig, the
 // enrollment id the session had before the lapse, and the state path its records are saved to.
@@ -33,7 +32,7 @@ func lapseRig(t *testing.T, failRevokes int) (*rig, string, string) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	r.fake.mu.Lock()
-	r.fake.lease = 150 * time.Millisecond
+	r.fake.nextLease = 150 * time.Millisecond
 	r.fake.refuseRenewNext = 1
 	r.fake.revokeFailFirst = failRevokes
 	r.fake.mu.Unlock()
@@ -41,9 +40,6 @@ func lapseRig(t *testing.T, failRevokes int) (*rig, string, string) {
 	if !reg.OK || reg.State != "enrolled" {
 		t.Fatalf("register: %+v", reg)
 	}
-	r.fake.mu.Lock()
-	r.fake.lease = time.Hour
-	r.fake.mu.Unlock()
 	waitFor(t, func() bool {
 		r.fake.mu.Lock()
 		defer r.fake.mu.Unlock()
@@ -210,8 +206,8 @@ func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
 	r, first, state := lapseRig(t, failAlways)
 	renewGate, releaseRenew := testGate(t)
 	r.fake.mu.Lock()
-	r.fake.lease = 150 * time.Millisecond // the second enrollment renews at MinRenew,
-	r.fake.refuseRenewNext = 1            // and that renew is refused whenever the gate lets it through
+	r.fake.nextLease = 150 * time.Millisecond // the second enrollment renews at MinRenew,
+	r.fake.refuseRenewNext = 1                // and that renew is refused whenever the gate lets it through
 	r.fake.renewGate = renewGate
 	r.fake.mu.Unlock()
 	replies := registerWaitBlocked(t, r)
@@ -222,8 +218,7 @@ func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
 
 	enrollGate, releaseEnroll := testGate(t)
 	r.fake.mu.Lock()
-	r.fake.lease = time.Hour // the third enrollment cannot lapse under the assertions
-	r.fake.enrollGate = enrollGate
+	r.fake.enrollGate = enrollGate // the third enrollment gets the fake's 900 s default lease
 	r.fake.mu.Unlock()
 	releaseRenew() // the second lapse
 	deadline := time.Now().Add(10 * time.Second)
@@ -255,14 +250,14 @@ func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
 // TestARenewThatFailsTransientlyKeepsTheLease: a renew the broker cannot answer (503) is an outage,
 // not a refusal, so the session keeps its enrollment and its lease and renews again: it never
 // lapses, revokes or enrolls afresh. The fake holds the first renew at one gate until the test has
-// moved the enrollment's stored expiry an hour out, so no lease passes under the test however slow
-// the host is, and holds the retry at a second gate, so the session is read after it has handled
-// the 503 and before the retry succeeds.
+// moved the enrollment's stored expiry a minute out, past every deadline in the test, so no lease
+// passes under the test however slow the host is, and holds the retry at a second gate, so the
+// session is read after it has handled the 503 and before the retry succeeds.
 func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
 	r := startRig(t, "")
 	first, releaseFirst := testGate(t)
 	r.fake.mu.Lock()
-	r.fake.lease = 150 * time.Millisecond // the first renew comes at MinRenew
+	r.fake.nextLease = 150 * time.Millisecond // the first renew comes at MinRenew
 	r.fake.renewFail = 1
 	r.fake.renewGate = first
 	r.fake.mu.Unlock()
@@ -279,9 +274,8 @@ func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
 	waitFor(t, func() bool { return renews() == 1 }) // the first renew is waiting at its gate
 	retry, releaseRetry := testGate(t)
 	r.fake.mu.Lock()
-	stored := time.Now().Add(time.Hour)
+	stored := time.Now().Add(time.Minute)
 	r.fake.leaseExpiry[id] = stored
-	r.fake.lease = time.Hour
 	r.fake.renewGate = retry
 	r.fake.mu.Unlock()
 	releaseFirst() // answered 503
@@ -289,10 +283,8 @@ func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
 	sess := r.srv.Registry.Get(os.Getpid())
 	kept := func(when string) {
 		t.Helper()
-		_, deletes, _ := r.fake.snapshot()
-		r.fake.mu.Lock()
-		enrolls := len(r.fake.posts)
-		r.fake.mu.Unlock()
+		posts, deletes, _ := r.fake.snapshot()
+		enrolls := len(posts)
 		if sess.State() != "enrolled" || sess.EnrollmentID() != id || sess.lapsed() != "" || len(deletes) != 0 || enrolls != 1 {
 			t.Fatalf("%s: session %s under %q (lapsed id %q), revokes %q, %d enrolls; want enrolled under %q, no revoke, one enroll",
 				when, sess.State(), sess.EnrollmentID(), sess.lapsed(), deletes, enrolls, id)
@@ -300,7 +292,7 @@ func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for renews() < 2 {
-		kept("after the 503")
+		kept("until the retry arrives")
 		if time.Now().After(deadline) {
 			t.Fatal("the session never renewed again after a renew that failed with 503")
 		}

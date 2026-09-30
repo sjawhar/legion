@@ -753,13 +753,13 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 // The lapse is the fake's genuine expiry path, with nothing timed against it: the fake holds the
 // session's first renew at its renew gate until the test has seen the enrollment's stored lease
 // pass, and only then lets it through, so the renew is refused because the lease has passed
-// however slow the host is. Enrollments after the first get an hour's lease, so the fresh
-// enrollment cannot lapse again under the assertions.
+// however slow the host is. The first enrollment's short lease is the fake's nextLease, so the
+// fresh enrollment gets the fake's 900 s default and cannot lapse again under the assertions.
 func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 	r := startRig(t, "")
 	gate, open := testGate(t)
 	r.fake.mu.Lock()
-	r.fake.lease = 60 * time.Millisecond
+	r.fake.nextLease = 60 * time.Millisecond
 	r.fake.renewGate = gate
 	r.fake.mu.Unlock()
 	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
@@ -768,7 +768,6 @@ func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 	}
 	r.fake.mu.Lock()
 	expiry := r.fake.leaseExpiry[reg.EnrollmentID]
-	r.fake.lease = time.Hour
 	r.fake.mu.Unlock()
 	time.Sleep(time.Until(expiry) + 20*time.Millisecond)
 	open()

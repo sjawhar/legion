@@ -98,7 +98,8 @@ type fakeBroker struct {
 	issuedCredentialID string // the launcher credential id minted for the most recent "issued" login
 
 	// refuseRenewNext answers the next N renews 401 LEASE_EXPIRED whatever the lease, so a test
-	// lapses a session on its next renew without racing the lease's wall clock.
+	// lapses a session on its next renew without racing the lease's wall clock. A renew that
+	// renewFail also covers gets renewFail's 503 instead, since renewFail is checked first.
 	refuseRenewNext int
 	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
 	// session enrolling for exactly as long as it needs.
@@ -111,8 +112,12 @@ type fakeBroker struct {
 	// test can tell that a renew is waiting at the gate.
 	renewAttempts int
 	// renewFail answers the next N renews 503 without touching the lease: an outage, not a
-	// refusal.
+	// refusal. It is checked before refuseRenewNext, so with both set the 503s come first.
 	renewFail int
+	// nextLease, when set, is the lease the next new enrollment gets, and that enrollment clears
+	// it, so every later one gets lease. A test gives one enrollment a lease short enough that it
+	// renews soon, and nothing it re-enrolls can lapse under the test however the steps interleave.
+	nextLease time.Duration
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -170,7 +175,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		}
 		f.next++
 		id := fmt.Sprintf("enr-%d", f.next)
-		lease := time.Now().Add(f.lease)
+		d := f.lease
+		if f.nextLease > 0 {
+			d, f.nextLease = f.nextLease, 0
+		}
+		lease := time.Now().Add(d)
 		f.enrolled[id], f.byTP[tp] = tp, id
 		f.leaseExpiry[id] = lease
 		f.runtimeIDToID[rid] = id
