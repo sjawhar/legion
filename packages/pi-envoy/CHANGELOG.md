@@ -8,8 +8,9 @@
   `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
   (`@deep`): given a goal, the workspace and files in scope, the skills to follow and the checks
   that must pass, it makes the change, runs the checks and reports what it changed. Its prompt
-  tells it to make no commit, push or GitHub write; nothing enforces that, and the implementer
-  checks it when it reads the worker's diff. The implementer's role text plans the change as todos,
+  tells it to make no commit, push or GitHub write. Nothing enforces that: the implementer's
+  review of each result can catch a worker's commit, but not a push or a GitHub write
+  (LEGION-428). The implementer's role text plans the change as todos,
   hands each coding task (the plan's change and each review round's fixes) to
   `task(agent="deep-worker")` one at a time, and verifies every result itself, running the plan's
   checks and reading the diff, before it builds on or commits it; the commits, pushes, pull
