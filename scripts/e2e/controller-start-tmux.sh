@@ -138,8 +138,8 @@ manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$pr
 want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
 note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, goDaemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
-# their roles (@review, @oracle) and the default one model, served by a static-key provider that
-# listens nowhere: this proof takes no model turn, so no model is called and no credential the
+# their roles (@review, @oracle, @deep) and the default one model, served by a static-key provider
+# that listens nowhere: this proof takes no model turn, so no model is called and no credential the
 # machine carries decides the gate.
 mkdir -p "$profile_agent"
 cat >"$profile_agent/models.yml" <<'EOF'
@@ -153,7 +153,7 @@ providers:
       - id: m1
         name: M1
 EOF
-printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n' >"$profile_agent/config.yml"
+printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n  deep: offline/m1\n' >"$profile_agent/config.yml"
 
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token")
 cat >"$work/legion.yaml" <<EOF

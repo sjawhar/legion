@@ -59,7 +59,8 @@ only on this phase's artifact.
 
 You never spawn another Legion role: spawning a worker
 (`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
-scouts, reviewers, and oracle subagents for your own phase work; they are not Legion roles.
+scouts, reviewers, and oracle subagents for your own phase work, and the implementer hands its
+code to `task(agent="deep-worker")`; none of them is a Legion role.
 Escalate a product, scope, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents

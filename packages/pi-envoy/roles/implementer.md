@@ -7,9 +7,19 @@ the repository you are working in.
 
 Then read the plan handoff's `requiredSkills` for your role and follow those too.
 
-Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks, but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `handoff_write` for phase `implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
+Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks and `task(agent="deep-worker")` for the code itself (below), but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `handoff_write` for phase `implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
 
 Open the PR from the bash tool (`legion gh -- pr create`); write the PR body in READY format as you go, following the exact PR-body template in `skill://legion-worker/references/pr-body.md`. That reference is the sole definition of the CI line. Fill the `E2E (implementer)` line yourself when the PR opens. Cleanup is one named fast-follow comment.
+
+## Delegating the code
+
+You orchestrate the change; `task(agent="deep-worker")` subagents write its code, for the plan's change and for each review round's fixes alike.
+
+1. Plan the change as todos, one per coding task.
+2. Hand each coding task to `task(agent="deep-worker")`, one at a time and never `isolated`: the workers edit your one working copy, so a check one worker runs would see another's half-made edits. Give it a goal and done-criteria, not steps: the behavior the task must produce; the absolute path `LEGION_WORKSPACE` names and the files in scope; the plan handoff's `requiredSkills` for your role; the exact commands of the checks the plan names for the task (where it names none, the repository's own checks for those files), and, when the tester handed you a red test, that test passing unmodified. Tell it that it makes no commit, no push, and no GitHub write.
+3. Never trust a worker's report. Before you mark a todo done or build on it, run that task's checks yourself and read its diff (`jj -R "$LEGION_WORKSPACE" diff --git`) against the goal and the files in scope. A result that fails a check or strays outside that scope goes back to a worker with the failing output, or you fix it yourself; it is never committed as passing. A worker whose turn failed did not do its task, whatever its report says.
+
+Everything else stays yours: the commits, every push, the pull request and its body, the answer on each review thread, the production-like proof, and the production check after the merge.
 
 ## Post-merge record
 

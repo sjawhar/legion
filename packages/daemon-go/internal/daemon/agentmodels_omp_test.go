@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -118,6 +119,89 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 					SkipAgentModels: testCase.skip, RoleReferences: promptrefs.New(), Log: log})
 			}
 
+			if len(testCase.want) == 0 {
+				if err != nil {
+					t.Fatalf("ProbeImage = %v, want every probe to pass", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ProbeImage passed, want a refusal saying %q", testCase.want)
+			}
+			for _, want := range testCase.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("ProbeImage = %v, want it to say %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// shippedPromptPlugin lays out a pi-legion-envoy under dir with the prompts this checkout ships:
+// the plugin's own agents/, and the repository's skills as its dist/skills, as the package's
+// prepack copies them, under testPlugin's manifest and load marker.
+func shippedPromptPlugin(t *testing.T, dir string) string {
+	t.Helper()
+	pluginSource := filepath.Dir(daemonTestRolePromptsDir(t))
+	files := map[string]string{}
+	for source, target := range map[string]string{
+		filepath.Join(pluginSource, "agents"):             "agents",
+		filepath.Join(pluginSource, "..", "..", "skills"): filepath.Join("dist", "skills"),
+	} {
+		if err := fs.WalkDir(os.DirFS(source), ".", func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return err
+			}
+			body, err := os.ReadFile(filepath.Join(source, path))
+			if err != nil {
+				return err
+			}
+			files[filepath.Join(target, path)] = string(body)
+			return nil
+		}); err != nil {
+			t.Fatalf("copy the shipped prompts from %s: %v", source, err)
+		}
+	}
+	return testPlugin(t, dir, files)
+}
+
+// The implementer's role prompt hands its code to the deep-worker the plugin ships, whose model is
+// the deployment's `deep` role. On the prompts this checkout ships, with the daemon's own role
+// prompts, the image probe passes a route that gives every role Legion's shipped agents name a
+// model, and refuses one that leaves `deep` unset, naming deep-worker and the role prompt that
+// dispatches it: the task tool would otherwise run every coding task on the implementer's own
+// model without a word. A plugin that ships no deep-worker is refused by name on either route.
+func TestTheImageProbeRequiresTheDeepRoleOfTheShippedDeepWorker(t *testing.T) {
+	omp := testbin.OMP(t)
+	references, err := promptrefs.Roles(daemonTestRolePromptsDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const models = "providers:\n" +
+		"  fake:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: static-key\n" +
+		"    models:\n      - id: m1\n        name: M1\n"
+	const shared = "  default: fake/m1\n  review: fake/m1\n  oracle: fake/m1\n"
+	for _, testCase := range []struct {
+		name, roles string
+		want        []string
+	}{
+		{name: "a route that gives deep a model", roles: shared + "  deep: fake/m1\n"},
+		{name: "a route that leaves deep unset", roles: shared,
+			want: []string{"task agent deep-worker (dispatched by ", "roles/implementer.md", "on its model @deep: role deep is not configured"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			home := filepath.Join(dir, "home")
+			agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
+			mkdir(t, agent)
+			for name, content := range map[string]string{"models.yml": models, "config.yml": "modelRoles:\n" + testCase.roles} {
+				if err := os.WriteFile(filepath.Join(agent, name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": "/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED": "true"}
+			err := ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: shippedPromptPlugin(t, dir),
+				RoleReferences: references, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))})
 			if len(testCase.want) == 0 {
 				if err != nil {
 					t.Fatalf("ProbeImage = %v, want every probe to pass", err)

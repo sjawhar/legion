@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const rolesDir = import.meta.dir;
@@ -22,6 +22,8 @@ const headlessOnly = [
   "roleToken",
   "spawn_worker",
   "legion-worker",
+  // A task subagent the interactive fragment starts dispatches none of its own.
+  'task(agent="',
 ];
 const repoSpecific = [
   "Inspect",
@@ -139,6 +141,29 @@ describe("role prompt parts", () => {
       expect(text.endsWith("\n") && !text.endsWith("\n\n"), `${file} ends with one newline`).toBe(
         true
       );
+    }
+  });
+
+  test("every task agent a role part dispatches is shipped with the plugin or bundled with Oh My Pi", () => {
+    // Oh My Pi's bundled agents Legion's prompts dispatch (docs/kubernetes.md, Model roles).
+    const bundled: Record<string, true> = { scout: true, reviewer: true };
+    const agentsDir = path.join(rolesDir, "..", "agents");
+    const parts = readdirSync(rolesDir, { recursive: true, encoding: "utf8" }).filter((file) =>
+      file.endsWith(".md")
+    );
+    const dispatched = parts.flatMap((file) =>
+      [...read(file).matchAll(/task\(agent="([a-z0-9][a-z0-9._-]*)"\)/g)].map(([, name]) => ({
+        file,
+        name,
+      }))
+    );
+    expect(dispatched.map(({ name }) => name)).toContain("deep-worker");
+    for (const { file, name } of dispatched) {
+      if (bundled[name]) continue;
+      expect(
+        existsSync(path.join(agentsDir, `${name}.md`)),
+        `${file} dispatches ${name}, which agents/ does not ship`
+      ).toBe(true);
     }
   });
 });

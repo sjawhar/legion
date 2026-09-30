@@ -4,6 +4,19 @@
 
 ### Added
 
+- The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
+  `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
+  (`@deep`): given a goal, the workspace and files in scope, the skills to follow and the checks
+  that must pass, it makes the change, runs the checks and reports what it changed, and it never
+  commits, pushes or writes to GitHub. The implementer's role text plans the change as todos,
+  hands each coding task (the plan's change and each review round's fixes) to
+  `task(agent="deep-worker")` one at a time, and verifies every result itself, running the plan's
+  checks and reading the diff, before it builds on or commits it; the commits, pushes, pull
+  request, review-thread answers and production check stay the implementer's. The Go daemon's
+  boot gate resolves `deep-worker` as it does the other shipped agents, so an operator route that
+  gives `deep` no model (`modelRoles.deep`, or a `task.agentModelOverrides` entry) refuses the
+  boot, naming `deep-worker`; the TypeScript daemon has no such gate, and there Oh My Pi runs an
+  unmapped `deep-worker` on the implementer's own model.
 - Every session with the Dispatch tools, Legion panes and `task` subagents included, now carries the
   `dispatch-first` skill in every model request: search Dispatch before planning, filing, asking or
   starting work; extend the issue that already tracks the work; cite the decision a human already

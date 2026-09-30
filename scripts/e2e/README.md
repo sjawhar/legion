@@ -714,8 +714,8 @@ Task 4b.5's acceptance for `legion controller start`, on tmux. The Go daemon run
 with this checkout's plugin in an isolated OMP profile, against a real Envoy listener and NATS, and
 the command runs in real tmux panes, as an operator would. The pinned Oh My Pi is launched through
 mise. The controller takes no model turn, so the run needs no model route: the profile names the
-roles the task agents use (`review`, `oracle`) and the default on a static-key provider that listens
-nowhere, which is all the boot gate's agent-model check resolves.
+roles the task agents use (`review`, `oracle`, `deep`) and the default on a static-key provider
+that listens nowhere, which is all the boot gate's agent-model check resolves.
 
 ```bash
 bash scripts/e2e/controller-start-tmux.sh
@@ -1051,8 +1051,8 @@ call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token
 carries the key alone. The profile's
 `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
 and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
-(`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
-`oracle`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
+(`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review`,
+`oracle` and `deep`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
 `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
 `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 

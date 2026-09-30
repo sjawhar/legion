@@ -208,6 +208,9 @@ jobs:
               - 'packages/envoy/cmd/dispatch/**'
               # The plugin's Go client and the manifest field the boot gate holds it to.
               - 'packages/pi-envoy/**'
+              # The skills the plugin ships, which internal/daemon's image-probe test resolves with
+              # the plugin's agents and role prompts (TestTheImageProbeRequiresTheDeepRoleOfTheShippedDeepWorker).
+              - 'skills/**'
               # The Oh My Pi pin the real-binary tests run (internal/podsafety's baseline, the
               # pod agent's argv in internal/runtime/sandbox).
               - 'packages/daemon/src/daemon/omp-pin.ts'
