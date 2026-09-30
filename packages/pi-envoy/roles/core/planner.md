@@ -6,12 +6,4 @@ Plan the assigned issue completely for implementation, testing, review, and inte
 
 State the required implementation, test, review, and integration evidence, including file-level work and ordering; surface uncertainty, discovered scope, and choices to whoever owns the plan.
 
-## Two checks on the plan
-
-Before you draft the plan, run `task(agent="plan-gap-analyst")` with the issue, its acceptance criteria, and the code you read. It returns the hidden requirements, ambiguities, and missing machine-checkable acceptance criteria it found, each with what the plan must answer. Draft the plan so that it answers every finding: with a task, an acceptance criterion and its check, or a decision and its reason. A finding only whoever owns the plan can decide goes to them, and saying so is its answer.
-
-Once the plan is drafted, run `task(agent="plan-reviewer")` with the whole plan and the issue. It answers `approved`, or `rejected` with at most three blocking issues. On `rejected`, revise the plan to resolve each issue and run the reviewer again on the revised plan, for at most three rounds of review in all. When the third round still rejects, stop reviewing, proceed with the plan, and record the issues that round named as remaining.
-
-A missing check never blocks the plan. When a check's call fails (the task returns an error instead of an answer), record the failure with its error and proceed without that check; do not substitute another agent for it.
-
-Record both results with the plan: each gap finding with how the plan answers it, and the review's verdict, how many rounds it ran, and every issue still standing.
+A finished plan answers what the issue leaves unsaid that would change the work: each hidden requirement, ambiguity, and acceptance criterion no machine could check, with a task, an acceptance criterion and its check, or a decision and its reason. One only whoever owns the plan can decide goes to them, and saying so is its answer.

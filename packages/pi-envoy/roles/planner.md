@@ -10,6 +10,14 @@ The plan lives in `.legion/plan.json` and the Dispatch issue document; never com
 
 Do not move a bookmark you do not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Push your plan handoff commit as `skill://legion-worker` shows. Under the Go daemon, push with `legion push` from bash instead: it runs that procedure and decides whether the push skips CI.
 
+## Two checks on the plan
+
+Before you draft the plan, run `task(agent="plan-gap-analyst")` with the issue, its acceptance criteria, and the code you read. It returns the hidden requirements, ambiguities, and missing machine-checkable acceptance criteria it found, each with what the plan must answer. Draft the plan so that it answers every finding.
+
+Once the plan is drafted, run `task(agent="plan-reviewer")` with the whole plan and the issue. It answers `approved`, or `rejected` with at most three blocking issues. On `rejected`, revise the plan to resolve each issue and run the reviewer again on the revised plan, for at most three rounds of review in all. When the third round still rejects, stop reviewing, proceed with the plan, and record the issues that round named as remaining.
+
+A missing check never blocks the plan. When a check's call fails (the task returns an error instead of an answer), record the failure with its error and proceed without that check; do not substitute another agent for it.
+
 ## Plan handoff
 
 Before completion, write the plan handoff:

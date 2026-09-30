@@ -183,12 +183,16 @@ describe("the planner's plan checks", () => {
     }
   });
 
-  test("the gap analyst runs before the plan is drafted and the reviewer after", () => {
+  // The core is also composed with the interactive fragment, whose subagent dispatches nothing, so
+  // the dispatches live in the headless residue alone.
+  test("the headless planner runs the gap analyst before the plan is drafted and the reviewer after; its core dispatches neither", () => {
     const gap = planner.indexOf('task(agent="plan-gap-analyst")');
     const review = planner.indexOf('task(agent="plan-reviewer")');
     expect(gap).toBeGreaterThan(-1);
     expect(review).toBeGreaterThan(gap);
     expect(dispatched(planner).sort()).toEqual(["plan-gap-analyst", "plan-reviewer"]);
+    expect(dispatched(read("planner.md")).sort()).toEqual(["plan-gap-analyst", "plan-reviewer"]);
+    expect(dispatched(read("core", "planner.md"))).toEqual([]);
   });
 
   test("both checks are read-only and run on the deployment's oracle and review roles", () => {
