@@ -281,9 +281,9 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
  *     a rig error;
  *   - `readExport` is a substring match on the tool calls' arguments, not a record of a read;
  *   - the fixture gives agents a second reason to drop A: every owner in the export is at
- *     example.invalid, and 9 of the first 30 asks said those addresses cannot receive mail. In the
- *     21 that did not, the drop rates were head 3/6, base 0/6, ablate 0/9; in the 9 that did,
- *     4/4, 1/4 and 0/1. Read a drop against that split before crediting the rule with it. */
+ *     example.invalid, and an agent that notices those addresses cannot receive mail has grounds
+ *     to drop A that have nothing to do with gate 2. Split the runs on whether the ask says so, and
+ *     read a drop against that split before crediting the rule with it. */
 function measureBeforeAsk(runDir: string, run: string, label: string): Row {
   const row = askRow(runDir, run, "measure-before-ask", label, (all, options) => {
     const population = /\b430\b/.test(all);
@@ -421,7 +421,7 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
  *     the profile's gateway key command ran past its budget. The key command's own record of each
- *     call, which open pull request #1623 adds, would be a better signal;
+ *     call would be a better signal; this rig does not read it;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
  *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.

@@ -25,14 +25,15 @@
 #   measure-before-ask
 #                   A plain session is told to ask Sami which of three ways to finish an owner
 #                   session posted, with the export the message names in its working directory;
-#                   the export shows one way cannot work (run_measure_before_ask). Scored by
+#                   the export shows one way reaches only 18 of the 430 issues it names
+#                   (run_measure_before_ask). Scored by
 #                   measureBeforeAsk.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
 # whose skills state it. So every comparison carries an ablate label: a checkout of the head with
 # the scenario's scored rule deleted from its skills, never committed. measure-before-ask is the
-# instrument: gate 2 lives in the dispatch skill alone, and deleting it took the drop rate from
-# 7/10 to 0/10. ask-on-message and tester-proof are controls: their rules also live in
+# instrument: gate 2 lives in the dispatch skill alone, and its ablate arm scores below the head.
+# ask-on-message and tester-proof are controls: their rules also live in
 # dispatch-first and dispatch_ask's description, and in the tester role prompt, so ablate scores
 # as the head does and they cannot detect a lost skill rule. A new scenario is an instrument only
 # once an ablate arm has scored lower on it.
