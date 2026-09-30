@@ -379,11 +379,11 @@ a close whose branch delete failed is reported as closed with the reason the bra
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
-pull request open and prints gh's reason, with a line saying some may still be open. Whoever reads
-the run's output can go first, for example a supervised launcher's own `tee` stopped with the run,
-and the transcript's disk can fill. The run keeps going, and the trap still closes its pull
-requests. Its output then reaches anyone still reading, and the transcript up to the point its disk
-filled.
+pull request open and prints gh's reason, with a line saying some may still be open. The trap still
+closes the run's pull requests in two further cases. In the first, whoever reads the run's output
+goes first, for example a supervised launcher's own `tee` stopped with the run. In the second, the
+transcript's disk fills. In both the run keeps going, and its output reaches anyone still reading,
+and the transcript up to the point its disk filled ([`lib/transcript.sh`](#libtranscriptsh)).
 
 ## stage3-4b13b-acceptance.sh
 
@@ -623,10 +623,12 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - a closed pane, a Ctrl-C, or `timeout`'s TERM;
 - the transcript's `tee` ignores those signals and SIGPIPE;
 - whoever reads the run's output can go first, for example a supervised launcher's own `tee` stopped
-  with the run, and the transcript's disk can fill. The run keeps going and its teardown still runs
-  in full. Its output reaches anyone still reading, and the transcript up to the point its disk
-  filled; nothing restores the transcript once a write to it has failed. A run whose reader goes
-  and no signal follows runs to its own end, and holds the lock until then;
+  with the run. A run whose reader goes and no signal follows runs to its own end, and holds the
+  lock until then;
+- the transcript's disk can fill. With or without its reader, the run keeps going and its teardown
+  still runs in full. Its output reaches anyone still reading, and the transcript up to the point its
+  disk filled; nothing restores the transcript once a write to it has failed
+  ([`lib/transcript.sh`](#libtranscriptsh));
 - the teardown ignores a second signal and SIGPIPE;
 - the teardown writes to the transcript even when the signal interrupted a command whose output
   went to `/dev/null`;
@@ -1164,6 +1166,27 @@ Every run also carries its own negative control: the first session holding a tur
 `--control` with that one turn rewritten as `amazon-bedrock/us.anthropic.claude-opus-4-8`, and the
 same check must refuse the copy, or the run exits 1 (`the negative control passed`). An argument
 refusal exits 2.
+
+## lib/transcript.sh
+
+The stage proof's transcript. Stage 3, Stage 4a and Stage 4b source it before their first output.
+
+```sh
+. "$root/scripts/e2e/lib/transcript.sh"     # sourced, never run
+transcript_to "$evidence/transcript.log"
+```
+
+`transcript_to FILE` sends the calling shell's stdout and stderr to `FILE` as well as to whatever
+read them before. It does this through a `tee` that ignores the signals a driver traps and SIGPIPE,
+with `/dev/null` as an output that never fails.
+
+- A signal to the process group, a reader that goes first (a supervised launcher's own `tee`,
+  stopped with the run), or a full disk under `FILE` each cost `tee` at most the outputs they break.
+  The driver and its cleanup never fail on a write.
+- GNU `tee` stops once every output has failed and never reopens one. `/dev/null` is what keeps it
+  draining once both the reader and `FILE` have failed.
+- busybox `tee` keeps writing every output and reports errors at EOF. It rejects `-p`, which is why
+  the trap, not `-p`, carries SIGPIPE.
 
 ## lib/rig.sh
 
