@@ -24,6 +24,10 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
+// failAlways, set as a failure count (failFirst, revokeFailFirst), fails every such call a test
+// can make.
+const failAlways = 1 << 30
+
 // fakeBroker records enrollment traffic. It answers 201 for a new thumbprint, 200 for a repeat
 // (the contract's idempotent enroll), 401 LAUNCHER_INVALID for a missing or forced-invalid Proof
 // header, and verifies renew proofs against the thumbprint it enrolled. leaseExpiry models the
@@ -48,10 +52,9 @@ import (
 // stuck retrying with backoff can be observed and torn down mid-retry. revokeAttempts counts
 // every DELETE this fake received, whether it failed or actually deleted the row, independent of
 // revokeFailFirst, so a test can poll for exactly when an attempt has been answered instead of
-// guessing with a raw sleep. renewFail forces the next N renew attempts to answer 503 (a
-// transient broker outage) without touching
-// the lease at all, so a test can let real time pass the lease's own expiry while renews are
-// failing for an unrelated reason.
+// guessing with a raw sleep. revokeForbidden answers a DELETE of each id it names with 403
+// OPERATOR_MISMATCH, as the broker does for an enrollment made under another operator's launcher
+// credential.
 //
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
 // claim instead of a bearer token (AGENTC-834 Task 1): enrollUnauthorizedNext simulates an
@@ -59,8 +62,9 @@ import (
 // The fake also serves the machine-login routes a Broker.Login talks to: POST
 // /v1/launcher-credentials verifies the posted request object with record.VerifyRequestObject and
 // mints a pending id and confirmation code; GET /v1/launcher-credentials/{pending} answers
-// loginOutcome ("issued" by default, or "denied"/"expired" when a test sets it before Login),
-// minting a fresh credential id on "issued".
+// loginOutcome ("issued" by default, or "denied"/"expired" when a test sets it before Login, or
+// "pending" to hold the login undecided until the test sets "issued"), minting a fresh credential
+// id on "issued".
 type fakeBroker struct {
 	mu               sync.Mutex
 	srv              *httptest.Server
@@ -73,12 +77,12 @@ type fakeBroker struct {
 	renews           int
 	conflicts        int           // 409 ALREADY_ENROLLED answers from the runtime_id-keyed conflict path
 	failFirst        int           // 503 this many enroll calls first
-	renewFail        int           // 503 this many renew calls first, lease untouched
 	revokeFirstDelay time.Duration // sleep this long before the first DELETE actually removes its row
 	revokeFailFirst  int           // 503 this many DELETE calls first, row untouched (an unreachable broker)
 	revokeAttempts   int           // every DELETE this fake received, failed or not
 	lease            time.Duration // lease length the fake grants; 900 s unless a test shortens it
 	seen             map[string]bool
+	revokeForbidden  map[string]bool
 	next             int // ids are minted, never derived from the key, like the broker's uuids
 
 	lastAuthorization      string // the Authorization header the most recent Enroll call carried; must stay empty
@@ -90,8 +94,30 @@ type fakeBroker struct {
 	pendingThumbprint  string // the embedded key's thumbprint from that request object
 	pendingID          string // the opaque id minted for the most recent login
 	pendingCode        string // the confirmation code minted for the most recent login
-	loginOutcome       string // what the pending login's poll answers: "issued", "denied", or "expired"
+	loginOutcome       string // what the pending login's poll answers: "issued", "pending", "denied", or "expired"
 	issuedCredentialID string // the launcher credential id minted for the most recent "issued" login
+
+	// refuseRenewNext answers the next N renews 401 LEASE_EXPIRED whatever the lease, so a test
+	// lapses a session on its next renew without racing the lease's wall clock. A renew that
+	// renewFail also covers gets renewFail's 503 instead, since renewFail is checked first.
+	refuseRenewNext int
+	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
+	// session enrolling for exactly as long as it needs.
+	enrollGate chan struct{}
+	// renewGate, when set, holds every renew until the test closes it. A renew reads the gate as it
+	// arrives, so a test can hold one renew, swap in another gate for the next, and release them
+	// one at a time.
+	renewGate chan struct{}
+	// renewAttempts counts every renew this fake received, on arrival and before any gate, so a
+	// test can tell that a renew is waiting at the gate.
+	renewAttempts int
+	// renewFail answers the next N renews 503 without touching the lease: an outage, not a
+	// refusal. It is checked before refuseRenewNext, so with both set the 503s come first.
+	renewFail int
+	// nextLease, when set, is the lease the next new enrollment gets, and that enrollment clears
+	// it, so every later one gets lease. A test gives one enrollment a lease short enough that it
+	// renews soon, and nothing it re-enrolls can lapse under the test however the steps interleave.
+	nextLease time.Duration
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -102,6 +128,12 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		gate := f.enrollGate
+		f.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.lastAuthorization = r.Header.Get("Authorization")
@@ -143,7 +175,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		}
 		f.next++
 		id := fmt.Sprintf("enr-%d", f.next)
-		lease := time.Now().Add(f.lease)
+		d := f.lease
+		if f.nextLease > 0 {
+			d, f.nextLease = f.nextLease, 0
+		}
+		lease := time.Now().Add(d)
 		f.enrolled[id], f.byTP[tp] = tp, id
 		f.leaseExpiry[id] = lease
 		f.runtimeIDToID[rid] = id
@@ -156,6 +192,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		}
 		f.mu.Lock()
 		f.revokeAttempts++
+		if f.revokeForbidden[r.PathValue("id")] {
+			f.mu.Unlock()
+			writeJSON(w, 403, map[string]string{"code": "OPERATOR_MISMATCH", "error": "the enrollment belongs to another operator"})
+			return
+		}
 		if f.revokeFailFirst > 0 {
 			f.revokeFailFirst--
 			f.mu.Unlock()
@@ -186,11 +227,23 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	})
 	mux.HandleFunc("POST /v1/enrollments/{id}/renew", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.renewAttempts++
+		gate := f.renewGate
+		f.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
+		f.mu.Lock()
 		defer f.mu.Unlock()
 		id := r.PathValue("id")
 		if f.renewFail > 0 {
 			f.renewFail--
 			writeJSON(w, 503, map[string]string{"code": "DATABASE", "error": "postgres unreachable"})
+			return
+		}
+		if f.refuseRenewNext > 0 {
+			f.refuseRenewNext--
+			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
 			return
 		}
 		v := &proof.Verifier{
@@ -249,7 +302,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 			return
 		}
 		switch f.loginOutcome {
-		case "denied", "expired":
+		case "denied", "expired", "pending":
 			writeJSON(w, 200, map[string]string{"state": f.loginOutcome})
 			return
 		default:
@@ -492,6 +545,9 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "expired" })
+	if b.LoginStatus().Refused {
+		t.Fatal("a pending login nobody approved in time is expired, not a refused credential")
+	}
 	ro2, err := record.VerifyRequestObject(f.lastLoginRequest, f.srv.URL, time.Minute, time.Now())
 	if err != nil {
 		t.Fatal(err)

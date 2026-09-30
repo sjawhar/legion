@@ -1,4 +1,5 @@
 import { snippetSegments } from "@legion/contracts/dispatch-snippet";
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useQuery } from "@tanstack/react-query";
 import {
   Fragment,
@@ -398,7 +399,10 @@ function PaletteDialog({
   const searchText = query.trim();
   const needle = searchText.toLowerCase();
   const searching = mode !== "projects";
-  const queryEnabled = searching && searchText.length >= 2;
+  const tooShort = searchText.length < 2;
+  // The server refuses a longer query; name the limit here instead of sending it.
+  const tooLong = searchText.length > SEARCH_QUERY_MAX;
+  const queryEnabled = searching && !tooShort && !tooLong;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(searchText), 150);
@@ -406,7 +410,7 @@ function PaletteDialog({
   }, [searchText]);
 
   const search = useQuery({
-    enabled: searching && debouncedQuery.length >= 2,
+    enabled: searching && debouncedQuery.length >= 2 && debouncedQuery.length <= SEARCH_QUERY_MAX,
     queryFn: () => api.search(debouncedQuery),
     queryKey: ["search", debouncedQuery],
   });
@@ -683,9 +687,14 @@ function PaletteDialog({
                 {searchText === "" ? "No projects" : `No projects match "${searchText}"`}
               </p>
             ) : null
-          ) : !queryEnabled ? (
+          ) : tooShort ? (
             <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
               Type at least 2 characters
+            </p>
+          ) : tooLong ? (
+            <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
+              Search with a short phrase: {searchText.length} characters is over the{" "}
+              {SEARCH_QUERY_MAX}-character limit
             </p>
           ) : waitingForQuery || search.isPending ? (
             <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>Searching…</p>

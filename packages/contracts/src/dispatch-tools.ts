@@ -181,6 +181,18 @@ export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 /** Longest ask question the Dispatch server accepts, in characters. */
 export const ASK_QUESTION_MAX = 800;
 
+/**
+ * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
+ * query travels in the URL; percent-encoded at up to 9 bytes a unit, 1,000 stays under the load
+ * balancer's 16 K request-line limit. Generated into Go as `contracts.SearchQueryMax`, which the
+ * server enforces.
+ */
+export const SEARCH_QUERY_MAX = 1000;
+
+/** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
+ *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
+export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -908,8 +920,12 @@ export const dispatchToolSpecs = [
       'Websearch syntax: "quoted phrase", -excluded, OR.',
     arguments: (z) => ({
       query: z
-        .string({ min: 2 })
-        .describe("Keyword, phrase, or websearch expression; at least 2 characters."),
+        .string({
+          min: 2,
+          max: SEARCH_QUERY_MAX,
+          maxHint: SEARCH_QUERY_HINT,
+        })
+        .describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z.string().describe("Optional project key to search within.").optional(),
       limit: z
         .number({ int: true, min: 1, max: 50 })

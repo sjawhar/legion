@@ -19,6 +19,12 @@
 # run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
 # `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
+# The proof human's GitHub writes (the merge, the teardown's closes and branch deletes, and the
+# fixture push) are the devbox gh's and its git credential helper's, acting as the sjawhar-agent
+# App: run the driver from the operator's own Oh My Pi session, not a Legion pane, with no personal
+# GH_TOKEN in its environment. `prerequisites` refuses to start otherwise (require_proof_human,
+# lib/workflow.sh).
+#
 # Inputs:
 # - LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 #   ~/.kube/legion-daemon-production) name the restricted identity the daemon runs as.
@@ -957,9 +963,11 @@ delete_consumers() {
 }
 # remove_run_branches closes each pull request the run left open on the smoke repository and deletes
 # each tree's branch legion/<tree> there (tree 2's is the fixture's): the run's own, which a run that
-# stops before the proof human's merge would otherwise leave behind.
+# stops before the proof human's merge would otherwise leave behind. It makes no gh call unless
+# require_proof_human passed: a refused run's gh acts as someone else.
 remove_run_branches() {
   local issue number
+  [ -n "$proof_human" ] || return 0
   for issue in $tree1 $tree2 $tree3 $tree4; do
     number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
     if [ -n "$number" ]; then
@@ -1243,6 +1251,7 @@ gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
+require_proof_human
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"

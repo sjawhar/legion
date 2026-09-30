@@ -100,8 +100,31 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	default:
 		t.Fatal("setEnrolled must close ready")
 	}
-	sess.clearEnrollment()
-	if sess.State() != "enrolling" {
-		t.Fatal("a refused renew puts the session back to enrolling")
+	if id := sess.markLapsed("the broker refused this session's renew (PROOF_INVALID); enrolling again"); id != "enr-2" {
+		t.Fatalf("markLapsed returns the lapsed id: %q", id)
+	}
+	if sess.State() != "enrolling" || sess.EnrollmentID() != "" {
+		t.Fatal("a refused renew puts the session back to enrolling at once")
+	}
+	if got := sess.LastError(); got != "the broker refused this session's renew (PROOF_INVALID); enrolling again" {
+		t.Fatalf("a lapse records its reason as the last error: %q", got)
+	}
+	select {
+	case <-sess.readyCh():
+		t.Fatal("a lapse must reopen ready, so a register --wait waits for the re-enrollment")
+	default:
+	}
+	if got := sess.recordedEnrollmentID(); got != "enr-2" {
+		t.Fatalf("the record keeps the lapsed id until its revoke: %q", got)
+	}
+	sess.clearLapsed()
+	if got := sess.recordedEnrollmentID(); got != "" {
+		t.Fatalf("a revoked lapsed id leaves the record: %q", got)
+	}
+	sess.setEnrolled("enr-3")
+	select {
+	case <-sess.readyCh():
+	default:
+		t.Fatal("the re-enrollment must close the reopened ready")
 	}
 }

@@ -13,9 +13,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/helper"
 )
 
 const notLoggedInNotice = "agent-secrets: this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets launcher login)\n"
@@ -129,5 +132,37 @@ func TestCommandsOnAHelperWithoutALauncherCredentialPrintTheNotice(t *testing.T)
 		if code != 1 || stdout != "" || stderr != notLoggedInNotice {
 			t.Errorf("agent-secrets %s: exit %d, stdout %q, stderr %q; want 1, nothing, %q", strings.Join(args, " "), code, stdout, stderr, notLoggedInNotice)
 		}
+	}
+}
+
+// TestLoginStatusSaysARefusedCredentialWasRefused: the broker answers 401 LAUNCHER_INVALID for any
+// launcher proof it rejects, a clock step or an AGENT_SECRETS_URL mismatch as well as an expired
+// or revoked credential, so a refused credential must not be reported as merely expired.
+// login-status keeps the word the dotfiles launcher gate matches, "expired", and says on stderr
+// that the broker refused it when the helper reports so. Without that report it says only that
+// the login is expired: the "not reported refused" row is both a login that expired unapproved and
+// a helper from before login_refused answering for a credential the broker refused (it keeps
+// running after the client is upgraded, until the installer can restart it), since both send this
+// same reply, so the client must claim neither.
+func TestLoginStatusSaysARefusedCredentialWasRefused(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	for _, tc := range []struct {
+		name    string
+		refused bool
+		want    string
+	}{
+		{"refused", true, "the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login"},
+		{"not reported refused", false, "the last machine login is expired; run: agent-secrets launcher login"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock := filepath.Join(t.TempDir(), "h.sock")
+			fakeHelperAt(t, sock, helper.Response{OK: true, LoginState: "expired", LoginRefused: tc.refused})
+			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
+			want := "agent-secrets launcher login-status: " + tc.want + "\n"
+			if exit != 1 || stdout != "expired\n" || stderr != want {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want 1, %q, %q", exit, stdout, stderr, "expired\n", want)
+			}
+		})
 	}
 }

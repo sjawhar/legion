@@ -241,7 +241,11 @@ server, the Go daemon; stage 2 and the other local rigs unset every variable bel
 users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
-anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
+anyway). The shim routes `gh` to that App only from the operator's own Oh My Pi session, so the run
+starts there: a plain shell's `gh`, a tmux window's included, is the user's own login, a Legion
+pane's is one of Legion's Apps, and a personal `GH_TOKEN` in the environment makes any session's
+`gh` that token's owner. `prerequisites` refuses to start, before the run's first write to GitHub,
+unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
 `GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier. The agents'
 model is Anthropic through the Hawk model gateway, the route every devbox agent session uses:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes the isolated profile there in
@@ -349,10 +353,13 @@ transcripts too, and fails unless they hold the same turns, sessions and subagen
 scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
 root, which frees its admission slot as its sign-off would), `restart` also skips the held worker,
 and the credential and idle-read checks read `STAGE3_PR` (default: the newest smoke pull request).
-`STAGE3_UNTIL=rework` is the other development aid: it drives the first issue through its three
-review rounds, the per-round handoff checks, and the final review, then skips every later scenario.
-Such a run skips the status-actor check, which needs the first issue's whole history, ends
-`stage 3 e2e: development run from <step> finished (not the proof)` (or `until rework`), and is
+`STAGE3_UNTIL` is the other development aid. `STAGE3_UNTIL=prerequisites` stops once
+`prerequisites` has passed (the tools, the inputs, the proof human, the smoke repository read and
+the model route), before the rig starts anything, and removes the scratch work directory.
+`STAGE3_UNTIL=rework` drives the first issue through its three review rounds, the per-round handoff
+checks, and the final review, then skips every later scenario. Such a run skips the status-actor
+check, which needs the first issue's whole history, ends
+`stage 3 e2e: development run from <step> finished (not the proof)` (or `until <step>`), and is
 never cited as the proof; only a full run is.
 
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
@@ -385,8 +392,10 @@ ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_N
 **Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
 stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
 required inputs and the same model route and proof human as
-[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), but creates no Docker container: the daemon
-and Dispatch take their own databases in the running Postgres container `ACCEPT_PG_CONTAINER` names
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), so it too runs from the operator's own Oh My
+Pi session and refuses to start in `prerequisites` when `gh` acts as anyone but `sjawhar-agent[bot]`. It creates
+no Docker container: the daemon and Dispatch take their own databases in the running Postgres
+container `ACCEPT_PG_CONTAINER` names
 (user `postgres`, password `ci`), and NATS is the native `ACCEPT_NATS_BIN`. Real agents drive the
 task's surfaces through it: a Go prompt part a restart rewrites, the refused root stops, the pane's
 refusal of `legion handoff complete` from a shell in every pane kind, park and re-run, the
@@ -626,7 +635,11 @@ the run that owns it. A signal to the whole process group does not stop the remo
   claim, so the workflow reads its status writes as a human's.
 - **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, and tree 1's pull request, which
   the proof human merges. The teardown closes any pull request the run left open, such as one from a
-  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`.
+  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. Every one of
+  these writes is Stage 3's proof human's: the devbox `gh`, and for the fixture push the git
+  credential helper the same routing installs. So the driver runs from the operator's own Oh My Pi
+  session, and `prerequisites` refuses to start, before it takes the lock, when `gh` acts as anyone
+  but `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)).
 - **Namespace `legion`**: the run's Sandboxes, pods, Secrets and PVCs, its control pods, and its
   copy of the operator fixture's ConfigMap, `legion-operator-route-legsmoke`, all labelled
   `legsmoke`. [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown and
@@ -664,7 +677,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 
 | checkpoint | what it holds |
 | :--- | :--- |
-| `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
+| `prerequisites` | the tools, the restricted context and the image by digest; the devbox `gh` acts as the proof human, `sjawhar-agent[bot]`; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
@@ -1033,8 +1046,9 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
-is unset for it), for that one command. It appends one line per invocation, one per mint, and
-`hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's
+is unset for it), for that one command. It appends one line per invocation, one per mint, one per
+call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout
+carries the key alone. The profile's
 `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
 and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
 (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
@@ -1069,13 +1083,14 @@ with no key. Every role is the one model because the gateway answers `claude-hai
 model OMP gave that Stage 3 scout once Bedrock failed it, with `404 model not found`.
 
 Its first mint is the preflight, before any pane exists. It exits 1 naming the cause when
-`hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
+`hawk-token`, `flock` or `timeout` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
 `lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
 unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
-last line of its stderr); an argument refusal exits 2. The mint also runs `hawk-token`'s own periodic
-self-refresh, which can take longer than OMP's ten-second budget for a `!command`, before any pane
-needs a key rather than inside one. The key is never printed.
+last line of its stderr); an argument refusal exits 2. The installer runs that one call with
+`--preflight`, which exempts it from the key command's deadline (below): on a machine where
+`hawk-token` has never run, its first-run build takes about a minute in the foreground, and it
+happens here rather than inside a pane's ten-second `!command`. The key is never printed.
 
 The key command mints once and keeps the key in `<cache-dir>/hawk-token.key` (`0600`) until
 300 seconds before its JWT `exp`, or for 300 seconds when the key has none. Each `hawk-token` run
@@ -1086,6 +1101,22 @@ the cache. Every call inside the window gets the kept key. A key the gateway ref
 not re-minted: the proof's model turns fail, loudly, which is right for a proof. (The command cannot
 tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/sh -c`, so each call
 has a fresh parent process.)
+
+One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
+once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
+finds no kept key takes an `flock` on `<cache-dir>/hawk-token.key.lock`, looks at the cache again,
+and mints only when the key is still missing; every other call waits on the lock and serves the key
+the holder kept. The mint runs with the lock's descriptor closed, since `hawk-token` can start a
+detached refresh that would otherwise hold the lock for minutes.
+
+Oh My Pi kills a `!command` 10 s after it starts it, so every call but the preflight gives up at
+9500 ms of a clock that starts with its own process (under load bash can take half a second to
+reach its first line), whether it is waiting on the lock or minting under `timeout`, and logs why.
+A waiter that takes the lock with under 2000 ms left starts no mint: the fastest mint measured on
+the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wait is bounded by
+one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
+succeeds is served inside every caller's ten seconds. A call that gets no key exits 1, which Oh My
+Pi reports as `No API key found for anthropic.` and retries 30 s later.
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
@@ -1246,6 +1277,20 @@ where an agent runs:
 `new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
 `legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
 none, since it runs under its root's tree.
+
+`require_proof_human` is the proof human's precondition, which every stage proof that writes to
+GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox
+`gh` which account it acts as, through GraphQL's `viewer` with `GH_REPO` naming `repo` (the owner
+the dotfiles shim routes by): an App installation token answers `viewer` with the App's bot login,
+where REST's `GET /user` refuses one (403, "Resource not accessible by integration"). Unless the
+answer is `sjawhar-agent[bot]` it fails the check in one line: the account it found ("no account"
+when `gh` gave none, and why when it gave no answer within the probe's 60 s), the requirement (the
+operator's own Oh My Pi session, not a Legion pane, with no personal `GH_TOKEN` in its
+environment), and whatever `gh` wrote to stderr, where the shim names an inherited `GH_TOKEN`. Each
+harness's GitHub teardown (Stage 3's `close_unpassed_run_pull_requests`, 4b.13b's `github_cleanup`,
+Stage 4b's `remove_run_branches`) returns without a `gh` call unless the check passed.
+`lib/proof-human.test.ts` drives the check and Stage 3's teardown against a fake `gh`
+(`bun test scripts/e2e/lib`, which CI runs).
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own

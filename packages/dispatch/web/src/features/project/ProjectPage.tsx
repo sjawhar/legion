@@ -244,7 +244,11 @@ export function ProjectPage(): ReactNode {
       >
         {activeTab === "issues" ? (
           <>
-            <IssueFilters project={route.project} showStatus={issueView === "list"} />
+            <IssueFilters
+              key={route.project}
+              project={route.project}
+              showStatus={issueView === "list"}
+            />
             {issueView === "list" ? (
               <IssueList project={route.project} />
             ) : (
