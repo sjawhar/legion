@@ -191,10 +191,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
       "aria-pressed",
       "true"
     );
-    await expect(page.locator("article h2").allTextContents()).resolves.toEqual([
-      "Reviewer",
-      "Planner",
-    ]);
+    await expect(shownTitles).toHaveText(["Reviewer", "Planner"]);
 
     const plannerToggle = plannerCard.getByRole("button", { exact: true, name: "Planner" });
     await plannerToggle.click();
