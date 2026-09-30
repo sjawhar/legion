@@ -57,10 +57,13 @@ func revoked(r *rig, id string) bool {
 }
 
 // endSessionThenReleaseRevokes ends sess while every revoke is failing (reg.Remove, as retire and
-// unregister do) and waits for the next revoke attempt after that. That attempt is the handed-off
-// revoke's first, or at most one last try of the session's own loop, which then returns at once.
-// It lets that attempt fail and only then clears the fake's revoke fault, so the id can land only
-// through the handed-off revoke's next try, 2 s later. It fails the test when no attempt comes
+// unregister do), waits for the next revoke attempt after that, then clears the fake's revoke
+// fault. The fake fails an attempt in the same critical section that counts it, so the attempt the
+// helper sees has already failed. That attempt is the handed-off revoke's first, or at most one
+// last try of the session's own loop, which then returns at once. In that second case the
+// handed-off revoke's first try follows at once, and the 200 ms sleep before the fault is cleared
+// makes that try fail too. Either way the id lands on the handed-off revoke's next try, 2 s later,
+// although no test asserts which try lands it. The helper fails the test when no attempt comes
 // within 5 s: nothing handed the id on.
 func endSessionThenReleaseRevokes(t *testing.T, r *rig, reg *Registry, sess *Session) {
 	t.Helper()
@@ -222,7 +225,11 @@ func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
 }
 
 // blockedInRegisterReply reports whether some goroutine is blocked in a select inside
-// Server.registerReply, which is where a register call waits for its session to enroll.
+// Server.registerReply, which is where a register call waits for its session to enroll. It finds
+// that goroutine by name in the goroutine dump, a "[select" header over a ").registerReply("
+// frame, so a rename of registerReply must be made here too. A name that no longer matches never
+// lets the test pass: TestRegisterWaitWaitsForTheReEnrollmentAfterALapse then fails after about
+// 10 s.
 func blockedInRegisterReply() bool {
 	buf := make([]byte, 1<<20)
 	for {
