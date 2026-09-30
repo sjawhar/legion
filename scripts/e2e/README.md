@@ -682,7 +682,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
-| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3 is held by one of its planner claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its planner's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's delete, registration, death and charge; a deleted pod that is still starting can register, and even take its task, before it is stopped. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
+| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
 | `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
@@ -854,11 +854,67 @@ both sides, when a binary:
 The stamp does not hash a changed tree, so an edit made after the build to a tree that was already
 changed goes unseen. Every caller runs the helper right after its build.
 
+## lib/pack-plugin.sh
+
+Packs this checkout's `@sjawhar/pi-legion-envoy` the way the release packs it, and prints the
+tarball's path: what `npm pack` ships (`package.json` `files`: `dist/` with the two bundles and
+`prepack.sh`'s `dist/skills`, `agents/`, and the packed manifest). Every script that installs a
+branch-built plugin packs through it: [`lib/install-plugin-profile.sh`](#libinstall-plugin-profilesh),
+which `controller-start-tmux.sh`, `stage2-tmux-supervision.sh`, `stage3-devbox-workflow.sh`,
+`stage3-4b13b-acceptance.sh` and `stage4b-sandbox-tree.sh` call, and the grant rig's branch mode
+(`packages/pi-envoy/scripts/grant-rig/setup.sh`). The worker image packs on its own, as the release
+does: `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN` rewrites `omp.extensions` with `jq`
+and runs `bun pm pack`, and `prepack.sh` refuses to pack any other `omp.extensions`, which holds all
+of them to the same manifest.
+
+```sh
+bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
+tarball=$(scripts/e2e/lib/pack-plugin.sh "$work/pack")
+```
+
+`<out dir>` is created when missing, and refused inside the checkout (jj would snapshot the tarball)
+or when it already holds a `.tgz`. Stdout is exactly one line, the tarball's path; every step's own
+output goes to stderr.
+
+The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
+because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
+`node_modules`:
+
+1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
+   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
+   in "Point extensions at the packed bundles");
+2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
+   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
+3. `bun pm pack --destination <out dir>`, whose `prepack` builds `dist/` (the release's "Pack
+   extension" step, `packages/pi-envoy/scripts/prepack.sh`); the bundles inline `package.json`, so
+   they are built while it names the packed bundles, as the release builds them;
+4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
+   manifest").
+
+Each step cites its source by what it runs, never by line number: the lines move with every edit
+above them. The release's version bump (its "Set release version" step) is not a step: the tarball
+carries the checkout's own version. The saved manifest is written to the run's `mktemp -d`
+directory, never beside `package.json`, so an interrupted run strands no `tmp.json` in the checkout.
+
+The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
+way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
+dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
+itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
+`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
+the checkout.
+
+Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
+itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
+has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
+rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
+jj snapshots the rewritten `package.json`. Two stage proofs in one checkout, or a stage proof and the
+grant rig, can pack at the same time, and the lock takes them in turn.
+
 ## lib/install-plugin-profile.sh
 
 Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
-release packs it, so a stage proof or a boot-gate test runs the branch-built plugin and the user's
-own profiles are never touched.
+release packs it, so a stage proof runs the branch-built plugin and the user's own profiles are never
+touched.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
@@ -880,50 +936,23 @@ the manifest both daemons' contract gates read under the same profile — the Ty
 (`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
 goes to stderr.
 
-The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
-because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
-`node_modules`:
+The plugin is packed by [`lib/pack-plugin.sh`](#libpack-pluginsh), the release's pack steps run in the
+checkout, into the run's `mktemp -d` directory (never beside `package.json`, so an interrupted run
+strands no `.tgz` in the checkout). Then:
 
-1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
-   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
-   in "Point extensions at the packed bundles");
-2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
-   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
-3. `bun pm pack`, whose `prepack` builds `dist/` (the release's "Pack extension" step,
-   `packages/pi-envoy/scripts/prepack.sh`);
-4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
-   manifest");
-5. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
+1. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
    `tar xzf ./*.tgz -C /out/pi-legion-envoy --strip-components=1`);
-6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
+2. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
    `omp plugin install /opt/legion/pi-legion-envoy`);
-7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
+3. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the tarball's version,
    enabled, and resolving to `<dir>`.
 
-Steps 6 and 7 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
+Steps 2 and 3 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
 `HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
 there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
 
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them.
-
-The release's version bump (its "Set release version" step) is not a step: the profile gets the checkout's
-own version. The packed manifest and the tarball are written to the run's `mktemp -d` directory,
-never beside `package.json`, so an interrupted run strands no `tmp.json` or `.tgz` in the checkout.
-
-The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
-way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
-dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
-itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
-`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
-the checkout.
-
-Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
-itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
-has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
-rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
-jj snapshots the rewritten `package.json`. `go test ./...` runs package test binaries in parallel,
-so two callers at once is the expected case.
 
 The script creates the profile and `<dir>` and removes neither; the caller does, with its work
 directory, which holds both (the profile holds `plugins/` — the link and `omp-plugins.lock.json` —

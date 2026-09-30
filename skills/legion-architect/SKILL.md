@@ -256,10 +256,10 @@ Preserve this order exactly:
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/`, or a conflict-resolution merge whose fingerprint
-(`skill://legion-worker`'s unchanged-diff check) differs from the approved head's. What does not: retro's
+(the unchanged-diff check, `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's. What does not: retro's
 `docs/solutions/` commit, and a merge forced by a GitHub-reported conflict whose fingerprint
 is unchanged. For that merge the order is: the implementer merges the bookmark forward with the
-destination (`legion-worker`'s forward-merge procedure — `jj new legion/<KEY> <destination>`,
+destination (the forward-merge procedure in `skill://legion-worker/references/conflicts-and-rewrites.md` — `jj new legion/<KEY> <destination>`,
 never a rebase, since a rebase rewrites every descendant of the chain's fork point, including
 another tree's branch stacked on it), pushes it with the ordinary push procedure (a genuine
 fast-forward), and posts the before/after fingerprints; the tester re-runs the bare gates only;

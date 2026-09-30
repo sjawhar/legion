@@ -34,7 +34,7 @@ test("a spec's approval is a human review pinned to its version: requested by th
   const artifactID = issue.primary_artifact_id;
 
   // The agent asks for approval; the Inbox shows a fixed-option approval ask.
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   expect(requested.version).toBe(1);
   const alice = await asUser(browser, "alice");
   try {
@@ -120,18 +120,70 @@ test("a spec's approval is a human review pinned to its version: requested by th
   }
 });
 
+test("an approval ask's Inbox card shows a question carrying a long summary whole", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({ project: "GATE", spec: "The plan.", title: "Design gate" });
+  // Nearly as long as the ask cap leaves a summary after "Approve spec.md (version 1)? ": 771
+  // units, cut at a word so the text still reads as a sentence.
+  const opening =
+    "Retries a failed push at most three times, one minute apart, and then stops and names the push that failed. ";
+  const ending = "Nothing else in the retry path changes.";
+  const filler = opening.repeat(8).slice(0, 771 - ending.length);
+  const summary = filler.slice(0, filler.lastIndexOf(" ") + 1) + ending;
+  expect(summary.length).toBeGreaterThan(750);
+  expect(summary.length).toBeLessThanOrEqual(771);
+  const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
+  expect(requested.ask.question).toBe(`Approve spec.md (version 1)? ${summary}`);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await expect(card).toBeVisible();
+    const question = card.locator("p", { hasText: ending });
+    await expect(question).toHaveText(requested.ask.question);
+    // Whole means nothing between the question and its card clips it: no clamp, ellipsis or box
+    // shorter or narrower than the text it holds.
+    const clipped = await question.evaluate((element) => {
+      const clips: string[] = [];
+      for (let node: Element | null = element; node !== null; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.webkitLineClamp !== "none" || style.textOverflow === "ellipsis") {
+          clips.push(`${node.tagName}: line clamp ${style.webkitLineClamp}, ${style.textOverflow}`);
+        }
+        if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) {
+          clips.push(
+            `${node.tagName}: ${node.scrollWidth}x${node.scrollHeight} in ${node.clientWidth}x${node.clientHeight}`
+          );
+        }
+        if (node.tagName === "ARTICLE") {
+          break;
+        }
+      }
+      return clips;
+    });
+    expect(clipped).toEqual([]);
+    await card.screenshot({ path: testInfo.outputPath("approval-long-question.png") });
+  } finally {
+    await alice.close();
+  }
+});
+
 test("reading an approved spec and moving the caret through its numbered list leaves its approval current", async ({
   browser,
 }) => {
   await createProject({ key: "GATE", name: "Gate" });
-  // Numbered outcomes, as the default spec template asks for under Acceptance.
+  // A spec holding a numbered list, which the caret moves through below.
   const issue = await createIssue({
     project: "GATE",
     spec: "## Acceptance\n\n1. The migration ships.\n2. The error rate stays flat.\n",
     title: "Design gate",
   });
   const artifactID = issue.primary_artifact_id;
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   const bob = await asUser(browser, "bob");
   try {
@@ -181,7 +233,7 @@ test("an agent's comment on part of an identifier in an approved spec leaves its
     title: "Design gate",
   });
   const artifactID = issue.primary_artifact_id;
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -232,7 +284,7 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
     },
     session
   );
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -272,7 +324,7 @@ test("an approval request for an unassigned issue's non-primary document remains
     { content: "Supporting review target.", name: "supporting-design.md" },
     session
   );
-  const nonPrimary = await requestApproval(supporting.artifact.id, session);
+  const nonPrimary = await requestApproval(supporting.artifact.id, {}, session);
   await expect
     .poll(
       async () => (await getArtifact(issue.primary_artifact_id, { login: "alice" })).approval?.state

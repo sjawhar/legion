@@ -45,7 +45,7 @@ empty commit carrying only `.omp/config.yml` on top of the tester's record. Ever
 follows from one decision — never move it.
 
 **Superseded 2026-09-27 (LEGION-118):** `jj new legion/<KEY> main@origin -m "<message>"` (a
-forward merge, `skills/legion-worker/SKILL.md`) never touches an existing commit, so it never
+forward merge, `skills/legion-worker/references/conflicts-and-rewrites.md`) never touches an existing commit, so it never
 risks another role's working copy either, whichever chain it sits on — and the first rule below
 was no safer against LEGION-118: per `jj help rebase`, `-b X -d D` is defined as `-s roots(D..X)
 -d D`, the identical descendant-inclusive set. Merge from the bookmark, not `@`: a handoff split

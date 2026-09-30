@@ -557,6 +557,7 @@ def classify_run_step(step: dict) -> list[tuple[str, bool]]:
     return found
 
 NON_BUILDING_ACTIONS = {
+    "actions/attest-build-provenance",
     "actions/checkout",
     "actions/download-artifact",
     "actions/setup-go",

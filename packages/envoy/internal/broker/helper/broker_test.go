@@ -24,6 +24,10 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
+// failAlways, set as a failure count (failFirst, revokeFailFirst), fails every such call a test
+// can make.
+const failAlways = 1 << 30
+
 // fakeBroker records enrollment traffic. It answers 201 for a new thumbprint, 200 for a repeat
 // (the contract's idempotent enroll), 401 LAUNCHER_INVALID for a missing or forced-invalid Proof
 // header, and verifies renew proofs against the thumbprint it enrolled. leaseExpiry models the
@@ -51,7 +55,9 @@ import (
 // guessing with a raw sleep. renewFail forces the next N renew attempts to answer 503 (a
 // transient broker outage) without touching
 // the lease at all, so a test can let real time pass the lease's own expiry while renews are
-// failing for an unrelated reason.
+// failing for an unrelated reason. revokeForbidden answers a DELETE of each id it names with 403
+// OPERATOR_MISMATCH, as the broker does for an enrollment made under another operator's
+// launcher credential.
 //
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
 // claim instead of a bearer token (AGENTC-834 Task 1): enrollUnauthorizedNext simulates an
@@ -79,6 +85,7 @@ type fakeBroker struct {
 	revokeAttempts   int           // every DELETE this fake received, failed or not
 	lease            time.Duration // lease length the fake grants; 900 s unless a test shortens it
 	seen             map[string]bool
+	revokeForbidden  map[string]bool
 	next             int // ids are minted, never derived from the key, like the broker's uuids
 
 	lastAuthorization      string // the Authorization header the most recent Enroll call carried; must stay empty
@@ -156,6 +163,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		}
 		f.mu.Lock()
 		f.revokeAttempts++
+		if f.revokeForbidden[r.PathValue("id")] {
+			f.mu.Unlock()
+			writeJSON(w, 403, map[string]string{"code": "OPERATOR_MISMATCH", "error": "the enrollment belongs to another operator"})
+			return
+		}
 		if f.revokeFailFirst > 0 {
 			f.revokeFailFirst--
 			f.mu.Unlock()
@@ -436,6 +448,36 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	}
 }
 
+// TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone covers a 401 LAUNCHER_INVALID that
+// answers a call signed with a credential another login has since replaced (a session's enroll
+// retry in flight while the operator logs in again): it clears nothing, since the credential it
+// rejects is no longer the one installed, and the new login still reports "issued".
+func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "sjawhar")
+	old := b.cred.Load()
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.cred.Load() != old && b.LoginStatus().State == "issued" })
+	fresh := b.cred.Load()
+
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	if err := b.clearOnInvalid(old, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatalf("a rejected credential still reports the login command to its caller: %v", err)
+	}
+	if b.cred.Load() != fresh || b.LoginStatus().State != "issued" {
+		t.Fatalf("a late rejection of the replaced credential changed the new login: cred replaced %v, state %q", b.cred.Load() != fresh, b.LoginStatus().State)
+	}
+
+	if err := b.clearOnInvalid(fresh, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatal(err)
+	}
+	if b.cred.Load() != nil || b.LoginStatus().State == "issued" {
+		t.Fatalf("rejecting the installed credential must clear it and end its login: state %q", b.LoginStatus().State)
+	}
+}
+
 // TestDeniedAndExpiredLoginsSurfaceTheirState drives the fake through both terminal non-issued
 // outcomes and confirms a later Login, once the prior one is no longer pending, starts completely
 // fresh rather than reusing the denied/expired attempt's key.
@@ -462,6 +504,9 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "expired" })
+	if b.LoginStatus().Refused {
+		t.Fatal("a pending login nobody approved in time is expired, not a refused credential")
+	}
 	ro2, err := record.VerifyRequestObject(f.lastLoginRequest, f.srv.URL, time.Minute, time.Now())
 	if err != nil {
 		t.Fatal(err)

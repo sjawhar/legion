@@ -318,7 +318,11 @@ anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`. An inse
 read as text written into the document (`pmdoc.ParseFragment`), so a leading `---` line is a rule,
 as `***` is, except that a closed front-matter block is front matter where the insert lands at the
 document's start (`start`, or before the first block); the accept and the insert decide that with
-one rule (`docs.opensDocument`).
+one rule (`docs.opensDocument`). A document with nothing in it holds one empty paragraph
+(`pmdoc.EmptyDocument`: an issue created without a spec, or a document whose last block was
+deleted), and an insert into it takes that paragraph's place wherever it is anchored, rather than
+leaving an empty line beside what it writes; it therefore lands at the document's start, and reads
+front matter there whatever its anchor.
 
 A write runs on its transaction's fork of the room, so a browser change made while it is in flight
 merges with it rather than blocking it, and the merge can annihilate the write: `pmdoc.Update`
@@ -1048,7 +1052,7 @@ canonical markdown.
 - Every document version or transactional live mutation refreshes each open anchored ask and comment from the current tree, once per tree: a version written in the transaction whose own live mutation produced that tree inherits that mutation's refresh rather than repeating it, and a version with no live mutation of its own - settlement, a standalone named version - refreshes for itself. A changed persisted anchor emits its own full `ask.anchor_refreshed` or `comment.anchor_refreshed` event in that same transaction; an unchanged row emits none. Refresh events are retained and sequenced on the row's owner topic but never notify or author/follower-route a session: the mutation is a side effect, not an interaction addressed to someone. The refresh writes only the two fields it owns, the quote and the orphan flag, never the whole `anchor` column: it reads every open row up front and writes each one back after the lookups and event appends the rows before it cost, so a whole-column write would erase what another writer put in that anchor in between - the block id `BackfillAnchorBlocks` pins (LEGION-149).
 - The quote a refresh reads is the first contiguous run of the row's mark (`pmdoc.FindMark`), so text written inside an anchor must carry its mark. A `replace` through the edit route, and the text an accepted suggestion writes inline or into code, takes every comment, suggestion and ask mark that covers all of the text it replaces (`pmdoc.AnchorMarksCovering`, the accepted suggestion's own mark excepted): replacing a word, the first or last word, or the whole quote leaves the anchor over the new text, and the refreshed quote is its whole current extent. A replace that runs past an anchor's edge rewrote text outside it too, so that anchor keeps only the text the replace left alone, and one covering the whole anchor and more orphans it. A block replacement from an accepted suggestion takes no mark, since it can land a code block an ask's mark cannot cover.
 - `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` create questions: the asker supplies the options and no option label carries a server rule (a human to-do is the to-do phrased as the question, with whatever options fit it). `kind` may be absent or `question`; `kind: "action"` (removed; migration 0035 folded every stored action ask into a question keeping its options and its answer) and `kind: "approval"` (server-created by the document-approval route only) answer `400 ASK_KIND_INPUT`.
-- Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` (any actor) opens - or returns the open - ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Answering it (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the document's latest settled version at answer time and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header and answers the open approval ask if there is one (`ask_id` null otherwise). Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` while awaiting); `stale` is derived from versions, so a new version emits nothing approval-specific. Legion's design gate is the consumer; it is the exception path, not an every-issue step.
+- Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` `{summary?}` (any actor) opens an ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Its question is `Approve <name> (version <N>)?`, followed by the request's `summary`: what that version proposes that the human has not already agreed to. A summary is trimmed and must hold text (`400 SUMMARY_INPUT`), and one that would take the question past the ask cap is `400 CAP_EXCEEDED` naming `summary` and the characters left for it; both are checked on every request, including one that opens nothing, and a request without one gets the bare question. An open approval ask names the document's latest settled version: every write of a new version (a settlement, an edit, a named version, an accepted suggestion, an anchored snapshot, an upload) retracts an open approval ask naming an older one in the same transaction, in the writer's name - settlement's own `{kind: "system", id: "document-settlement"}` when a settlement knows no writer of its version - with a reason naming the new version (`ask.resolved`, `resolution.kind: "retracted"`, `the document moved on to version N; …`), so the ask leaves the Inbox and its followers learn that approval has to be requested again - all but the writer, since the outbox sends no event to its own actor, as with any resolve (`docs.RetractStaleApprovalAsks`, which `writeVersionTx` and the upload route call). One helper, `docs.ApprovalAskAt`, finds the approval ask open at a version and retracts the others, for the version writers, the request and the header's review; each runs under the document owner's row, which every version write takes first. What resolving an ask stores is written in one place, `docs.WriteAskResolution`, which this retraction, settlement's retraction of a removed ask block and the resolve route all call. A request while the latest version is approved returns the approval and opens nothing, and one while an approval ask is open at the latest version returns that ask unchanged, keeping its question. One that finds an approval ask an older server left open at an older version retracts it in the requester's name and opens a new ask at the latest version in the same transaction. Answering it (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the document's latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. An approval ask an older server left open at an older version than that is not answered: its question never named what the review would approve, so either answer is `409 APPROVAL_ASK_STALE`, naming both versions and saying to review that version from the document header or wait for a new request. The answer transition refuses it before it writes the ask's row (`refuseStaleApprovalAsk`), and the ask stays open until a new request, a new version or the header's review retracts it. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, since the header sends none. It answers the open approval ask when that ask names this version; one naming an older version it retracts in the reviewer's name (a reason naming the new version), so no review cites an ask about another version (`ask_id` is null whenever no ask at the reviewed version was open). Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` while awaiting); `stale` is derived from versions, so a new version emits nothing approval-specific beyond the retraction of an ask naming an older one. Legion's design gate is the consumer; it is the exception path, not an every-issue step.
 - `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
 - A reply to an open ask (`ask_id` set on `POST /api/v1/issues/{key}/comments` or `POST /api/v1/artifacts/{id}/comments`) records `turn` (`comments.turn`, migration 0028): who holds the turn after it. A human author's reply always stores `agent` whatever the request says; a session author's stores `human` unless the request says `turn: "agent"` (a progress note - the agent still owes the next move). A reply under an answered or resolved ask records no turn (nothing is waiting; a requested `turn` is ignored there, as a human's is). `turn` on a comment that is not an ask reply is `400 TURN_REQUIRES_ASK`; any value but `human`/`agent` is `400 INVALID_COMMENT`. Comment objects carry `turn` (null under a closed ask and off ask replies). The column's only constraint is `turn requires ask_id`, so a pre-0028 server still draining during a deploy inserts its ask replies with a null turn; every reader coalesces a null newest-reply turn to `human`.
 - Every ask the API serves is read through one row shape: `docs.AskColumns` + `docs.ScanAsk` decode the ask row (the document settler uses the same pair for indexed blocks and anchor-refresh events), while `api/ask_rows.go` extends it with the block ask's document (`askRowColumns`) and, for reads, the newest comment in its thread (`askReadColumns`, a `lateral ... limit 1` join). `opened_event_id` is attached afterwards by `attachOpenedEventIDs`, one `events` query per read served by the partial index `events_ask_payload_id` (`store/migrations/0030_events_ask_payload_id.up.sql`; its `type in (...)` list mirrors that query and must change with it). `asks.options` is always a JSON array, never null.
@@ -1361,14 +1365,14 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 AGENTC-393 v9's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
-box/pod-side client, which enrolls a runtime, requests grants, polls a pending decision to
-completion, and either prints session/grant state (`self`, `status --json`) or `syscall.Exec`s a
-command with the granted values injected into its environment. The broker holds no Dispatch
-credential and opens no Dispatch ask anywhere: every human decision — approving or denying a
-secret request, approving or denying a machine login, revoking a grant, registering or endorsing an
-approver key — is a WebAuthn assertion the broker verifies itself against its own persisted,
-attested key set (`internal/broker/approvers`) over a domain-separated challenge
-(`internal/broker/record`). Dispatch's server relays that assertion from a browser page on
+client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
+runtime, requests grants, polls a pending decision to completion, and either prints session/grant
+state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
+its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere: every human decision —
+approving or denying a secret request, approving or denying a machine login, revoking a grant,
+registering or endorsing an approver key — is a WebAuthn assertion the broker verifies itself
+against its own persisted, attested key set (`internal/broker/approvers`) over a domain-separated
+challenge (`internal/broker/record`). Dispatch's server relays that assertion from a browser page on
 Dispatch's own origin to the broker's UI routes; it never decides anything (contract v9, "The
 approval signal is a WebAuthn assertion..."). `internal/broker/enroll` turns a launcher credential
 into a leased enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a
@@ -1379,6 +1383,57 @@ that file's `approvers:` section (origin, AAGUID allowlist, per-login attested k
 enrollment or credential; `internal/broker/machine` decides typed-code machine logins and mints the
 launcher credentials they approve; and `internal/broker/secrets` reads the granted value from AWS
 Secrets Manager, or a fake local file for development.
+
+The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
+`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
+Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
+`helper.sock` inside it, used only when that file is there; a pod sets its variables and has no
+`XDG_RUNTIME_DIR`. The exec form's command keeps exactly those three variables, so an
+`agent-secrets` call it makes is the same session's. A box's key and enrollment arrive after the
+box starts, so its launcher writes `enrollment.pending` into the key dir before the box starts and
+removes it once it has written `enrollment` or `enrollment.error`. While that marker is there and
+younger than 160 s by mtime, a call waits for `key.pem` and `enrollment`, up to
+`AGENT_SECRETS_ENROLL_WAIT` (default 20s), then fails with its ordinary error; with no fresh marker
+nothing waits, and the Go shim never writes one, so a pod never waits. `agent-secrets identity`
+answers locally, with no broker call and no registration, whether the calling process has a
+session identity (exit 0 for a `key.pem`, a fresh marker, or the helper's sign probe answering OK
+or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but cannot be asked),
+for callers that choose between the broker and another backend. A helper holding no launcher
+credential, from every restart until the operator logs the machine in, enrolls no one: its sign
+and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
+with the same not-logged-in notice naming `agent-secrets launcher login`. The login that installs
+a credential wakes every registered session's enrollment retry, so those sessions reach the broker
+within about a second of it rather than when a backoff of up to a minute comes round. A session
+whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
+enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment
+after a helper restart. While it is lapsed and the helper holds a credential, sign answers
+NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-enrollment. The
+helper revokes a lapsed id before the session enrolls again, and while the session lives its
+record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any
+login, still revokes it. A session that ends first takes its record with it and hands the id to a
+bounded revoke (three tries); before a login those fail, and the id ends with its lease. A revoke
+refused 403 `OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential)
+counts as done, and the session enrolls afresh. `agent-secrets launcher login-status`, which the
+helper answers, exits 0 only for an issued login whose credential the helper still holds. Once the
+broker refuses that credential (401 `LAUNCHER_INVALID`, which it answers for an expired or
+revoked credential and for any launcher proof it cannot verify, such as clock skew or an
+`AGENT_SECRETS_URL` that is not the broker's public URL), the login reads `expired`, the word the
+dotfiles launcher gate matches, and stderr says the broker refused it when the helper reports
+that (`login_refused`); a helper from before that field gets the plain "the last machine login
+is expired". The helper logs every change of the credential: `machine login issued` (credential
+id, operator) when a login installs one, and `launcher credential refused; cleared` (credential
+id, the broker's code) when a refusal clears it. `agent-secrets --version` and
+`agent-secrets-helper --version` print the release tag the release job stamps in
+(`internal/buildversion`), `devel` for any other build, and the helper's startup line
+(`agent-secrets-helper listening`) carries the same version.
+`register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles
+launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that
+login-status says `issued`, once the pinned release carries that answer and the helper has
+restarted on it; its login-status probe stays, since it also finds a helper that does not answer.
+Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
+exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
+with a warning that its `agent-secrets` calls fail, and secret-run uses secretsd, until the machine
+is logged in.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal
@@ -1604,7 +1659,8 @@ Postgres or network) and runs in CI's `envoy-go` job.
 `bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
 backend auto-strips exactly one leading directory, so the installed tree still ends up
 `bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
-`bin/...` top level would itself be the directory mise strips. Bundled into the same
-per-arch release artifact as the existing `legion-envoy-<arch>.tar.gz` (envoy-listener
-alone). This is the release a host installs both binaries from (AGENTC-834's dotfiles Plan B).
+`bin/...` top level would itself be the directory mise strips. The release job builds them, once
+it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
+build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone). This is the release a
+host installs both binaries from (AGENTC-834's dotfiles Plan B).
 

@@ -24,11 +24,11 @@ related_issues:
   - "LEGION-173"
 applies_when:
   - Your branch changes anything under packages/contracts or packages/envoy-client
-  - The `claude-envoy` job fails "Check the committed bundle is fresh" with `dist/ is stale (envoy-channel.js, open-asks-hook.js)` while GitHub reports MERGEABLE
+  - The `claude-envoy` job fails "Check the committed bundle is fresh" with `dist/ is stale (envoy-channel.js, session-hook.js)` while GitHub reports MERGEABLE
   - You are deciding whether Sami's no-unnecessary-rebase rule (2026-09-11) applies
   - You are reviewing or fingerprinting a pull request that carries a `chore(claude-envoy)` dist commit
 symptoms:
-  - "dist/ is stale (envoy-channel.js, open-asks-hook.js); run `bun run build` on Bun 1.3.14 and commit the result"
+  - "dist/ is stale (envoy-channel.js, session-hook.js); run `bun run build` on Bun 1.3.14 and commit the result"
   - "a PR whose every check was green four minutes ago is red on one job after a main merge, with no push"
   - "the unchanged-diff fingerprint changed after a rebase although no branch line changed: two added files under packages/claude-envoy/dist"
 ---
@@ -41,7 +41,8 @@ LEGION-131 (`sjawhar/legion#1106`) tightened `packages/contracts/src/handoff-sch
 `.legion/` deletion head `239aaa28` was pushed at 00:22Z on 2026-09-15 with every earlier check
 green and GitHub reporting `MERGEABLE`. Four minutes earlier, at 00:18:39Z, `main` had merged #1103,
 which commits two built files — `packages/claude-envoy-bridge/dist/envoy-channel.js` and
-`dist/open-asks-hook.js` — and adds a CI step, "Check the committed bundle is fresh"
+`dist/open-asks-hook.js` (today `packages/claude-envoy/dist/envoy-channel.js` and
+`dist/session-hook.js`, which holds both hook commands) — and adds a CI step, "Check the committed bundle is fresh"
 (`bun run check-dist` = `bun scripts/build.ts --check` in `.github/workflows/envoy-and-contracts.yaml`,
 job `claude-envoy-bridge`, now `claude-envoy`), that rebuilds them on the Bun `.bun-version` pins
 and compares bytes.
@@ -82,7 +83,7 @@ bun install --frozen-lockfile                      # main's lockfile may have mo
 cat .bun-version; bun --version                    # both 1.3.14 on the box; else: mise x bun@<pin> -- bun run build
 cd packages/claude-envoy
 bun run check-dist                                 # reproduces CI's `dist/ is stale (...)` — keep that line
-bun run build                                      # `built envoy-channel, open-asks-hook into dist/`
+bun run build                                      # `built envoy-channel, session-hook into dist/`
 bun run check-dist                                 # must print `dist/ matches a fresh build`
 bun run lint && bun run typecheck                  # the job's other steps
 bun run test                                       # the job's test step

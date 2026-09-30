@@ -4,6 +4,16 @@ export function closestMatching(node: Element | null, selector: string): HTMLEle
 }
 
 /**
+ * The element matching `selector` that holds keyboard focus *itself* - not one merely containing
+ * a focused control. Every roving list asks this of its own rows: a key bound to the row acts
+ * while the reader is on the row, and stays out of the way while they are in something inside it.
+ */
+export function focusedMatching(selector: string): HTMLElement | null {
+  const active = document.activeElement;
+  return active instanceof HTMLElement && active.matches(selector) ? active : null;
+}
+
+/**
  * The rows of `nodes` a reader can actually reach, for the keys that step over them and for
  * the `when` that offers those keys - one rule, so the two cannot disagree.
  *

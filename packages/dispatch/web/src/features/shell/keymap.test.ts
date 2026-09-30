@@ -213,6 +213,37 @@ test("only inEditable bindings fire while an input, textarea, select, or content
   }
 });
 
+test("a checkbox, radio or button takes no text, so single keys still fire while one has focus", () => {
+  const { keymap, press } = harness();
+  const next = binding("next", "j");
+  keymap.register("global", [next.definition]);
+
+  const typed = (type: string) => {
+    const input = document.createElement("input");
+    input.type = type;
+    return input;
+  };
+  const shortcutTargets = [typed("checkbox"), typed("radio"), typed("button")];
+  const typing = [typed("text"), typed("search"), typed("unknown-becomes-text")];
+  for (const element of [...shortcutTargets, ...typing]) {
+    document.body.appendChild(element);
+  }
+  try {
+    for (const target of shortcutTargets) {
+      expect(press("j", { target })).toBe(true);
+    }
+    expect(next.fired()).toBe(shortcutTargets.length);
+    for (const target of typing) {
+      expect(press("j", { target })).toBe(false);
+    }
+    expect(next.fired()).toBe(shortcutTargets.length);
+  } finally {
+    for (const element of [...shortcutTargets, ...typing]) {
+      element.remove();
+    }
+  }
+});
+
 test("an already-handled key (defaultPrevented) or one mid-IME-composition is left alone", () => {
   const { keymap, press } = harness();
   const next = binding("next", "j");

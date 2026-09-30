@@ -17,6 +17,7 @@ import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
+import { outsideAskCard } from "../inbox/ask-card";
 import {
   buildReferencePath,
   documentRoute,
@@ -112,6 +113,27 @@ function usableControl(selector: string): HTMLElement | null {
   return disabled ? null : node;
 }
 
+/**
+ * Whether focus is outside every `<input>` and outside every ask card. `0`-`3` and `Shift+P` are
+ * the two keys that write the issue without focusing a control, so they are the two that have to
+ * say where the reader is not: a digit typed straight after ticking `Show activity` or picking an
+ * ask's option belongs to that control's own surface, not to the issue's priority. The registry
+ * passes single keys through every control that takes no typed text, so this is the page's own
+ * question to answer.
+ *
+ * A focused `<button>` is deliberately not excluded. Every single-key binding in the registry
+ * fires from one: a digit has no native meaning on a button, and after any click - a tab, a
+ * disclosure, Copy - focus sits on the button that was clicked, which is where a reader reaching
+ * for the next shortcut stands. Withholding these keys there would make them work only from the
+ * page's own background. An ask card's buttons are the exception, and that is what
+ * `outsideAskCard` covers (`inbox/ask-card.ts`, the one definition both pages read): inside the
+ * card, the card's controls own the keys. `l` and `e` open a control rather
+ * than write, so a stray press is visible and undoable and they are offered throughout.
+ */
+function outsideInputsAndAskCards(): boolean {
+  return !(document.activeElement instanceof HTMLInputElement) && outsideAskCard();
+}
+
 /** The tabs the chords reach, each through the tablist button `IssueTabs` renders for it. */
 const tabChords: readonly { keys: string; label: string; tab: IssueTab }[] = [
   { keys: "t s", label: "Spec tab", tab: "spec" },
@@ -180,7 +202,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       keys: ["0", "1", "2", "3"],
       label: "Set priority P0–P3",
       run: (event) => priorityWrite.submit(Number(event.key) as IssuePriority),
-      when: () => usableControl(PRIORITY_SELECT) !== null,
+      when: () => usableControl(PRIORITY_SELECT) !== null && outsideInputsAndAskCards(),
     },
     {
       id: "labels",
@@ -203,7 +225,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       keys: "Shift+P",
       label: "Pin or unpin the issue",
       run: () => usableControl(PIN_TOGGLE)?.click(),
-      when: () => usableControl(PIN_TOGGLE) !== null,
+      when: () => usableControl(PIN_TOGGLE) !== null && outsideInputsAndAskCards(),
     },
     {
       // `s` and `p` put focus in a native select, where every single-key binding is suspended
