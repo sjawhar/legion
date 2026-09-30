@@ -120,15 +120,15 @@ def href_kind(key: str, href: str) -> str | None:
     """The row kind api/search.go's searchHref encoded in an issue-owned href, at every version since search
     shipped: `primary document` (the issue's /spec route with ?q=), `other document` (its /artifacts/<slug>
     route with ?q=), comment (/comments/<id>, or ?comment= on a document), ask (/asks/<id>, ?ask= or a #b-
-    block fragment), message (/log, or /messages/<id>) or issue (the issue's own route). A title can hold
-    ` - comment`, so the label's kind word is only the fallback."""
+    block fragment), message (/log, /conversation or /messages/<id>) or issue (the issue's own route). A
+    title can hold ` - comment`, so the label's kind word is only the fallback."""
     u = urllib.parse.urlsplit(href)
     query, path, base = urllib.parse.parse_qs(u.query), u.path.rstrip("/"), f"/issues/{key}"
     if "comment" in query or re.search(r"/comments/[^/]+$", path):
         return "comment"
     if "ask" in query or u.fragment.startswith("b-") or re.search(r"/asks/[^/]+$", path):
         return "ask"
-    if path.endswith(base + "/log") or re.search(r"/messages/[^/]+$", path):
+    if path.endswith((base + "/log", base + "/conversation")) or re.search(r"/messages/[^/]+$", path):
         return "message"
     if path.endswith(base + "/spec"):
         return "primary document"

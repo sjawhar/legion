@@ -7,14 +7,17 @@ SHA-256) and the labels labels.py derives from the session store. Every issue in
 and LEGSMOKE is rebuilt as a run of states: its title (the latest whole-issue event before a moment:
 issue.created, issue.updated or issue.closed) and its primary spec (the latest version before it), each
 state valid on (lo, hi]. A search sent at t sees every issue created before t in the state valid at t.
+The full index (--index full) adds everything else production's search reads on an issue, as it stood
+at t: each comment, message and ask version, and each version of its other documents (export-units),
+each chunk prefixed with the issue's title as it stood then.
 
-Systems, each over that as-of corpus of titles and primary specs:
+Systems, each over the chosen as-of index (titles and primary specs, or full):
   A        today's production search, emulated: websearch_to_tsquery (every word must match) over key and
-           title (weight A) and, as a second row, the primary spec with ask blocks removed, ranked by
-           ts_rank_cd then last update, 50 rows, collapsed to issues (api/search.go at the pinned commit)
+           title (weight A), the primary spec with ask blocks removed and, on the full index, every other
+           row api/search.go reads, ranked by ts_rank_cd then last update, 50 rows, collapsed to issues
   A:ran    what production actually returned, from the transcript (agent searches only)
   B        the keyword leg of the design: any word matching, ts_rank_cd / (1 + log length), key and title
-           weight A, spec weight D
+           weight A, spec weight D (an ask's question weight A, other rows D); an issue ranks by its best row
   C:<m>    meaning only: an issue's score is its best chunk's cosine similarity to the query
   W<w>:<m> C and B merged by reciprocal rank fusion (k = 60) over each one's top 200, B weighted w
   F:<m>+<r>, H<w>:<m>+<r>  C's or W<w>'s top 150 reranked (rerank command, on a sample)
@@ -23,11 +26,15 @@ Run order (STORE holds internal company text and is kept, mode 0700; SEARCHBENCH
 whose text search the keyword systems use; every vector stays in STORE):
   measured.py labels  --store STORE        labels.py's rules over the session store -> STORE/labels.jsonl
   measured.py export  --store STORE        GET-only reads of production: histories, spec versions, states
-  measured.py load    --store STORE        states into SEARCHBENCH_PG for the keyword systems
+  measured.py export-units --store STORE   GET-only: comments, messages, asks and other documents as of each search
+  measured.py load    --store STORE        states (and units) into SEARCHBENCH_PG for the keyword systems
   measured.py embed   --store STORE --model M --budget-usd X     every distinct chunk text once, then every query
-  measured.py score   --store STORE --models M...   first-stage systems for every scored query, lists to depth 200
-  measured.py rerank  --store STORE --model M --reranker R --weights W... --per-class N --budget-usd X
-  measured.py report  --store STORE [--compare A,B ...]   class tables, session-bootstrap intervals, results.json
+  measured.py score   --store STORE --index I --models M...   first-stage systems for every query, lists to depth 200
+  measured.py rerank  --store STORE --index I --model M --reranker R --weights W... --per-class N --budget-usd X
+  measured.py report  --store STORE --index I [--matrix S...] [--compare A,B ...]   group tables, intervals
+  measured.py compare-index --store STORE --systems S...   the same systems on both indexes, full minus spec
+  measured.py crossval --store STORE --index I --models M...   the adaptive keyword weight, held out by session
+  measured.py per-query --store STORE --out FILE   every query's ranks on both indexes, for publication
 Every command appends its run to STORE/runs.jsonl: arguments, times, load average, the command as executed,
 `git rev-parse HEAD` and `git status --porcelain` of the checkout, and the SHA-256 of each harness file.
 Provider usage goes to STORE/usage.jsonl, priced at bench.PRICES; the run stops at CAP_USD.
@@ -42,7 +49,6 @@ import json
 import math
 import os
 import random
-import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -127,6 +133,28 @@ def load_query_set(store: str) -> dict:
     return json.loads(body)
 
 
+def pinned_classifier(store: str):
+    """The query set's own shape function: classify.py exactly as the pinned query set records its source."""
+    import types
+
+    mod = types.ModuleType("query_set_classify")
+    exec(compile(load_query_set(store)["build"]["scripts"]["classify.py"], "query-set:classify.py", "exec"), mod.__dict__)
+    return mod.shape
+
+
+def query_shapes(store: str, queries: list[dict], texts: dict[str, str]) -> dict[str, dict]:
+    """Each scored query's shape: the query set's for a search (checked against the pinned classifier), the
+    pinned classifier's for a duplicate pair's query. The adaptive weighting reads only this."""
+    shape = pinned_classifier(store)
+    out = {}
+    for q in queries:
+        got = shape(texts[q["id"]])
+        if q["shape"] is not None and got != q["shape"]:
+            raise SystemExit(f"{q['id']}: the pinned classifier gives {got}, the query set records {q['shape']}")
+        out[q["id"]] = got
+    return out
+
+
 def scored_queries(store: str) -> tuple[list[dict], dict]:
     """Every labelled search, and every duplicate pair, as one scored query each, with the counts of
     what was left out and why."""
@@ -168,7 +196,8 @@ def scored_queries(store: str) -> tuple[list[dict], dict]:
             targets = keep
         out.append({"id": qid, "source": q["source"], "text": q["text"], "at": q["at"], "project": q.get("project") or "",
                     "session": q.get("session") or q.get("browser_profile"), "class": query_class(q["shape"]),
-                    "targets": targets, "hits": lab.get("hits"), "exclude": []})
+                    "targets": targets, "hits": lab.get("hits"), "rows": lab.get("hit_rows"), "shape": q["shape"],
+                    "exclude": []})
     for p in qs["pairs"]:
         if p["state"] != "closed":
             skipped["pair parked, not closed"] += 1
@@ -180,7 +209,8 @@ def scored_queries(store: str) -> tuple[list[dict], dict]:
             out.append({"id": f"pair:{p['duplicate']}:{mode}", "source": "pairs", "pair": p, "mode": mode,
                         "at": p["duplicate_created_at"], "project": "", "session": "pair:" + p["duplicate"],
                         "class": "duplicate title" if mode == "title" else "duplicate spec",
-                        "targets": [{"key": p["survivor"], "rule": "pair"}], "hits": None, "exclude": [p["duplicate"]]})
+                        "targets": [{"key": p["survivor"], "rule": "pair"}], "hits": None, "rows": None, "shape": None,
+                        "exclude": [p["duplicate"]]})
     return out, dict(skipped)
 
 
@@ -227,7 +257,7 @@ def cmd_export(args):
     moments = sorted(ts(q["at"]) for q in queries)
     print(f"{len(moments)} search moments", flush=True)
 
-    issues, intervals, needed = {}, [], {}
+    issues, needed = {}, {}
     for key, h in hists.items():
         created = ts(h["created_at"])
         points = {ts(s["at"]) for s in h["snapshots"]}
@@ -328,25 +358,38 @@ def cmd_export_units(args):
     def needed(lo: datetime, hi: datetime) -> bool:
         return bisect.bisect_right(moments, lo) != bisect.bisect_right(moments, hi)
 
+    snap_at = {k: [(ts(s["at"]), s["title"]) for s in h["snapshots"]] for k, h in hists.items()}
+
     def title_at(key: str, at: datetime) -> str:
-        """The issue's title just after `at`: the prefix of this unit's chunks, as a spec chunk carries its title."""
-        snaps = [s for s in hists[key]["snapshots"] if ts(s["at"]) <= at] or hists[key]["snapshots"][:1]
-        return snaps[-1]["title"]
+        """The issue's title just after `at`: the prefix of a unit's chunks, as a spec chunk carries its title."""
+        titles = [t for when, t in snap_at[key] if when <= at] or [snap_at[key][0][1]]
+        return titles[-1]
+
+    def title_runs(key: str, lo: datetime, hi: datetime) -> list[tuple[datetime, datetime, str]]:
+        """(lo, hi] cut where the issue's title changed, each piece with the title it had then, keeping the
+        pieces a search looked at: a unit's chunks carry the title as it stood, as a state's do."""
+        cuts = sorted({when for when, _ in snap_at[key] if lo < when < hi})
+        pieces: list[tuple[datetime, datetime, str]] = []
+        for a, b in zip([lo] + cuts, cuts + [hi]):
+            title = title_at(key, a)
+            if pieces and pieces[-1][2] == title:
+                pieces[-1] = (pieces[-1][0], b, title)
+            else:
+                pieces.append((a, b, title))
+        return [p for p in pieces if needed(p[0], p[1])]
 
     units = []
     for eid, vs in versions.items():
         vs.sort(key=lambda x: ts(x[0]))
         bounds = [ts(at) for at, _ in vs] + [FAR]
         for n, ((at, p), hi) in enumerate(zip(vs, bounds[1:])):
-            lo = ts(at)
-            if not needed(lo, hi):
-                continue
             kind = kind_of[eid]
             text = ask_search_text(p) if kind == "ask" else (p.get("body") or "")
-            units.append({"id": f"{eid}:{n}", "key": owner[eid], "kind": kind, "name": None, "lo": iso(lo),
-                          "hi": None if hi == FAR else iso(hi), "text": text, "title": title_at(owner[eid], lo),
-                          "dense": corpus.ask_text(p) if kind == "ask" else (p.get("body") or ""),
-                          "kw_title": p.get("question") if kind == "ask" else ""})
+            for j, (lo, top, title) in enumerate(title_runs(owner[eid], ts(at), hi)):
+                units.append({"id": f"{eid}:{n}:{j}", "key": owner[eid], "kind": kind, "name": None, "lo": iso(lo),
+                              "hi": None if top == FAR else iso(top), "text": text, "title": title,
+                              "dense": corpus.ask_text(p) if kind == "ask" else (p.get("body") or ""),
+                              "kw_title": p.get("question") if kind == "ask" else ""})
     doc_versions = []
     for aid, key in docs.items():
         vs = sorted(metas[aid]["versions"], key=lambda v: ts(v["created_at"]))
@@ -354,14 +397,16 @@ def cmd_export_units(args):
         for v, hi in zip(vs, bounds[1:]):
             if needed(ts(v["created_at"]), hi):
                 doc_versions.append((aid, key, v, hi))
-    print(f"{len(units)} comment, message and ask versions; {len(docs)} other documents, "
+    print(f"{len(units)} comment, message and ask pieces; {len(docs)} other documents, "
           f"{len(doc_versions)} of their versions seen by a search", flush=True)
     with ThreadPoolExecutor(args.threads) as ex:
         texts = list(ex.map(lambda x: replay.cget(data, f"/artifacts/{x[0]}/versions/{x[2]['number']}")["markdown"], doc_versions))
     for (aid, key, v, hi), md in zip(doc_versions, texts):
-        units.append({"id": f"document:{aid}:{v['number']}", "key": key, "kind": "document", "name": metas[aid]["name"],
-                      "lo": v["created_at"], "hi": None if hi == FAR else iso(hi), "text": md,
-                      "title": title_at(key, ts(v["created_at"])), "dense": corpus.strip_ask_blocks(md), "kw_title": ""})
+        md = md or ""  # production indexes coalesce(markdown, '')
+        for j, (lo, top, title) in enumerate(title_runs(key, ts(v["created_at"]), hi)):
+            units.append({"id": f"document:{aid}:{v['number']}:{j}", "key": key, "kind": "document",
+                          "name": metas[aid]["name"], "lo": iso(lo), "hi": None if top == FAR else iso(top), "text": md,
+                          "title": title, "dense": corpus.strip_ask_blocks(md), "kw_title": ""})
     write_jsonl(os.path.join(store, "corpus", "units.jsonl"), units)
     print(f"{len(units)} units written, {sum(len(u['text']) for u in units):,} characters", flush=True)
 
@@ -503,7 +548,8 @@ def cmd_load(args):
               "kw_body": corpus.strip_ask_blocks(u["text"]) if u["kind"] == "document"
               else (u["text"][len(u["kw_title"] or ""):] if u["kind"] == "ask" else u["text"])} for u in units],
         )
-    conn.execute("create index on m_unit (key); create index on m_unit (lo); analyze;")
+    conn.execute("""create index on m_unit (key); create index on m_unit (lo);
+                    create index on m_unit using gin (prod); create index on m_unit using gin (kw); analyze;""")
     print(f"{len(units)} units ({collections.Counter(u['kind'] for u in units)})")
 
 
@@ -723,6 +769,7 @@ def cmd_score(args):
     c = Corpus(args.store, units=full)
     queries, skipped = scored_queries(args.store)
     texts = query_texts(args.store, queries)
+    shapes = query_shapes(args.store, queries, texts)
     conn = pg()
     models = {m: Dense(c, args.store, m) for m in args.models}
     sdir = os.path.join(args.store, "scores")
@@ -746,9 +793,14 @@ def cmd_score(args):
                 lists[f"C:{m}"] = [(k, round(s, 6)) for k, s in dense]
                 for w in WEIGHTS:
                     lists[f"W{w}:{m}"] = fused(dense, lists["B"], w)
+            rows = q["rows"]
             rec = {"id": q["id"], "class": q["class"], "source": q["source"], "at": q["at"], "session": q["session"],
                    "text_sha256": sha(text), "targets": q["targets"], "candidates": len(live),
                    "units": 0 if units is None else len(units),
+                   "shape_class": shapes[q["id"]]["class"], "quoted": "quoted" in shapes[q["id"]]["syntax"],
+                   # the kinds of row production listed each target by, from the transcript (agent searches)
+                   "production_rows": None if rows is None else
+                   {t["key"]: sorted({r["kind"] for r in rows if r["key"] == t["key"]}) for t in q["targets"]},
                    "findable": any(t["key"] in live_keys for t in q["targets"]), "production_error": err,
                    "ranks": {s: rank_of([k for k, _ in lst], q["targets"]) for s, lst in lists.items()},
                    "top10": {s: [k for k, _ in lst[:10]] for s, lst in lists.items()}}
@@ -914,6 +966,44 @@ def cluster_boot(rows: list[dict], a: str, b: str, reps: int = 2000, seed: int =
             "a_ahead": int(sum(x > 0 for x in d)), "b_ahead": int(sum(x < 0 for x in d)), "n": len(d), "sessions": len(groups)}
 
 
+TITLE_OR_SPEC = {"issue", "primary document"}  # the rows the titles-and-primary-specs index holds
+ROUTES = ("title or primary spec", "other rows only", "not listed")
+
+
+def production_route(r: dict) -> str | None:
+    """How production as it ran listed a search's targets (labels.py's hit rows): `title or primary spec` when
+    any target had an issue or primary-document row, `other rows only` when every listed target had only
+    comment, ask, message or other-document rows, `not listed` when it listed none; None with no transcript."""
+    pr = r.get("production_rows")
+    if pr is None:
+        return None
+    kinds = [set(v) for v in pr.values() if v]
+    if not kinds:
+        return "not listed"
+    return "title or primary spec" if any(k & TITLE_OR_SPEC for k in kinds) else "other rows only"
+
+
+def report_groups(rows: list[dict]) -> dict[str, list[dict]]:
+    groups = {cls: [r for r in rows if r["class"] == cls] for cls in CLASSES}
+    agent = [r for r in rows if r["source"] == "fleet-transcript"]
+    groups["all agent searches"] = agent
+    groups["Sami's searches"] = [r for r in rows if r["source"] == "dashboard-sjawhar"]
+    for rule in ("returned", "missed"):
+        want = {"returned": {"returned"}, "missed": {"elsewhere", "chain"}}[rule]
+        groups[f"agent searches, target {rule} by production"] = [r for r in agent if {t["rule"] for t in r["targets"]} <= want]
+    for route in ROUTES:
+        groups[f"agent searches, production listed the target: {route}"] = [r for r in agent if production_route(r) == route]
+    return groups
+
+
+def print_matrix(table: dict, groups: dict, systems: list[str]) -> None:
+    """One MRR row per group, one column per system, n in the row label."""
+    print("\n| group (n) | " + " | ".join(systems) + " |\n|---|" + "---|" * len(systems))
+    for g, rs in groups.items():
+        cells = [f"{table[g][s]['mrr']:.3f}" if table[g].get(s, {}).get("n") else "" for s in systems]
+        print(f"| {g} ({len(rs)}) | " + " | ".join(cells) + " |")
+
+
 def merged_rows(store: str, index: str) -> tuple[list[dict], list[str]]:
     """First-stage rows with every rerank file's ranks merged in; the rerank systems are on the sample only."""
     sdir = os.path.join(store, "scores")
@@ -931,13 +1021,7 @@ def merged_rows(store: str, index: str) -> tuple[list[dict], list[str]]:
 def cmd_report(args):
     rows, rerank_systems = merged_rows(args.store, args.index)
     systems = sorted({s for r in rows for s in r["ranks"]}, key=lambda s: (s[0], s))
-    groups = {cls: [r for r in rows if r["class"] == cls] for cls in CLASSES}
-    groups["all agent searches"] = [r for r in rows if r["source"] == "fleet-transcript"]
-    groups["Sami's searches"] = [r for r in rows if r["source"] == "dashboard-sjawhar"]
-    for rule in ("returned", "missed"):
-        want = {"returned": {"returned"}, "missed": {"elsewhere", "chain"}}[rule]
-        groups[f"agent searches, target {rule} by production"] = [
-            r for r in groups["all agent searches"] if {t["rule"] for t in r["targets"]} <= want]
+    groups = report_groups(rows)
     table = {g: {s: metrics([r["ranks"][s] for r in rs if s in r["ranks"]]) for s in systems} for g, rs in groups.items()}
     comparisons = {}
     for pair in args.compare or []:
@@ -954,18 +1038,192 @@ def cmd_report(args):
     os.makedirs(os.path.join(args.store, "report"), mode=0o700, exist_ok=True)
     with open(os.path.join(args.store, "report", f"results-{args.index}.json"), "w") as f:
         json.dump(out, f, indent=1)
-    show = args.systems or systems
-    for g, rs in groups.items():
+    show = systems if args.systems is None else args.systems
+    for g, rs in groups.items() if show else ():
         print(f"\n### {g} ({len(rs)})\n")
         print("| system | n | MRR | top 1 | top 5 | top 10 |\n| --- | --- | --- | --- | --- | --- |")
         for s in show:
             m = table[g].get(s, {"n": 0})
             if m["n"]:
                 print(f"| {s} | {m['n']} | {m['mrr']:.3f} | {m['top1']} | {m['top5']} | {m['top10']} |")
+    if args.matrix:
+        print_matrix(table, groups, args.matrix)
     for pair, by in comparisons.items():
         print(f"\n### {pair}\n")
         for g, c in by.items():
             print(f"- {g}: {c['diff']:+.3f} [{c['lo']:+.3f}, {c['hi']:+.3f}], ahead {c['a_ahead']} / {c['b_ahead']}, n {c['n']}")
+
+
+def cmd_compare_index(args):
+    """The same systems on the titles-and-primary-specs index and on the full index, per group: each MRR, and
+    full minus spec with a session-bootstrap interval (the two score files hold the same queries)."""
+    spec = {r["id"]: r for r in jsonl(os.path.join(args.store, "scores", "first-stage-spec.jsonl.gz"))}
+    full = {r["id"]: r for r in jsonl(os.path.join(args.store, "scores", "first-stage-full.jsonl.gz"))}
+    if spec.keys() != full.keys():
+        raise SystemExit(f"the index score files hold different queries: {len(spec.keys() ^ full.keys())} differ")
+    rows = []
+    for qid, f in full.items():
+        pair = dict(f, ranks={})
+        for s in args.systems:
+            pair["ranks"][f"spec {s}"], pair["ranks"][f"full {s}"] = spec[qid]["ranks"].get(s), f["ranks"].get(s)
+        rows.append(pair)
+    out = {}
+    for g, rs in report_groups(rows).items():
+        out[g] = {s: {"n": len(rs), "spec": metrics([r["ranks"][f"spec {s}"] for r in rs]).get("mrr"),
+                      "full": metrics([r["ranks"][f"full {s}"] for r in rs]).get("mrr"),
+                      "full_minus_spec": cluster_boot(rs, f"full {s}", f"spec {s}") if rs else None} for s in args.systems}
+    with open(os.path.join(args.store, "report", "compare-index.json"), "w") as f:
+        json.dump(out, f, indent=1)
+    for s in args.systems:
+        print(f"\n### {s}: titles and primary specs -> full index\n")
+        print("| group (n) | spec | full | full - spec [95%] |\n|---|---|---|---|")
+        for g, by in out.items():
+            c = by[s]
+            if c["full_minus_spec"]:
+                d = c["full_minus_spec"]
+                print(f"| {g} ({c['n']}) | {c['spec']:.3f} | {c['full']:.3f} | {d['diff']:+.3f} [{d['lo']:+.3f}, {d['hi']:+.3f}] |")
+
+
+# ---------------------------------------------------------------------------------------------
+# crossval: the adaptive keyword weight, chosen on some sessions and scored on the others
+
+
+# Runtime-computable query signals, from the pinned classifier's shape only.
+SIGNALS = {
+    # the hypothesis as stated: a literal token and no content word (exact-token), or quoted prose
+    "exact token or quoted phrase": lambda r: r["shape_class"] == "literal" or (r["shape_class"] == "prose" and r["quoted"]),
+    # wider: any literal token, with or without prose (exact-token and mixed), or any quote
+    "any literal token or quote": lambda r: r["shape_class"] in ("literal", "mixed") or r["quoted"],
+}
+GRID = (0.0,) + WEIGHTS  # 0.0 is meaning only (C)
+POPULATIONS = {
+    "all": lambda r: True,
+    "agent": lambda r: r["source"] == "fleet-transcript",
+    # production missed the target: labels not defined by what production listed
+    "missed": lambda r: r["source"] == "fleet-transcript" and {t["rule"] for t in r["targets"]} <= {"elsewhere", "chain"},
+}
+
+
+def grid_systems(model: str) -> list[str]:
+    return [f"C:{model}"] + [f"W{w}:{model}" for w in WEIGHTS]
+
+
+def choose(m: np.ndarray, sig: dict[str, np.ndarray], train: np.ndarray) -> tuple[int, tuple[str, int, int]]:
+    """On the training rows: the best single weight, and the best (signal, weight when it fires, weight when
+    not). The objective splits by signal, so each side's weight is chosen on its own rows. Ties go to the
+    lighter keyword weight, then to the first signal."""
+    fixed = int(np.argmax(m[train].mean(0)))
+    best, best_score = None, -1.0
+    for name, s in sig.items():
+        on, off = train & s, train & ~s
+        hi = int(np.argmax(m[on].mean(0))) if on.any() else fixed
+        lo = int(np.argmax(m[off].mean(0))) if off.any() else fixed
+        score = float(m[on, hi].sum() + m[off, lo].sum())
+        if score > best_score + 1e-12:
+            best, best_score = (name, hi, lo), score
+    return fixed, best
+
+
+def cmd_crossval(args):
+    """Grouped K-fold over sessions (a session's searches are never split between choosing and scoring),
+    repeated with fresh fold assignments; each query's held-out reciprocal rank is averaged over the repeats.
+    Reported beside today's search, meaning only, the fixed weight chosen the same way, and the stated
+    hypothesis (1.5 when `exact token or quoted phrase`, else 0.25) applied without fitting."""
+    rows = jsonl(os.path.join(args.store, "scores", f"first-stage-{args.index}.jsonl.gz"))
+    out = {"index": args.index, "folds": args.folds, "repeats": args.repeats, "grid": GRID, "signals": list(SIGNALS),
+           "models": {}}
+    per_query: dict[str, dict] = collections.defaultdict(dict)
+    hyp_hi, hyp_lo = GRID.index(1.5), GRID.index(0.25)
+    for model in args.models:
+        out["models"][model] = {}
+        for pop, keep in POPULATIONS.items():
+            rs = [r for r in rows if keep(r)]
+            m = np.array([[rr(r["ranks"][s]) for s in grid_systems(model)] for r in rs])
+            sig = {name: np.array([f(r) for r in rs]) for name, f in SIGNALS.items()}
+            if any(not r["session"] for r in rs):
+                raise SystemExit(f"{sum(not r['session'] for r in rs)} scored queries have no session to hold out")
+            sessions = sorted({r["session"] for r in rs})
+            pos = {s: i for i, s in enumerate(sessions)}
+            sidx = np.array([pos[r["session"]] for r in rs])
+            oof_fixed = np.zeros((len(rs), args.repeats))
+            oof_adapt = np.zeros((len(rs), args.repeats))
+            picks_fixed, picks_adapt = collections.Counter(), collections.Counter()
+            for rep in range(args.repeats):
+                rng = np.random.default_rng(args.seed + rep)
+                fold_of = np.empty(len(sessions), np.int64)
+                fold_of[rng.permutation(len(sessions))] = np.arange(len(sessions)) % args.folds
+                fold = fold_of[sidx]
+                for k in range(args.folds):
+                    test = fold == k
+                    if not test.any():
+                        continue
+                    fixed, (name, hi, lo) = choose(m, sig, ~test)
+                    picks_fixed[GRID[fixed]] += 1
+                    picks_adapt[f"{name}: {GRID[hi]} / {GRID[lo]}"] += 1
+                    oof_fixed[test, rep] = m[test, fixed]
+                    oof_adapt[test, rep] = np.where(sig[name][test], m[test, hi], m[test, lo])
+            fixed_all, (name_all, hi_all, lo_all) = choose(m, sig, np.ones(len(rs), bool))
+            s0 = sig["exact token or quoted phrase"]
+            ev = {"adaptive, cross-validated": oof_adapt.mean(1), "fixed weight, cross-validated": oof_fixed.mean(1),
+                  "hypothesis 1.5 / 0.25, not fitted": np.where(s0, m[:, hyp_hi], m[:, hyp_lo]),
+                  "meaning only": m[:, 0],
+                  "today's search": np.array([rr(r["ranks"]["A"]) for r in rs]),
+                  "keyword only": np.array([rr(r["ranks"]["B"]) for r in rs])}
+            vrows = [{"session": r["session"], "class": r["class"], "source": r["source"], "targets": r["targets"],
+                      "production_rows": r.get("production_rows"), "ranks": {}} for r in rs]
+            for name, v in ev.items():  # cluster_boot reads ranks: a reciprocal rank x is rank 1/x
+                for vr, x in zip(vrows, v):
+                    vr["ranks"][name] = (1 / x) if x > 0 else None
+            groups = {g: g_rs for g, g_rs in report_groups(vrows).items() if g_rs}
+            groups = {"all in this population": vrows, **groups}
+            summary = {g: {name: round(float(np.mean([rr(r["ranks"][name]) for r in g_rs])), 4) for name in ev}
+                       for g, g_rs in groups.items()}
+            diffs = {f"{a} - {b}": {g: cluster_boot(g_rs, a, b) for g, g_rs in groups.items()}
+                     for a, b in (("adaptive, cross-validated", "fixed weight, cross-validated"),
+                                  ("adaptive, cross-validated", "meaning only"),
+                                  ("adaptive, cross-validated", "today's search"),
+                                  ("hypothesis 1.5 / 0.25, not fitted", "fixed weight, cross-validated"))}
+            out["models"][model][pop] = {
+                "n": len(rs), "sessions": len(sessions), "summary": summary, "diffs": diffs,
+                "in_sample": {"fixed": GRID[fixed_all], "adaptive": f"{name_all}: {GRID[hi_all]} / {GRID[lo_all]}"},
+                "picks_fixed": {str(k): v for k, v in picks_fixed.most_common()},
+                "picks_adaptive": dict(picks_adapt.most_common())}
+            for r, a, f_ in zip(rs, ev["adaptive, cross-validated"], ev["fixed weight, cross-validated"]):
+                per_query[r["id"]][f"{model} {pop}"] = {"adaptive_rr": round(float(a), 4), "fixed_rr": round(float(f_), 4)}
+            print(f"\n## {model}, population {pop}: n {len(rs)}, {len(sessions)} sessions")
+            print(f"in sample: fixed {GRID[fixed_all]}; adaptive {name_all}: {GRID[hi_all]} when it fires, {GRID[lo_all]} otherwise")
+            print("folds chose (adaptive): " + "; ".join(f"{k} x{v}" for k, v in picks_adapt.most_common(4)))
+            print("folds chose (fixed): " + "; ".join(f"{k} x{v}" for k, v in picks_fixed.most_common(4)))
+            print("\n| group (n) | " + " | ".join(ev) + " |\n|---|" + "---|" * len(ev))
+            for g, g_rs in groups.items():
+                print(f"| {g} ({len(g_rs)}) | " + " | ".join(f"{summary[g][name]:.3f}" for name in ev) + " |")
+            for pair, by in diffs.items():
+                c = by["all in this population"]
+                print(f"- {pair}: {c['diff']:+.3f} [{c['lo']:+.3f}, {c['hi']:+.3f}], ahead {c['a_ahead']} / {c['b_ahead']}")
+    out["per_query"] = per_query
+    with open(os.path.join(args.store, "scores", f"crossval-{args.index}.json"), "w") as f:
+        json.dump(out, f, indent=1)
+
+
+def cmd_per_query(args):
+    """One line per scored query for publication: what was searched, its labels, how production listed the
+    target, and every system's rank on both indexes, the rerank sample and the held-out adaptive weighting."""
+    queries, _ = scored_queries(args.store)
+    texts = query_texts(args.store, queries)
+    idx = {}
+    for index in ("spec", "full"):
+        idx[index] = {r["id"]: r for r in merged_rows(args.store, index)[0]}
+    cv = json.load(open(os.path.join(args.store, "scores", "crossval-full.json")))["per_query"]
+    with open(args.out, "w") as f:
+        for q in queries:
+            full = idx["full"][q["id"]]
+            f.write(json.dumps({"id": q["id"], "source": q["source"], "at": q["at"], "session": q["session"],
+                                "class": q["class"], "text": texts[q["id"]], "targets": q["targets"],
+                                "shape_class": full["shape_class"], "quoted": full["quoted"],
+                                "production_rows": full["production_rows"], "production_listed": q["hits"],
+                                "ranks_spec": idx["spec"][q["id"]]["ranks"], "ranks_full": full["ranks"],
+                                "crossval_full": cv.get(q["id"], {})}) + "\n")
+    print(f"{len(queries)} queries written to {args.out}")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -975,13 +1233,14 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     cmds = {"labels": cmd_labels, "export": cmd_export, "export-units": cmd_export_units, "load": cmd_load,
-            "embed": cmd_embed, "score": cmd_score, "rerank": cmd_rerank, "report": cmd_report}
+            "embed": cmd_embed, "score": cmd_score, "rerank": cmd_rerank, "report": cmd_report,
+            "compare-index": cmd_compare_index, "crossval": cmd_crossval, "per-query": cmd_per_query}
     for name in cmds:
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
         if name in ("export", "export-units"):
             p.add_argument("--threads", type=int, default=4)
-        if name in ("score", "rerank", "report"):
+        if name in ("score", "rerank", "report", "crossval"):
             p.add_argument("--index", required=True, choices=["spec", "full"],
                            help="titles and primary specs, or everything production's search reads on an issue")
         if name == "embed":
@@ -1000,8 +1259,18 @@ def main():
             p.add_argument("--seed", type=int, default=386)
             p.add_argument("--budget-usd", type=float, required=True)
         if name == "report":
-            p.add_argument("--systems", nargs="*", help="rows to print (all by default)")
+            p.add_argument("--systems", nargs="*", help="rows to print per group (all by default; none when empty)")
+            p.add_argument("--matrix", nargs="*", help="systems for one group-by-system MRR table")
             p.add_argument("--compare", nargs="*", help="'a,b' pairs for bootstrap intervals by class")
+        if name == "compare-index":
+            p.add_argument("--systems", nargs="+", required=True)
+        if name == "crossval":
+            p.add_argument("--models", nargs="+", required=True)
+            p.add_argument("--folds", type=int, default=10)
+            p.add_argument("--repeats", type=int, default=20)
+            p.add_argument("--seed", type=int, default=386)
+        if name == "per-query":
+            p.add_argument("--out", required=True)
     args = ap.parse_args()
     os.umask(0o077)
     run = {"cmd": args.cmd, "args": {k: v for k, v in vars(args).items() if k != "cmd"}, "started_at": utcnow(),
