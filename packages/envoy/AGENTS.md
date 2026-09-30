@@ -1544,3 +1544,11 @@ tombstone-on-absence behavior, and listens on the port its own `cmd/broker` bind
 shared port either. `dev-broker.test.sh` proves both kinds of isolation with fakes (no real
 Postgres or network) and runs in CI's `envoy-go` job.
 
+`.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
+`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393/AGENTC-834): each
+of `agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` holds `bin/agent-secrets` and
+`bin/agent-secrets-helper`, alongside the existing `legion-envoy-<arch>.tar.gz` (envoy-listener
+alone) and `SHA256SUMS`, so a host can pin `[tools.agent-secrets]` in mise's `github:` backend to
+that tag and select the asset with `platforms.linux-*.asset_pattern` — see dotfiles
+`installers/agent-secrets.sh`.
+
