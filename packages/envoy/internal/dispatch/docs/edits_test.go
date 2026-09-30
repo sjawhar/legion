@@ -2179,24 +2179,23 @@ func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
 }
 
 // A table-row insert is judged against the table it lands in, as a whole-document write of the same
-// rows is. Read as a document of its own, a fragment holding a line of one or two hyphens is a table
-// of its own first row, so the edit route tries the rows before it reads the fragment that way; a
-// table nested in a block the fragment opens keeps its own refusal.
+// rows is, whatever hyphen rows the fragment holds; a table the fragment makes itself keeps its own
+// refusal.
 func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
 	const three = "| K | V | W |\n| --- | --- | --- |\n| a | b | c |\n"
 	const two = "| K | V |\n| --- | --- |\n| a | c |\n"
 	for _, test := range []struct {
 		name, table, markdown string
-		// want is the refusal the insert answers, or nil where it stores the rows as the whole-document
-		// write of the table and the markdown does.
-		want error
+		// code is the error code the insert answers, or "" where it stores the rows as the
+		// whole-document write of the table and the markdown does.
+		code string
 	}{
-		{"dash row under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |", nil},
-		{"dash row of one cell under three columns", three, "| A11 |\n| - |\n| A12 | y |", nil},
-		{"dash row above a wide row", two, "| A11 | x |\n| - | - |\n| A12 | y | z |", pmdoc.ErrTableWidth},
-		{"wide row", two, "| A11 | x |\n| A12 | y | z |", pmdoc.ErrTableWidth},
-		{"wide row in a list's own table", two, "- | h |\n  | - |\n  | a | b |", pmdoc.ErrSchema},
-		{"wide row in a table after a heading", two, "# h | x\n| a |\n| - |\n| b | c |", pmdoc.ErrSchema},
+		{"dash row under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |", ""},
+		{"dash row of one cell under three columns", three, "| A11 |\n| - |\n| A12 | y |", ""},
+		{"dash row above a wide row", two, "| A11 | x |\n| - | - |\n| A12 | y | z |", "TABLE_WIDTH"},
+		{"wide row", two, "| A11 | x |\n| A12 | y | z |", "TABLE_WIDTH"},
+		{"wide row in a list's own table", two, "- | h |\n  | - |\n  | a | b |", "INVALID_OP"},
+		{"wide row in a table after a heading", two, "# h | x\n| a |\n| - |\n| b | c |", "INVALID_OP"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.table)
@@ -2204,15 +2203,16 @@ func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
 				t.Fatal(err)
 			}
 			batch, err := applyOperations(tree, []model.EditOp{{Op: "insert", Markdown: test.markdown, After: "c"}})
-			switch {
-			case test.want == pmdoc.ErrSchema:
+			switch test.code {
+			case "INVALID_OP":
 				var invalid *ErrInvalidOp
 				if !errors.As(err, &invalid) || errors.Is(err, pmdoc.ErrTableWidth) {
 					t.Fatalf("insert = %v, want INVALID_OP and not TABLE_WIDTH", err)
 				}
-			case test.want != nil:
-				if !errors.Is(err, test.want) {
-					t.Fatalf("insert = %v, want %v", err, test.want)
+			case "TABLE_WIDTH":
+				var invalid *ErrInvalidOp
+				if !errors.Is(err, pmdoc.ErrTableWidth) || errors.As(err, &invalid) {
+					t.Fatalf("insert = %v, want TABLE_WIDTH and not INVALID_OP", err)
 				}
 			default:
 				if err != nil {

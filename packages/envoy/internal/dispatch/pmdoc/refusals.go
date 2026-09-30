@@ -97,7 +97,8 @@ func blockRefusal(node ast.Node, source []byte) error {
 		}
 		if value, wide := current.Attribute(wideRowAttr); wide {
 			row := value.(wideRow)
-			row.leading = current.PreviousSibling() == nil && current.Parent().Kind() == ast.KindDocument
+			// Where the table stands is for parseTableRows, which maps only its own table's refusal.
+			row.firstBlock = current.PreviousSibling() == nil && current.Parent().Kind() == ast.KindDocument
 			return fmt.Errorf("%w: %w", ErrSchema, row)
 		}
 	default:

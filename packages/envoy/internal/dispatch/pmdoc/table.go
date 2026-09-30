@@ -450,7 +450,7 @@ var wideRowAttr = []byte("pmdoc-wide-row")
 type wideRow struct {
 	cells, width int
 	opening      string
-	leading      bool
+	firstBlock   bool
 }
 
 func (row wideRow) Error() string {
