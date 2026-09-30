@@ -285,42 +285,146 @@ def cmd_export(args):
     print(f"{len(states)} distinct states in {len(rows)} intervals", flush=True)
 
 
+def ask_search_text(a: dict) -> str:
+    """What production's asks.search indexes: question || ' ' || ask_search_suffix(options, answer)
+    (store migration 0019), so the Python text gives the same to_tsvector."""
+    opts = a.get("options") if isinstance(a.get("options"), list) else []
+    agg = " ".join(" ".join(x for x in (o.get("label"), o.get("description")) if x) for o in opts)
+    ans = a.get("answer") or {}
+    sel = ans.get("selected") if isinstance(ans.get("selected"), list) else []
+    return f"{a.get('question') or ''} {agg} {ans.get('text') or ''} {' '.join(sel)}"
+
+
+def cmd_export_units(args):
+    """Every other thing production's search reads on an issue, as it stood at each search moment: its
+    comments, messages and asks (from the issue's own events, each event carrying the whole entity) and
+    its other documents (every version, read with GET). The primary document is already a state."""
+    store, data = args.store, os.path.join(args.store, "export")
+    os.umask(0o077)
+    queries, _ = scored_queries(store)
+    moments = sorted(ts(q["at"]) for q in queries)
+    keys = [i["key"] for proj in PROJECTS for i in replay.cget(data, "/issues", {"project": proj})]
+    keyset = set(keys)
+    primaries, versions = set(), collections.defaultdict(list)  # entity -> [(at, payload)]
+    owner, kind_of, docs, hists = {}, {}, {}, {}
+    for key in keys:
+        h = hists[key] = replay.issue_history(data, key)
+        primaries |= {s["primary_artifact_id"] for s in h["snapshots"] if s["primary_artifact_id"]}
+        for e in replay.issue_events(data, key):
+            t, p = e["type"], e.get("payload") or {}
+            kind = t.split(".")[0]
+            if kind in ("comment", "message", "ask") and "id" in p and ("body" in p or "question" in p):
+                if p.get("issue_key") not in keyset:
+                    continue  # a project document's thread (no issue): never an issue's hit
+                eid = f"{kind}:{p['id']}"
+                owner[eid], kind_of[eid] = p["issue_key"], kind
+                versions[eid].append((e["created_at"], p))
+            elif t == "artifact.created" and (p.get("artifact") or {}).get("kind") == "doc":
+                docs[p["artifact"]["id"]] = key
+    docs = {a: k for a, k in docs.items() if a not in primaries}
+    with ThreadPoolExecutor(args.threads) as ex:
+        metas = dict(zip(docs, ex.map(lambda a: replay.cget(data, f"/artifacts/{a}"), docs)))
+
+    def needed(lo: datetime, hi: datetime) -> bool:
+        return bisect.bisect_right(moments, lo) != bisect.bisect_right(moments, hi)
+
+    def title_at(key: str, at: datetime) -> str:
+        """The issue's title just after `at`: the prefix of this unit's chunks, as a spec chunk carries its title."""
+        snaps = [s for s in hists[key]["snapshots"] if ts(s["at"]) <= at] or hists[key]["snapshots"][:1]
+        return snaps[-1]["title"]
+
+    units = []
+    for eid, vs in versions.items():
+        vs.sort(key=lambda x: ts(x[0]))
+        bounds = [ts(at) for at, _ in vs] + [FAR]
+        for n, ((at, p), hi) in enumerate(zip(vs, bounds[1:])):
+            lo = ts(at)
+            if not needed(lo, hi):
+                continue
+            kind = kind_of[eid]
+            text = ask_search_text(p) if kind == "ask" else (p.get("body") or "")
+            units.append({"id": f"{eid}:{n}", "key": owner[eid], "kind": kind, "name": None, "lo": iso(lo),
+                          "hi": None if hi == FAR else iso(hi), "text": text, "title": title_at(owner[eid], lo),
+                          "dense": corpus.ask_text(p) if kind == "ask" else (p.get("body") or ""),
+                          "kw_title": p.get("question") if kind == "ask" else ""})
+    doc_versions = []
+    for aid, key in docs.items():
+        vs = sorted(metas[aid]["versions"], key=lambda v: ts(v["created_at"]))
+        bounds = [ts(v["created_at"]) for v in vs] + [FAR]
+        for v, hi in zip(vs, bounds[1:]):
+            if needed(ts(v["created_at"]), hi):
+                doc_versions.append((aid, key, v, hi))
+    print(f"{len(units)} comment, message and ask versions; {len(docs)} other documents, "
+          f"{len(doc_versions)} of their versions seen by a search", flush=True)
+    with ThreadPoolExecutor(args.threads) as ex:
+        texts = list(ex.map(lambda x: replay.cget(data, f"/artifacts/{x[0]}/versions/{x[2]['number']}")["markdown"], doc_versions))
+    for (aid, key, v, hi), md in zip(doc_versions, texts):
+        units.append({"id": f"document:{aid}:{v['number']}", "key": key, "kind": "document", "name": metas[aid]["name"],
+                      "lo": v["created_at"], "hi": None if hi == FAR else iso(hi), "text": md,
+                      "title": title_at(key, ts(v["created_at"])), "dense": corpus.strip_ask_blocks(md), "kw_title": ""})
+    write_jsonl(os.path.join(store, "corpus", "units.jsonl"), units)
+    print(f"{len(units)} units written, {sum(len(u['text']) for u in units):,} characters", flush=True)
+
 
 # ---------------------------------------------------------------------------------------------
 # corpus in memory: states, intervals, chunks
 
 
-class Corpus:
-    """The as-of corpus: states, the intervals each is valid on, and each state's chunk texts."""
+def unit_chunks(u: dict) -> list[str]:
+    """A unit's chunk texts: an ask is one chunk, its issue's title then question, options and answer (as
+    corpus.load builds one); a comment, message or other document is chunked like a spec, prefixed with
+    its issue's title (and a document's name)."""
+    if u["kind"] == "ask":
+        return [f"{u['title']}\n\n{u['dense']}"]
+    head = f"{u['title']} — {u['name']}" if u["name"] else u["title"]
+    return corpus.chunk_markdown(head, u["dense"])
 
-    def __init__(self, store: str):
+
+class Corpus:
+    """The as-of corpus: states (title and primary spec) and the intervals each is valid on, and, for the
+    full index, units (comments, messages, asks and other documents, one row per version); each with its
+    chunk texts."""
+
+    def __init__(self, store: str, units: bool = False):
         self.store = store
         cdir = os.path.join(store, "corpus")
         self.states = {s["id"]: s for s in jsonl(os.path.join(cdir, "states.jsonl"))}
         self.issues = json.load(open(os.path.join(cdir, "issues.json")))
+        self.keys = sorted(self.issues)
+        self.kidx = {k: i for i, k in enumerate(self.keys)}
         self.sids = sorted(self.states)
         self.sidx = {s: i for i, s in enumerate(self.sids)}
         ivs = jsonl(os.path.join(cdir, "intervals.jsonl"))
         self.iv_state = np.array([self.sidx[r["state"]] for r in ivs], np.int64)
         self.iv_key = np.array([r["key"] for r in ivs])
+        self.iv_issue = np.array([self.kidx[r["key"]] for r in ivs], np.int64)
         self.iv_lo = np.array([ts(r["lo"]).timestamp() for r in ivs])
         self.iv_hi = np.array([ts(r["hi"]).timestamp() if r["hi"] else math.inf for r in ivs])
         self.iv_project = np.array([k.split("-")[0] for k in self.iv_key])
         # chunks: each state's chunk texts, as the harness chunks a spec (title-prefixed, ask blocks removed)
         self.texts: dict[str, str] = {}
-        self.state_chunks: list[list[str]] = []
-        for sid in self.sids:
-            s = self.states[sid]
+
+        def add(texts: list[str]) -> list[str]:
             hs = []
-            for text in corpus.chunk_markdown(s["title"], corpus.strip_ask_blocks(s["markdown"] or "")):
+            for text in texts:
                 h = sha(text)
                 self.texts[h] = text
                 hs.append(h)
-            self.state_chunks.append(hs)
+            return hs
+
+        self.state_chunks = [add(corpus.chunk_markdown(self.states[s]["title"], corpus.strip_ask_blocks(self.states[s]["markdown"] or "")))
+                             for s in self.sids]
+        self.units = jsonl(os.path.join(cdir, "units.jsonl")) if units else []
+        self.unit_chunks = [add(unit_chunks(u)) for u in self.units]
+        self.u_issue = np.array([self.kidx[u["key"]] for u in self.units], np.int64)
+        self.u_lo = np.array([ts(u["lo"]).timestamp() for u in self.units])
+        self.u_hi = np.array([ts(u["hi"]).timestamp() if u["hi"] else math.inf for u in self.units])
         self.hashes = sorted(self.texts)
         self.hidx = {h: i for i, h in enumerate(self.hashes)}
         self.rows = np.array([self.hidx[h] for hs in self.state_chunks for h in hs], np.int64)
         self.ptr = np.cumsum([0] + [len(hs) for hs in self.state_chunks])[:-1]
+        self.u_rows = np.array([self.hidx[h] for hs in self.unit_chunks for h in hs], np.int64)
+        self.u_ptr = np.cumsum([0] + [len(hs) for hs in self.unit_chunks])[:-1]
 
     def live(self, q: dict) -> np.ndarray:
         """Indices of the intervals a query sees: one per issue created before it, the duplicate excluded."""
@@ -331,6 +435,15 @@ class Corpus:
         for k in q["exclude"]:
             m &= self.iv_key != k
         return np.nonzero(m)[0]
+
+    def live_units(self, q: dict, live: np.ndarray) -> np.ndarray:
+        """Indices of the units a query sees: the version valid then, on an issue it sees."""
+        if not len(self.units):
+            return np.zeros(0, np.int64)
+        t = ts(q["at"]).timestamp()
+        seen = np.zeros(len(self.keys), bool)
+        seen[self.iv_issue[live]] = True
+        return np.nonzero((self.u_lo < t) & (t <= self.u_hi) & seen[self.u_issue])[0]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -371,28 +484,56 @@ def cmd_load(args):
                         [(r["state"], r["key"], r["lo"], r["hi"], r["updated_at"]) for r in ivs])
     conn.execute("create index on m_interval (lo); analyze;")
     print(f"{len(c.states)} states, {len(c.texts)} distinct chunk texts ({sum(map(len, c.texts.values())):,} characters)")
+    upath = os.path.join(args.store, "corpus", "units.jsonl")
+    if not os.path.exists(upath):
+        return
+    units = jsonl(upath)
+    conn.execute(
+        """drop table if exists m_unit;
+           create table m_unit (id text primary key, key text not null, kind text not null, lo timestamptz not null,
+             hi timestamptz, prod tsvector not null, kw tsvector not null);"""
+    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            """insert into m_unit values (%(id)s, %(key)s, %(kind)s, %(lo)s, %(hi)s,
+                 case when %(kind)s = 'document' then to_tsvector('english', regexp_replace(%(text)s, '(?s):::ask\\{.*?:::', '', 'g'))
+                      else to_tsvector('english', %(text)s) end,
+                 setweight(to_tsvector('english', %(kw_title)s), 'A') || setweight(to_tsvector('english', %(kw_body)s), 'D'))""",
+            [{**{k: u[k] for k in ("id", "key", "kind", "lo", "hi", "text")}, "kw_title": u["kw_title"] or "",
+              "kw_body": corpus.strip_ask_blocks(u["text"]) if u["kind"] == "document"
+              else (u["text"][len(u["kw_title"] or ""):] if u["kind"] == "ask" else u["text"])} for u in units],
+        )
+    conn.execute("create index on m_unit (key); create index on m_unit (lo); analyze;")
+    print(f"{len(units)} units ({collections.Counter(u['kind'] for u in units)})")
 
 
 LIVE_SQL = """select iv.key, iv.state_id, iv.updated_at from m_interval iv join m_state s on s.id = iv.state_id
                where iv.lo < %(t)s and (iv.hi is null or %(t)s <= iv.hi)
                  and (%(proj)s = '' or s.project = %(proj)s) and iv.key <> all(%(exclude)s)"""
+# The full index also reads each live issue's comments, messages, asks and other documents as they stood.
+UNITS_LIVE = "u.lo < %(t)s and (u.hi is null or %(t)s <= u.hi)"
 
 
-def sys_production(conn, q: dict, text: str) -> tuple[list[tuple[str, float]], str | None]:
-    """Today's search over the as-of titles and primary specs: every word must match, 50 rows, then
-    one entry per issue at its first row."""
+def sys_production(conn, q: dict, text: str, full: bool = False) -> tuple[list[tuple[str, float]], str | None]:
+    """Today's search: every word must match, ts_rank_cd then last update, 50 rows, then one entry per
+    issue at its first row. Over the as-of titles and primary specs, or with full=True over everything
+    it reads on an issue (api/search.go: issue, document, comment, ask and message rows)."""
     if len(text.strip()) < 2:
         return [], "refused: fewer than 2 characters"
     if conn.execute("select numnode(websearch_to_tsquery('english', %s))", (text.strip(),)).fetchone()[0] == 0:
         return [], None
+    units = f"""union all
+                     select u.kind, u.key, u.id, ts_rank_cd(u.prod, q.tsq), l.updated_at
+                       from m_unit u join live l on l.key = u.key, q where {UNITS_LIVE} and u.prod @@ q.tsq""" if full else ""
     rows = conn.execute(
         f"""with q as (select websearch_to_tsquery('english', %(q)s) as tsq), live as ({LIVE_SQL}),
-            hits as (select 'issue' as kind, l.key, ts_rank_cd(s.prod_title, q.tsq) as rank, l.updated_at
+            hits as (select 'issue' as kind, l.key, l.key as id, ts_rank_cd(s.prod_title, q.tsq) as rank, l.updated_at
                        from live l join m_state s on s.id = l.state_id, q where s.prod_title @@ q.tsq
                      union all
-                     select 'document', l.key, ts_rank_cd(s.prod_spec, q.tsq), l.updated_at
-                       from live l join m_state s on s.id = l.state_id, q where s.prod_spec @@ q.tsq)
-            select key, rank from hits order by rank desc, updated_at desc, kind, key limit %(n)s""",
+                     select 'document', l.key, s.id, ts_rank_cd(s.prod_spec, q.tsq), l.updated_at
+                       from live l join m_state s on s.id = l.state_id, q where s.prod_spec @@ q.tsq
+                     {units})
+            select key, rank from hits order by rank desc, updated_at desc, kind, id limit %(n)s""",
         {"q": text.strip(), "t": q["at"], "proj": q["project"], "exclude": q["exclude"], "n": PROD_LIMIT},
     ).fetchall()
     out, seen = [], set()
@@ -403,11 +544,16 @@ def sys_production(conn, q: dict, text: str) -> tuple[list[tuple[str, float]], s
     return out, None
 
 
-def sys_keyword(conn, q: dict, text: str) -> list[tuple[str, float]]:
+def sys_keyword(conn, q: dict, text: str, full: bool = False) -> list[tuple[str, float]]:
+    """The design's keyword leg: any word matching, length normalised; an issue ranks by its best row."""
+    units = f"""union all
+                select u.key, ts_rank_cd(u.kw, q.tsq, 1) from m_unit u join live l on l.key = u.key, q
+                 where {UNITS_LIVE} and u.kw @@ q.tsq""" if full else ""
     rows = conn.execute(
-        f"""with q as (select {bench.KW_TSQUERY} as tsq), live as ({LIVE_SQL})
-            select l.key, ts_rank_cd(s.kw, q.tsq, 1) as r from live l join m_state s on s.id = l.state_id, q
-             where s.kw @@ q.tsq order by r desc, l.key limit %(n)s""",
+        f"""with q as (select {bench.KW_TSQUERY} as tsq), live as ({LIVE_SQL}),
+            hits as (select l.key, ts_rank_cd(s.kw, q.tsq, 1) as r from live l join m_state s on s.id = l.state_id, q
+                      where s.kw @@ q.tsq {units})
+            select key, max(r) as m from hits group by key order by m desc, key limit %(n)s""",
         {"q": bench.keyword_text(text), "t": q["at"], "proj": q["project"], "exclude": q["exclude"], "n": FUSE_DEPTH},
     ).fetchall()
     return [(k, float(r)) for k, r in rows]
@@ -463,7 +609,7 @@ def query_texts(store: str, queries: list[dict]) -> dict[str, str]:
 
 
 def cmd_embed(args):
-    c = Corpus(args.store)
+    c = Corpus(args.store, units=os.path.exists(os.path.join(args.store, "corpus", "units.jsonl")))
     queries, _ = scored_queries(args.store)
     texts = query_texts(args.store, queries)
     emb = P.EMBEDDERS[args.model]()
@@ -547,11 +693,17 @@ class Dense:
             raise SystemExit(f"{self.model}: no query vector for {sha(text)[:12]}; run embed first")
         return self.m @ v
 
-    def rank(self, q: dict, sims: np.ndarray, live: np.ndarray, n: int = FUSE_DEPTH) -> list[tuple[str, float]]:
+    def rank(self, q: dict, sims: np.ndarray, live: np.ndarray, units: np.ndarray | None = None,
+             n: int = FUSE_DEPTH) -> list[tuple[str, float]]:
+        """Issues by their best chunk: the title-and-spec state's, and with units, any live unit's too."""
         best = np.maximum.reduceat(sims[self.c.rows], self.c.ptr)
-        st = self.c.iv_state[live]
         keys = self.c.iv_key[live]
-        scores = best[st]
+        scores = best[self.c.iv_state[live]]
+        if units is not None and len(units):
+            ubest = np.maximum.reduceat(sims[self.c.u_rows], self.c.u_ptr)[units]
+            pos = np.full(len(self.c.keys), -1, np.int64)
+            pos[self.c.iv_issue[live]] = np.arange(len(live))
+            np.maximum.at(scores, pos[self.c.u_issue[units]], ubest)
         order = np.lexsort((keys, -scores))[:n]
         return [(str(keys[i]), float(scores[i])) for i in order]
 
@@ -567,7 +719,8 @@ def fused(dense: list[tuple[str, float]], kw: list[tuple[str, float]], w: float,
 
 
 def cmd_score(args):
-    c = Corpus(args.store)
+    full = args.index == "full"
+    c = Corpus(args.store, units=full)
     queries, skipped = scored_queries(args.store)
     texts = query_texts(args.store, queries)
     conn = pg()
@@ -575,24 +728,27 @@ def cmd_score(args):
     sdir = os.path.join(args.store, "scores")
     os.makedirs(sdir, mode=0o700, exist_ok=True)
     t0 = time.time()
-    ranks_path, lists_path = os.path.join(sdir, "first-stage.jsonl.gz"), os.path.join(sdir, "first-stage-lists.jsonl.gz")
+    ranks_path = os.path.join(sdir, f"first-stage-{args.index}.jsonl.gz")
+    lists_path = os.path.join(sdir, f"first-stage-{args.index}-lists.jsonl.gz")
     with gzip.open(ranks_path + ".tmp", "wt") as fr, gzip.open(lists_path + ".tmp", "wt") as fl:
         for n, q in enumerate(queries, 1):
             text = texts[q["id"]]
             live = c.live(q)
+            units = c.live_units(q, live) if full else None
             live_keys = set(c.iv_key[live].tolist())
             lists = {}
-            prod, err = sys_production(conn, q, text)
-            lists["A"], lists["B"] = prod, sys_keyword(conn, q, text)
+            prod, err = sys_production(conn, q, text, full)
+            lists["A"], lists["B"] = prod, sys_keyword(conn, q, text, full)
             if q["hits"] is not None:
                 lists["A:ran"] = [(k, None) for k in q["hits"]]
             for m, d in models.items():
-                dense = d.rank(q, d.sims(text), live)
+                dense = d.rank(q, d.sims(text), live, units)
                 lists[f"C:{m}"] = [(k, round(s, 6)) for k, s in dense]
                 for w in WEIGHTS:
                     lists[f"W{w}:{m}"] = fused(dense, lists["B"], w)
             rec = {"id": q["id"], "class": q["class"], "source": q["source"], "at": q["at"], "session": q["session"],
                    "text_sha256": sha(text), "targets": q["targets"], "candidates": len(live),
+                   "units": 0 if units is None else len(units),
                    "findable": any(t["key"] in live_keys for t in q["targets"]), "production_error": err,
                    "ranks": {s: rank_of([k for k, _ in lst], q["targets"]) for s, lst in lists.items()},
                    "top10": {s: [k for k, _ in lst[:10]] for s, lst in lists.items()}}
@@ -602,9 +758,9 @@ def cmd_score(args):
                 print(f"{n}/{len(queries)} scored, {time.time() - t0:.0f}s", flush=True)
     os.replace(ranks_path + ".tmp", ranks_path)
     os.replace(lists_path + ".tmp", lists_path)
-    with open(os.path.join(sdir, "first-stage.meta.json"), "w") as f:
-        json.dump({"scored": len(queries), "skipped": skipped, "models": args.models, "weights": WEIGHTS,
-                   "depth": FUSE_DEPTH, "production_rows": PROD_LIMIT, "finished_at": utcnow()}, f)
+    with open(os.path.join(sdir, f"first-stage-{args.index}.meta.json"), "w") as f:
+        json.dump({"index": args.index, "scored": len(queries), "skipped": skipped, "models": args.models,
+                   "weights": WEIGHTS, "depth": FUSE_DEPTH, "production_rows": PROD_LIMIT, "finished_at": utcnow()}, f)
     print(f"{len(queries)} queries scored; skipped {skipped}")
 
 
@@ -640,29 +796,34 @@ class RerankCache:
                 f.write(json.dumps({"k": k, "query_sha256": qh, "doc_sha256": dh, "score": s}) + "\n")
 
 
-def passages_for(c: Corpus, d: Dense, sims: np.ndarray, live: np.ndarray, keys: list[str]) -> dict[str, str]:
-    """Each issue as the reranker sees it: its best three chunks by this model's similarity (bench.passage_docs)."""
-    state_of = {str(c.iv_key[i]): int(c.iv_state[i]) for i in live}
+def passages_for(c: Corpus, sims: np.ndarray, live: np.ndarray, units: np.ndarray | None, keys: list[str]) -> dict[str, str]:
+    """Each issue as the reranker sees it: its best three chunks by this model's similarity (bench.passage_docs),
+    from its title-and-spec state and, on the full index, its live units."""
+    chunks: dict[str, list[str]] = {}
+    for i in live:
+        chunks[str(c.iv_key[i])] = list(c.state_chunks[int(c.iv_state[i])])
+    for u in units if units is not None else []:
+        chunks[c.keys[int(c.u_issue[u])]].extend(c.unit_chunks[int(u)])
     rows = []
     for k in keys:
-        s = state_of[k]
-        hs = c.state_chunks[s]
-        idx = [c.hidx[h] for h in hs]
-        order = sorted(range(len(hs)), key=lambda j: (-float(sims[idx[j]]), j))
-        rows += [(k, c.texts[hs[j]], float(sims[idx[j]])) for j in order]
+        hs = list(dict.fromkeys(chunks[k]))
+        order = sorted(range(len(hs)), key=lambda j: (-float(sims[c.hidx[hs[j]]]), j))
+        rows += [(k, c.texts[hs[j]], float(sims[c.hidx[hs[j]]])) for j in order]
     return bench.passage_docs(rows)
 
 
 def cmd_rerank(args):
-    c = Corpus(args.store)
+    full = args.index == "full"
+    c = Corpus(args.store, units=full)
     queries, _ = scored_queries(args.store)
     texts = query_texts(args.store, queries)
     qmap = {q["id"]: q for q in queries}
-    first = {r["id"]: r for r in jsonl(os.path.join(args.store, "scores", "first-stage.jsonl.gz"))}
+    sdir = os.path.join(args.store, "scores")
+    first = {r["id"]: r for r in jsonl(os.path.join(sdir, f"first-stage-{args.index}.jsonl.gz"))}
     sample = stratified_sample(list(first.values()), args.per_class, args.seed)
     wanted = {r["id"] for r in sample}
     kw_lists = {}
-    with gzip.open(os.path.join(args.store, "scores", "first-stage-lists.jsonl.gz"), "rt") as f:
+    with gzip.open(os.path.join(sdir, f"first-stage-{args.index}-lists.jsonl.gz"), "rt") as f:
         for line in f:
             x = json.loads(line)
             if x["id"] in wanted:
@@ -671,7 +832,7 @@ def cmd_rerank(args):
     rr = P.RERANKERS[args.reranker]()
     cache = RerankCache(args.store, args.reranker)
     before = ledger_spend(args.store)
-    out_path = os.path.join(args.store, "scores", f"rerank-{args.model}-{args.reranker}.jsonl.gz")
+    out_path = os.path.join(sdir, f"rerank-{args.index}-{args.model}-{args.reranker}.jsonl.gz")
     done = {r["id"]: r for r in jsonl(out_path)} if os.path.exists(out_path) else {}
     depth = bench.RERANK_DEPTH
     print(f"{len(sample)} sampled queries ({len(done)} already reranked); run spend so far ${before:.2f}", flush=True)
@@ -681,13 +842,14 @@ def cmd_rerank(args):
                 continue
             q, text = qmap[r["id"]], texts[r["id"]]
             sims, live = d.sims(text), c.live(q)
-            dense = d.rank(q, sims, live)
+            units = c.live_units(q, live) if full else None
+            dense = d.rank(q, sims, live, units)
             kw = kw_lists[r["id"]]
             bases = {f"F:{args.model}+{args.reranker}": [k for k, _ in dense]}
             for w in args.weights:
                 bases[f"H{w}:{args.model}+{args.reranker}"] = [k for k, _ in fused(dense, kw, w)]
             union = list(dict.fromkeys(k for b in bases.values() for k in b[:depth]))
-            docs = passages_for(c, d, sims, live, union)
+            docs = passages_for(c, sims, live, units, union)
             qh = sha(text)
             keyed = {k: (sha(f"{text}\0{docs[k]}"), sha(docs[k])) for k in union}
             missing = [k for k in union if keyed[k][0] not in cache.scores]
@@ -752,13 +914,13 @@ def cluster_boot(rows: list[dict], a: str, b: str, reps: int = 2000, seed: int =
             "a_ahead": int(sum(x > 0 for x in d)), "b_ahead": int(sum(x < 0 for x in d)), "n": len(d), "sessions": len(groups)}
 
 
-def merged_rows(store: str) -> tuple[list[dict], list[str]]:
+def merged_rows(store: str, index: str) -> tuple[list[dict], list[str]]:
     """First-stage rows with every rerank file's ranks merged in; the rerank systems are on the sample only."""
-    rows = {r["id"]: r for r in jsonl(os.path.join(store, "scores", "first-stage.jsonl.gz"))}
-    rerank_systems = []
     sdir = os.path.join(store, "scores")
+    rows = {r["id"]: r for r in jsonl(os.path.join(sdir, f"first-stage-{index}.jsonl.gz"))}
+    rerank_systems = []
     for name in sorted(os.listdir(sdir)):
-        if name.startswith("rerank-") and name.endswith(".jsonl.gz"):
+        if name.startswith(f"rerank-{index}-") and name.endswith(".jsonl.gz"):
             for r in jsonl(os.path.join(sdir, name)):
                 rows[r["id"]]["ranks"].update(r["ranks"])
                 rows[r["id"]]["top10"].update(r["top10"])
@@ -767,7 +929,7 @@ def merged_rows(store: str) -> tuple[list[dict], list[str]]:
 
 
 def cmd_report(args):
-    rows, rerank_systems = merged_rows(args.store)
+    rows, rerank_systems = merged_rows(args.store, args.index)
     systems = sorted({s for r in rows for s in r["ranks"]}, key=lambda s: (s[0], s))
     groups = {cls: [r for r in rows if r["class"] == cls] for cls in CLASSES}
     groups["all agent searches"] = [r for r in rows if r["source"] == "fleet-transcript"]
@@ -790,7 +952,7 @@ def cmd_report(args):
            "usage": jsonl(os.path.join(args.store, "usage.jsonl")) if os.path.exists(os.path.join(args.store, "usage.jsonl")) else [],
            "spend_usd": round(ledger_spend(args.store), 4)}
     os.makedirs(os.path.join(args.store, "report"), mode=0o700, exist_ok=True)
-    with open(os.path.join(args.store, "report", "results.json"), "w") as f:
+    with open(os.path.join(args.store, "report", f"results-{args.index}.json"), "w") as f:
         json.dump(out, f, indent=1)
     show = args.systems or systems
     for g, rs in groups.items():
@@ -812,13 +974,16 @@ def cmd_report(args):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    cmds = {"labels": cmd_labels, "export": cmd_export, "load": cmd_load, "embed": cmd_embed, "score": cmd_score,
-            "rerank": cmd_rerank, "report": cmd_report}
+    cmds = {"labels": cmd_labels, "export": cmd_export, "export-units": cmd_export_units, "load": cmd_load,
+            "embed": cmd_embed, "score": cmd_score, "rerank": cmd_rerank, "report": cmd_report}
     for name in cmds:
         p = sub.add_parser(name)
         p.add_argument("--store", required=True)
-        if name == "export":
+        if name in ("export", "export-units"):
             p.add_argument("--threads", type=int, default=4)
+        if name in ("score", "rerank", "report"):
+            p.add_argument("--index", required=True, choices=["spec", "full"],
+                           help="titles and primary specs, or everything production's search reads on an issue")
         if name == "embed":
             p.add_argument("--model", required=True, choices=list(P.EMBEDDERS))
             p.add_argument("--budget-usd", type=float, required=True)

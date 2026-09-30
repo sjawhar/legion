@@ -6,8 +6,9 @@ search there names its session file and tool-call id; this reads those files aga
 set records only whether a returned issue was read, not which issue was opened when it was not
 returned, and not what the session had already seen.
 
-For every agent search that reached the server, from the session's tool calls in file order:
-  hits         the issue keys its result listed, in the order listed (one per result line)
+  hits         the issue keys its result listed, in the order listed (one per result line), and for each
+               key the kind of row production matched it by (issue title, a named document, comment, ask
+               or message)
   window       its next WINDOW tool calls, as the query set's next-step rule reads them
   seen_before  every issue key in the session's header, user messages, tool-call arguments and tool
                results before the assistant turn that sent the search
@@ -104,6 +105,21 @@ def hit_keys(text: str) -> list[str]:
     return out
 
 
+# A result line is `KEY [status] title - <kind>[ <document name>]: snippet -> href` (envoy-client's
+# searchResultLine), kind one of issue, document, comment, ask, message.
+ROW = re.compile(r"^\s*(?:\d+[.)]\s*)?((?:AGENTC|LEGION|OPS|LEGSMOKE)-\d+) \[[^\]]*\] .*? - (issue|document|comment|ask|message)(?: ([^:]+?))?: ")
+
+
+def hit_kinds(text: str) -> dict[str, list[str]]:
+    """For each key a result listed, the kind of every row it had, in order (`document <name>` for a document)."""
+    out: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        m = ROW.match(line)
+        if m:
+            out.setdefault(m.group(1), []).append(m.group(2) + (f" {m.group(3)}" if m.group(2) == "document" and m.group(3) else ""))
+    return out
+
+
 def open_kind(name: str, device: str | None, args: dict) -> str | None:
     """'dispatch' for a Dispatch read or write, 'local' for another read-shaped call, else None."""
     if device in DISPATCH_READ or device in DISPATCH_ACT:
@@ -192,7 +208,8 @@ def label_session(path: str, fleet: dict[str, dict]) -> dict[str, dict]:
         reform = next((j for j in window if is_search(calls[j]["name"], calls[j]["device"])
                        and relation(text_of(i), text_of(j)) != "different topic"), None)
         base = {"hits": hits, "reformulation": calls[reform]["id"] if reform is not None else None,
-                "filed_issue": any(calls[j]["device"] == "dispatch_issue" for j in window)}
+                "filed_issue": any(calls[j]["device"] == "dispatch_issue" for j in window),
+                "hit_kinds": hit_kinds(results[cid]["text"]) if hits is not None else None}
         if hits is None:
             out[cid] = {**base, "direct": [], "hits_unknown": True}
             continue
