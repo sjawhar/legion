@@ -131,9 +131,11 @@ cleanup() {
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
-# scratch base. Nothing here touches the smoke main.
+# scratch base. Nothing here touches the smoke main, and nothing runs unless require_proof_human
+# passed: a refused run's gh acts as someone else.
 github_cleanup() {
   local n b
+  [ -n "$proof_human" ] || return 0
   [ -n "${main_sha:-}" ] || return 0
   for n in $(gh -R "$repo" pr list --state open --limit 100 --json number,headRefName \
     --jq ".[] | select(.headRefName | startswith(\"legion/$project-\")) | .number" 2>/dev/null); do

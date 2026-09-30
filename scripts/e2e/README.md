@@ -1266,13 +1266,13 @@ GitHub as the proof human runs in `prerequisites` before its first `gh` call. It
 the dotfiles shim routes by): an App installation token answers `viewer` with the App's bot login,
 where REST's `GET /user` refuses one (403, "Resource not accessible by integration"). Unless the
 answer is `sjawhar-agent[bot]` it fails the check in one line: the account it found ("no account"
-when `gh` gave none), the requirement (the operator's own Oh My Pi session, not a Legion pane, with
-no personal `GH_TOKEN` in its environment), and whatever `gh` wrote to stderr, where the shim names
-an inherited `GH_TOKEN`. Of the harnesses' teardowns, Stage 3's `close_unpassed_run_pull_requests`
-makes no `gh` call in a run that never passed it; 4b.13b's `github_cleanup` waits for `main_sha` and
-Stage 4b's `remove_run_branches` for `locked`, each set after the check. `lib/proof-human.test.ts`
-drives the check and Stage 3's teardown against a fake `gh` (`bun test scripts/e2e/lib`, which CI
-runs).
+when `gh` gave none, and why when it gave no answer within the probe's 60 s), the requirement (the
+operator's own Oh My Pi session, not a Legion pane, with no personal `GH_TOKEN` in its
+environment), and whatever `gh` wrote to stderr, where the shim names an inherited `GH_TOKEN`. Each
+harness's GitHub teardown (Stage 3's `close_unpassed_run_pull_requests`, 4b.13b's `github_cleanup`,
+Stage 4b's `remove_run_branches`) returns without a `gh` call unless the check passed.
+`lib/proof-human.test.ts` drives the check and Stage 3's teardown against a fake `gh`
+(`bun test scripts/e2e/lib`, which CI runs).
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own

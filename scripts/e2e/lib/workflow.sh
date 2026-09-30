@@ -199,20 +199,23 @@ drive_gate() {
 # that one requirement, and whatever gh wrote to stderr (the shim names an inherited GH_TOKEN there).
 # The probe is GraphQL's viewer, which answers an App installation token with the App's bot login,
 # where REST's GET /user refuses one (403, "Resource not accessible by integration"); GH_REPO names
-# the owner the shim routes by, as each write's own repository does. Every stage proof that writes
-# to GitHub as the proof human calls it before its first gh call. Of their teardowns, Stage 3's
-# close_unpassed_run_pull_requests reads the account it recorded; 4b.13b's github_cleanup waits for
-# main_sha and Stage 4b's remove_run_branches for locked, each set after the check.
+# the owner the shim routes by, as each write's own repository does. The probe gets 60 s, as Stage
+# 4b's teardown gh calls do, so a network that never answers fails the check, saying so, instead of
+# hanging it. Every stage proof that writes to GitHub as the proof human calls it before its first
+# gh call, and each one's GitHub teardown (Stage 3's close_unpassed_run_pull_requests, 4b.13b's
+# github_cleanup, Stage 4b's remove_run_branches) returns without a gh call unless it passed.
 proof_human_login='sjawhar-agent[bot]'
 proof_human=
 require_proof_human() {
-  local login said
-  login=$(GH_REPO="$repo" gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>"$work/proof-human.err") ||
-    login=
+  local login found said status=0
+  login=$(GH_REPO="$repo" timeout 60 gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>"$work/proof-human.err") ||
+    { status=$?; login=; }
+  found=${login:-no account}
+  [ "$status" != 124 ] || found="no account (gh gave no answer within 60 s)"
   said=$(<"$work/proof-human.err")
   said=${said//$'\n'/ }
   [ "$login" = "$proof_human_login" ] ||
-    fail "the devbox gh acts as ${login:-no account} for $repo, not the proof human $proof_human_login: run the script from the operator's own Oh My Pi session, not a Legion pane, with no personal GH_TOKEN in its environment${said:+; gh said: $said}"
+    fail "the devbox gh acts as $found for $repo, not the proof human $proof_human_login: run the script from the operator's own Oh My Pi session, not a Legion pane, with no personal GH_TOKEN in its environment${said:+; gh said: $said}"
   proof_human=$login
   note "the proof human: the devbox gh acts as $login for $repo"
 }

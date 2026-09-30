@@ -963,9 +963,11 @@ delete_consumers() {
 }
 # remove_run_branches closes each pull request the run left open on the smoke repository and deletes
 # each tree's branch legion/<tree> there (tree 2's is the fixture's): the run's own, which a run that
-# stops before the proof human's merge would otherwise leave behind.
+# stops before the proof human's merge would otherwise leave behind. It makes no gh call unless
+# require_proof_human passed: a refused run's gh acts as someone else.
 remove_run_branches() {
   local issue number
+  [ -n "$proof_human" ] || return 0
   for issue in $tree1 $tree2 $tree3 $tree4; do
     number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
     if [ -n "$number" ]; then
