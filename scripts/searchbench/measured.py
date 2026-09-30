@@ -20,7 +20,8 @@ Systems, each over the chosen as-of index (titles and primary specs, or full):
            weight A, spec weight D (an ask's question weight A, other rows D); an issue ranks by its best row
   C:<m>    meaning only: an issue's score is its best chunk's cosine similarity to the query
   W<w>:<m> C and B merged by reciprocal rank fusion (k = 60) over each one's top 200, B weighted w
-  F:<m>+<r>, H<w>:<m>+<r>  C's or W<w>'s top 150 reranked (rerank command, on a sample)
+  V<w>:<m> C and A (today's every-word search, up to 50 issues) merged the same way, A weighted w
+  F:<m>+<r>, H<w>:<m>+<r>, G<w>:<m>+<r>  C's, W<w>'s or V<w>'s top 150 reranked (rerank command, on a sample)
 
 Run order (STORE holds internal company text and is kept, mode 0700; SEARCHBENCH_PG is a scratch Postgres 16,
 whose text search the keyword systems use; every vector stays in STORE):
@@ -30,7 +31,7 @@ whose text search the keyword systems use; every vector stays in STORE):
   measured.py load    --store STORE        states (and units) into SEARCHBENCH_PG for the keyword systems
   measured.py embed   --store STORE --model M --budget-usd X     every distinct chunk text once, then every query
   measured.py score   --store STORE --index I --models M...   first-stage systems for every query, lists to depth 200
-  measured.py rerank  --store STORE --index I --model M --reranker R --weights W... --per-class N --budget-usd X
+  measured.py rerank  --store STORE --index I --model M --reranker R [--weights W...] [--v-weights W...] --per-class N --budget-usd X
   measured.py report  --store STORE --index I [--matrix S...] [--compare A,B ...]   group tables, intervals
   measured.py compare-index --store STORE --systems S...   the same systems on both indexes, full minus spec
   measured.py crossval --store STORE --index I --models M...   the adaptive keyword weight, held out by session
@@ -793,6 +794,7 @@ def cmd_score(args):
                 lists[f"C:{m}"] = [(k, round(s, 6)) for k, s in dense]
                 for w in WEIGHTS:
                     lists[f"W{w}:{m}"] = fused(dense, lists["B"], w)
+                    lists[f"V{w}:{m}"] = fused(dense, lists["A"], w)
             rows = q["rows"]
             rec = {"id": q["id"], "class": q["class"], "source": q["source"], "at": q["at"], "session": q["session"],
                    "text_sha256": sha(text), "targets": q["targets"], "candidates": len(live),
@@ -879,7 +881,7 @@ def cmd_rerank(args):
         for line in f:
             x = json.loads(line)
             if x["id"] in wanted:
-                kw_lists[x["id"]] = [tuple(y) for y in x["lists"]["B"]]
+                kw_lists[x["id"]] = {leg: [tuple(y) for y in x["lists"][leg]] for leg in ("A", "B")}
     d = Dense(c, args.store, args.model)
     rr = P.RERANKERS[args.reranker]()
     cache = RerankCache(args.store, args.reranker)
@@ -899,7 +901,9 @@ def cmd_rerank(args):
             kw = kw_lists[r["id"]]
             bases = {f"F:{args.model}+{args.reranker}": [k for k, _ in dense]}
             for w in args.weights:
-                bases[f"H{w}:{args.model}+{args.reranker}"] = [k for k, _ in fused(dense, kw, w)]
+                bases[f"H{w}:{args.model}+{args.reranker}"] = [k for k, _ in fused(dense, kw["B"], w)]
+            for w in args.v_weights:
+                bases[f"G{w}:{args.model}+{args.reranker}"] = [k for k, _ in fused(dense, kw["A"], w)]
             union = list(dict.fromkeys(k for b in bases.values() for k in b[:depth]))
             docs = passages_for(c, sims, live, units, union)
             qh = sha(text)
@@ -1104,8 +1108,10 @@ POPULATIONS = {
 }
 
 
-def grid_systems(model: str) -> list[str]:
-    return [f"C:{model}"] + [f"W{w}:{model}" for w in WEIGHTS]
+def grid_systems(model: str, leg: str) -> list[str]:
+    """Meaning only, then the model fused with a keyword leg at each weight: W (the design's any-word leg B)
+    or V (today's every-word search A)."""
+    return [f"C:{model}"] + [f"{leg}{w}:{model}" for w in WEIGHTS]
 
 
 def choose(m: np.ndarray, sig: dict[str, np.ndarray], train: np.ndarray) -> tuple[int, tuple[str, int, int]]:
@@ -1134,11 +1140,12 @@ def cmd_crossval(args):
            "models": {}}
     per_query: dict[str, dict] = collections.defaultdict(dict)
     hyp_hi, hyp_lo = GRID.index(1.5), GRID.index(0.25)
-    for model in args.models:
-        out["models"][model] = {}
+    for model, leg in [(m, leg) for m in args.models for leg in args.legs]:
+        label = f"{model} {leg}"
+        out["models"][label] = {}
         for pop, keep in POPULATIONS.items():
             rs = [r for r in rows if keep(r)]
-            m = np.array([[rr(r["ranks"][s]) for s in grid_systems(model)] for r in rs])
+            m = np.array([[rr(r["ranks"][s]) for s in grid_systems(model, leg)] for r in rs])
             sig = {name: np.array([f(r) for r in rs]) for name, f in SIGNALS.items()}
             if any(not r["session"] for r in rs):
                 raise SystemExit(f"{sum(not r['session'] for r in rs)} scored queries have no session to hold out")
@@ -1183,14 +1190,14 @@ def cmd_crossval(args):
                                   ("adaptive, cross-validated", "meaning only"),
                                   ("adaptive, cross-validated", "today's search"),
                                   ("hypothesis 1.5 / 0.25, not fitted", "fixed weight, cross-validated"))}
-            out["models"][model][pop] = {
+            out["models"][label][pop] = {
                 "n": len(rs), "sessions": len(sessions), "summary": summary, "diffs": diffs,
                 "in_sample": {"fixed": GRID[fixed_all], "adaptive": f"{name_all}: {GRID[hi_all]} / {GRID[lo_all]}"},
                 "picks_fixed": {str(k): v for k, v in picks_fixed.most_common()},
                 "picks_adaptive": dict(picks_adapt.most_common())}
             for r, a, f_ in zip(rs, ev["adaptive, cross-validated"], ev["fixed weight, cross-validated"]):
-                per_query[r["id"]][f"{model} {pop}"] = {"adaptive_rr": round(float(a), 4), "fixed_rr": round(float(f_), 4)}
-            print(f"\n## {model}, population {pop}: n {len(rs)}, {len(sessions)} sessions")
+                per_query[r["id"]][f"{label} {pop}"] = {"adaptive_rr": round(float(a), 4), "fixed_rr": round(float(f_), 4)}
+            print(f"\n## {model}, keyword leg {leg}, population {pop}: n {len(rs)}, {len(sessions)} sessions")
             print(f"in sample: fixed {GRID[fixed_all]}; adaptive {name_all}: {GRID[hi_all]} when it fires, {GRID[lo_all]} otherwise")
             print("folds chose (adaptive): " + "; ".join(f"{k} x{v}" for k, v in picks_adapt.most_common(4)))
             print("folds chose (fixed): " + "; ".join(f"{k} x{v}" for k, v in picks_fixed.most_common(4)))
@@ -1254,7 +1261,8 @@ def main():
         if name == "rerank":
             p.add_argument("--model", required=True)
             p.add_argument("--reranker", required=True, choices=list(P.RERANKERS))
-            p.add_argument("--weights", nargs="+", type=float, required=True, help="fused lists to rerank, by keyword weight")
+            p.add_argument("--weights", nargs="*", type=float, default=[], help="W lists (fused with B) to rerank, by weight")
+            p.add_argument("--v-weights", nargs="*", type=float, default=[], help="V lists (fused with A) to rerank, by weight")
             p.add_argument("--per-class", type=int, required=True)
             p.add_argument("--seed", type=int, default=386)
             p.add_argument("--budget-usd", type=float, required=True)
@@ -1266,6 +1274,7 @@ def main():
             p.add_argument("--systems", nargs="+", required=True)
         if name == "crossval":
             p.add_argument("--models", nargs="+", required=True)
+            p.add_argument("--legs", nargs="+", default=["W", "V"], choices=["W", "V"])
             p.add_argument("--folds", type=int, default=10)
             p.add_argument("--repeats", type=int, default=20)
             p.add_argument("--seed", type=int, default=386)
