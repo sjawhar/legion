@@ -1,8 +1,11 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // routeAuth names who may call a route. It describes the check the handler performs; the
@@ -84,7 +87,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries", authAny, "Retry delivering a targeted message.", s.createDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/reply", authBearer, "The targeted session's reply to a delivery; the session names itself in actor. Once the attempt is answered, ?follow_up=true posts other text as the session's follow-up, threaded under its first reply; with follow_up=false or absent, or with text the session already posted there, nothing is posted and the stored message comes back marked duplicate. Any other follow_up is 400 MESSAGE_INPUT.", s.replyMessage},
 		{http.MethodGet, "/api/v1/inbox", authHuman, "Open asks waiting on the caller, grouped by whose turn it is; ?project= and ?assignee=me|unassigned|<login> filter (unassigned includes document asks; an unlisted login is 400 ASSIGNEE_NOT_ALLOWED).", s.listInbox},
-		{http.MethodGet, "/api/v1/search", authAny, "Full-text search ?q= across issues, documents, asks, and comments.", s.search},
+		{http.MethodGet, "/api/v1/search", authAny, fmt.Sprintf("Full-text search ?q= across issues, documents, asks, and comments; a q over %d characters is 400 CAP_EXCEEDED.", contracts.SearchQueryMax), s.search},
 		{http.MethodGet, "/api/v1/agents", authAny, "Live sessions with roles, capabilities, open asks, and last activity.", s.listAgents},
 		{http.MethodGet, "/api/v1/agents/{session_id}/messages", authHuman, "A session's targeted messages, newest first.", s.listAgentMessages},
 		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session.", s.createAgentMessage},

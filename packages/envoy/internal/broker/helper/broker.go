@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
@@ -57,6 +58,11 @@ type Broker struct {
 	URL          string
 	OperatorFile string // login_hint source; read per login, as before
 	HTTP         *http.Client
+	// Log records every change of the launcher credential: a machine login installing one, and
+	// a broker refusal clearing it. Its lines carry the credential id, the operator the login was
+	// signed with (its login_hint) and the broker's refusal code, which are identifiers, never a
+	// proof, a request object or key material. Nil logs nothing.
+	Log *slog.Logger
 
 	cred    atomic.Pointer[machineCredential]
 	loginMu sync.Mutex                 // one login at a time
@@ -167,7 +173,7 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 		return "", fmt.Errorf("broker returned no pending_id/code")
 	}
 	b.login.Store(&loginState{Code: out.Code, PendingID: out.PendingID, State: "pending"})
-	go b.pollLogin(key, out.PendingID, out.Code)
+	go b.pollLogin(key, out.PendingID, out.Code, operator)
 	return out.Code, nil
 }
 
@@ -220,8 +226,10 @@ func (b *Broker) installCredential(cred *machineCredential) {
 
 // pollLogin polls a pending machine login until a human decides it, backing off from 2s to 10s
 // between attempts. On "issued" it installs the credential (key and id only — never written to
-// disk); on "denied" or "expired" it records the terminal state and leaves cred untouched.
-func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
+// disk) and logs it with operator, the login_hint the login was signed with, whatever the
+// operator file says by then; on "denied" or "expired" it records the terminal state and leaves
+// cred untouched.
+func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code, operator string) {
 	ctx := context.Background()
 	delay := 2 * time.Second
 	for {
@@ -230,6 +238,7 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
 			case "issued":
 				b.installCredential(&machineCredential{key: key, id: credentialID})
 				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: "issued"})
+				b.logger().Info("machine login issued; the helper holds a launcher credential", "credential_id", credentialID, "operator", operator)
 				return
 			case "denied", "expired":
 				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: state})
@@ -302,8 +311,18 @@ func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
 		return err
 	}
-	b.cred.CompareAndSwap(cred, nil)
+	if b.cred.CompareAndSwap(cred, nil) {
+		b.logger().Warn("launcher credential refused; cleared", "credential_id", cred.id, "code", be.Code)
+	}
 	return errNoCredential
+}
+
+// logger is b.Log, or a logger that writes nowhere when there is none.
+func (b *Broker) logger() *slog.Logger {
+	if b.Log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return b.Log
 }
 
 // Enroll registers the session's key as kind host. 201 is a new enrollment; 200 is the live one

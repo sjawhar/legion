@@ -33,6 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
+| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), and the watch that names the lock a timed-out migration wanted |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
@@ -597,6 +598,16 @@ one it runs. Both separate pools zero `MinConns` and `MinIdleConns`, so a floor 
 shared pool cannot become a target a one- or four-connection pool can never reach, and both
 are deliberately unguarded — a load or a probe taken under an open transaction must be served,
 not refused, and a separate pool cannot close the cycle the guard prevents.
+
+The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
+applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`
+(five seconds), after the runner's advisory lock, so a migration queued behind a long transaction
+fails the boot rather than holding every read and write of its table behind its request. While
+the migration runs, its lock watch reads `pg_locks` for the transaction's backend every 200 ms on
+a connection it dials from that backend's own configuration (`pgx.Conn.Config`) at its first
+reading and closes when the migration ends, so a migration faster than one reading dials nothing.
+The watch's last reading is how the failure names the lock and its holders: Postgres's own error
+says only `canceling statement due to lock timeout`.
 
 Everywhere else a read runs through the transaction it is already inside: the issue state an
 anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor
@@ -1406,21 +1417,26 @@ a credential wakes every registered session's enrollment retry, so those session
 within about a second of it rather than when a backoff of up to a minute comes round. A session
 whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
 enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment
-after a helper restart. The helper revokes a lapsed id before the session enrolls again, and the
-session's record keeps it until the revoke lands, so a restart meanwhile, even a second one
-before any login, still revokes it; a revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made
-under another operator's launcher credential) counts as done, and the session enrolls afresh.
-`agent-secrets launcher login-status`, which the helper answers, exits 0 only for an issued login
-whose credential the helper still holds. Once the broker refuses that credential (401
-`LAUNCHER_INVALID`, which it answers for an expired or revoked credential and for any launcher
-proof it cannot verify, such as clock skew or an `AGENT_SECRETS_URL` that is not the broker's
-public URL), the login reads `expired`, the word the dotfiles launcher gate matches, and stderr
-says the broker refused it when the helper reports that (`login_refused`); a helper from before
-that field gets the plain "the last machine login is expired". `agent-secrets --version` and
-`agent-secrets-helper --version` print the release tag the release job stamps in
-(`internal/buildversion`), `devel` for any other build, and the helper's startup line
-(`agent-secrets-helper listening`) carries the same version and whether it holds a launcher
-credential.
+after a helper restart. While it is lapsed and the helper holds a credential, sign answers
+NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-enrollment. The
+helper revokes a lapsed id before the session enrolls again, and while the session lives its
+record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any
+login, still revokes it. A session that ends first takes its record with it and hands the id to a
+bounded revoke (three tries); before a login those fail, and the id ends with its lease. A revoke
+refused 403 `OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential)
+counts as done, and the session enrolls afresh. `agent-secrets launcher login-status`, which the
+helper answers, exits 0 only for an issued login whose credential the helper still holds. Once the
+broker refuses that credential (401 `LAUNCHER_INVALID`, which it answers for an expired or
+revoked credential and for any launcher proof it cannot verify, such as clock skew or an
+`AGENT_SECRETS_URL` that is not the broker's public URL), the login reads `expired`, the word the
+dotfiles launcher gate matches, and stderr says the broker refused it when the helper reports
+that (`login_refused`); a helper from before that field gets the plain "the last machine login
+is expired". The helper logs every change of the credential: `machine login issued` (credential
+id, and the operator the login was signed with) when a login installs one, and `launcher
+credential refused; cleared` (credential id, the broker's code) when a refusal clears it.
+`agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
+job stamps in (`internal/buildversion`), `devel` for any other build, and the helper's startup
+line (`agent-secrets-helper listening`) carries the same version.
 `register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles
 launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that
 login-status says `issued`, once the pinned release carries that answer and the helper has

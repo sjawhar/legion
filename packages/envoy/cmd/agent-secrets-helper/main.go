@@ -107,7 +107,7 @@ func serve(cfg config) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(cfg.StatePath),
-		Broker:   &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, HTTP: &http.Client{Timeout: 30 * time.Second}},
+		Broker:   &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
 		Hostname: hostname,
 		PeerOf:   helper.PeerOf,
 		Log:      log,
@@ -116,9 +116,9 @@ func serve(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	srv.Recover(ctx)
-	// The version and the credential say which release a restart came up on and that it holds no
-	// launcher credential yet (a restart discards it), so the journal answers both.
-	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL, "version", buildversion.String(), "launcher_credential", srv.Broker.HasCredential())
+	// The version says which release a restart came up on. The credential's state is logged where
+	// it changes (the Broker's machine-login and refusal lines); a restart never holds one here.
+	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL, "version", buildversion.String())
 	return srv.Serve(ctx, ln)
 }
 

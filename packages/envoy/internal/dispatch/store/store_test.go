@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"io/fs"
 	"net/url"
 	"os"
 	"reflect"
@@ -14,8 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/pgmigrate"
+	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -286,26 +289,22 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		where connamespace = current_schema()::regnamespace
 	`, []string{"artifacts_issue_key_slug_key"})
 
-	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
-	if err != nil {
-		t.Fatalf("list embedded migrations: %v", err)
-	}
-	var recordedMigrations int
-	if err := store.Pool.QueryRow(ctx, "select count(*) from schema_migrations").Scan(&recordedMigrations); err != nil {
-		t.Fatalf("count migrations: %v", err)
-	}
-	if recordedMigrations != len(files) {
-		t.Errorf("recorded migrations: got %d, want %d", recordedMigrations, len(files))
+	assertRecordsEveryVersion(t, ctx, store)
+}
+
+// Dispatch's set is numbered 1 to N with none missing; pgmigratetest.CheckNumberedOneToN says why.
+func TestMigrationSetIsNumberedOneToN(t *testing.T) {
+	if err := pgmigratetest.CheckNumberedOneToN(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestMigrateRecordsEveryVersionContiguously(t *testing.T) {
-	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
+// Every file in Dispatch's migrations directory reaches the runner; pgmigratetest.CheckEmbedsEveryFile
+// says why that needs a test.
+func TestEveryMigrationFileIsEmbedded(t *testing.T) {
+	if err := pgmigratetest.CheckEmbedsEveryFile(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
 	}
-	assertContiguousVersions(t, ctx, store)
 }
 
 func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
@@ -325,7 +324,7 @@ func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate past a hand-recorded version: %v", err)
 	}
-	assertContiguousVersions(t, ctx, store)
+	assertRecordsEveryVersion(t, ctx, store)
 	var appliedAt time.Time
 	if err := store.Pool.QueryRow(ctx, `select applied_at from schema_migrations where version = 8`).Scan(&appliedAt); err != nil {
 		t.Fatalf("read version 8 after migrate: %v", err)
@@ -335,34 +334,28 @@ func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
 	}
 }
 
-func assertContiguousVersions(t *testing.T, ctx context.Context, store *Store) {
+// assertRecordsEveryVersion checks that schema_migrations holds exactly the versions of the
+// embedded set.
+func assertRecordsEveryVersion(t *testing.T, ctx context.Context, store *Store) {
 	t.Helper()
-	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
-		t.Fatalf("list embedded migrations: %v", err)
+		t.Fatalf("load migrations: %v", err)
 	}
 	rows, err := store.Pool.Query(ctx, "select version from schema_migrations order by version")
 	if err != nil {
 		t.Fatalf("list recorded migrations: %v", err)
 	}
-	defer rows.Close()
-	var versions []int
-	for rows.Next() {
-		var version int
-		if err := rows.Scan(&version); err != nil {
-			t.Fatalf("scan recorded migration: %v", err)
-		}
-		versions = append(versions, version)
+	recorded, err := pgx.CollectRows(rows, pgx.RowTo[int])
+	if err != nil {
+		t.Fatalf("read recorded migrations: %v", err)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate recorded migrations: %v", err)
+	want := make([]int, len(migrations))
+	for i, migration := range migrations {
+		want[i] = migration.Version
 	}
-	want := make([]int, len(files))
-	for i := range want {
-		want[i] = i + 1
-	}
-	if !reflect.DeepEqual(versions, want) {
-		t.Errorf("recorded versions = %v, want %v", versions, want)
+	if !reflect.DeepEqual(recorded, want) {
+		t.Errorf("recorded versions = %v, want every embedded version %v", recorded, want)
 	}
 }
 
@@ -427,24 +420,16 @@ func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	`); err != nil {
 		t.Fatalf("create schema migrations table: %v", err)
 	}
-	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
-		t.Fatalf("list migrations: %v", err)
+		t.Fatalf("load migrations: %v", err)
 	}
-	for _, filename := range files {
-		version, err := migrationVersion(filename)
-		if err != nil {
-			t.Fatalf("parse %s: %v", filename, err)
+	for _, migration := range migrations {
+		if migration.Version > maxVersion {
+			break
 		}
-		if version > maxVersion {
-			continue
-		}
-		contents, err := migrationFiles.ReadFile(filename)
-		if err != nil {
-			t.Fatalf("read %s: %v", filename, err)
-		}
-		if err := store.applyMigration(ctx, version, string(contents)); err != nil {
-			t.Fatalf("apply %s: %v", filename, err)
+		if err := store.applyMigration(ctx, migration); err != nil {
+			t.Fatalf("apply %s: %v", migration.Name, err)
 		}
 	}
 }
@@ -623,25 +608,6 @@ func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("0009 migration record count = %d, want 1", count)
-	}
-}
-
-func TestMigrationVersionParsesNumericFilenamePrefix(t *testing.T) {
-	for _, tc := range []struct {
-		filename string
-		want     int
-	}{
-		{filename: "migrations/0001_init.up.sql", want: 1},
-		{filename: "migrations/0012_add_events.up.sql", want: 12},
-	} {
-		got, err := migrationVersion(tc.filename)
-		if err != nil {
-			t.Errorf("%s: %v", tc.filename, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("%s: got %d, want %d", tc.filename, got, tc.want)
-		}
 	}
 }
 

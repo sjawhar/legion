@@ -152,6 +152,7 @@ func TestTakingTheLabelOffAWaitingRootDequeuesItButStopsNoRunningTree(t *testing
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
+	registerController(t, pool)
 
 	apply(t, pool, admission, "next-unlabeled", intake.DispatchIssue{Key: "LEGION-NEXT", Seq: 2, Type: "issue.updated", Status: "todo", Title: "next", Rank: "B"}, engineStub{})
 	assertWaiting(t, pool, nil)

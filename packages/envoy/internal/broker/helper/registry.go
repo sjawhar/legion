@@ -31,13 +31,17 @@ type Session struct {
 	// lapsedID is an enrollment of this session's runtime that must be revoked before it enrolls
 	// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the
 	// re-pinned session's prior one, the one its record named (setLapsed, from Recover).
-	// enrollLoop revokes it first (clearLapsed once done), and until then it stays on the
-	// session's record, so a restart in between still revokes it.
+	// enrollLoop revokes it first (clearLapsed once done). While the session lives it stays on the
+	// session's record, so a restart in between still revokes it once the helper is logged in. A
+	// session that ends first leaves the record without it and hands the id to the bounded revoke
+	// (revokeLapsed); if that fails too, as it must before a login, the id ends with its lease.
 	lapsedID  string
 	lastError string
-	ready     chan struct{} // closed on the first successful enrollment
-	stop      chan struct{} // closed when the session is removed
-	peer      *Peer
+	// ready closes when the session enrolls. A lapse (markLapsed) puts an open one in its place,
+	// which the next enrollment closes, so `register --wait` waits for the re-enrollment too.
+	ready chan struct{}
+	stop  chan struct{} // closed when the session is removed
+	peer  *Peer
 }
 
 func newSession(pid int, ticks uint64, runtimeID string, peer *Peer) (*Session, error) {
@@ -85,6 +89,13 @@ func (s *Session) setEnrolled(id string) {
 	}
 }
 
+// readyCh is the channel that closes when the session next enrolls (or already has).
+func (s *Session) readyCh() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ready
+}
+
 func (s *Session) setError(msg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,11 +105,18 @@ func (s *Session) setError(msg string) {
 // markLapsed is what a refused renew does: the broker no longer honours this enrollment (its lease
 // lapsed, or it was revoked), so the session stops counting as enrolled at once — sign and
 // sign-request answer as for any session still enrolling — and the enrollment becomes the lapsed
-// id. Returns it.
-func (s *Session) markLapsed() string {
+// id. reason becomes the session's last error, which those answers and a register reply report,
+// until the next attempt replaces it. The session gets an open ready channel, which its
+// re-enrollment closes. Returns the lapsed id.
+func (s *Session) markLapsed(reason string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lapsedID, s.enrollmentID = s.enrollmentID, ""
+	s.lapsedID, s.enrollmentID, s.lastError = s.enrollmentID, "", reason
+	select {
+	case <-s.ready:
+		s.ready = make(chan struct{})
+	default:
+	}
 	return s.lapsedID
 }
 
