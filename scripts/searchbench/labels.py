@@ -5,10 +5,13 @@ Input is the pinned query set (dispatch://LEGION-386/artifact/query-set-json ver
 search there names its session file and tool-call id; this reads those files again, because the query
 set records only whether a returned issue was read, not which issue was opened when it was not
 returned, and not what the session had already seen.
-
-  hits         the issue keys its result listed, in the order listed (one per result line), and for each
-               key the kind of row production matched it by (issue title, a named document, comment, ask
-               or message)
+For every agent search that reached the server, from the session's tool calls in file order:
+  hits         the issue keys its result listed, in the order listed (one per result line, the query set's
+               miner's rule)
+  hit_rows     each result row whose owner is an issue, parsed strictly (envoy-client's searchResultLine):
+               its key, the kind of row production matched (issue, document, comment, ask or message),
+               for a document whether it was the issue's primary document (its href opens the Spec tab)
+               or another one, and the artifact name the row carried
   window       its next WINDOW tool calls, as the query set's next-step rule reads them
   seen_before  every issue key in the session's header, user messages, tool-call arguments and tool
                results before the assistant turn that sent the search
@@ -37,6 +40,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 
 KEY = re.compile(r"\b((?:AGENTC|LEGION|OPS|LEGSMOKE)-\d+)\b")
 KEY_B = re.compile(rb"\b((?:AGENTC|LEGION|OPS|LEGSMOKE)-\d+)\b")
@@ -105,18 +109,54 @@ def hit_keys(text: str) -> list[str]:
     return out
 
 
-# A result line is `KEY [status] title - <kind>[ <document name>]: snippet -> href` (envoy-client's
-# searchResultLine), kind one of issue, document, comment, ask, message.
-ROW = re.compile(r"^\s*(?:\d+[.)]\s*)?((?:AGENTC|LEGION|OPS|LEGSMOKE)-\d+) \[[^\]]*\] .*? - (issue|document|comment|ask|message)(?: ([^:]+?))?: ")
+# A result is `KEY [status] title - <kind>[ <artifact name>]: snippet -> href` (envoy-client's
+# searchResultLine, unchanged for issue-owned rows since search shipped). A snippet can hold newlines, so a
+# row runs until the next row starts, and its href is the text after its last ` -> `.
+ROW = re.compile(r"^((?:AGENTC|LEGION|OPS|LEGSMOKE)-\d+) \[[^\]]*\] .*? - (issue|document|comment|ask|message)\b")
+DOC_ROW = re.compile(r"^dispatch://\S+ \[document\] ")
 
 
-def hit_kinds(text: str) -> dict[str, list[str]]:
-    """For each key a result listed, the kind of every row it had, in order (`document <name>` for a document)."""
-    out: dict[str, list[str]] = {}
+def href_kind(key: str, href: str) -> str | None:
+    """The row kind api/search.go's searchHref encoded in an issue-owned href, at every version since search
+    shipped: `primary document` (the issue's /spec route with ?q=), `other document` (its /artifacts/<slug>
+    route with ?q=), comment (/comments/<id>, or ?comment= on a document), ask (/asks/<id>, ?ask= or a #b-
+    block fragment), message (/log, or /messages/<id>) or issue (the issue's own route). A title can hold
+    ` - comment`, so the label's kind word is only the fallback."""
+    u = urllib.parse.urlsplit(href)
+    query, path, base = urllib.parse.parse_qs(u.query), u.path.rstrip("/"), f"/issues/{key}"
+    if "comment" in query or re.search(r"/comments/[^/]+$", path):
+        return "comment"
+    if "ask" in query or u.fragment.startswith("b-") or re.search(r"/asks/[^/]+$", path):
+        return "ask"
+    if path.endswith(base + "/log") or re.search(r"/messages/[^/]+$", path):
+        return "message"
+    if path.endswith(base + "/spec"):
+        return "primary document"
+    if re.search(re.escape(base) + r"/artifacts/[^/]+$", path):
+        return "other document"
+    if path.endswith(base):
+        return "issue"
+    return None
+
+
+def hit_rows(text: str) -> list[dict]:
+    """Every issue-owned result row in order: its key and the kind of row production matched, read from its
+    href (href_kind), else from the label's kind word."""
+    rows: list[list] = []
     for line in text.splitlines():
         m = ROW.match(line)
         if m:
-            out.setdefault(m.group(1), []).append(m.group(2) + (f" {m.group(3)}" if m.group(2) == "document" and m.group(3) else ""))
+            rows.append([m.group(1), m.group(2), line])
+        elif DOC_ROW.match(line):
+            rows.append([None, None, line])  # a project document's row: owned by no issue
+        elif rows:
+            rows[-1][2] += "\n" + line
+    out = []
+    for key, label_kind, body in rows:
+        if key is None:
+            continue
+        kind = href_kind(key, body.rsplit(" -> ", 1)[1].strip()) if " -> " in body else None
+        out.append({"key": key, "kind": kind or label_kind, "from": "href" if kind else "label"})
     return out
 
 
@@ -209,7 +249,7 @@ def label_session(path: str, fleet: dict[str, dict]) -> dict[str, dict]:
                        and relation(text_of(i), text_of(j)) != "different topic"), None)
         base = {"hits": hits, "reformulation": calls[reform]["id"] if reform is not None else None,
                 "filed_issue": any(calls[j]["device"] == "dispatch_issue" for j in window),
-                "hit_kinds": hit_kinds(results[cid]["text"]) if hits is not None else None}
+                "hit_rows": hit_rows(results[cid]["text"]) if hits is not None else None}
         if hits is None:
             out[cid] = {**base, "direct": [], "hits_unknown": True}
             continue
