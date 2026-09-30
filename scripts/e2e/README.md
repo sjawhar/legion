@@ -597,13 +597,14 @@ the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `s
 to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
 It then fails unless the architect's approval request at the approved version carries a summary
 after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
-and no approval request on the spec, retracted ones included, named a version that still held one
-of them open ([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by
-`bun test scripts/e2e/lib`). It reads each block's state from that version rather than comparing
-times, because Dispatch indexes a block as an ask only when it settles the document, after the edit
-that wrote it: a request sent in the same turn predates the block's ask. It keeps the issue's asks
-as `<issue>-asks.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
-`<issue>-gate-verdict.json`.
+and every approval request on the spec, retracted ones included, came after those answers and named
+a version with none of them open ([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested
+by `bun test scripts/e2e/lib`). Whether a block was open is read from the version itself, outside
+fenced code, because Dispatch indexes a block as an ask only when it settles the document, after the
+edit that wrote it: a request sent in the same turn predates the block's ask. The answer's time is
+written as the human answers, so it orders a request made while the choice was still prose, or sent
+in parallel with the edit that wrote the block. It keeps the issue's asks as `<issue>-asks.json`,
+each requested version as `<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.

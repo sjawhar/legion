@@ -136,7 +136,9 @@ describe("design-gate-verdict.jq", () => {
     ).toEqual(["version 5: Where does the smoke file go?"]);
   });
 
-  test("a request at a version written before the block is not early", () => {
+  // LEGION-386's own incident: approval requested while the open choice was still prose, before
+  // any block asked it; the architect added the block later, the human answered, and it asked again.
+  test("a request made before the choice was asked as a block is early", () => {
     const asks = [
       block,
       approval(1, "2026-09-30T09:58:00Z", "resolved"),
@@ -144,11 +146,38 @@ describe("design-gate-verdict.jq", () => {
     ];
     expect(verdict(asks, [specAt(1, null), specAt(3, "answered")], 3)).toMatchObject({
       blocks: 1,
-      early: [],
+      early: ["version 1: Where does the smoke file go?"],
     });
   });
 
-  test("only the spec's blocks a human answered count: another document's and a retracted one do not", () => {
+  // The request reached the server before the edit adding the block committed, so it names the
+  // version before the block, and the block's ask was indexed after both.
+  test("a request sent in parallel with the edit that wrote the block is early", () => {
+    const parallel = {
+      ...block,
+      created_at: "2026-09-30T10:00:02.1Z",
+      answer: { at: "2026-09-30T10:03:00.4Z" },
+    };
+    const asks = [
+      parallel,
+      approval(1, "2026-09-30T10:00:00.1Z", "resolved"),
+      approval(3, "2026-09-30T10:04:00Z", "answered"),
+    ];
+    expect(verdict(asks, [specAt(1, null), specAt(3, "answered")], 3).early).toEqual([
+      "version 1: Where does the smoke file go?",
+    ]);
+  });
+
+  test("a block quoted in a fenced code block is not an open block", () => {
+    const quoted = specAt(5, "answered");
+    quoted.markdown +=
+      '\nAn open block is written:\n\n```md\n:::ask{#example urgency="med" multiple="false" state="open"}\nShip it?\n:::\n```\n';
+    expect(
+      verdict([block, approval(5, "2026-09-30T10:06:00Z", "answered")], [quoted]).early
+    ).toEqual([]);
+  });
+
+  test("only the spec's blocks a human answered count: another document's, a retracted one and one naming no document do not", () => {
     const elsewhere = { ...block, block_id: "block-2", block_artifact: { id: "other" } };
     const retracted = {
       ...block,
@@ -156,9 +185,10 @@ describe("design-gate-verdict.jq", () => {
       answer: null,
       resolution: { kind: "retracted", at: "2026-09-30T10:01:00Z" },
     };
+    const { block_artifact: _, ...unattached } = { ...block, block_id: "block-4" };
     expect(
       verdict(
-        [elsewhere, retracted, approval(5, "2026-09-30T10:02:00Z", "answered")],
+        [elsewhere, retracted, unattached, approval(5, "2026-09-30T10:02:00Z", "answered")],
         [specAt(5, null)]
       )
     ).toMatchObject({ blocks: 0, early: [] });

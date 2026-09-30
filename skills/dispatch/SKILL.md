@@ -118,7 +118,7 @@ make the decision a block and must fix the spec.
 it, with 2–4 options, a recommendation, and surrounding prose that explains the trade-off.
 
 A spec that already has the pile is repaired with `move`, not rewritten: `dispatch_doc_edit` with
-`{ op: "move", block: "<block-uuid>", after: "<the sentence that states the options>" }` relocates
+`{ op: "move", block: "<block-uuid>", after: "<the last sentence of the section that discusses it>" }` relocates
 the block and keeps its ask, its answer and its followers; the context paragraphs that were lifted
 out of Design move the same way, and the emptied section is deleted (the same repair, made on
 AGENTC-397 after Sami's 2026-09-20 request: "move the decisions items to be in context of their
