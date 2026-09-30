@@ -527,6 +527,12 @@ start_daemon() {
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300)"; }
 log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log"; }
+# left_planning ISSUE prints when and for what ISSUE first left planning, from the daemon's log, and
+# fails when it has not.
+left_planning() {
+  log_lines "workflow: phase changed" |
+    jq -s -e -c --arg issue "$1" 'map(select(.issue == $issue and .from == "planning")) | first // empty | {time, to}'
+}
 
 # ---- the pod watch (checkpoint pod-watch) ---------------------------------------------------------
 
@@ -1434,9 +1440,11 @@ cat >"$work/instructions.md" <<'EOF'
 This is a throwaway workflow proof on the disposable LEGSMOKE project. A tree's root architect
 starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
 issue's own primary document and registers the gate, then waits. Apart from that, do not act until
-a targeted human Dispatch message gives the next exact proof operation. Follow that instruction
-precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
-smoke branch.
+a targeted human Dispatch message gives the next exact proof operation. A phase worker's first
+message is the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`): it names your
+phase and is not that message. Read what your role says to read, then reply WAITING and wait for
+the targeted message. Follow that instruction precisely, use the Go-daemon Legion tools and
+handoffs, and do not create work outside the issue's smoke branch.
 
 ## Scope of this proof
 
@@ -1500,7 +1508,15 @@ wait_for_worker "$tree1" planner
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree1" implementing 900
 wait_for_worker "$tree1" implementer
-wait_for_worker "$tree2" planner
+# Tree 2's planner holds for the driver, which has sent it nothing yet, and the checkpoints below
+# read its live pod. A planner that took the daemon's task line as its go-ahead has planned and been
+# suspended by now, so it never reads as live: name that rather than time out on its registration.
+tree2_planner_live_or_gone() { issue_worker_live "$tree2" planner || left_planning "$tree2" >/dev/null; }
+until_true 300 "planner worker on $tree2 to register" tree2_planner_live_or_gone
+if left=$(left_planning "$tree2"); then
+  fail "tree 2's planner did not hold for the driver's instruction: $tree2 left planning on its own ($left) before the driver sent it anything"
+fi
+assert_claim_endpoints "$tree2" planner
 node_of_tree() { op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u; }
 at=$(date -u +%FT%TZ)
 nodes1=$(node_of_tree "$tree1")
