@@ -2,15 +2,18 @@ package prompts
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -170,6 +173,62 @@ func TestNewSnapshotsSharedRolePromptsBeforeComposing(t *testing.T) {
 	for _, path := range parts.RolePromptPaths {
 		if _, err := os.ReadFile(path); err != nil {
 			t.Errorf("read snapshot %s: %v", path, err)
+		}
+	}
+}
+
+// The planner this daemon composes from the shipped bundle runs the gap analyst before it drafts
+// and the plan reviewer after (LEGION-421), each a task agent the plugin ships in agents/, where Oh
+// My Pi finds it in a pane and in a pod; an agent missing there is one the boot gate refuses by
+// name. The Go daemon's own parts dispatch no agent, so the checks are the shared text's alone.
+func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) {
+	plugin := filepath.Join("..", "..", "..", "pi-envoy")
+	stateDir := t.TempDir()
+	composer, err := New(filepath.Join(plugin, "roles"), stateDir)
+	if err != nil {
+		t.Fatalf("New on the shipped bundle: %v", err)
+	}
+	parts, err := composer.Compose(claim.RolePlanner, false)
+	if err != nil {
+		t.Fatalf("Compose: %v", err)
+	}
+	var text strings.Builder
+	dispatched, goDispatched := promptrefs.New(), promptrefs.New()
+	for _, path := range parts.RolePromptPaths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text.Write(body)
+		if err := dispatched.File(stateDir, path, "state"); err != nil {
+			t.Fatalf("references of %s: %v", path, err)
+		}
+		if strings.HasPrefix(path, filepath.Join(stateDir, "prompts", "go")) {
+			if err := goDispatched.File(stateDir, path, "state"); err != nil {
+				t.Fatalf("references of %s: %v", path, err)
+			}
+		}
+	}
+	gap := strings.Index(text.String(), "`task(agent=\"plan-gap-analyst\")`")
+	review := strings.Index(text.String(), "`task(agent=\"plan-reviewer\")`")
+	if gap < 0 || review < gap {
+		t.Errorf("the composed planner dispatches the gap analyst at %d and the plan reviewer at %d, want the analyst first", gap, review)
+	}
+	agents := dispatched[promptrefs.TaskAgents]
+	if got, want := slices.Sorted(maps.Keys(agents)), []string{"plan-gap-analyst", "plan-reviewer"}; !slices.Equal(got, want) {
+		t.Errorf("the composed planner dispatches %q, want %q", got, want)
+	}
+	if names := goDispatched[promptrefs.TaskAgents]; len(names) > 0 {
+		t.Errorf("the Go daemon's planner parts dispatch %v, which the shared planner text owns", names)
+	}
+	for agent, files := range agents {
+		body, err := os.ReadFile(filepath.Join(plugin, "agents", agent+".md"))
+		if err != nil {
+			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
+			continue
+		}
+		if !strings.HasPrefix(string(body), "---\nname: "+agent+"\n") {
+			t.Errorf("agents/%s.md does not open with the frontmatter name %s", agent, agent)
 		}
 	}
 }

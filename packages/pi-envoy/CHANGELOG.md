@@ -4,6 +4,17 @@
 
 ### Added
 
+- The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
+  `task(agent="plan-gap-analyst")`, which finds the hidden requirements, ambiguities, and
+  acceptance criteria no machine could check that the issue leaves unsaid, each with what the plan
+  must answer. After it drafts, it runs `task(agent="plan-reviewer")`, which checks that the plan
+  can be carried out as written, approves when in doubt, and names at most three blocking issues,
+  each with its evidence. The planner revises for at most three rounds, then proceeds with the
+  issues still standing; a check whose model call fails is recorded and never blocks the plan. The
+  plan handoff records both results (`gapAnalysis`, `planReview`). Both agents ship in `agents/`
+  and are read-only: the gap analyst runs on the operator's `@oracle` role and the reviewer on
+  `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the reviewer's
+  pair.
 - Every session with the Dispatch tools, Legion panes and `task` subagents included, now carries the
   `dispatch-first` skill in every model request: search Dispatch before planning, filing, asking or
   starting work; extend the issue that already tracks the work; cite the decision a human already

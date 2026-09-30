@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { describePhaseHandoffWriteProblems, PLAN_REVIEW_MAX_ROUNDS } from "@legion/contracts";
 
 const rolesDir = import.meta.dir;
 const phaseRoles = ["planner", "implementer", "tester", "reviewer", "merger"] as const;
@@ -140,5 +141,106 @@ describe("role prompt parts", () => {
         true
       );
     }
+  });
+});
+
+const agentsDir = path.join(rolesDir, "..", "agents");
+const rolePromptFiles = readdirSync(rolesDir, { recursive: true, encoding: "utf8" }).filter(
+  (file) => file.endsWith(".md")
+);
+// The form the boot gate resolves (packages/daemon-go/internal/promptrefs: `agent="<name>"`).
+const dispatched = (text: string) =>
+  [...text.matchAll(/task\(agent="([^"]+)"\)/g)].map((match) => match[1]);
+const frontmatter = (file: string) => {
+  const match = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(path.join(agentsDir, file), "utf8"));
+  if (!match) throw new Error(`${file} has no frontmatter`);
+  return Bun.YAML.parse(match[1]) as { name?: unknown; model?: unknown; tools?: unknown };
+};
+// Every phase worker's parts in the order both daemons compose them
+// (packages/daemon/src/daemon/processes.ts, packages/daemon-go/internal/prompts/prompts.go).
+const planner = [
+  path.join("core", "common.md"),
+  path.join("core", "planner.md"),
+  path.join("mechanics", "headless.md"),
+  "planner.md",
+]
+  .map((file) => read(file))
+  .join("\n");
+
+describe("the planner's plan checks", () => {
+  test("every task agent a role prompt dispatches is shipped in agents/ under its own name", () => {
+    const named = new Map<string, string[]>();
+    for (const file of rolePromptFiles)
+      for (const agent of dispatched(read(file)))
+        named.set(agent, [...(named.get(agent) ?? []), file]);
+    expect([...named.keys()]).toEqual(
+      expect.arrayContaining(["plan-gap-analyst", "plan-reviewer"])
+    );
+    for (const [agent, files] of named) {
+      const file = `${agent}.md`;
+      expect(existsSync(path.join(agentsDir, file)), `${agent}, dispatched by ${files}`).toBe(true);
+      expect(frontmatter(file).name, file).toBe(agent);
+    }
+  });
+
+  test("the gap analyst runs before the plan is drafted and the reviewer after", () => {
+    const gap = planner.indexOf('task(agent="plan-gap-analyst")');
+    const review = planner.indexOf('task(agent="plan-reviewer")');
+    expect(gap).toBeGreaterThan(-1);
+    expect(review).toBeGreaterThan(gap);
+    expect(dispatched(planner).sort()).toEqual(["plan-gap-analyst", "plan-reviewer"]);
+  });
+
+  test("both checks are read-only and run on the deployment's oracle and review roles", () => {
+    const readOnly = new Set(["read", "glob", "grep", "find", "lsp", "ast_grep", "todo"]);
+    for (const [agent, model] of [
+      ["plan-gap-analyst", "@oracle"],
+      ["plan-reviewer", "@review"],
+    ]) {
+      const declared = frontmatter(`${agent}.md`);
+      expect(declared.model, agent).toEqual([model]);
+      expect(typeof declared.tools, `${agent} lists its tools`).toBe("string");
+      const tools = String(declared.tools)
+        .split(",")
+        .map((tool) => tool.trim());
+      expect(
+        tools.filter((tool) => !readOnly.has(tool)),
+        `${agent} has a mutation tool`
+      ).toEqual([]);
+    }
+  });
+
+  // A planner that records the checks as its handoff instructions show them is not refused.
+  test("every plan-check shape the handoff instructions show is one the plan write accepts", () => {
+    const residue = read("planner.md");
+    const shapes = (field: string) => {
+      const line = residue.split("\n").find((text) => text.startsWith(`- \`${field}\`:`));
+      if (!line) throw new Error(`planner.md shows no ${field}`);
+      return [...line.matchAll(/`(\{.*?\})`(?=[ ,;.]|$)/g)].map(
+        (match) => JSON.parse(match[1].replaceAll("…", "x").replaceAll(": N", ": 1")) as object
+      );
+    };
+    const gapAnalyses = shapes("gapAnalysis");
+    const planReviews = shapes("planReview");
+    expect(gapAnalyses).toHaveLength(2);
+    expect(planReviews.map((review) => (review as { verdict: string }).verdict)).toEqual([
+      "approved",
+      "rejected",
+      "failed",
+    ]);
+    expect(planReviews[1]).toMatchObject({ rounds: PLAN_REVIEW_MAX_ROUNDS });
+    const requiredSkills = { implement: ["none: x"], test: ["none: x"], review: ["none: x"] };
+    for (const gapAnalysis of gapAnalyses)
+      for (const planReview of planReviews) {
+        const handoff = {
+          schemaVersion: 1,
+          phase: "plan",
+          completed: "2026-09-30T00:00:00.000Z",
+          requiredSkills,
+          gapAnalysis,
+          planReview,
+        };
+        expect(describePhaseHandoffWriteProblems(handoff), JSON.stringify(handoff)).toEqual([]);
+      }
   });
 });

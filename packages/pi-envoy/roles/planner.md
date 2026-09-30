@@ -16,4 +16,11 @@ Before completion, write the plan handoff:
 
 Call the `legion` tool with `op: "handoff_write"`, `phase: "plan"`, and `data`: the plan handoff's fields as a JSON object.
 
+The handoff records the two plan checks:
+
+- `gapAnalysis`: `{"findings": [{"finding": "…", "answer": "…"}]}`, every finding the gap analyst returned with how the plan answers it (`[]` when it found none), or `{"error": "…"}` when its call failed.
+- `planReview`: `{"verdict": "approved", "rounds": N}` when the last round approved; `{"verdict": "rejected", "rounds": 3, "remainingIssues": [{"issue": "…", "evidence": "…"}]}` when the third round still rejected, each blocking issue that round named; or `{"verdict": "failed", "rounds": N, "error": "…"}` when a review's call failed. `rounds` counts the reviews run, a failed one included.
+
 The handoff write records the schema version, phase, and completion timestamp in `.legion/plan.json`. Do not report completion until it has succeeded.
+
+When the review ended `rejected` or either check failed, say so in your completion summary.
