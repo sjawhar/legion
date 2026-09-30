@@ -885,9 +885,16 @@ target only a session that advertises the mode you want. Sending to a session wi
 
 ### Answering a direct message
 
-A human can also message you directly from the **Agents** page, with no issue at all. That frame
-names no issue and its `reply_with` hint carries none either; answer it with the message's bare
-id in `in_reply_to`, alone:
+A human can also message you directly from the **Agents** page, with no issue at all. On Oh My
+Pi, a person's **Send** or **Aside** arrives as their own user message, exactly as if they had
+typed it at your terminal: your Envoy plugin reads it back from Dispatch first and takes it only
+when a person wrote it to you. Answer it in the conversation as you would anything typed, with no
+`dispatch_message`; the Agents page shows your conversation live, so they read your answer there.
+
+Everything else still arrives as a Dispatch frame: a **BTW**, a broadcast, a direct message on a
+host that takes no user turn from its plugin (Claude Code), and one the plugin could not confirm.
+That frame names no issue and its `reply_with` hint carries none either; answer it with the
+message's bare id in `in_reply_to`, alone:
 
 ```ts
 dispatch_message({

@@ -10,9 +10,19 @@
 - Added the native Dispatch workspace API, persisted documents and events, retained Dispatch notifications, and daily Postgres backups.
 - `POST /v1/roles/set` accepts `"soft": true`: the claim lands only if the role is unheld, held by a session that is no longer live, or held by the declared `previous_session_id`; any other live holder answers 409 with its id.
 - Dispatch redelivers the GitHub App webhook's failed deliveries, which GitHub never redelivers on its own. Every two minutes it lists the webhook's attempts whose status is not OK and asks GitHub to redeliver each one the listener answered 5xx or GitHub could not complete. A failed or refused redelivery is retried after a doubling backoff, at most five times, and a 4xx is never redelivered. Requests go a second apart, and a GitHub rate limit stops the sweep until the time GitHub gives. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep over a chosen window.
+- Every Dispatch message read returns `broadcast_id`, the broadcast the message is one
+  recipient's copy of, or null: the thread read (`GET /api/v1/messages/{id}`), the Agents page's
+  conversation list, each reply, and every message event. A session confirming a person's direct
+  message reads it, since a broadcast keeps its envelope (LEGION-394).
 
 ### Changed
 
+- Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
+  session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
+  person's message that an Oh My Pi session took as its own user turn shows once, where the
+  session took it, still naming its author. The Agents page shows a person's direct Send or
+  Aside, once sent, as delivered to the session's conversation, with no retry, since the session
+  answers there rather than with a Dispatch reply (LEGION-394).
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it

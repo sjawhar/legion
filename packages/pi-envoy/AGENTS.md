@@ -16,7 +16,16 @@ renderer: it produces a tolerant TOON block and never exposes raw envelope bytes
 Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn` on Oh My Pi 18.3,
 `pi.askEphemeral` on the earlier fork releases Legion pins) and posts its body or error to the
 correlated delivery attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective
-delivery mode. On a host with `ctx.runEphemeralTurn` (the fork's 18.3 releases included, since the
+delivery mode. A person's direct Send or Aside from Dispatch's Agents page is the exception: it
+becomes the user's own turn (`src/dispatch-user-turn.ts`). The extension reads the message back
+with its own Dispatch bearer (`GET /api/v1/messages/{id}?session=`) and sends the stored body with
+`pi.sendUserMessage` (`deliverAs: "aside"` for an Aside, nothing for a Send, as the stored attempt
+says) only when the stored author is a person, the message has no issue, its thread is aimed at
+this session, no broadcast sent it, and a stored attempt names this session; anything else keeps
+its card and posts nothing. The message id goes into the transcript (`envoy-dispatch-user-turn`
+entries, rebuilt at start), so a replayed frame never becomes a second turn, and the stream tags
+that user message with it (`dispatchMessageId`, matched by text until `agent_end`) so the
+dashboard shows it once. On a host with `ctx.runEphemeralTurn` (the fork's 18.3 releases included, since the
 context's call wins there), a BTW side turn still running when the handler that subscribed the agent
 subject (`session_start`, a session switch, or a Legion handler re-establishing through the claim
 bridge) reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the
@@ -248,7 +257,10 @@ a worker can pipe a handoff built from the one on disk to `legion handoff write`
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), `src/legion/phase-stall.ts`
 tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
-`handoff_complete` closes it. When a run is about to settle (`session_stop`) with the phase still
+`handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
+own turn is a user message too, but it counts as an Envoy delivery, never an assignment: the Envoy
+extension records each body it sends in, process-wide, and legion.ts takes it back at
+`message_start` (`takeInjectedUserTurn`). When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
 message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a

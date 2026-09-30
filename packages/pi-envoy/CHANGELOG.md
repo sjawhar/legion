@@ -40,6 +40,16 @@
 
 ### Changed
 
+- A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
+  turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
+  (LEGION-394). The extension reads the message back from Dispatch with its own bearer and takes
+  it only when Dispatch records a person's message on no issue, in a conversation aimed at this
+  session, sent by no broadcast, with an attempt for this session; that attempt's mode decides
+  Send (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`). Anything else keeps its
+  card and posts nothing. The message id goes into the transcript (`envoy-dispatch-user-turn`),
+  so a replayed frame never becomes a second turn, even after a restart, and the live stream tags
+  that user message with `dispatchMessageId`, so Dispatch's conversation view shows it once. In a
+  Legion phase worker it counts as an inbound event, as its card did, and never opens a phase.
 - `legion.goDaemonApiVersion` is 11. Contract 11 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, each Legion role App's login keyed by its App role (`{implement, review}`), which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
 - `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
   role Apps once the Legion review App's `Accepted:` is its newest submitted comment. A CI bot
