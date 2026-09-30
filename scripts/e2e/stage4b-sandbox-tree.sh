@@ -412,6 +412,7 @@ gates:
   design: "off"
 admission_cap: 2
 linger_hours: 0.3
+controller_wake_interval_seconds: 60
 instructions: $work/instructions.md
 github_apps:
   implement:
@@ -1850,6 +1851,60 @@ until_true 120 "Dispatch to show $tree3 in backlog" dispatch_status_is "$tree3" 
 note "legion status $tree3 backlog from the operator shell, with the operator bearer: Dispatch moved $tree3 from $before_status to $(dispatch_get "issues/$tree3" | jq -r .status)"
 until_true 600 "$tree3's pods to be gone" sh -c \
   "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree3' -o name) && [ -z \"\$out\" ]"
+# The controller's walk wakes (LEGION-392). controller_received NEEDLE: an Envoy delivery in the
+# controller's session holds NEEDLE.
+controller_received() {
+  local file
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    grep -F '"customType":"envoy-message"' "$file" | grep -qF "$1" && return 0
+  done
+  return 1
+}
+# (1) The controller was launched with the daemon's own design gate policy (gates.design: off): the
+# Oh My Pi running in the controller's directory carries the line in its --append-system-prompt.
+# shellcheck disable=SC2016 # the backticks are the line's own text, never a substitution
+policy_line='Design gate policy: `gates.design: off`.'
+controller_launched_with_policy() {
+  local proc
+  for proc in /proc/[0-9]*; do
+    [ "$(readlink "$proc/cwd" 2>/dev/null)" = "$work/controller-state/controller" ] || continue
+    tr '\0' '\n' <"$proc/cmdline" 2>/dev/null | grep -qF "$policy_line" && return 0
+  done
+  return 1
+}
+controller_launched_with_policy || fail "no process in $work/controller-state/controller was launched with '$policy_line'"
+note "the controller's Oh My Pi was launched with '$policy_line'"
+# (2) With tree 3 out, a slot stands free (tree 1 holds the other), so an unlabelled leaf set to
+# todo wakes the controller with `todo on <KEY>`.
+free=$(daemon_state | jq -r '.admission.cap - (.admission.active | length) - (.admission.waiting | length)')
+[ "$free" -gt 0 ] || fail "no admission slot stands free after $tree3 left ($(daemon_state | jq -c .admission)), so no walk wake can be sent"
+walk_candidate=$(dispatch_human POST issues "$(jq -cn --arg project "$project" --arg title "Stage 4b proof walk candidate ($work)" '{project:$project,title:$title,force:true}')" | jq -er .key) ||
+  fail "create the unlabelled walk candidate in $project"
+set_status "$walk_candidate" todo
+until_true 300 "'todo on $walk_candidate' to reach the controller session $controller_session" controller_received "$(notice_needle todo "$walk_candidate")"
+note "the controller session received 'todo on $walk_candidate' with $free slot(s) free"
+# (3) The daemon's periodic tick (controller_wake_interval_seconds: 60) reaches it too.
+until_true 300 "'tick on $project' to reach the controller session $controller_session" controller_received "$(notice_needle tick "$project")"
+note "the controller session received 'tick on $project'"
+# (4) The walk takes nothing: this proof's scope line says the controller hands Legion no issue
+# itself. The controller has a minute after the tick to act on either wake, and the candidate must
+# still be unlabelled and unrecorded when it ends.
+sleep 60
+dispatch_get "issues/$walk_candidate" | jq -e '(.labels | map(ascii_downcase) | index("legion")) == null' >/dev/null ||
+  fail "the controller labelled $walk_candidate legion, though the proof's scope says it hands Legion no issue"
+daemon_state | jq -e --arg key "$walk_candidate" '.issues[$key] == null' >/dev/null ||
+  fail "the daemon recorded $walk_candidate, though the controller was to take nothing"
+set_status "$walk_candidate" "done"
+note "the controller took nothing: $walk_candidate stayed unlabelled and unrecorded, and is now done"
+# (5) A root architect claimed its root issue at its first catch-up: tree 3's root is claimed by a
+# session that is not the controller's, and its events say so.
+root_claim=$(dispatch_get "issues/$tree3" | jq -c '.claim')
+jq -e --arg c "$controller_session" '.actor.kind == "session" and .actor.id != $c' <<<"$root_claim" >/dev/null ||
+  fail "$tree3's root issue is not claimed by its architect's session: claim $root_claim"
+dispatch_events "$tree3" | jq -e --argjson claim "$root_claim" 'any(.[]; .type == "issue.claimed" and .actor.id == $claim.actor.id)' >/dev/null ||
+  fail "$tree3's events hold no issue.claimed by $(jq -r .actor.id <<<"$root_claim")"
+note "$tree3's root issue is claimed by its architect session $(jq -r .actor.id <<<"$root_claim")"
 pass
 fi # the controller checks
 
@@ -1939,6 +1994,12 @@ until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_
 clean_smoke_main
 release_smoke_main
 note "$repo#$pr_number merged by the proof human; the production check and the sign-off closed $tree1"
+# The daemon's done released the claim tree 1's architect took on its root issue (LEGION-392).
+dispatch_events "$tree1" | jq -e 'any(.[]; .type == "issue.claimed" and .actor.kind == "session")' >/dev/null ||
+  fail "$tree1's events hold no issue.claimed by its architect's session"
+root_claim_released() { dispatch_get "issues/$1" | jq -e '.claim == null' >/dev/null; }
+until_true 120 "$tree1's root claim to be released by its done" root_claim_released "$tree1"
+note "$tree1's architect claimed its root issue, and the done released the claim"
 pass
 
 begin node-release
