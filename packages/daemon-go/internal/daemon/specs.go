@@ -32,7 +32,7 @@ type specs struct {
 	repo         ghrepo.Repository
 	prompts      *prompts.Composer
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
-	// is told after its addressing (designGateFragment).
+	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
@@ -58,7 +58,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		return runtime.SpawnSpec{}, err
 	}
 	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
-		addressing += " " + designGateFragment(s.designGate)
+		addressing += " " + DesignGateFragment(s.designGate)
 	}
 	env := map[string]string{}
 	if s.identity != nil {
@@ -120,10 +120,11 @@ func addressingFragment(project string, c supervise.Claim) (string, error) {
 		notify.RoleTopicPrefix, c.Token, notify.RoleTopicPrefix, architect, notify.RoleTopicPrefix, claim.ControllerToken(project)), nil
 }
 
-// designGateFragment is the sentence a tree's root architect is told after its addressing: this
-// project's design gate policy, the "Design gate policy" line the shared role prompt reads
-// (designGateFragment, packages/daemon/src/daemon/processes.ts). What each policy asks of the
-// architect under this daemon is in its Go role part (prompts/go/architect-root.md).
-func designGateFragment(policy config.DesignGate) string {
+// DesignGateFragment is the sentence a tree's root architect is told after its addressing, and the
+// operator's controller as its launch addressing (`legion controller start`): this project's design
+// gate policy, the "Design gate policy" line the shared role prompts read (designGateFragment,
+// packages/daemon/src/daemon/processes.ts). What each policy asks of the architect under this
+// daemon is in its Go role part (prompts/go/architect-root.md).
+func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
 }

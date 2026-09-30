@@ -5,11 +5,18 @@ package helper
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // proofShaped matches what a bearer in a log line would look like: a JWS or JWT (base64url JSON,
@@ -18,19 +25,36 @@ var proofShaped = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{16,}\.[
 
 // TestTheHelperLogsEveryChangeOfTheLauncherCredential: a machine login installing the credential
 // and a broker refusal clearing it each leave one line in the journal, carrying identifiers only —
-// the credential id, the operator, the broker's code — and never a proof, a request object or key
-// material.
+// the credential id, the operator the login was signed with, the broker's code — and never a
+// proof, a request object or key material. The operator file changes while the login is pending,
+// and the line still names the operator the login was signed with.
 func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "sjawhar"), HTTP: f.srv.Client(),
+	operator := operatorFile(t, "sjawhar")
+	b := &Broker{URL: f.srv.URL, OperatorFile: operator, HTTP: f.srv.Client(),
 		Log: slog.New(slog.NewJSONHandler(&out, nil))}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
+	f.mu.Lock()
+	f.loginOutcome = "pending"
+	f.mu.Unlock()
 	if _, err := b.Login(context.Background(), "example-host-devbox"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
+	if err := os.WriteFile(operator, []byte("someone-else\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.loginOutcome = "issued"
+	f.mu.Unlock()
+	deadline := time.Now().Add(15 * time.Second) // pollLogin's next poll comes 2 s after the pending one
+	for b.LoginStatus().State != "issued" {
+		if time.Now().After(deadline) {
+			t.Fatalf("the login never issued: %+v", b.LoginStatus())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	credentialID := b.cred.Load().id
 	if _, _, err := b.Enroll(context.Background(), sess); err != nil {
 		t.Fatalf("a fresh credential must enroll: %v", err)
@@ -73,6 +97,17 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 	f.mu.Unlock()
 	if proof == "" || !proofShaped.MatchString(proof) {
 		t.Fatalf("control: the proof the broker saw (%q) must look proof-shaped to the check below", proof)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}); !proofShaped.Match(keyPEM) {
+		t.Fatalf("control: PEM key material must look proof-shaped to the check below: %s", keyPEM)
 	}
 	if m := proofShaped.FindString(out.String()); m != "" {
 		t.Fatalf("a log line carries something proof-shaped: %q in %s", m, out.String())

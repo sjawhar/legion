@@ -191,6 +191,35 @@ drive_gate() {
 
 # ---- the proof human on the smoke repository ------------------------------------------------------
 
+# The proof human is the devbox's ordinary gh acting as the sjawhar-agent App, which the dotfiles gh
+# shim routes to only from the operator's own Oh My Pi session. A plain shell's gh is the user's own
+# login, a Legion pane's is one of Legion's Apps, and a personal GH_TOKEN in the environment makes
+# any session's gh that token's owner. require_proof_human asks gh which account it acts as for the
+# smoke repository and fails the check unless it is the App's bot, in one line naming the account,
+# that one requirement, and whatever gh wrote to stderr (the shim names an inherited GH_TOKEN there).
+# The probe is GraphQL's viewer, which answers an App installation token with the App's bot login,
+# where REST's GET /user refuses one (403, "Resource not accessible by integration"); GH_REPO names
+# the owner the shim routes by, as each write's own repository does. The probe gets 60 s, as Stage
+# 4b's teardown gh calls do, so a network that never answers fails the check, saying so, instead of
+# hanging it. Every stage proof that writes to GitHub as the proof human calls it before its first
+# gh call, and each one's GitHub teardown (Stage 3's close_unpassed_run_pull_requests, 4b.13b's
+# github_cleanup, Stage 4b's remove_run_branches) returns without a gh call unless it passed.
+proof_human_login='sjawhar-agent[bot]'
+proof_human=
+require_proof_human() {
+  local login found said status=0
+  login=$(GH_REPO="$repo" timeout 60 gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>"$work/proof-human.err") ||
+    { status=$?; login=; }
+  found=${login:-no account}
+  [ "$status" != 124 ] || found="no account (gh gave no answer within 60 s)"
+  said=$(<"$work/proof-human.err")
+  said=${said//$'\n'/ }
+  [ "$login" = "$proof_human_login" ] ||
+    fail "the devbox gh acts as $found for $repo, not the proof human $proof_human_login: run the script from the operator's own Oh My Pi session, not a Legion pane, with no personal GH_TOKEN in its environment${said:+; gh said: $said}"
+  proof_human=$login
+  note "the proof human: the devbox gh acts as $login for $repo"
+}
+
 # pull_request_product_files prints each file the pull request changes outside .legion/.
 pull_request_product_files() {
   gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .filename'
@@ -370,9 +399,11 @@ close_run_pull_requests() {
 }
 # close_unpassed_run_pull_requests is the EXIT trap's part: a run that did not pass (`ok` unset)
 # closes what it opened, best effort, reporting to stderr. A passing run closed them in
-# cleanup-is-complete.
+# cleanup-is-complete. A run that never established the proof human (require_proof_human) opened
+# nothing and makes no gh call here, since its gh may act as someone else.
 close_unpassed_run_pull_requests() {
   [ -z "${ok:-}" ] || return 0
+  [ -n "$proof_human" ] || return 0
   close_run_pull_requests >&2 ||
     printf "some of this run's pull requests may still be open on %s (above)\n" "$repo" >&2
   return 0

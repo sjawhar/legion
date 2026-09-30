@@ -12,7 +12,9 @@
 # agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), the
 # route every devbox agent session uses, and no Anthropic key reaches a pane. The proof human's
 # reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent
-# App), never a Legion App.
+# App), never a Legion App, so run the script from the operator's own Oh My Pi session, not a Legion
+# pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses to start otherwise
+# (require_proof_human, lib/workflow.sh).
 # The App private keys are resolved by the daemon through private_key_command; they never enter
 # this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
@@ -23,9 +25,17 @@ work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="S3$(( ($$ + $(date +%s)) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -70,7 +80,7 @@ prod_dispatch_url=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
 
-begin() { check=$1; printf '== %s\n' "$check"; }
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s\n' "$check"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
@@ -94,7 +104,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -122,6 +132,10 @@ cleanup() {
     printf "the run's scratch workspace is %s\n" "$work" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run: it never sets the status. A hangup, an interrupt or a termination
+  # (129, 130, 143, as trapped below) stopped the run and gets none.
+  [ -n "${ok:-}" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
   return 0
 }
 trap cleanup EXIT
@@ -551,9 +565,10 @@ for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-tok
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
 # credential and idle-read checks read STAGE3_PR (default: the newest smoke pull request) in place
-# of its pull request. `restart` also skips the held-worker scenario. STAGE3_UNTIL=rework is the other
-# development aid: it drives the first issue through its review rounds and the final review, then
-# skips every later scenario.
+# of its pull request. `restart` also skips the held-worker scenario. STAGE3_UNTIL is the other
+# development aid: `prerequisites` stops once this checkpoint has passed, before the rig exists, and
+# `rework` drives the first issue through its review rounds and the final review, then skips every
+# later scenario.
 from=${STAGE3_FROM:-}
 case "$from" in
   "" | held | restart) ;;
@@ -561,8 +576,8 @@ case "$from" in
 esac
 until=${STAGE3_UNTIL:-}
 case "$until" in
-  "" | rework) ;;
-  *) fail "STAGE3_UNTIL must be rework, not $until" ;;
+  "" | prerequisites | rework) ;;
+  *) fail "STAGE3_UNTIL must be prerequisites or rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
 # The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
@@ -583,6 +598,7 @@ development=${from:+from $from}${until:+until $until}
 # (the dotfiles shim, which hands an agent's explicit GH_TOKEN on to `knives gh`), so the proof
 # names mise's gh as LEGION_GH_PATH, the override an operator uses for exactly this.
 real_gh=$(mise which gh) || fail "mise has no gh"
+require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
@@ -598,6 +614,11 @@ note "the agents' model route: $pinned through the gateway, keyed by $key_comman
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
+if [ "$until" = prerequisites ]; then
+  ok=1
+  echo "stage 3 e2e: development run $development finished (not the proof)"
+  exit 0
+fi
 
 begin rig
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&

@@ -35,6 +35,9 @@ type sessionRegistryOpts struct {
 	replicas int
 	ttl      time.Duration
 	log      *slog.Logger
+	// bucket is the KV bucket the registry opens: SessionBucket, or in a test on the package's
+	// shared NATS server one no other test uses.
+	bucket string
 }
 
 func WithSessionReplicas(n int) SessionRegistryOption {
@@ -97,7 +100,7 @@ type SessionRegistry struct {
 }
 
 func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*SessionRegistry, error) {
-	opts := sessionRegistryOpts{replicas: 1, ttl: 5 * time.Minute}
+	opts := sessionRegistryOpts{replicas: 1, ttl: 5 * time.Minute, bucket: SessionBucket}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -106,7 +109,7 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		return nil, err
 	}
 	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
-		Bucket:   SessionBucket,
+		Bucket:   opts.bucket,
 		TTL:      opts.ttl,
 		Replicas: opts.replicas,
 		Storage:  nats.FileStorage,

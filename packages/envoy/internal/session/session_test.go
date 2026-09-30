@@ -11,34 +11,10 @@ import (
 	"testing"
 	"time"
 
-	natsgo "github.com/nats-io/nats.go"
-	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	session "github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
-
-func clearSessionBucket(t *testing.T, conn *natsgo.Conn) {
-	t.Helper()
-	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("failed to open JetStream: %v", err)
-	}
-	if err := js.DeleteKeyValue(session.SessionBucket); err != nil && !errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
-		t.Fatalf("failed to delete session bucket: %v", err)
-	}
-}
-
-func setupNATS(t *testing.T) *bus.Client {
-	t.Helper()
-	client, err := bus.ConnectOwningStream([]string{session.SharedTestNATSURI(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("failed to connect bus: %v", err)
-	}
-	t.Cleanup(client.Close)
-	clearSessionBucket(t, client.Conn)
-	return client
-}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -71,8 +47,8 @@ func mockPort(url string) int {
 
 func newKVDeliverer(t *testing.T) (*session.SessionRegistry, session.Deliverer) {
 	t.Helper()
-	client := setupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	client := session.SetupNATS(t)
+	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -558,8 +534,8 @@ func TestDeliver_KVRegistryUsed(t *testing.T) {
 	defer kvMock.Close()
 	kvPort := mockPort(kvMock.URL)
 
-	client := setupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	client := session.SetupNATS(t)
+	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -617,8 +593,8 @@ func TestDeliver_CrossMachineUsesRemoteHost(t *testing.T) {
 	// Use localhost as the "remote" machine hostname
 	remoteHost := "localhost"
 
-	client := setupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	client := session.SetupNATS(t)
+	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
