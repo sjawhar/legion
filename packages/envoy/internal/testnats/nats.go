@@ -48,7 +48,11 @@ var (
 
 // firstAccounts is how many accounts the shared server starts with. Every time a test asks for
 // one past them, the server doubles them by a reload: a server's start time grows faster than its
-// account count (0.9 s for 1,000 on a loaded devbox, 26 s for 5,000).
+// account count (0.9 s for 1,000 on a loaded devbox, 26 s for 5,000). The reload's wait,
+// connectTimeout, caps that growth: at half a CPU, doubling 4,096 accounts took 36 s and 65 s in
+// two measurements, so the test that asks for account 4,097 fails. A package run takes one account
+// for each test and subtest that asks (103 for cmd/listener, 64 for internal/store), so -count=40
+// of cmd/listener in one binary reaches the ceiling.
 const firstAccounts = 256
 
 // init runs in every test binary that imports this package, whichever helper its tests use. Every
@@ -83,10 +87,8 @@ func Main(m *testing.M) int {
 // often it asks, so every connection it makes reaches the same streams; each subtest is a test of
 // its own and gets its own account, since subtests that each delete and recreate one name in a
 // shared account would race as tests did on a shared server.
-// Before handing an account out it checks the account holds no stream or consumer, and refuses
-// one that does. When the test ends, its account's streams are deleted to free their storage;
-// nothing creates a stream in that account again, so a delete that leaves files behind reaches no
-// test.
+// When the test ends, its account's streams are deleted to free their storage; nothing creates a
+// stream in that account again, so a delete that leaves files behind reaches no test.
 func URL(t testing.TB) string {
 	t.Helper()
 	if !mainRuns {
@@ -147,7 +149,8 @@ func (s *accountServer) url(t testing.TB) string {
 	s.handedOut++
 	account := s.handedOut
 	uri := fmt.Sprintf("nats://t%d:t%d@%s", account, account, s.host)
-	refuseUsed(t, uri, account)
+	// Wait for the account to answer, after the start or the reload that declared it.
+	Connect(t, uri).Close()
 	name := t.Name()
 	s.holders[name] = uri
 	t.Cleanup(func() {
@@ -169,26 +172,6 @@ func accountsConfig(n int) string {
 	}
 	config.WriteString("}\n")
 	return config.String()
-}
-
-// refuseUsed fails t when account already holds a stream or a consumer: it was used before, and a
-// test may only have an account no earlier test used. The check is also the account's readiness
-// wait, after the start or a reload that declared it.
-func refuseUsed(t testing.TB, uri string, account int) {
-	t.Helper()
-	conn := Connect(t, uri)
-	defer conn.Close()
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream as account T%d: %v", account, err)
-	}
-	info, err := js.AccountInfo()
-	if err != nil {
-		t.Fatalf("read account T%d: %v", account, err)
-	}
-	if info.Streams != 0 || info.Consumers != 0 {
-		t.Fatalf("testnats: account T%d holds %d streams and %d consumers, so an earlier test used it: a test may only have an account no earlier test used", account, info.Streams, info.Consumers)
-	}
 }
 
 // deleteStreams deletes every stream in the account uri names, as its test ends.

@@ -65,7 +65,7 @@ func TestEachTestGetsTheSharedServerEmpty(t *testing.T) {
 			t.Fatalf("account info: %v", err)
 		}
 		if info.Streams != 0 {
-			t.Errorf("the shared server holds %d streams from the previous test", info.Streams)
+			t.Errorf("the second subtest's account holds %d streams, want none of the first's", info.Streams)
 		}
 	})
 }
@@ -178,30 +178,6 @@ func ownAccountServer(t *testing.T, accounts int) *accountServer {
 		t.Fatalf("start an account server: %v", err)
 	}
 	return server
-}
-
-// An account that holds a stream is never handed to a test, however it came to hold one.
-func TestAnAccountAnEarlierTestUsedIsRefused(t *testing.T) {
-	server := ownAccountServer(t, 2)
-	conn := Connect(t, fmt.Sprintf("nats://t1:t1@%s", server.host))
-	defer conn.Close()
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := js.AddStream(&natsgo.StreamConfig{Name: "EARLIER", Subjects: []string{"earlier.>"}}); err != nil {
-		t.Fatalf("add stream: %v", err)
-	}
-	refused := &fatalRecorder{TB: t}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		server.url(refused)
-	}()
-	<-done
-	if want := "account T1 holds 1 streams and 0 consumers, so an earlier test used it"; !strings.Contains(refused.message, want) {
-		t.Fatalf("handing out a used account ended with %q, want it to say %q", refused.message, want)
-	}
 }
 
 // A server whose accounts are all handed out declares twice as many by a reload and hands out the

@@ -56,10 +56,10 @@ No watcher carries anything between tests. Each registry's watcher applies only 
 and a finished test's watcher ended when its connection closed; the new test's own watcher faithfully
 mirrors a bucket the server had filled with the old stream's messages.
 
-`error creating store for stream`, which `internal/store` and `internal/cistore` saw before they
-named each test's buckets apart, is another symptom of deleting and recreating a stream name on a
-shared server. It more likely comes from a single delete and create racing the background cleanup,
-where this one needs two deletes and a failed rename (an inference from the code, not reproduced).
+`error creating store for stream`, which `internal/store` and `internal/cistore` saw while their
+tests shared one account, is another symptom of deleting and recreating a stream name on a shared
+server. It more likely comes from a single delete and create racing the background cleanup, where
+this one needs two deletes and a failed rename (an inference from the code, not reproduced).
 
 ## Reproducing it without load
 
@@ -82,11 +82,11 @@ Never delete a stream name in a place a later test creates it again. `testnats.U
 test the shared server as the user of a JetStream account no earlier test used, and nats-server keeps
 each account's streams in a directory of its own (`<store>/jetstream/<account>/streams`), so one
 test's deletes cannot reach another's creates under the same name. An account is never handed out
-twice, and URL refuses one that already holds a stream; the race is unchanged inside one account, so
-each subtest gets an account of its own too. Every package whose tests share a server takes it
-through `testnats.URL`: the session, interest and CI registries, the listener, and the packages that
-already did. A delete a test makes of its own stream is the first of that name in its account, so it
-renames as it should.
+twice. The race is unchanged inside one account, so each subtest gets an account of its own too.
+Every package whose tests share a server takes it through `testnats.URL`: the session, interest and
+CI registries, the listener, `internal/bus`, `internal/kvwatch`, `internal/dispatch/redeliver` and
+`internal/integration`. A delete a test makes of its own stream is the first of that name in its
+account, so it renames as it should.
 
 One test still deletes a name twice, and the race cannot fail it:
 `internal/kvwatch`'s `TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache` deletes

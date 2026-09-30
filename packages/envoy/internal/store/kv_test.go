@@ -2007,11 +2007,10 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	bucket := Bucket
-	if err := js.DeleteKeyValue(bucket); err != nil {
+	if err := js.DeleteKeyValue(Bucket); err != nil {
 		t.Fatalf("delete the interest bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("recreate the interest bucket: %v", err)
 	}
