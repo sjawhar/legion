@@ -232,9 +232,15 @@ report dependencies-skipped "$work/zizmor-findings.json" "$work/deps.json" --rep
 enforce dependencies-skipped
 check "a promoted check whose job did not run is not a pass: exits 1" "$(is "$rc" 1)"
 report flags-unknown "$work/zizmor-findings.json" "$work/deps.json" --report-only-zizmor "" \
-  --report-only-dependencies "" --workflows failure --dependencies failure
+  --report-only-dependencies "" --workflows success --dependencies success
 enforce flags-unknown
-check "flags unknown (the window job did not run): report-only, exits 0" "$(is "$rc" 0)"
+check "flags unknown (the window job did not run): not report-only, exits 1" "$(is "$rc" 1)"
+check "naming each unknown flag" \
+  "$( [ "$(contains "$(cat "$work/flags-unknown.enforce")" "report_only.zizmor is unknown")" = true ] &&
+    [ "$(contains "$(cat "$work/flags-unknown.enforce")" "report_only.dependencies is unknown")" = true ] &&
+    echo true || echo false)"
+check "and prints no 'not enforced'" \
+  "$( [ "$(contains "$(cat "$work/flags-unknown.enforce")" "not enforced")" = false ] && echo true || echo false)"
 rc=0
 "$run_script" enforce "$work/nowhere.json" > /dev/null 2>&1 || rc=$?
 check "a missing report exits 2" "$(is "$rc" 2)"
@@ -242,7 +248,7 @@ jq 'del(.gate)' "$work/zizmor-failed.json" > "$work/no-gate.json"
 enforce no-gate
 check "a report without its gate results exits 2" "$(is "$rc" 2)"
 
-echo "=== 11. window-flags: the window job's reading of the file, one output line per check ==="
+echo "=== 11. window-flags: the window job's reading of the base's file, one output line per check ==="
 # run_flags ARG…: runs `security-run.sh window-flags ARG…` from the current directory; stdout in
 # $flags_out, stderr in $flags_err, exit code in $rc.
 run_flags() {
@@ -257,30 +263,78 @@ check "exits 0" "$(is "$rc" 0)"
 check "prints one GITHUB_OUTPUT line per check" "$(is "$flags_out" "zizmor=true
 dependencies=false")"
 check "and no note" "$(is "$flags_err" "")"
-echo '{"report_only": true}' > "$work/flags/bare.json"
-run_flags "$work/flags/bare.json"
-check "a bare boolean is that value for each check" "$(is "$flags_out" "zizmor=true
-dependencies=true")"
-check "and is named on stderr" "$(contains "$flags_err" "report_only is one boolean")"
 run_flags "$work/flags/nowhere.json"
-check "no file: exits 0, every check report-only" "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=true
+check "no file (a base from before the file landed): exits 0, every check report-only" \
+  "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=true
 dependencies=true" ] && echo true || echo false)"
-check "and names the file" "$(contains "$flags_err" "nowhere.json: missing")"
-echo '{"report_only": {"zizmor": 0, "dependencies": false}}' > "$work/flags/number.json"
-run_flags "$work/flags/number.json"
-check "a number is not false: that check stays report-only" "$(is "$flags_out" "zizmor=true
-dependencies=false")"
+check "and names the file" "$(contains "$flags_err" "nowhere.json: missing; every check reads as report-only")"
 run_flags "$script_dir/../security-window.json"
-check "the checked-in window file is in the per-check shape: no note" "$(is "$flags_err" "")"
+check "the checked-in window file is in its shape: no note" "$(is "$flags_err" "")"
 rc=0
 "$run_script" window-flags > /dev/null 2>&1 || rc=$?
 check "window-flags without a file exits 2" "$(is "$rc" 2)"
+
+echo "=== 11a. a window file that is there but not in its shape fails closed: each check it does not set is blocking, named ==="
+# flags_case NAME CONTENT ZIZMOR DEPENDENCIES NOTE: window-flags on a file holding CONTENT exits 0,
+# reads the flags ZIZMOR and DEPENDENCIES, and notes NOTE.
+flags_case() {
+  printf '%s\n' "$2" > "$work/flags/$1.json"
+  run_flags "$work/flags/$1.json"
+  check "$1: exits 0, zizmor=$3 dependencies=$4" "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=$3
+dependencies=$4" ] && echo true || echo false)"
+  check "$1: names it" "$(contains "$flags_err" "$1.json: $5")"
+}
+flags_case not-json '{"report_only":' false false "not JSON (.*); every check is blocking"
+flags_case not-an-object '[false]' false false "not a JSON object; every check is blocking"
+flags_case no-report-only '{"report-only": {"zizmor": true, "dependencies": true}}' false false \
+  'has no report_only key; every check is blocking'
+flags_case string '{"report_only": "true"}' false false \
+  'report_only is "true", not an object of checks; every check is blocking'
+flags_case missing-key '{"report_only": {"zizmor": true}}' true false \
+  "report_only has no dependencies key; dependencies is blocking"
+flags_case non-boolean '{"report_only": {"zizmor": "true", "dependencies": true}}' false true \
+  'report_only.zizmor is "true", not true or false; zizmor is blocking'
+flags_case number '{"report_only": {"zizmor": 1, "dependencies": true}}' false true \
+  "report_only.zizmor is 1, not true or false; zizmor is blocking"
+flags_case unknown-check '{"report_only": {"zizmor": true, "dependencies": true, "codeql": false}}' true true \
+  'report_only."codeql" names no check (zizmor, dependencies); ignored'
+flags_case unknown-key '{"report_only": {"zizmor": true, "dependencies": true}, "window_days": 14}' true true \
+  '"window_days" is not a key of the file (report_only is its one key); ignored'
+
+echo "=== 11b. window-check: a pull request's own window file is validated, never obeyed ==="
+# run_check FILE: `security-run.sh window-check FILE`; stderr in $check_err, exit code in $rc.
+run_check() {
+  rc=0
+  "$run_script" window-check "$1" > "$work/check.out" 2> "$work/check.err" || rc=$?
+  check_err=$(< "$work/check.err")
+}
+run_check "$script_dir/../security-window.json"
+check "the checked-in file: exits 0 and prints nothing" \
+  "$( [ "$rc" = 0 ] && [ -z "$check_err" ] && [ ! -s "$work/check.out" ] && echo true || echo false)"
+echo '{"report_only": {"zizmor": false, "dependencies": false}}' > "$work/flags/promoted.json"
+run_check "$work/flags/promoted.json"
+check "a promotion (every flag false): exits 0" "$(is "$rc" 0)"
+run_check "$work/flags/nowhere.json"
+check "no file: exits 1, naming it" \
+  "$( [ "$rc" = 1 ] && [ "$(contains "$check_err" "nowhere.json: missing")" = true ] && echo true || echo false)"
+for bad in not-json not-an-object no-report-only string missing-key non-boolean number unknown-check unknown-key; do
+  run_check "$work/flags/$bad.json"
+  check "$bad: exits 1, naming the file" \
+    "$( [ "$rc" = 1 ] && [ "$(contains "$check_err" "$bad.json: ")" = true ] && echo true || echo false)"
+done
+run_check "$work/flags/missing-key.json"
+check "a missing key names the key" "$(contains "$check_err" "report_only has no dependencies key")"
+rc=0
+"$run_script" window-check > /dev/null 2>&1 || rc=$?
+check "window-check without a file exits 2" "$(is "$rc" 2)"
 
 echo "=== 12. the base: a pull request is judged against its merge commit's first parent, and reads its flags there ==="
 # A real repository. Main promotes zizmor (A1); a pull request branched from A1 sets it back to
 # report-only (P); main moves on (A2), so the pull request's recorded base (A1) is stale; GitHub's
 # merge commit M joins A2 and P, as refs/pull/<n>/merge does. The run checks M out at depth 1 from
-# an origin, as actions/checkout does, so HEAD is shallow and its parents are not local.
+# an origin, as actions/checkout does, so HEAD is shallow and its parents are not local. B is a
+# base whose window file is cut short, as only a push that bypassed its own pull request's run
+# could leave it.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 g() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
 src="$work/git/src"
@@ -301,6 +355,10 @@ a2=$(g -C "$src" rev-parse HEAD)
 g -C "$src" checkout -q --detach main
 g -C "$src" merge -q --no-ff pr -m "M: GitHub's merge commit"
 g -C "$src" branch pull-merge HEAD
+g -C "$src" checkout -q -b broken main
+printf '{"report_only": {"zizmor": true' > "$src/.github/security-window.json"
+g -C "$src" commit -qam "B: a base whose window file is not JSON"
+b1=$(g -C "$src" rev-parse HEAD)
 g clone -q --bare "$src" "$work/git/origin.git"
 g clone -q --depth 1 --branch pull-merge "file://$work/git/origin.git" "$work/git/clone"
 g clone -q --depth 1 --branch main "file://$work/git/origin.git" "$work/git/main"
@@ -337,6 +395,11 @@ run_flags .github/nowhere.json --at "$a2"
 check "a base with no window file: every check report-only, named with the commit" \
   "$( [ "$flags_out" = "zizmor=true
 dependencies=true" ] && [ "$(contains "$flags_err" ".github/nowhere.json at ${a2:0:12}: missing")" = true ] &&
+  echo true || echo false)"
+run_flags .github/security-window.json --at "$b1"
+check "a base whose window file is not JSON: every check blocking, named with the commit" \
+  "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=false
+dependencies=false" ] && [ "$(contains "$flags_err" ".github/security-window.json at ${b1:0:12}: not JSON")" = true ] &&
   echo true || echo false)"
 cd - > /dev/null
 unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM

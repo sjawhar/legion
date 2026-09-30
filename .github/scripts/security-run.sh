@@ -7,6 +7,7 @@
 # Usage:
 #   security-run.sh base-commit EVENT [MERGE_GROUP_BASE_SHA]
 #   security-run.sh window-flags .github/security-window.json [--at REV]
+#   security-run.sh window-check .github/security-window.json
 #   security-run.sh summarize [--osv osv.json] [--govulncheck govulncheck.json]… --out deps-summary.json
 #   security-run.sh report --zizmor zizmor-findings.json --deps deps-summary.json --run-id ID
 #       --event EVENT --head SHA --base SHA --report-only-zizmor true|false
@@ -22,16 +23,22 @@
 #
 # window-flags — .github/security-window.json holds one report-only flag per check,
 # {"report_only": {"zizmor": true, "dependencies": true}}: while a check's flag is true its Gate
-# step runs under continue-on-error. A check is blocking only where the file sets its flag to
-# false: a missing or unreadable file, a document that is not an object with a report_only key,
-# a missing key and a value that is not true or false each read as report-only, and each is named
-# in a note. A bare boolean ({"report_only": true}, the file's first form) is that value for every
-# check. It prints the file's flags as `zizmor=<bool>` and `dependencies=<bool>` lines (the window
-# job appends them to $GITHUB_OUTPUT) and its notes on stderr, and exits 0; with --at it reads the
-# file as it is at commit REV (fetched from origin at depth 1 when absent), which is how a pull
-# request or merge group reads its base's flags rather than its own: a promotion takes effect on
-# main from its merge, its own pull request's run stays report-only, and a pull request cannot
-# make its own check report-only again by editing the file.
+# step runs under continue-on-error. It prints the file's flags as `zizmor=<bool>` and
+# `dependencies=<bool>` lines (the window job appends them to $GITHUB_OUTPUT), with a note on
+# stderr for each problem, and exits 0. A missing file reads as report-only for every check: the
+# file lands with this workflow, so a base from before it has none. A file that is there fails
+# closed: a check is report-only only where report_only.<check> is true, and every check the file
+# fails to set true or false (a file that is not JSON, not {"report_only": {…}}, missing the
+# check's key or holding a value that is not a boolean) is blocking. With --at it reads the file
+# as it is at commit REV (fetched from origin at depth 1 when absent), which is how a pull request
+# or merge group reads its base's flags rather than its own: a promotion takes effect on main from
+# its merge, its own pull request's run stays report-only, and a pull request cannot make its own
+# check report-only again by editing the file.
+#
+# window-check — a pull request's or merge group's own copy of the file, which the window job
+# validates and never obeys: it exits 1 naming each problem window-flags would note, a key that
+# names no check included, or a missing file, so a malformed file fails its own run before it can
+# reach main.
 #
 # summarize — the dependencies job's numbers. --osv is osv-scanner's `--format json` output, given
 # only when osv-scanner ran to completion; each --govulncheck is one module's `govulncheck -format
@@ -62,13 +69,15 @@
 # enforce — the security job's last step. A check whose flag in security-report.json is false is
 # blocking, and enforce exits 1 when that check's job (workflows for zizmor, dependencies for the
 # dependency scanners) concluded anything but success: that job's Gate no longer runs under
-# continue-on-error, so its failure is the finding. A check whose flag is true or unknown (the
-# window job did not run) is report-only and never fails here, so requiring the security check
-# refuses nothing a report-only check found.
+# continue-on-error, so its failure is the finding. A check whose flag is true is report-only and
+# never fails here, so requiring the security check refuses nothing a report-only check found. A
+# flag that is unknown (null: the window job read none) fails: nothing says that check is
+# report-only.
 #
-# Exit codes: 0 printed, written or nothing to enforce; 1 a blocking check's job did not succeed;
-# 2 a usage error, a report enforce cannot read, a base that cannot be fetched or read, or a
-# pull_request HEAD that is not a merge commit.
+# Exit codes: 0 printed, written or nothing to enforce; 1 a blocking check's job did not succeed, a
+# flag enforce does not know, or a window file window-check refuses; 2 a usage error, a report
+# enforce cannot read, a file or base that cannot be fetched or read, or a pull_request HEAD that
+# is not a merge commit.
 # CI runs its tests (security-run.test.sh) in the test job of pr-and-main.yaml.
 set -euo pipefail
 
@@ -80,6 +89,7 @@ from collections import Counter
 
 USAGE = """usage: security-run.sh base-commit EVENT [MERGE_GROUP_BASE_SHA]
        security-run.sh window-flags .github/security-window.json [--at REV]
+       security-run.sh window-check .github/security-window.json
        security-run.sh summarize [--osv osv.json] [--govulncheck govulncheck.json]... --out deps-summary.json
        security-run.sh report --zizmor zizmor-findings.json --deps deps-summary.json --run-id ID --event EVENT
                               --head SHA --base SHA --report-only-zizmor true|false
@@ -159,7 +169,7 @@ def recorded(half, path, read, *args):
         return dict(TOOL_ERROR[half])
 
 
-# --- base-commit and window-flags ---------------------------------------------------------------
+# --- base-commit, window-flags and window-check -------------------------------------------------
 def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True)
 
@@ -187,39 +197,58 @@ def base_commit(args):
         print(parents[0])
 
 
-def window_flags(text, where):
-    """({check: report_only}, notes) from the text of .github/security-window.json, None when there is
-    no file. A check is blocking only where the file says false; every other form reads as report-only
-    and is named in a note. Values the file holds are quoted with json.dumps, so a note is one line."""
-    every = dict.fromkeys(CHECKS, True)
-    if text is None:
-        return every, [f"{where}: missing; every check reads as report-only"]
+def window_file(text, where):
+    """The window file read as ({check: its flag, None where the file sets it to no boolean},
+    problems), each problem (the checks it leaves unset, its text). Values the file holds are quoted
+    with json.dumps, so a problem is one line."""
+    unset = dict.fromkeys(CHECKS)
     try:
         document = json.loads(text)
     except ValueError as error:
-        return every, [f"{where}: not JSON ({error}); every check reads as report-only"]
-    if not isinstance(document, dict) or "report_only" not in document:
-        return every, [f"{where}: not an object with a report_only key; every check reads as report-only"]
+        return unset, [(CHECKS, f"{where}: not JSON ({error})")]
+    if not isinstance(document, dict):
+        return unset, [(CHECKS, f"{where}: not a JSON object")]
+    if "report_only" not in document:
+        return unset, [(CHECKS, f"{where}: has no report_only key")]
     value = document["report_only"]
-    if isinstance(value, bool):
-        return dict.fromkeys(CHECKS, value), [
-            f"{where}: report_only is one boolean ({json.dumps(value)}) for every check; the per-check form is "
-            '{"report_only": {"zizmor": …, "dependencies": …}}']
     if not isinstance(value, dict):
-        return every, [f"{where}: report_only is {json.dumps(value)}, not an object of checks; "
-                       "every check reads as report-only"]
-    flags, notes = dict(every), []
+        return unset, [(CHECKS, f"{where}: report_only is {json.dumps(value)}, not an object of checks")]
+    flags, problems = {}, []
     for check in CHECKS:
+        flags[check] = value[check] if isinstance(value.get(check), bool) else None
         if check not in value:
-            notes.append(f"{where}: report_only has no {check} key; {check} reads as report-only")
-        elif not isinstance(value[check], bool):
-            notes.append(f"{where}: report_only.{check} is {json.dumps(value[check])}, not true or false; "
-                         f"{check} reads as report-only")
-        else:
-            flags[check] = value[check]
-    for key in sorted(set(value) - set(CHECKS)):
-        notes.append(f"{where}: report_only.{json.dumps(key)} names no check ({', '.join(CHECKS)}); ignored")
-    return flags, notes
+            problems.append(((check,), f"{where}: report_only has no {check} key"))
+        elif flags[check] is None:
+            problems.append(((check,), f"{where}: report_only.{check} is {json.dumps(value[check])}, not true or false"))
+    problems += [((), f"{where}: report_only.{json.dumps(key)} names no check ({', '.join(CHECKS)})")
+                 for key in sorted(set(value) - set(CHECKS))]
+    problems += [((), f"{where}: {json.dumps(key)} is not a key of the file (report_only is its one key)")
+                 for key in sorted(set(document) - {"report_only"})]
+    return flags, problems
+
+
+def window_flags(text, where):
+    """({check: report_only}, notes) from the text of .github/security-window.json, None when there is
+    no file. No file reads as report-only for every check; any other file sets a check report-only only
+    where it says true, and each check it fails to set is blocking. Each problem is a note."""
+    if text is None:
+        return dict.fromkeys(CHECKS, True), [f"{where}: missing; every check reads as report-only"]
+    flags, problems = window_file(text, where)
+    notes = [f"{problem}; " + ("every check is blocking" if checks == CHECKS else
+                               f"{checks[0]} is blocking" if checks else "ignored")
+             for checks, problem in problems]
+    return {check: flag is True for check, flag in flags.items()}, notes
+
+
+def read_file(path):
+    """PATH's text, None when there is no such file."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        fail(f"cannot read {path}: {error.strerror}")
 
 
 def file_at(rev, path):
@@ -240,24 +269,29 @@ def file_at(rev, path):
 def print_window_flags(args):
     """window-flags FILE [--at REV]: the flags as the window job's $GITHUB_OUTPUT lines, notes on stderr."""
     if len(args) == 1:
-        path, rev = args[0], None
+        flags, notes = window_flags(read_file(args[0]), args[0])
     elif len(args) == 3 and args[1] == "--at":
-        path, rev = args[0], args[2]
+        flags, notes = window_flags(file_at(args[2], args[0]), f"{args[0]} at {args[2][:12]}")
     else:
         usage("window-flags takes one file and, optionally, --at REV")
-    if rev is None:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
-        except OSError:
-            text = None
-        flags, notes = window_flags(text, path)
-    else:
-        flags, notes = window_flags(file_at(rev, path), f"{path} at {rev[:12]}")
     for check in CHECKS:
         print(f"{check}={json.dumps(flags[check])}")
     for note in notes:
         print(note, file=sys.stderr)
+
+
+def window_check(args):
+    """window-check FILE: exits 1 naming each problem of the file, 0 when it is in its shape."""
+    if len(args) != 1:
+        usage("window-check takes one file")
+    text = read_file(args[0])
+    if text is None:
+        problems = [f"{args[0]}: missing; merged, it would leave every check on main report-only"]
+    else:
+        problems = [problem for _, problem in window_file(text, args[0])[1]]
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    sys.exit(1 if problems else 0)
 
 
 # --- summarize ----------------------------------------------------------------------------------
@@ -470,8 +504,12 @@ def enforce(args):
     failed = False
     for check, job in GATE_JOBS.items():
         flag, result = document["report_only"][check], document["gate"][job]
-        if flag is not False:
-            print(f"{check}: report-only (report_only.{check} is {FLAG_TEXT[flag]}); not enforced")
+        if flag is None:
+            print(f"::error::{check}: report_only.{check} is unknown (the window job read no flag), so nothing says "
+                  "it is report-only")
+            failed = True
+        elif flag:
+            print(f"{check}: report-only (report_only.{check} is true); not enforced")
         elif result == "success":
             print(f"{check}: blocking, and its {job} job succeeded")
         else:
@@ -486,6 +524,8 @@ if command == "base-commit":
     base_commit(args)
 elif command == "window-flags":
     print_window_flags(args)
+elif command == "window-check":
+    window_check(args)
 elif command == "summarize":
     summarize(args)
 elif command == "report":
@@ -493,5 +533,5 @@ elif command == "report":
 elif command == "enforce":
     enforce(args)
 else:
-    usage("the first argument is base-commit, window-flags, summarize, report or enforce")
+    usage("the first argument is base-commit, window-flags, window-check, summarize, report or enforce")
 PY

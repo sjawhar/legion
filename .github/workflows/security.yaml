@@ -6,9 +6,11 @@ name: Security
 # scanner job ends in one Gate step, the only step that can fail on findings or tool errors, and
 # while .github/security-window.json keeps that check report-only (report_only.zizmor for the
 # workflows job, report_only.dependencies for the dependencies job) the step runs under
-# continue-on-error, so the job concludes success and blocks no merge. Once a check's flag is false
-# its job fails on a finding, and the security job's last step fails with it. Installs and tool runs
-# record a tool error instead of failing. The daily scheduled run also runs
+# continue-on-error, so the job concludes success and blocks no merge. A check whose flag is
+# anything but true (false, a base file that fails to set it, or no flag at all because the window
+# job failed) fails its job on a finding, and the security job's last step fails with it. Installs
+# and tool runs record a tool error instead of failing its step.
+# The daily scheduled run also runs
 # scripts/security-report.sh, whose exit is that run's conclusion: it fails once the report-only
 # window has closed while a check is still report-only, and the window watcher reads that off this
 # workflow's status badge.
@@ -56,10 +58,13 @@ jobs:
       #
       # One flag per check, from the base's window file on a pull request or merge group and from
       # the tree's own (main's) otherwise, so a promotion takes effect on main from its merge and a
-      # pull request cannot make its own check report-only again by editing the file. A check is
-      # blocking only where the file sets it false; any other form reads as report-only, and the
-      # step summary and an annotation name it (.github/scripts/security-run.sh window-flags). The
-      # base is fetched without a credential, which persist-credentials: false relies on.
+      # pull request cannot make its own check report-only again by editing the file. A missing
+      # file reads as report-only (a base from before the file landed); a file that is there sets a
+      # check report-only only where it says true, and each check it fails to set is blocking; the
+      # step summary and an annotation name each problem (.github/scripts/security-run.sh
+      # window-flags). A pull request's or merge group's own copy is validated and never obeyed:
+      # window-check fails this job on a copy not in its shape, so a malformed file cannot reach
+      # main. The base is fetched without a credential, which persist-credentials: false relies on.
       - name: Read the base and the report-only flags
         id: flags
         env:
@@ -83,6 +88,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           cat flags.txt
           sed 's/^/::warning::/' notes.txt
+          if [ -n "$base" ] && ! .github/scripts/security-run.sh window-check .github/security-window.json 2> problems.txt; then
+            {
+              echo
+              echo "## This ${EVENT//_/ }'s own .github/security-window.json is not in its shape"
+              echo
+              sed 's/^/- /' problems.txt
+            } >> "$GITHUB_STEP_SUMMARY"
+            sed 's/^/::error::/' problems.txt
+            exit 1
+          fi
 
   workflows:
     needs: window
@@ -193,7 +208,7 @@ jobs:
 
       - name: Gate
         if: always()
-        continue-on-error: ${{ needs.window.outputs.zizmor != 'false' }}
+        continue-on-error: ${{ needs.window.outputs.zizmor == 'true' }}
         env:
           EVENT: ${{ github.event_name }}
         run: |
@@ -293,7 +308,7 @@ jobs:
 
       - name: Gate
         if: always()
-        continue-on-error: ${{ needs.window.outputs.dependencies != 'false' }}
+        continue-on-error: ${{ needs.window.outputs.dependencies == 'true' }}
         run: |
           if ! jq -e '(.osv.tool_error or .govulncheck.tool_error) | not' deps-summary.json > /dev/null; then
             echo "::error::a dependency scanner recorded a tool error; see the steps above"

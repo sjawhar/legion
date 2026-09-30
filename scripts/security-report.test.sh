@@ -632,19 +632,13 @@ check "exits 0" "$(is "$rc" 0)"
 check "prints the run table" "$(has "| 1000 | push |")"
 check "prints no decision" "$(lacks "DECISION:")"
 check "prints each check's flag" "$(has "report_only: zizmor false, dependencies false")"
-setup r11-bare "15 days ago"
-echo '{"report_only": false}' > "$d/window.json"
-run_report
-check "a bare false (the file's first form) promotes both checks: exits 0" "$(is "$rc" 0)"
-check "and reads false for each" "$(has "report_only: zizmor false, dependencies false")"
-check "and names the bare boolean" "$(has "note: main's .github/security-window.json: report_only is one boolean")"
 
 echo "=== per-check flags: each check's promotion is decided on its own ==="
 setup promoted-zizmor "15 days ago"
 echo '{"report_only": {"zizmor": false, "dependencies": true}}' > "$d/window.json"
 run_report
 check "zizmor promoted, dependencies still report-only after the window: exits 1" "$(is "$rc" 1)"
-check "zizmor reads as already blocking" "$(has "DECISION: zizmor already blocking (report_only.zizmor is false)")"
+check "zizmor reads as already blocking" "$(has "DECISION: zizmor already blocking (main's report_only.zizmor is not true)")"
 check "zizmor is not decided again" "$(lacks "DECISION: PROMOTE zizmor")"
 check "no rule 5 request for a check already promoted" "$(lacks "NEXT:")"
 check "dependencies is still decided" "$(has "DECISION: PROMOTE dependencies")"
@@ -654,7 +648,7 @@ run_report
 check "dependencies promoted, zizmor still report-only after the window: exits 1" "$(is "$rc" 1)"
 check "zizmor is decided" "$(has "DECISION: PROMOTE zizmor")"
 check "dependencies reads as already blocking" \
-  "$(has "DECISION: dependencies already blocking (report_only.dependencies is false)")"
+  "$(has "DECISION: dependencies already blocking (main's report_only.dependencies is not true)")"
 check "dependencies is not decided again" "$(lacks "DECISION: PROMOTE dependencies")"
 setup promoted-open "3 days ago"
 echo '{"report_only": {"zizmor": false, "dependencies": true}}' > "$d/window.json"
@@ -662,29 +656,25 @@ run_report
 check "one check still report-only inside the window: exits 0, no decision" \
   "$( [ "$rc" = 0 ] && [ "$(lacks "DECISION:")" = true ] && echo true || echo false)"
 
-echo "=== main's window file not in its shape: each check it does not set false reads as report-only, named ==="
-# window_case NAME CONTENT|- ZIZMOR DEPENDENCIES NOTE: main's window file holds CONTENT (- for no
-# file); the report reads the flags ZIZMOR and DEPENDENCIES through security-run.sh and prints NOTE.
+echo "=== main's window file, as security-run.sh reads it: missing is report-only, malformed is blocking ==="
+# window_case NAME CONTENT|- ZIZMOR DEPENDENCIES RC NOTE: main's window file holds CONTENT (- for
+# no file); the report reads the flags ZIZMOR and DEPENDENCIES, prints NOTE and exits RC.
 window_case() {
   setup "window-$1" "15 days ago"
   if [ "$2" = - ]; then rm "$d/window.json"; else printf '%s\n' "$2" > "$d/window.json"; fi
   run_report
   check "$1: reads zizmor $3, dependencies $4" "$(has "report_only: zizmor $3, dependencies $4")"
-  check "$1: names it" "$(has "note: main's .github/security-window.json: $5")"
-  check "$1: exits 1 (a check is still report-only after the window)" "$(is "$rc" 1)"
+  check "$1: names it" "$(has "note: main's .github/security-window.json: $6")"
+  check "$1: exits $5" "$(is "$rc" "$5")"
 }
-window_case missing - true true "missing; every check reads as report-only"
-window_case not-json '{"report_only":' true true "not JSON"
-window_case not-an-object '[false]' true true "not an object with a report_only key; every check reads as report-only"
-window_case no-report-only '{"report-only": false}' true true "not an object with a report_only key"
-window_case string '{"report_only": "false"}' true true \
-  'report_only is "false", not an object of checks; every check reads as report-only'
-window_case missing-key '{"report_only": {"zizmor": false}}' false true \
-  "report_only has no dependencies key; dependencies reads as report-only"
-window_case non-boolean '{"report_only": {"zizmor": "false", "dependencies": false}}' true false \
-  'report_only.zizmor is "false", not true or false; zizmor reads as report-only'
-window_case unknown-key '{"report_only": {"zizmor": true, "dependencies": true, "codeql": false}}' true true \
-  'report_only."codeql" names no check (zizmor, dependencies); ignored'
+window_case missing - true true 1 "missing; every check reads as report-only"
+window_case not-json '{"report_only":' false false 0 "not JSON"
+check "not-json: every check blocking after the window: no decision" "$(lacks "DECISION:")"
+window_case missing-key '{"report_only": {"zizmor": true}}' true false 1 \
+  "report_only has no dependencies key; dependencies is blocking"
+check "missing-key: dependencies reads as already blocking" \
+  "$(has "DECISION: dependencies already blocking (main's report_only.dependencies is not true)")"
+check "missing-key: zizmor, still report-only, is decided" "$(has "DECISION: PROMOTE zizmor")"
 
 echo "=== R12. --decision force with the window open ==="
 setup r12 "3 days ago"

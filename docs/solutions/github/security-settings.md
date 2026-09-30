@@ -68,15 +68,19 @@ its `base_sha`.
 `{"report_only": {"zizmor": true, "dependencies": true}}`. While a check's flag is `true`, its
 job's single Gate step (`workflows` for zizmor, `dependencies` for osv-scanner and govulncheck) runs
 under `continue-on-error`, so the job concludes `success` and blocks no merge; a tool that fails to
-install or run records a tool error rather than failing its job. A check is blocking only where
-the file sets its flag to `false`. A missing file, a document that is not an object with a
-`report_only` key, a missing key and a value that is not `true` or `false` each read as
-report-only, and the `window` job's step summary and an annotation name the problem. A bare
-boolean (`{"report_only": true}`, the file's first form) applies to both checks. The `security` job
-gathers each run's counts and both flags into the `security-report` artifact and the step summary.
-Its last step enforces: once a check's flag is `false`, `security` fails whenever that check's job
-did not succeed, so a ruleset that requires the `security` check refuses what a promoted check
-found; while the flag is `true`, `security` stays `success` whatever the check found.
+install or run records a tool error rather than failing its job. A missing file reads as
+report-only for both checks, since the file lands with the workflow and a base from before it has
+none. A file that is there fails closed: a check is report-only only where the file sets its flag
+to `true`, so a file that is not JSON, not `{"report_only": {…}}`, missing a check's key or holding
+a value that is not `true` or `false` leaves each check it fails to set blocking. The `window`
+job's step summary and an annotation name each problem. A pull request's or merge group's own copy
+is validated and never obeyed: a copy not in its shape fails the `window` job, so a malformed file
+cannot reach `main`. The `security` job gathers each run's counts and both flags into the
+`security-report` artifact and the step summary. Its last step enforces: once a check's flag is
+not `true`, `security` fails whenever that check's job did not succeed, and it fails on a flag the
+`window` job never produced, so a ruleset that requires the `security` check refuses what a
+promoted check found; while the flag is `true`, `security` stays `success` whatever the check
+found.
 
 A pull request or merge group reads the flags from its base's copy of the file, not its own; a
 push to `main` and the daily run read `main`'s. So a promotion takes effect on `main` from its

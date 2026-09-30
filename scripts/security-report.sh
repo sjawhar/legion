@@ -15,7 +15,8 @@
 # workflow's runs returns at most 1,000 results once filtered, and a branch listing would lose the
 # first run as main's runs pile up. Once the window has closed, or with --decision force, the
 # report ends in a DECISION block with a line per check: the rule's PROMOTE or HOLD while that
-# check is still report-only on main, `already blocking` once its flag is false. While any check is
+# check is still report-only on main, `already blocking` once main's file no longer sets its flag
+# true (security-run.sh window-flags: false, or a file that fails to set it). While any check is
 # still report-only the block makes the exit code 1, which fails the scheduled run so its status
 # badge turns red and the window watcher wakes the owner of the decision. With every check
 # blocking it prints the numbers and no decision (unless forced), and exits 0.
@@ -686,7 +687,7 @@ def dependencies_decision(tool_error_runs, main_deps):
 
 def decide(flags, main_count, main_deps, dispositions, tool_error_runs, codeql_fixed, threads):
     """The DECISION lines from each rule's value, with rule 5's NEXT when rule 1 promotes zizmor. A check
-    whose flag on main is already false is blocking, and is not decided again."""
+    main's file no longer sets report-only is blocking, and is not decided again."""
     lines = []
     if flags["zizmor"]:
         promote_zizmor, zizmor_line = zizmor_decision(main_count, dispositions)
@@ -694,9 +695,9 @@ def decide(flags, main_count, main_deps, dispositions, tool_error_runs, codeql_f
         if promote_zizmor:
             lines.append("NEXT: ask a repository admin to require the check `security` (rule 5)")
     else:
-        lines.append("DECISION: zizmor already blocking (report_only.zizmor is false)")
+        lines.append("DECISION: zizmor already blocking (main's report_only.zizmor is not true)")
     lines.append(f"DECISION: {dependencies_decision(tool_error_runs, main_deps)}" if flags["dependencies"]
-                 else "DECISION: dependencies already blocking (report_only.dependencies is false)")
+                 else "DECISION: dependencies already blocking (main's report_only.dependencies is not true)")
     if codeql_fixed is None:
         lines.append(f"DECISION: codeql: {CODEQL_BLOCKED}")
     elif codeql_fixed:
