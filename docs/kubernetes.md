@@ -1230,12 +1230,16 @@ keeping nothing until the daemon has answered, the command:
    refuses a pi-legion-envoy it does not load, or one speaking another Go daemon API contract;
 3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer`. The
    daemon compares it in constant time and mints a fresh controller capability, which replaces the
-   previous one and its registration and ends every controller grant: the last start wins;
+   previous one and its registration and ends every controller grant: the last start wins. The
+   answer also carries the daemon's `gates.design`, and an answer without `root-issues` or `off`
+   is refused with a request to upgrade the daemon;
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
    `$XDG_STATE_HOME/legion/<project>-controller`), beside the `gh` shim, the `legion` launcher and the
    deployment instructions;
 5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
-   `--append-system-prompt`, no `--resume`, no `--mode rpc`) with the controller's environment
+   `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
+   and the deployment instructions, a start message as Oh My Pi's first prompt so the controller's first turn runs its start
+   procedure with nothing typed, no `--resume`, no `--mode rpc`) with the controller's environment
    (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
