@@ -19,12 +19,15 @@ production build from `web/dist`.
   them, hidden while it is collapsed, so everything it holds - its draft, a send in flight and its
   refusal, an upload, a reply in progress, the issue picked, the unread set and what was unfolded -
   has one owner that no pin, fold or collapse discards, and nothing is ever handed from one
-  instance to another. A collapsed row's list marks nothing read, and each open freezes its unread
-  set afresh (`useUnreadAtOpen`). The composer takes a changed seed - an issue pick, or a reply that
-  moves the message to another channel - into its live draft in place (`initialDraft`); a message
-  on its way holds the picker and every Reply until the server answers (the row reads its send
-  through `useIsMutating` on `agentComposerMutationKey`), and a refusal hands back exactly the
-  draft that was sent.
+  instance to another. A row's list marks nothing read unless the row is open and on screen - a
+  collapsed row, or an open one a closed fold hides (the reader folded it, Shift+P moved it, or its
+  agent went quiet for ten minutes), marks nothing - and each time it comes back on screen it
+  freezes its unread set afresh (`useUnreadAtOpen`). The composer takes a changed seed - an issue
+  pick, or a reply that moves the message to another channel - into its live draft in place
+  (`seededDraft`); a message on its way holds the picker, every Reply and Cancel reply until the
+  server answers (the row reads its send through `useIsMutating` on `agentComposerMutationKey`),
+  and a refusal hands back exactly the draft that was sent. An upload's reference names where the
+  file went, whatever was picked while it was out.
 - The Agents broadcast page renders recipients in the order the server returns them: the send's
   tick order after exclusions.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
@@ -454,6 +457,20 @@ worker evaluates a helper module once, at the first spec that imports it, so a t
 the helper's module scope ages with every spec the worker runs after that, until the Agents page
 folds the session under `Inactive` at 10 minutes. A spec's own module scope is evaluated when the
 worker reaches that spec, which is why `agents.e2e.ts` can pin literal ages for its freshness rows.
+The Agents page keeps rows mounted where a reader cannot see them: a closed fold's rows stay in its
+one keyed list with the `hidden` attribute, and a row opened once keeps its conversation and
+composer inside it, hidden, while it is collapsed. Role queries (Playwright's and Testing
+Library's `getByRole`) skip hidden elements; CSS locators, `getByText`, `nth`, counts and
+`toHaveText`/`toContainText` do not. So a query over rows says which it means:
+`shownAgentRows(page)` (`e2e/agents.ts`) for the rows a reader sees, `agentRow(page, id)` for one
+row shown or hidden with `toBeVisible`/`toBeHidden` saying which is expected, `includeHidden: true`
+or `hidden: true` where a hidden element is the point, and `filter({ visible: true })` on text. A
+count of 0 no longer means a folded or collapsed row's content is gone, only that the query did
+not look for hidden elements. `toBeHidden()` also passes when nothing matches at all, so wherever
+it means "mounted but hidden" it needs `toHaveCount(1)` beside it. A hidden row is off screen for
+every purpose: its list marks nothing read (`open` is expanded and not hidden). `holdPosts` and
+`refusePosts` hold a route's `POST`s until released or refused, as a slow or failing server
+would, and `pasteFile` pastes a file into a field as the clipboard does.
 `e2e/clipboard.ts`'s `recordClipboard(page)` swaps the page's async clipboard for a recorder before
 navigation, so a copy-button test asserts the written value rather than only the `Copied` label.
 `e2e/touch.ts` drives real touch gestures through Chromium's `Input.dispatchTouchEvent`

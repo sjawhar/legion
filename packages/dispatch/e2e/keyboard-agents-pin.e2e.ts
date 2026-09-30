@@ -447,13 +447,17 @@ test.describe("agents page pins", () => {
       const staleRow = agentRow(page, stale.session_id);
       const conversation = staleRow.getByRole("list", { name: "Conversation with Stale" });
       const fold = page.getByRole("button", { name: /^Inactive/ });
-      const navigation = page.getByRole("link", { name: /^Agents/ });
+      // What the navigation's badge shows, read from the server: the phone keeps that link in a
+      // menu, so the count is the one surface every project has.
+      const unread = async () =>
+        (await (await page.request.get("/api/v1/me/agents/state")).json())[stale.session_id]
+          ?.unread_replies ?? 0;
 
       await fold.click();
       await staleRow.getByRole("button", { exact: true, name: "Stale" }).click();
       await expect(conversation).toContainText("First answer");
       await expect.poll(() => readMarks.length).toBeGreaterThan(0);
-      await expect(navigation).not.toContainText("New replies");
+      await expect.poll(unread).toBe(0);
       const marked = readMarks.length;
 
       // The fold closes over the open row: it stays mounted, hidden, and its list still hears
@@ -468,17 +472,85 @@ test.describe("agents page pins", () => {
       );
       await replyToMessageDelivery(second.id, { attempt: 1, body: "Second answer" }, actor);
       await refetched;
-      await expect(navigation).toContainText("New replies 1");
+      await expect.poll(unread).toBe(1);
       // Nothing may mark it read from here, so the check waits out the render and effect a
       // hidden list would take to write one.
       await page.waitForTimeout(1_500);
       expect(readMarks).toHaveLength(marked);
-      await expect(navigation).toContainText("New replies 1");
+      expect(await unread()).toBe(1);
 
       await fold.click();
       await expect(conversation).toContainText("Second answer");
       await expect.poll(() => readMarks.length).toBeGreaterThan(marked);
-      await expect(navigation).not.toContainText("New replies");
+      await expect.poll(unread).toBe(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The same loss by the other road into a closed fold: Shift+P hands an open, pinned row back to
+  // it. (Written by the acceptance run, which saw it fail at 4881f7bb on chromium and iphone.)
+  test("an open row Shift+P unpins into a closed fold marks nothing read there", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const inactive = (id: string, title: string, minutes: number): FakeSession => ({
+      capabilities: ["aside", "btw", "steer"],
+      dir: `/srv/${id}`,
+      last_seen: Date.now() - minutes * 60_000,
+      machine_id: "box-1",
+      roles: ["tester"],
+      session_id: `${id}-session`,
+      title,
+    });
+    // Two inactive sessions, so the fold stays on the page while one of them is pinned out.
+    const stale = inactive("stale", "Stale", 45);
+    await setLiveSessions([plannerSession, reviewerSession, stale, inactive("old", "Old", 50)]);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const fold = page.getByRole("button", { name: /^Inactive/ });
+      const staleRow = agentRow(page, stale.session_id);
+      const unread = async () =>
+        (await (await page.request.get("/api/v1/me/agents/state")).json())[stale.session_id]
+          ?.unread_replies ?? 0;
+
+      await fold.click();
+      await staleRow.getByRole("button", { name: "Pin Stale" }).click();
+      await expect(shownAgentRows(page).nth(0)).toHaveAttribute("data-agent-row", "stale-session");
+      await fold.click();
+      await staleRow.getByRole("button", { exact: true, name: "Stale" }).click();
+      await expect(staleRow.getByRole("textbox", { name: "Comment" })).toBeVisible();
+      await pinFromRow(staleRow, "box-1 · /srv/stale");
+      await expect(staleRow).toHaveCount(1);
+      await expect(staleRow).toBeHidden();
+
+      const marks: string[] = [];
+      page.on("request", (request) => {
+        if (request.method() === "PUT" && request.url().endsWith("/stale-session/state")) {
+          marks.push(request.postData() ?? "");
+        }
+      });
+      const asked = await createAgentMessage(stale.session_id, {
+        body: "Are you there?",
+        delivery: "btw",
+      });
+      await replyToMessageDelivery(
+        asked.id,
+        { attempt: 1, body: "Yes, here" },
+        { id: stale.session_id, kind: "session" }
+      );
+      // The hidden row's list has the reply: a row reading it would mark it now.
+      await expect(staleRow.getByText("Yes, here")).toBeAttached();
+      await page.waitForTimeout(1_000);
+      expect(marks).toEqual([]);
+      expect(await unread()).toBe(1);
+
+      // On screen again, the reply is read.
+      await fold.click();
+      await expect(staleRow.getByText("Yes, here")).toBeVisible();
+      await expect.poll(unread).toBe(0);
     } finally {
       await context.close();
     }

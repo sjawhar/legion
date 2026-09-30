@@ -293,7 +293,7 @@ test.describe("agents page", () => {
       await expect(toggle).toContainText("CORE-2");
       upload.release();
 
-      await expect(field).toHaveValue("@Planner dispatch://CORE-1/artifact/notes");
+      await expect(field).toHaveValue("@Planner dispatch://CORE-1/artifact/notes-md");
       expect(upload.posts()).toBe(1);
     } finally {
       await context.close();

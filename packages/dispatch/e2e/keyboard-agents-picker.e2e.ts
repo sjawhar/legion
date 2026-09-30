@@ -349,10 +349,13 @@ test.describe("agents page", () => {
       const row = agentRow(page, plannerSession.session_id);
       const field = row.getByRole("textbox", { name: "Comment" });
       const cancelReply = row.getByRole("button", { name: "Cancel reply" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
       const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
 
       await page.keyboard.press("j");
       await page.keyboard.press("i");
+      // The picker takes focus once its list lands; the arrows are for it, not the row.
+      await expect(picker).toBeFocused();
       await page.keyboard.press("ArrowDown");
       await page.keyboard.press("Enter");
       await expect(field).toHaveValue("@Planner");

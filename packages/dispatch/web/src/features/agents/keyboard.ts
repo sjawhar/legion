@@ -14,6 +14,7 @@ const AGENT_ROW_ATTRIBUTE = "data-agent-row";
 export const AGENT_ROW_SELECTOR = `[${AGENT_ROW_ATTRIBUTE}]`;
 const AGENT_COMPOSER_SELECTOR = "[data-agent-composer]";
 export const ISSUE_PICKER_SELECTOR = "[data-agent-issue-picker]";
+const ISSUE_SELECT_SELECTOR = "[data-agent-issue-select]";
 
 /** The agent row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedAgentRow(): HTMLElement | null {
@@ -101,10 +102,20 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       label: "Pick an issue for the message",
       // The picker takes focus itself once its list lands (`AgentMessageComposer.tsx`'s
       // `issueSelect`), so the key that opens it leaves the reader inside it, where the arrows
-      // choose an issue and Escape is the control's own way out. A row not yet opened has no
-      // picker at all and a collapsed one's is hidden, so the row says whether one can open; an
-      // open row's picker is disabled while its message is in flight.
-      run: () => inOpenRow((row) => row.querySelector<HTMLElement>(ISSUE_PICKER_SELECTOR)?.click()),
+      // choose an issue and Escape is the control's own way out. It opens rather than toggles:
+      // a picker left open when the row collapsed is still open, so the key goes into its select
+      // instead of clicking it shut. A row not yet opened has no picker at all and a collapsed
+      // one's is hidden, so the row says whether one can open; an open row's picker is disabled
+      // while its message is in flight.
+      run: () =>
+        inOpenRow((row) => {
+          const toggle = row.querySelector<HTMLElement>(ISSUE_PICKER_SELECTOR);
+          if (toggle?.getAttribute("aria-expanded") === "true") {
+            row.querySelector<HTMLElement>(ISSUE_SELECT_SELECTOR)?.focus();
+            return;
+          }
+          toggle?.click();
+        }),
       when: () => {
         const row = focusedAgentRow();
         return (

@@ -54,7 +54,7 @@ const createdComment: Comment = {
 interface ComposerOptions {
   agents?: readonly Agent[];
   edit?: { body: string; id: string };
-  initialMentions?: readonly { target: string; title: string }[];
+  seedMentions?: readonly { target: string; title: string }[];
   onCancelReply?: () => void;
   onSent?: () => void;
   owner?: ComposerOwner;
@@ -80,7 +80,7 @@ function renderComposer(options: ComposerOptions = {}) {
         <MentionComposer
           agents={props.agents}
           edit={props.edit}
-          initialMentions={props.initialMentions}
+          seedMentions={props.seedMentions}
           onCancelReply={props.onCancelReply}
           onClose={() => {}}
           onSent={props.onSent ?? (() => {})}
@@ -781,7 +781,7 @@ const createdMessage: Message = {
 // accepted records disagreeing is exactly the defect these cover.
 test("a mount seeds the owner's mention and sends it", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
-  const { view } = renderComposer({ initialMentions: [plannerMention] });
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
@@ -821,7 +821,7 @@ test("a draft entering a channel that owes a mention is seeded in front of it, r
     fireEvent.change(field, { target: { value: "hello " } });
     await acceptMention(field, "Worker");
     await waitFor(() => expect(field.value).toBe("hello @Worker"));
-    rerender({ agents: [planner, worker], initialMentions: [plannerMention] });
+    rerender({ agents: [planner, worker], seedMentions: [plannerMention] });
     await waitFor(() => expect(field.value).toBe("@Planner hello @Worker"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
@@ -848,7 +848,7 @@ test("a draft that already holds the channel's mention is not seeded twice, wher
     await acceptMention(field, "Planner");
     await waitFor(() => expect(field.value).toBe("y@Planner"));
     fireEvent.change(field, { target: { value: "y@Planner x" } });
-    rerender({ agents: [planner, worker], initialMentions: [plannerMention] });
+    rerender({ agents: [planner, worker], seedMentions: [plannerMention] });
     await waitFor(() => expect(field.value).toBe("y@Planner x"));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
@@ -873,7 +873,7 @@ test("a mention accepted after a reseed lands at its own offset", async () => {
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
     fireEvent.change(field, { target: { value: "hello" } });
-    rerender({ agents: [planner, worker], initialMentions: [plannerMention] });
+    rerender({ agents: [planner, worker], seedMentions: [plannerMention] });
     await waitFor(() => expect(field.value).toBe("@Planner hello"));
     fireEvent.change(field, { target: { value: "@Planner hello " } });
     await acceptMention(field, "Worker");
@@ -897,7 +897,7 @@ test("a mention accepted after a reseed lands at its own offset", async () => {
 // proves the reader never touched the text the last channel seeded, so it goes with the channel.
 test("the owner's own untouched mention leaves with the channel that seeded it", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
-  const { rerender, view } = renderComposer({ initialMentions: [plannerMention] });
+  const { rerender, view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
@@ -916,7 +916,7 @@ test("the owner's own untouched mention leaves with the channel that seeded it",
 });
 
 test("an owner mention the reader edited is their prose and stays", async () => {
-  const { rerender, view } = renderComposer({ initialMentions: [plannerMention] });
+  const { rerender, view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
@@ -934,7 +934,7 @@ test("an owner mention the reader edited is their prose and stays", async () => 
 // composer's own - the same one a successful send runs. What it leaves is what a mount shows: the
 // channel's own mention, seeded again, or the next message would not reach it.
 test("Discard clears the draft to what a mount shows, wherever the host takes focus", () => {
-  const { view } = renderComposer({ initialMentions: [plannerMention] });
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
@@ -954,7 +954,7 @@ test("a refused send's Retry asks what Send asks, and Discard takes the notice w
   const createComment = spyOn(api, "createComment").mockRejectedValue(
     new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
   );
-  const { view } = renderComposer({ initialMentions: [plannerMention] });
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
@@ -982,13 +982,13 @@ test("a refused send's Retry asks what Send asks, and Discard takes the notice w
   }
 });
 
-// The draft can move while its send is out - a reply cancelled mid-flight takes the message back
-// to a channel that seeds nothing, which strips the seeded mention - but the refusal is about
-// what was sent: the reader gets exactly that back, records and all, to retry or edit.
+// The composer holds its own controls while a send is out, but a host can still hand it a new
+// seed then - here, to a channel that seeds nothing, which strips the seeded mention. The refusal
+// is about what was sent: the reader gets exactly that back, records and all, to retry or edit.
 test("a refusal hands back the draft that was sent, not the one the channel moved to", async () => {
   const refused = Promise.withResolvers<Comment>();
   const createComment = spyOn(api, "createComment").mockReturnValue(refused.promise);
-  const { rerender, view } = renderComposer({ initialMentions: [plannerMention] });
+  const { rerender, view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");

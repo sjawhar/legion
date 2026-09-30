@@ -713,7 +713,10 @@ function AgentRow({
             agent={agent}
             liveAgents={liveAgents}
             onReply={setReplyTo}
-            open={expanded}
+            // Open means on screen: an expanded row in a closed fold is as unseen as a collapsed
+            // one, so it marks nothing read, and reopening the fold is an open that freezes its
+            // unread set afresh.
+            open={expanded && !hidden}
             replyDisabled={sending}
           />
           <div data-agent-composer="">

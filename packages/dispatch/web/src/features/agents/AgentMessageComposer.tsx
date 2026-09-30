@@ -221,6 +221,7 @@ export function AgentMessageComposer({
               <select
                 aria-label="Issue"
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal disabled:cursor-not-allowed disabled:opacity-50 ${inputClasses(true)}`}
+                data-agent-issue-select=""
                 disabled={sending}
                 onBlur={() => {
                   // A step is not a pick until `Enter`, so leaving the select any other way -
@@ -271,7 +272,7 @@ export function AgentMessageComposer({
         // The channel decides which mention the message needs - an issue comment reaches this
         // agent by mentioning it, a direct message does not. The composer takes a changed seed
         // into its live draft in place, so one instance holds the draft across every pick.
-        initialMentions={
+        seedMentions={
           useDirectChannel
             ? undefined
             : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
