@@ -33,7 +33,7 @@ if (
   console.error(`gh-standin: ${run}/fixtures.json has no routes array`);
   process.exit(2);
 }
-// fixture.sh writes each route as {match, stdout?, stderr?, exit?}.
+// rig.sh's worker_fixture writes each route as {match, stdout?, stderr?, exit?}.
 const routes: readonly Route[] = fixtures.routes;
 
 let stdin: string | undefined;
@@ -72,11 +72,17 @@ for (let index = 0; index < args.length; index += 1) {
     if (prPatch && key === "body") body = value;
   }
 }
-const input = args[args.indexOf("--input") + 1];
-if (prPatch && args.includes("--input") && input !== undefined) {
+const inputIndex = args.indexOf("--input");
+const input = inputIndex >= 0 ? args[inputIndex + 1] : undefined;
+if (prPatch && input !== undefined) {
   const parsed: unknown = JSON.parse(files[input] ?? "null");
-  if (typeof parsed === "object" && parsed !== null && "body" in parsed) {
-    if (typeof parsed.body === "string") body = parsed.body;
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    "body" in parsed &&
+    typeof parsed.body === "string"
+  ) {
+    body = parsed.body;
   }
 }
 const joined = `${as} ${args.join(" ")}`;
