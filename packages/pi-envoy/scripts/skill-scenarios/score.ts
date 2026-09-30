@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-// Scores what rig.sh's agents did, from what the stand-ins recorded, never from what an agent
-// said it did.
+// Scores what rig.sh's agents did, from what the stand-ins, the scratch Dispatch and the bare
+// remote recorded, never from what an agent said it did.
 //
 //   score.ts live-read <run dir> <skills dir> <omp logs dir>
 //     One row per `read` the session made: the characters it got back, the file's own character
@@ -8,9 +8,12 @@
 //     the file arrived whole; then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
 //     One row per run, then pass counts per scenario and label. Each ask-on-message ask is printed
-//     whole, since the pass rule is read by a person: the automatic flags only point at it.
+//     whole, since the pass rule is read by a person: the automatic flags only point at it. A run
+//     the rig failed (no `exit=` line in its out.txt, or a record missing or malformed) is a rig
+//     error: printed with its reason and left out of the pass counts.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { describePhaseHandoffWriteProblems } from "@legion/contracts";
 import { z } from "zod";
 
 /** An Oh My Pi session transcript line: a tool call starting, or a tool's result. */
@@ -43,27 +46,26 @@ const IssueAsks = z.array(
       .nullish(),
   })
 );
-const IssueEvent = z.looseObject({
-  type: z.string(),
-  actor: z.looseObject({ kind: z.string(), id: z.string().nullish() }).nullish(),
-});
-/** `GET /api/v1/issues/{key}/events`: a page of the issue's event log. */
-const IssueEvents = z.union([
-  z.array(IssueEvent),
-  z.looseObject({ events: z.array(IssueEvent) }).transform((page) => page.events),
-]);
+/** `GET /api/v1/issues/{key}/events`: a page of the issue's event log, a bare array. */
+const IssueEvents = z.array(
+  z.looseObject({
+    type: z.string(),
+    actor: z.looseObject({ kind: z.string(), id: z.string().nullish() }).nullish(),
+  })
+);
 /** `GET /api/v1/issues/{key}/messages/{id}`: the message and its replies. */
 const MessageRead = z.looseObject({ message: z.looseObject({ body: z.string() }) });
-/** One line gh-standin.ts or legion-standin.sh records. */
+/** One line gh-standin.ts or legion-standin.sh records: when the call started, and its exit. */
 const Call = z.looseObject({
   at: z.string(),
   as: z.string(),
   argv: z.array(z.string()),
+  exit: z.number(),
   stdin: z.string().optional(),
   files: z.record(z.string(), z.string()).optional(),
 });
-type Call = z.infer<typeof Call>;
-const TestHandoff = z.looseObject({ proof: z.array(z.unknown()).min(1) });
+/** rig.sh's worker_fixture: the tester's world. */
+const World = z.object({ key: z.string(), repo: z.string(), pr: z.number(), branch: z.string() });
 
 function lines(file: string): string[] {
   if (!existsSync(file)) return [];
@@ -71,12 +73,17 @@ function lines(file: string): string[] {
     .split("\n")
     .filter((line) => line.trim() !== "");
 }
-/** Each line of a JSONL file that parses as `schema`; a line that does not is dropped. */
+/** Each line of a JSONL file, parsed as `schema`; a line that does not parse is the rig's fault. */
 function parsed<T>(file: string, schema: z.ZodType<T>): T[] {
-  return lines(file).flatMap((line) => {
+  return lines(file).map((line, index) => {
     const result = schema.safeParse(JSON.parse(line));
-    return result.success ? [result.data] : [];
+    if (!result.success)
+      throw new Error(`${file}:${index + 1} is not a record: ${result.error.message}`);
+    return result.data;
   });
+}
+function json<T>(file: string, schema: z.ZodType<T>): T {
+  return schema.parse(JSON.parse(readFileSync(file, "utf8")));
 }
 
 function session(runDir: string): SessionEntry[] {
@@ -155,13 +162,12 @@ interface Row {
 }
 
 function askOnMessage(runDir: string, run: string, label: string): Row {
-  const json = (file: string): unknown => JSON.parse(readFileSync(path.join(runDir, file), "utf8"));
-  const asks = IssueAsks.parse(json("asks.json"));
+  const asks = json(path.join(runDir, "asks.json"), IssueAsks);
   // Anything else the agent wrote on the issue; seed.ts writes as the session `dispatch-owner`.
-  const other = IssueEvents.parse(json("events.json"))
+  const other = json(path.join(runDir, "events.json"), IssueEvents)
     .filter((event) => event.actor?.id !== "dispatch-owner" && !event.type.startsWith("ask."))
     .map((event) => event.type);
-  const message = MessageRead.parse(json("message.json"));
+  const message = json(path.join(runDir, "message.json"), MessageRead);
   const wanted = terms(message.message.body);
   const verdicts = asks.map((ask) => {
     const question = ask.question;
@@ -176,6 +182,8 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
   const skillReads = readCalls(session(runDir))
     .map((call) => call.target)
     .filter((target) => target.startsWith("skill://"));
+  // The rule is in the dispatch skill's SKILL.md.
+  const ref = skillReads.some((target) => /^skill:\/\/dispatch(\/SKILL\.md)?$/.test(target));
   const notes = [
     `asks=${asks.length}`,
     ...verdicts.map(
@@ -190,41 +198,56 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
     const shown = v.options.map((o) => `  - ${o.label}: ${o.description ?? ""}`);
     notes.push(`\n  ask${i + 1} question: ${v.question}\n${shown.join("\n")}`);
   }
-  return { run, scenario: "ask-on-message", label, pass, ref: true, notes: notes.join(" ") };
+  return { run, scenario: "ask-on-message", label, pass, ref, notes: notes.join(" ") };
+}
+
+/** The tester's handoff as the next phase reads it: `.legion/test.json` at a pushed commit, which
+ * must pass the handoff CLI's own write rules and carry a proof of its own. */
+function pushedProof(remote: string, sha: string): string[] {
+  const shown = Bun.spawnSync(["git", "-C", remote, "show", `${sha}:.legion/test.json`]);
+  if (shown.exitCode !== 0) return [`${sha} has no .legion/test.json`];
+  const handoff: unknown = JSON.parse(shown.stdout.toString());
+  const problems = describePhaseHandoffWriteProblems(handoff);
+  if (problems.length > 0) return problems;
+  const { phase, proof } = handoff as { phase?: unknown; proof?: unknown };
+  if (phase !== "test") return [`phase is ${JSON.stringify(phase)}, not "test"`];
+  return Array.isArray(proof) && proof.length > 0 ? [] : ["no proof of the tester's own"];
 }
 
 function testerProof(runDir: string, run: string, label: string): Row {
+  const world = json(path.join(runDir, "world.json"), World);
   const calls = parsed(path.join(runDir, "calls.jsonl"), Call);
-  const callText = (call: Call) =>
-    [call.argv.join(" "), call.stdin ?? "", ...Object.values(call.files ?? {})].join("\n");
-  const write = calls.find(
-    (c) => c.argv[0] === "handoff" && c.argv[1] === "write" && c.argv.includes("test")
-  );
-  let proof = false;
-  try {
-    proof = TestHandoff.safeParse(JSON.parse(write?.stdin ?? "")).success;
-  } catch {
-    proof = false;
-  }
-  const complete = calls.find((c) => c.argv[0] === "handoff" && c.argv[1] === "complete");
+  const handoffs = calls.filter((c) => c.as === "legion" && c.argv[0] === "handoff");
+  const writes = handoffs.filter((c) => c.argv[1] === "write" && c.argv.includes("test"));
+  // A write or completion the CLI refused never counts.
+  const write = writes.find((c) => c.exit === 0);
+  const refused = writes.filter((c) => c.exit !== 0).length;
+  const complete = handoffs.find((c) => c.argv[1] === "complete" && c.exit === 0);
   const edit = calls.find(
     (c) =>
       c.as === "gh" &&
-      /^pr edit|^api .*pulls\/7/.test(c.argv.join(" ")) &&
-      callText(c).includes("E2E (tester)")
+      c.exit === 0 &&
+      new RegExp(`^pr edit|^api .*pulls/${world.pr}`).test(c.argv.join(" ")) &&
+      [c.argv.join(" "), c.stdin ?? "", ...Object.values(c.files ?? {})]
+        .join("\n")
+        .includes("E2E (tester)")
   );
   const remote = path.join(runDir, "remote.git");
-  const push = lines(path.join(runDir, "pushes.log"))
+  const pushes = lines(path.join(runDir, "pushes.log"))
     .map((line) => {
       const [at = "", ref = "", , sha = ""] = line.split(" ");
       return { at, ref, sha };
     })
-    .filter((p) => p.ref === "refs/heads/legion/LWEVAL-1")
-    .find(
-      (p) =>
-        Bun.spawnSync(["git", "-C", remote, "cat-file", "-e", `${p.sha}:.legion/test.json`])
-          .exitCode === 0
-    );
+    .filter((p) => p.ref === `refs/heads/${world.branch}`);
+  const push = pushes.find(
+    (p) =>
+      Bun.spawnSync(["git", "-C", remote, "cat-file", "-e", `${p.sha}:.legion/test.json`])
+        .exitCode === 0
+  );
+  // The branch as the next phase finds it: its tip when the tester completed, else its last push.
+  const tip = pushes.filter((p) => complete === undefined || p.at < complete.at).at(-1);
+  const problems = tip === undefined ? ["nothing pushed"] : pushedProof(remote, tip.sha);
+  const proof = problems.length === 0;
   const ordered =
     write !== undefined &&
     push !== undefined &&
@@ -240,8 +263,9 @@ function testerProof(runDir: string, run: string, label: string): Row {
     .filter((target) => target.includes("legion-worker"))
     .map((target) => target.replace("skill://legion-worker", "") || "/");
   const notes = [
-    `write=${write !== undefined} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} ordered=${ordered} testerLine=${edit !== undefined}`,
+    `write=${write !== undefined} refusedWrites=${refused} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} ordered=${ordered} testerLine=${edit !== undefined}`,
     `editBeforeWrite=${edit !== undefined && write !== undefined && edit.at < write.at}`,
+    ...(proof ? [] : [`proofProblems=${JSON.stringify(problems)}`]),
     `refs=[${worker.join(",")}]`,
     lines(path.join(runDir, "out.txt")).at(-1) ?? "",
   ];
@@ -250,24 +274,48 @@ function testerProof(runDir: string, run: string, label: string): Row {
 
 function scoreRuns(runsDir: string, only: string | undefined) {
   const rows: Row[] = [];
+  const errors: { run: string; key: string; reason: string }[] = [];
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
     const match = /^(ask-on-message|tester-proof)-(.+)-(\d+)$/.exec(run);
     if (!match) continue;
     const [, scenario = "", label = ""] = match;
     if (only && scenario !== only) continue;
     const dir = path.join(runsDir, run);
-    rows.push(
-      scenario === "ask-on-message" ? askOnMessage(dir, run, label) : testerProof(dir, run, label)
-    );
+    const key = `${scenario}\t${label}`;
+    // A run the rig failed never reached its agent's exit, or left a record missing or malformed.
+    let reason = lines(path.join(dir, "out.txt")).at(-1)?.startsWith("exit=")
+      ? undefined
+      : "out.txt has no exit= line: the run never finished";
+    if (reason === undefined) {
+      try {
+        rows.push(
+          scenario === "ask-on-message"
+            ? askOnMessage(dir, run, label)
+            : testerProof(dir, run, label)
+        );
+      } catch (error) {
+        reason = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (reason !== undefined) errors.push({ run, key, reason });
   }
   for (const row of rows) console.log(`${row.run}\tpass=${row.pass}\tref=${row.ref}\t${row.notes}`);
-  console.log("\nscenario\tlabel\tpass\tpass+ref");
-  const keys = [...new Set(rows.map((row) => `${row.scenario}\t${row.label}`))];
+  for (const error of errors) console.log(`${error.run}\trig error: ${error.reason}`);
+  console.log("\nscenario\tlabel\tpass\tpass+ref\trig errors");
+  const keys = [
+    ...new Set([
+      ...rows.map((row) => `${row.scenario}\t${row.label}`),
+      ...errors.map((e) => e.key),
+    ]),
+  ];
   for (const key of keys) {
     const group = rows.filter((row) => `${row.scenario}\t${row.label}` === key);
     const passed = group.filter((row) => row.pass);
     const withRef = passed.filter((row) => row.ref);
-    console.log(`${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}`);
+    const failed = errors.filter((error) => error.key === key).length;
+    console.log(
+      `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}`
+    );
   }
 }
 

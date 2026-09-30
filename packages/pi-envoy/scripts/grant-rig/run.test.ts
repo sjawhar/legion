@@ -22,7 +22,8 @@ test("strips an inherited Anthropic key from both worker launch modes", () => {
     ["rpc", true],
     ["tui", false],
   ] as const) {
-    const workerEnv = workerEnvironment({ ...launch, useSecrets }, inherited);
+    const worker = { ...launch, useSecrets };
+    const workerEnv = workerEnvironment(worker, inherited);
 
     expect(workerEnv).not.toHaveProperty("ANTHROPIC_API_KEY");
     expect(workerEnv).toMatchObject({
@@ -30,7 +31,7 @@ test("strips an inherited Anthropic key from both worker launch modes", () => {
       OPENAI_API_KEY: "openai-key",
       PATH: "/rig/state/worker-bin:/rig/state/bin:/usr/bin",
     });
-    expect(launchArgv({ ...launch, useSecrets }, mode)).toEqual(
+    expect(launchArgv(worker, mode)).toEqual(
       useSecrets
         ? ["secrets", "GEMINI_API_KEY", "OPENAI_API_KEY", "--", "/opt/omp/bin/omp", "--mode", "rpc"]
         : ["/opt/omp/bin/omp"]

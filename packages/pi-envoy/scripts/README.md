@@ -112,13 +112,18 @@ has one session read every file of a skill and reports whether each arrived whol
 ```bash
 cd packages/pi-envoy/scripts/skill-scenarios
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout>
-./rig.sh services up            # scratch Dispatch (the e2e harness's Go server), Postgres, NATS, listener
-./rig.sh batch ask-on-message 5 head base
+./rig.sh batch ask-on-message 5 head base   # starts and stops the scratch Dispatch, Postgres, NATS, listener
 ./rig.sh batch tester-proof 5 head base
 ./rig.sh score
-./rig.sh services down
 ```
 
 The scenarios, their pass rules and every input are in the script's header (`./rig.sh` with no
-arguments prints it). It needs the model gateway and Docker; every port it binds is in
-27000-27999, and nothing it runs reaches production Dispatch, GitHub, Envoy or NATS.
+arguments prints it). It needs the model gateway and Docker. Its bounded waits, port picks and
+process stops are [`scripts/e2e/lib/rig.sh`](../../../scripts/e2e/README.md#librigsh)'s; Docker
+assigns the containers' ports, and the kernel assigns each daemon stand-in's. Its agents run on the
+work directory's own tmux server (`<work>/tmux.sock`), and every container and session name carries
+the work directory's digest, so two rigs on one box never touch each other's. A batch stops its
+runs, agents and services when it exits, INT and TERM included. Nothing it runs reaches production
+Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's `DISPATCH_*`, `ENVOY_*` or
+`NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or `E2E_AGENT_TOKEN`
+is set.

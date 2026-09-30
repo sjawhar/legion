@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Stand-in for `gh`, and for every `legion` subcommand that talks to GitHub, on a skill scenario's
-// PATH. Each call is recorded to $SKILL_SCENARIO_RUN/calls.jsonl (argv, and the contents of any
-// file or stdin it hands GitHub a body through), then answered from the first route in
+// PATH. Each call is recorded to $SKILL_SCENARIO_RUN/calls.jsonl (argv, the contents of any file or
+// stdin it hands GitHub a body through, and its exit status), then answered from the first route in
 // $SKILL_SCENARIO_RUN/fixtures.json whose regex matches "<as> <argv...>". A call no route matches
 // answers `gh: Not Found (HTTP 404)` and exits 1. Nothing is sent anywhere. `--json a,b` picks
 // fields and `--jq`/`-q` runs jq, as gh does. A pull request body edit (`gh pr edit --body`,
@@ -9,13 +9,19 @@
 // has a `body` then answers with the new one, as GitHub's next read would.
 //   gh-standin.ts <gh|legion> <args...>
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { z } from "zod";
 
-interface Route {
-  readonly match: string;
-  readonly stdout?: unknown;
-  readonly stderr?: string;
-  readonly exit?: number;
-}
+/** rig.sh's worker_fixture writes each route as {match, stdout?, stderr?, exit?}. */
+const Fixtures = z.looseObject({
+  routes: z.array(
+    z.object({
+      match: z.string(),
+      stdout: z.unknown().optional(),
+      stderr: z.string().optional(),
+      exit: z.number().optional(),
+    })
+  ),
+});
 
 const run = process.env.SKILL_SCENARIO_RUN;
 if (!run) {
@@ -23,18 +29,9 @@ if (!run) {
   process.exit(2);
 }
 const [as = "gh", ...args] = Bun.argv.slice(2);
-const fixtures: unknown = JSON.parse(readFileSync(`${run}/fixtures.json`, "utf8"));
-if (
-  typeof fixtures !== "object" ||
-  fixtures === null ||
-  !("routes" in fixtures) ||
-  !Array.isArray(fixtures.routes)
-) {
-  console.error(`gh-standin: ${run}/fixtures.json has no routes array`);
-  process.exit(2);
-}
-// rig.sh's worker_fixture writes each route as {match, stdout?, stderr?, exit?}.
-const routes: readonly Route[] = fixtures.routes;
+const at = new Date().toISOString();
+const fixtures = Fixtures.parse(JSON.parse(readFileSync(`${run}/fixtures.json`, "utf8")));
+const routes = fixtures.routes;
 
 let stdin: string | undefined;
 const readStdin = async () => {
@@ -87,13 +84,17 @@ if (prPatch && input !== undefined) {
 }
 const joined = `${as} ${args.join(" ")}`;
 const route = routes.find((candidate) => new RegExp(candidate.match, "s").test(joined));
-appendFileSync(
-  `${run}/calls.jsonl`,
-  `${JSON.stringify({ at: new Date().toISOString(), as, argv: args, files, stdin, route: route?.match ?? null })}\n`
-);
+/** Records the call with the status it exits with, then exits. */
+function exit(status: number): never {
+  appendFileSync(
+    `${run}/calls.jsonl`,
+    `${JSON.stringify({ at, as, argv: args, files, stdin, route: route?.match ?? null, exit: status })}\n`
+  );
+  process.exit(status);
+}
 if (!route) {
   console.error(as === "gh" ? "gh: Not Found (HTTP 404)" : `unknown command: ${args.join(" ")}`);
-  process.exit(1);
+  exit(1);
 }
 if (body !== undefined) {
   const edited = routes.map((candidate) =>
@@ -120,9 +121,9 @@ if (filter !== undefined) {
   text = jq.stdout.toString();
   if (jq.exitCode !== 0) {
     process.stderr.write(jq.stderr.toString());
-    process.exit(1);
+    exit(1);
   }
 }
 if (text !== "") process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
 if (route.stderr) process.stderr.write(route.stderr);
-process.exit(route.exit ?? 0);
+exit(route.exit ?? 0);

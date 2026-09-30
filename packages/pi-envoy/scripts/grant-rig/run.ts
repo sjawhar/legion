@@ -37,7 +37,8 @@ import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promise
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { roleToken } from "@legion/contracts";
+import { type LegionRole, roleToken } from "@legion/contracts";
+import { grantSecretName, secretFilePath } from "../../../daemon/src/daemon/secrets";
 import { pathWithoutWorkerBin } from "../../../daemon/src/daemon/worker-bin";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -197,19 +198,28 @@ interface WorkerLaunch {
   readonly useSecrets: boolean;
 }
 
-/** The role token the rig worker claims; the grant file the daemon would name for it. */
-const RIG_ROLE_TOKEN = roleToken("l12rig", "RIG-1", "implementer");
+/** The claim a worker pane is launched for: its project, issue and role. */
+export interface WorkerClaim {
+  readonly project: string;
+  readonly issue: string;
+  readonly role: LegionRole;
+}
 
-/** The environment the Legion daemon gives a phase-worker pane, pointed at the scratch state
- * directory and the stand-in daemon — including the static credential environment
+/** The grant rig's own worker, whose role token collides with no live issue's. */
+const RIG_CLAIM: WorkerClaim = { project: "l12rig", issue: "RIG-1", role: "implementer" };
+
+/** The environment the Legion daemon gives a phase-worker pane for `claim`, pointed at the
+ * scratch state directory and the stand-in daemon — including the static credential environment
  * (`ProcessManager.credentialProcessEnvironment`): `LEGION_GRANT_FILE`, `GH_CONFIG_DIR`, the
  * emptied GitHub keys, and worker-bin first on PATH. An inherited `ANTHROPIC_API_KEY`, every
  * `LEGION_*` and `DISPATCH_*` value, and an inherited worker-bin PATH entry are dropped first so
- * worker-bin appears exactly once.
+ * worker-bin appears exactly once. The profile's agent directory is under the inherited `HOME`.
+ * The skill scenario rig (`../skill-scenarios/rig.sh`) builds its tester pane with it too.
  */
 export function workerEnvironment(
-  launch: WorkerLaunch,
-  inherited: NodeJS.ProcessEnv = process.env
+  launch: Pick<WorkerLaunch, "rig" | "port" | "profile">,
+  inherited: NodeJS.ProcessEnv = process.env,
+  claim: WorkerClaim = RIG_CLAIM
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(inherited)) {
@@ -219,7 +229,7 @@ export function workerEnvironment(
     if (key === "OMP_SESSION_ID" || key === "TMUX" || key === "TMUX_PANE") continue;
     env[key] = value;
   }
-  const home = os.homedir();
+  const home = env.HOME ?? os.homedir();
   const agentDir = path.join(home, ".omp", "profiles", launch.profile, "agent");
   const stateDir = path.join(launch.rig, "state");
   // The same strip the daemon applies at its boundary (`resolveDaemonEnvironment`): this rig may
@@ -231,16 +241,19 @@ export function workerEnvironment(
     PI_CODING_AGENT_DIR: agentDir,
     PI_NOTIFICATIONS: "off",
     PI_NO_TITLE: "1",
-    LEGION_ROLE: "implementer",
-    LEGION_TREE: "RIG-1",
-    LEGION_ISSUE: "RIG-1",
+    LEGION_ROLE: claim.role,
+    LEGION_TREE: claim.issue,
+    LEGION_ISSUE: claim.issue,
     LEGION_GENERATION: "1",
-    LEGION_PROJECT: "l12rig",
+    LEGION_PROJECT: claim.project,
     LEGION_BOOT_TOKEN_FILE: path.join(stateDir, "secrets", "boot"),
     LEGION_DAEMON_URL: `http://127.0.0.1:${launch.port}`,
     LEGION_STATE_DIR: stateDir,
     LEGION_WORKSPACE: path.join(launch.rig, "ws"),
-    LEGION_GRANT_FILE: path.join(stateDir, "secrets", `${RIG_ROLE_TOKEN}-grant`),
+    LEGION_GRANT_FILE: secretFilePath(
+      stateDir,
+      grantSecretName(roleToken(claim.project, claim.issue, claim.role))
+    ),
     GH_CONFIG_DIR: path.join(stateDir, "gh"),
     GH_TOKEN: "",
     GITHUB_TOKEN: "",
