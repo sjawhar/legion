@@ -418,6 +418,21 @@ check "a dependency tool error on main's newest run: rule 2 reads the run before
   "$(has "dependencies on main: 0 osv-scanner findings with a fix, 0 reachable govulncheck findings (run 1000, push)")"
 check "and promotes on its zeros" "$(has "DECISION: PROMOTE dependencies")"
 
+echo "=== main's newest ten runs all tool errors: rules 1a and 2 share one lookback and one message ==="
+setup lookback "15 days ago"
+lookback_report=$(security_report '{"tool_error": true, "head_count": null, "new_count": null}' error)
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  add_run $((1100 + n)) schedule main "$(iso "$n hours ago")"
+  add_report $((1100 + n)) "$lookback_report"
+done
+run_report
+check "zizmor on main: no result, in the one message" "$(has "zizmor on main: no result in main's newest 10 runs (tool errors)")"
+check "dependencies on main: the same message" \
+  "$(has "dependencies on main: no result in main's newest 10 runs (tool errors)")"
+check "rule 1a holds on it" "$(has "DECISION: HOLD zizmor — no result in main's newest 10 runs (tool errors)")"
+check "rule 2 holds on it" "$(has "DECISION: HOLD dependencies — no result in main's newest 10 runs (tool errors)")"
+check "the clean eleventh run is not read" "$(lacks "(run 1000, push)")"
+
 echo "=== #81. a dependency tool error on a PR's first run leaves its zizmor result counted ==="
 setup r81 "15 days ago"
 pr_with_findings 81 feat-n 8101 8102 "$(audit "$a_artipacked")" '[]' '[]'

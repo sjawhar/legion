@@ -113,6 +113,9 @@ PRECISION_BAR = 0.7
 MIN_DISPOSITIONS = 5
 KILL_AT = 3
 NARROW_AT = 3
+# How many of main's newest completed runs rules 1a and 2 look back through for a result.
+LOOKBACK = 10
+NO_RESULT_ON_MAIN = f"no result in main's newest {LOOKBACK} runs (tool errors)"
 CODEQL_BLOCKED = "BLOCKED (caller lacks security-events read; the scheduled Security run has it)"
 SECRET_BLOCKED = "BLOCKED (caller lacks secret_scanning read; run as an admin)"
 SECURITY_TAG = re.compile(r"^Security\[([a-z][a-z-]*)\]:")
@@ -368,16 +371,27 @@ def print_main_runs(done, window):
               f"| {'yes' if found['tool_error'] else 'no'} |")
 
 
-def zizmor_on_main(done):
-    """Rule 1a: the head_count of the newest completed main run with a zizmor result, looking back ten
-    runs at most, or None: a longer run of tool errors is itself the answer (no result on main)."""
-    for run in list(reversed(done))[:10]:
-        zizmor = security_report(run["id"])["zizmor"]
-        if zizmor is not None:
-            print()
-            print(f"zizmor on main: {zizmor['head_count']} findings (run {run['id']}, {run['event']})")
-            return zizmor["head_count"]
+def newest_on_main(done, *halves):
+    """(run, its security_report) of the newest completed main run with a result for every one of
+    HALVES, looking back LOOKBACK runs at most, or None: a longer run of tool errors is itself the
+    answer (no result on main)."""
+    for run in list(reversed(done))[:LOOKBACK]:
+        found = security_report(run["id"])
+        if all(found[half] is not None for half in halves):
+            return run, found
     return None
+
+
+def zizmor_on_main(done):
+    """Rule 1a: main's zizmor head_count (newest_on_main), or None."""
+    newest = newest_on_main(done, "zizmor")
+    print()
+    if newest is None:
+        print(f"zizmor on main: {NO_RESULT_ON_MAIN}")
+        return None
+    run, found = newest
+    print(f"zizmor on main: {found['zizmor']['head_count']} findings (run {run['id']}, {run['event']})")
+    return found["zizmor"]["head_count"]
 
 
 def plural(count, noun):
@@ -385,17 +399,17 @@ def plural(count, noun):
 
 
 def dependencies_on_main(done):
-    """Rule 2's precondition: (osv findings with a fix, reachable govulncheck findings) of the newest
-    completed main run with both dependency results, looking back ten runs at most, or None."""
-    for run in list(reversed(done))[:10]:
-        found = security_report(run["id"])
-        if found["osv"] is not None and found["govulncheck"] is not None:
-            counts = found["osv"]["with_fix"], found["govulncheck"]["reachable"]
-            print(f"dependencies on main: {plural(counts[0], 'osv-scanner finding')} with a fix, "
-                  f"{plural(counts[1], 'reachable govulncheck finding')} (run {run['id']}, {run['event']})")
-            return counts
-    print("dependencies on main: no result in main's newest ten runs (tool errors)")
-    return None
+    """Rule 2's precondition: main's (osv findings with a fix, reachable govulncheck findings)
+    (newest_on_main over both dependency halves), or None."""
+    newest = newest_on_main(done, "osv", "govulncheck")
+    if newest is None:
+        print(f"dependencies on main: {NO_RESULT_ON_MAIN}")
+        return None
+    run, found = newest
+    counts = found["osv"]["with_fix"], found["govulncheck"]["reachable"]
+    print(f"dependencies on main: {plural(counts[0], 'osv-scanner finding')} with a fix, "
+          f"{plural(counts[1], 'reachable govulncheck finding')} (run {run['id']}, {run['event']})")
+    return counts
 
 
 # --- tool errors (rule 2) ------------------------------------------------------------------------
@@ -661,7 +675,7 @@ def review_threads(window):
 def zizmor_decision(main_count, dispositions):
     """Rule 1: (whether zizmor is promoted, its DECISION line)."""
     if main_count is None:
-        return False, "HOLD zizmor — no zizmor result in main's newest ten runs (tool errors)"
+        return False, f"HOLD zizmor — {NO_RESULT_ON_MAIN}"
     if main_count > 0:
         return False, (f"HOLD zizmor — {main_count} findings on main (fix each, or ignore it with a reason: "
                        "workflows in .github/zizmor.yml, composite actions inline)")
@@ -677,7 +691,7 @@ def dependencies_decision(tool_error_runs, main_deps):
     """Rule 2 and its precondition: the dependency scanners' DECISION line."""
     reasons = [f"{tool_error_runs} tool errors in the window"] if tool_error_runs else []
     if main_deps is None:
-        reasons.append("no dependency result in main's newest ten runs (tool errors)")
+        reasons.append(NO_RESULT_ON_MAIN)
     elif any(main_deps):
         with_fix, reachable = main_deps
         reasons.append(f"main has {plural(with_fix, 'osv-scanner finding')} with a fix and "
