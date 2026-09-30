@@ -20,11 +20,12 @@
 #                   in prose. Each run seeds its own issue, attached table and message.
 #   tester-proof    A tester phase worker, booted by the Legion extension against a daemon stand-in,
 #                   is told the implementer has finished. The legion-worker skill's rule, as scored:
-#                   the PR body gets an `E2E (tester)` line (at any point), and a `handoff write
-#                   --phase test` the CLI accepts comes before the first push carrying
-#                   .legion/test.json, which comes before an accepted `handoff complete`; the
-#                   test.json the branch holds at that completion is a valid test handoff with a
-#                   proof. GitHub is a recording stand-in and the remote a local bare repository.
+#                   the PR body is left with an `E2E (tester)` line naming this run's head (written
+#                   at any point), and a `handoff write --phase test` the CLI accepts comes before
+#                   the first push carrying .legion/test.json, which comes before an accepted
+#                   `handoff complete`; the test.json the branch holds at that completion is a
+#                   valid test handoff with a proof. GitHub is a recording stand-in and the remote
+#                   a local bare repository.
 #
 # A batch's services are the e2e harness's real Go Dispatch server
 # (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded and read back
@@ -42,10 +43,14 @@
 # Each run's agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), under the label's own
 # HOME and profile (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), in a tmux
 # session on the work directory's own tmux server (`tmux -S <work>/tmux.sock attach -t <session>`
-# watches one), with `env -i` and only the variables its pane file names. A `gh` stand-in is first
-# on every run's PATH, so no run reaches GitHub. Every container and tmux session a work directory
-# starts carries its digest in its name. An exit, INT or TERM stops what the command started: a
-# batch its runs, their agents and its services; a run or a live read its agent and daemon stand-in.
+# watches one), with `env -i` and only the variables its pane file names, TMPDIR its run's own. A
+# `gh` stand-in is first on every run's PATH, so no run reaches GitHub. Every container and tmux
+# session a work directory starts carries its digest in its name. An agent can still write the
+# machine's /tmp, which every run shares and nothing here cleans: two concurrent runs can meet in a
+# scratch file there, so each tester-proof run has a PR number and heads of its own, and the score
+# reads its E2E (tester) line for this run's head. An exit, INT or TERM stops what the command
+# started: a batch its runs, their agents and its services; a run or a live read its agent and
+# daemon stand-in.
 set -euo pipefail
 # Nothing the rig starts inherits a service endpoint or credential from the caller: a Legion pane
 # exports ENVOY_URL, DISPATCH_URL and their token files, a developer's shell can hold NATS
@@ -60,11 +65,9 @@ root=$(cd "$here/../../../.." && pwd -P)
 work=${SKILL_SCENARIOS_WORK:-${TMPDIR:-/tmp}/skill-scenarios}
 work=$(realpath -m -- "$work")
 
-# The tester-proof world (worker_fixture below).
+# The tester-proof world (worker_fixture below). Each run also has a PR number and heads of its own.
 worker_key=LWEVAL-1
 worker_repo=example/widgets
-worker_pr=7
-worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
 
 note() { printf 'skill-scenarios: %s\n' "$*"; }
 fail() {
@@ -137,13 +140,15 @@ cmd_profile() {
 }
 
 # Writes the variables every agent gets to <file>: the label's home and profile, the run's
-# stand-ins first on PATH, and nothing else from the caller's environment.
+# stand-ins first on PATH, its own TMPDIR, and nothing else from the caller's environment.
 base_env() {
   local R=$1
+  mkdir -p "$R/tmp"
   {
     echo "HOME=$P/home"
     echo "USER=$USER"
     echo "TERM=xterm-256color"
+    echo "TMPDIR=$R/tmp"
     echo "MISE_DATA_DIR=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
     echo "OMP_PROFILE=$profile"
     echo "PI_NOTIFICATIONS=off"
@@ -356,9 +361,16 @@ run_ask_on_message() {
 
 # The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the
 # issue workspace cloned from it, the implementer's commit and handoff on legion/<key>, the PR the
-# gh stand-in serves, and the architect's assignment.
+# gh stand-in serves, and the architect's assignment. The PR number and the commit dates come from
+# a digest of $R, so concurrent runs almost never share a PR number or a head (the fixture's
+# content is the same in every run).
 worker_fixture() {
-  local R=$1 src C1 C2 body
+  local R=$1 src C1 C2 body digest when worker_pr worker_pr_url
+  digest=$(printf '%s' "$R" | cksum | cut -d' ' -f1)
+  worker_pr=$((1000 + digest % 9000))
+  worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
+  # A time on 2026-01-01.
+  when="@$((1767225600 + digest % 86400)) +0000"
   git init -q --bare -b main "$R/remote.git"
   cat >"$R/remote.git/hooks/post-receive" <<EOF
 #!/bin/sh
@@ -367,7 +379,10 @@ EOF
   chmod +x "$R/remote.git/hooks/post-receive"
   src=$R/src
   git init -q -b main "$src"
-  g() { git -C "$src" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false "$@"; }
+  g() {
+    GIT_AUTHOR_DATE=$when GIT_COMMITTER_DATE=$when \
+      git -C "$src" -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false "$@"
+  }
   printf '# widgets\n\nSmall CLI helpers.\n' >"$src/README.md"
   g add -A && g commit -qm "init"
   g push -q "$R/remote.git" main
@@ -449,9 +464,9 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
       {match:("^gh api .*pulls/" + ($number|tostring)), stdout:$pr},
       {match:"^gh (api user|auth status)", stdout:{login:"rig[bot]"}}
     ]}' >"$R/fixtures.json"
-  # The world the scorer reads.
-  jq -n --arg key "$worker_key" --arg repo "$worker_repo" --argjson pr "$worker_pr" --arg head "$C2" \
-    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head}' >"$R/world.json"
+  # The world the scorer reads: head is the PR's head, code the implementer's code commit under it.
+  jq -n --arg key "$worker_key" --arg repo "$worker_repo" --argjson pr "$worker_pr" --arg head "$C2" --arg code "$C1" \
+    '{key:$key, repo:$repo, pr:$pr, branch:("legion/" + $key), head:$head, code:$code}' >"$R/world.json"
   printf 'Architect → tester, %s. The implementer has finished: PR #%s (%s, repository %s) is at %s, and its implement handoff is on the branch. Test it and finish your phase.\n' \
     "$worker_key" "$worker_pr" "$worker_pr_url" "$worker_repo" "$C2" >"$R/prompt.txt"
 }

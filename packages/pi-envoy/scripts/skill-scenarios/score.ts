@@ -64,8 +64,15 @@ const Call = z.looseObject({
   stdin: z.string().optional(),
   files: z.record(z.string(), z.string()).optional(),
 });
-/** rig.sh's worker_fixture: the tester's world. */
-const World = z.object({ key: z.string(), repo: z.string(), pr: z.number(), branch: z.string() });
+/** rig.sh's worker_fixture: the tester's world, `head` the PR's head and `code` the commit under it. */
+const World = z.object({
+  key: z.string(),
+  repo: z.string(),
+  pr: z.number(),
+  branch: z.string(),
+  head: z.string(),
+  code: z.string(),
+});
 
 function lines(file: string): string[] {
   if (!existsSync(file)) return [];
@@ -223,14 +230,25 @@ function testerProof(runDir: string, run: string, label: string): Row {
   const write = writes.find((c) => c.exit === 0);
   const refused = writes.filter((c) => c.exit !== 0).length;
   const complete = handoffs.find((c) => c.argv[1] === "complete" && c.exit === 0);
-  const edit = calls.find(
+  /** Everything a gh call handed GitHub: its argv, its stdin, and each file it read a body from. */
+  const sent = (c: z.infer<typeof Call>) =>
+    [c.argv.join(" "), c.stdin ?? "", ...Object.values(c.files ?? {})].join("\n");
+  const edits = calls.filter(
     (c) =>
       c.as === "gh" &&
       c.exit === 0 &&
       new RegExp(`^pr edit|^api .*pulls/${world.pr}`).test(c.argv.join(" ")) &&
-      [c.argv.join(" "), c.stdin ?? "", ...Object.values(c.files ?? {})]
-        .join("\n")
-        .includes("E2E (tester)")
+      sent(c).includes("E2E (tester)")
+  );
+  const edit = edits[0];
+  // The PR is left with the last edit's body. Its E2E (tester) line, up to the next field, names a
+  // head of this run's own; one that names neither is a wrong head or another run's line, as when
+  // two concurrent agents write the body to one scratch file in the shared /tmp.
+  const last = edits.at(-1);
+  const testerLine =
+    /\*\*E2E \(tester\):\*\*[\s\S]*?(?=\n\*\*|$)/.exec(last ? sent(last) : "")?.[0] ?? "";
+  const ownHead = [...testerLine.matchAll(/\b[0-9a-f]{7,40}\b/g)].some(
+    ([sha]) => world.head.startsWith(sha) || world.code.startsWith(sha)
   );
   const remote = path.join(runDir, "remote.git");
   const pushes = lines(path.join(runDir, "pushes.log"))
@@ -254,7 +272,7 @@ function testerProof(runDir: string, run: string, label: string): Row {
     complete !== undefined &&
     write.at < push.at &&
     push.at < complete.at;
-  const pass = ordered && proof && edit !== undefined;
+  const pass = ordered && proof && ownHead;
   const opened = readCalls(session(runDir)).map((call) => call.target);
   const ref = opened.some((target) =>
     target.includes("skill://legion-worker/references/pr-body.md")
@@ -263,7 +281,7 @@ function testerProof(runDir: string, run: string, label: string): Row {
     .filter((target) => target.includes("legion-worker"))
     .map((target) => target.replace("skill://legion-worker", "") || "/");
   const notes = [
-    `write=${write !== undefined} refusedWrites=${refused} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} ordered=${ordered} testerLine=${edit !== undefined}`,
+    `write=${write !== undefined} refusedWrites=${refused} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} ordered=${ordered} testerLine=${edit !== undefined} ownHead=${ownHead}`,
     `editBeforeWrite=${edit !== undefined && write !== undefined && edit.at < write.at}`,
     ...(proof ? [] : [`proofProblems=${JSON.stringify(problems)}`]),
     `refs=[${worker.join(",")}]`,
