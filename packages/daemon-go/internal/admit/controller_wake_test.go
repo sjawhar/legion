@@ -21,19 +21,13 @@ import (
 // key.
 func registerController(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	registerControllerAt(t, pool.Config().ConnString(), testProject)
-}
-
-// registerControllerAt is registerController for the Dispatch project key on the database at dsn.
-func registerControllerAt(t *testing.T, dsn, key string) {
-	t.Helper()
 	ctx := context.Background()
-	st, err := store.Open(ctx, dsn)
+	st, err := store.Open(ctx, pool.Config().ConnString())
 	if err != nil {
 		t.Fatalf("open the store: %v", err)
 	}
 	defer st.Close()
-	token, err := claim.ProjectToken(key)
+	token, err := claim.ProjectToken(testProject)
 	if err != nil {
 		t.Fatal(err)
 	}
