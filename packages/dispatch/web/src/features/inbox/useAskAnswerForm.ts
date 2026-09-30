@@ -40,12 +40,29 @@ interface AskAnswerFailure {
 }
 
 /**
- * An approval ask naming an older version is refused however often it is sent, and the refusal
- * says where the human can review instead; any other failure may pass on a retry.
+ * The refusals the same answer is refused with again however often it is sent, and what the card
+ * says for each: the ask was answered or closed elsewhere, its question changed (the card reloads
+ * it, so the next answer is to the new wording), or it is an approval ask naming an older version,
+ * whose refusal says where the human can review instead. Any other failure may pass on a retry.
  */
 function answerFailure(error: Error): AskAnswerFailure {
-  if (error instanceof ApiError && error.code === "APPROVAL_ASK_STALE") {
-    return { message: error.message, retryable: false };
+  if (error instanceof ApiError) {
+    switch (error.code) {
+      case "APPROVAL_ASK_STALE":
+        return { message: error.message, retryable: false };
+      case "ASK_CLOSED":
+        return {
+          message: "This ask was already answered, so your answer was not saved.",
+          retryable: false,
+        };
+      case "ASK_RESOLVED":
+        return { message: "This ask was closed, so your answer was not saved.", retryable: false };
+      case "ASK_EDITED":
+        return {
+          message: "Your answer was not saved, because the question changed.",
+          retryable: false,
+        };
+    }
   }
   return { message: "Could not save your answer.", retryable: true };
 }

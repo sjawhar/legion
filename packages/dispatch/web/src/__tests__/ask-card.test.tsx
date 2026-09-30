@@ -880,6 +880,76 @@ test("an approval-kind ask naming an older version shows the server's refusal an
   }
 });
 
+// A refusal of what the answer says, or of the ask it answers, is refused again however often it
+// is sent, so the card says why and offers no Retry; anything else may pass on a retry.
+for (const refusal of [
+  {
+    code: "ASK_CLOSED",
+    error: "ask is already answered",
+    message: "This ask was already answered",
+  },
+  { code: "ASK_RESOLVED", error: "ask is already resolved", message: "This ask was closed" },
+  { code: "ASK_EDITED", error: "question changed", message: "the question changed" },
+]) {
+  test(`an answer refused with ${refusal.code} says so and offers no Retry`, async () => {
+    let calls = 0;
+    const input = ask({ options: [{ label: "Ship" }] });
+    const { view } = renderCard(
+      <AskCard
+        ask={input}
+        answerAsk={async () => {
+          calls++;
+          throw new ApiError(409, { code: refusal.code, error: refusal.error });
+        }}
+        getAskThread={emptyThread(input)}
+      />
+    );
+
+    try {
+      fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
+      fireEvent.click(view.getByRole("button", { name: "Answer" }));
+
+      const alert = await view.findByRole("alert");
+      expect(alert.textContent).toContain(refusal.message);
+      expect(within(alert).queryByRole("button", { name: "Retry" })).toBeNull();
+      expect(calls).toBe(1);
+    } finally {
+      view.unmount();
+    }
+  });
+}
+
+test("an answer that failed for another reason offers a Retry that sends it again", async () => {
+  const submitted: AnswerAskInput[] = [];
+  const input = ask({ options: [{ label: "Ship" }] });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        if (submitted.length === 1) {
+          throw new Error("offline");
+        }
+        return answered(input, submission.selected);
+      }}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Ship" }));
+    fireEvent.click(view.getByRole("button", { name: "Answer" }));
+
+    const alert = await view.findByRole("alert");
+    expect(alert.textContent).toContain("Could not save your answer.");
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(submitted).toHaveLength(2));
+    expect(submitted[1]).toEqual(submitted[0]);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("an approval-kind ask names the reason Request changes needs, focuses its field, and says why Answer is dead", async () => {
   const submitted: AnswerAskInput[] = [];
   const input = ask({
@@ -1130,7 +1200,8 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
   }
 });
 
-test("AskCard reloads a changed question and requires the human to reconfirm", async () => {
+test("AskCard reloads a changed question, requires the human to reconfirm, and answers the new wording", async () => {
+  const submitted: AnswerAskInput[] = [];
   const input = ask({ options: [{ label: "Ship" }] });
   const current = ask({
     edited_at: "2026-09-12T12:00:00Z",
@@ -1140,8 +1211,12 @@ test("AskCard reloads a changed question and requires the human to reconfirm", a
   const { view } = renderCard(
     <AskCard
       ask={input}
-      answerAsk={async () => {
-        throw new ApiError(409, { code: "ASK_EDITED", error: "question changed" });
+      answerAsk={async (_id, submission) => {
+        submitted.push(submission);
+        if (submitted.length === 1) {
+          throw new ApiError(409, { code: "ASK_EDITED", error: "question changed" });
+        }
+        return answered(current, submission.selected);
       }}
       getAskThread={async () => ({ ask: current, edits: [], followers: [], replies: [] })}
     />
@@ -1155,6 +1230,15 @@ test("AskCard reloads a changed question and requires the human to reconfirm", a
     expect(view.getByText("Should we hold this release?")).toBeTruthy();
     expect(view.getByRole("radio", { name: "Hold" }).hasAttribute("checked")).toBe(false);
     expect(view.getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(true);
+    expect(within(view.getByRole("alert")).queryByRole("button", { name: "Retry" })).toBeNull();
+
+    fireEvent.click(view.getByRole("radio", { name: "Hold" }));
+    fireEvent.click(view.getByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(submitted).toHaveLength(2));
+    expect(submitted[1]).toMatchObject({
+      selected: ["Hold"],
+      expected_edited_at: "2026-09-12T12:00:00Z",
+    });
   } finally {
     view.unmount();
   }
