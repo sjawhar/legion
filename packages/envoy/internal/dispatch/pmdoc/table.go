@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -266,6 +267,7 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 		} else if table, ok := node.NextSibling().(*extensionast.Table); ok {
 			markLazyRows(table, starts[kept:], lazyStarts)
 			markBlockRows(table, segments[kept:], reader.Source())
+			markWideRows(table, segments[kept:], reader.Source())
 		}
 		return
 	}
@@ -278,6 +280,7 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 		table.SetAttribute(blankAfterAttr, blank)
 		markLazyRows(table, starts, lazyStarts)
 		markBlockRows(table, segments, reader.Source())
+		markWideRows(table, segments, reader.Source())
 	}
 }
 
@@ -405,6 +408,35 @@ func markBlockRows(table *extensionast.Table, lines []gmtext.Segment, source []b
 		indent := columnOf(source[begin:text]) - columnOf(source[begin:segment.Start]) + segment.Padding
 		if indent >= 4 || listMarkerStart.Match(source[text:segment.Stop]) {
 			table.SetAttribute(blockRowAttr, true)
+			return
+		}
+	}
+}
+
+// wideRowAttr marks a table one of whose body rows holds more cells than its delimiter row, with
+// the first such row (markWideRows). Goldmark drops the cells past the table's width, where the
+// browser editor's parser keeps them, so the row would be stored without their text. A cell ends
+// at every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a
+// row that already fills its table makes one.
+var wideRowAttr = []byte("pmdoc-wide-row")
+
+// wideRow is the first body row markWideRows found holding more cells than its table: how many it
+// holds, the table's width, and the row's opening words, which name it in the refusal.
+type wideRow struct {
+	cells, width int
+	opening      string
+}
+
+// markWideRows marks table (wideRowAttr) where one of its body rows - the lines past its header
+// and delimiter rows, the first two of lines - holds more cells than the table's delimiter row, each
+// row read as goldmark's transformer splits it (tableRowWidth).
+func markWideRows(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
+	width := len(table.Alignments)
+	for index := 2; index < len(lines); index++ {
+		line := tabExpandedLine(lines[index], source)
+		if cells := tableRowWidth(line, source); cells > width {
+			opening := openingWords(strings.TrimSpace(string(line.Value(source))))
+			table.SetAttribute(wideRowAttr, wideRow{cells: cells, width: width, opening: opening})
 			return
 		}
 	}

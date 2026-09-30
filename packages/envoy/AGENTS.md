@@ -822,7 +822,12 @@ made of with the line, where the browser editor's parser ends the table, and eve
 line does not continue, before it. So is a table a line opening another block would be a row of - a
 list item that cannot interrupt a paragraph, whatever its marker, or indented code
 (`markBlockRows`): goldmark's table is a paragraph, which such a line continues, where that parser's
-table is no paragraph and ends there, reading the line as that block. A setext underline under a
+table is no paragraph and ends there, reading the line as that block. So is a table a body row of
+which holds more cells than its delimiter row (`markWideRows`), naming the row: goldmark drops the
+cells past the table's width, where that parser keeps them, and a cell ends at every `|` not
+written `\|`, inside code and links too, so a code span holding a bare `|` in a row that fills its
+table lost the rest of the row's text when it was stored. The renderer writes such a pipe `\|` and
+the header as wide as the widest row (`tableGrid`), so no rendering holds one. A setext underline under a
 table is the table's row, as that parser reads it (`underlineAfterTable`), all but a lone `-`, an
 empty list item there: goldmark's setext heading took the table's paragraph, then wrote the
 underline as a paragraph after the table, or made the lines before the table a heading after it.

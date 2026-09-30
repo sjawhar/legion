@@ -128,6 +128,11 @@ dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|te
 document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,
 still belongs inside a fenced code block, where it survives verbatim both ways.
 
+A table cell ends at every `|` not written `\|`, inside inline code and links too, so write
+`` `x: Promise<void> \| undefined` ``, never `` `x: Promise<void> | undefined` ``, in a cell. A row
+that then holds more cells than its table is refused with `INVALID_MARKDOWN`, naming the row, rather
+than stored without the cells past the table's width.
+
 ## A document that is reloading
 
 These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its

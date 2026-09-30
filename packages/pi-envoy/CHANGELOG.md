@@ -27,6 +27,9 @@
   `agentstream.<session id>.control`, and a session that hears nothing for thirty seconds goes
   quiet — and a viewer's replay is answered from a bounded in-memory ring (200 messages, 512 KiB)
   that never leaves the process. Nothing about it is written to Dispatch's database.
+- The dispatch skill's documents reference says a `|` in a table cell, inside inline code and
+  links too, is written `\|`, and that a row holding more cells than its table is refused rather
+  than stored short.
 
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask

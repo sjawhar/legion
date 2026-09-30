@@ -210,3 +210,29 @@ func TestSetextLookAheadReadsEachLineOnce(t *testing.T) {
 		})
 	}
 }
+
+// A cell ends at every `|` not written `\|`, inside code and links too, and goldmark drops the cells
+// a body row holds past its delimiter row's, which the browser editor's parser keeps: a row whose
+// code span holds a bare `|` lost the rest of its text when it was stored. Such a row is refused,
+// in a container too, naming what it holds and how to write the pipe; written `\|`, the same row
+// is read whole.
+func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
+	const row = "| `runtime.ts` | Hold `x: Promise<void> | undefined`; every caller waits. |\n"
+	for _, markdown := range []string{
+		"| File | Rule |\n| --- | --- |\n" + row,
+		"> | File | Rule |\n> | --- | --- |\n> " + row,
+		"- | File | Rule |\n  | --- | --- |\n  " + row,
+	} {
+		_, err := ParseForWrite(markdown, nil)
+		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "3 cells where its table has 2") || !strings.Contains(err.Error(), `written \|`) {
+			t.Errorf("ParseForWrite(%q) = %v, want a schema refusal naming the row's 3 cells and how to write the pipe", markdown, err)
+		}
+	}
+	doc, err := ParseForWrite("| File | Rule |\n| --- | --- |\n"+strings.Replace(row, "> | undefined", "> \\| undefined", 1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := textContent(doc.Children[0].Children[1].Children[1]); got != "Hold x: Promise<void> | undefined; every caller waits." {
+		t.Errorf("the row written with \\| holds %q in its second cell, want the whole text", got)
+	}
+}

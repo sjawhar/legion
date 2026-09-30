@@ -369,7 +369,7 @@ larger request is rejected as `INVALID_OP` on `markdown`. Rows wider than the ta
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
-| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema. Malformed edit replacements report `INVALID_OP`. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding more cells than its delimiter row, which a pipe inside code or a link that is not backslash-escaped makes. Malformed edit replacements report `INVALID_OP`. |
 | `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely. |
 
 ## Comment errors

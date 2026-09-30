@@ -728,10 +728,13 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // and otherwise with every ASCII punctuation character escaped as the text writer escapes it and
 // each line feed written as a character reference, which both parsers read back as the
 // character. That is kept only if it reads back, so an alt that fails for another
-// reason keeps the bytes it had, as inlineWithEscapes does.
+// reason keeps the bytes it had, as inlineWithEscapes does. In a table cell an alt holding a
+// backslash before a pipe takes the second spelling: the first leaves the pipe after two
+// backslashes, which Parse reads back as the alt, while the browser editor's parser, which pairs
+// backslashes before a pipe, ends the cell there.
 func imageAlt(alt string, context inlineContext) string {
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
-	if altReadsBack(written, alt, context) {
+	if !(context.tableCell && strings.Contains(alt, "\\|")) && altReadsBack(written, alt, context) {
 		return written
 	}
 	var out strings.Builder
