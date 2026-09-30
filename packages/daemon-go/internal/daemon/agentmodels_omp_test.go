@@ -38,8 +38,12 @@ func agentModelPlugin(t *testing.T, dir string) string {
 // build-time probe skips the check, and a key command slower than the 2 s Oh My Pi gives the
 // probe's shutdown handler still answers. The operator's override counts only when it expands to a model,
 // as the task tool takes it, and an agent that declares no model runs on the session's own and is
-// not judged. The profile's providers listen nowhere, so no model is called and no credential the
-// machine carries decides the run.
+// not judged. On the prompts this checkout ships, with the daemon's own role prompts, the probe
+// passes a route that gives every role Legion's shipped agents name a model, and refuses one that
+// leaves `deep` unset, naming deep-worker, the implementer's coding agent, and the role prompt that
+// dispatches it: the task tool would otherwise run every coding task on the implementer's own model
+// without a word. The profile's providers listen nowhere, so no model is called and no credential
+// the machine carries decides the run.
 func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 	omp := testbin.OMP(t)
 	const models = "providers:\n" +
@@ -58,7 +62,10 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 		env    map[string]string
 		pane   bool
 		skip   bool
-		want   []string
+		// shipped probes shippedPromptPlugin with the daemon's own role prompts in place of
+		// agentModelPlugin.
+		shipped bool
+		want    []string
 	}{
 		{name: "every agent's role configured", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: fake/m1\n"},
 		{name: "a role not configured", roles: "  default: fake/m1\n  review: fake/m1\n",
@@ -83,6 +90,10 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 		// process outlives it, so a key slower than that still answers. A pin that ends the process
 		// with the handler would refuse this boot.
 		{name: "a key command slower than the shutdown handler's 2 s", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: slowkey/m4\n"},
+		{name: "the shipped prompts, on a route that gives deep a model", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: fake/m1\n  deep: fake/m1\n",
+			shipped: true},
+		{name: "the shipped prompts, on a route that leaves deep unset", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: fake/m1\n", shipped: true,
+			want: []string{"task agent deep-worker (dispatched by ", "roles/implementer.md", "on its model @deep: role deep is not configured"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -94,7 +105,17 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			root := agentModelPlugin(t, dir)
+			root, references := "", promptrefs.New()
+			if testCase.shipped {
+				root = shippedPromptPlugin(t, dir)
+				roles, err := promptrefs.Roles(daemonTestRolePromptsDir(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				references = roles
+			} else {
+				root = agentModelPlugin(t, dir)
+			}
 			env := map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": "/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED": "true"}
 			for name, value := range testCase.env {
 				env[name] = value
@@ -112,10 +133,10 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
 				// probes it.
 				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
-					contract: 3, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
+					contract: 3, roleReferences: references, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
 			} else {
 				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
-					SkipAgentModels: testCase.skip, RoleReferences: promptrefs.New(), Log: log})
+					SkipAgentModels: testCase.skip, RoleReferences: references, Log: log})
 			}
 
 			if len(testCase.want) == 0 {
@@ -134,6 +155,18 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shippedPromptPlugin lays out a pi-legion-envoy under dir with the prompts this checkout ships:
+// the plugin's own agents/, and the repository's skills as its dist/skills, as the package's
+// prepack copies them, under testPlugin's manifest and load marker.
+func shippedPromptPlugin(t *testing.T, dir string) string {
+	t.Helper()
+	pluginSource := filepath.Dir(daemonTestRolePromptsDir(t))
+	root := testPlugin(t, dir, nil)
+	copyPromptBundle(t, filepath.Join(pluginSource, "agents"), filepath.Join(root, "agents"))
+	copyPromptBundle(t, filepath.Join(pluginSource, "..", "..", "skills"), filepath.Join(root, "dist", "skills"))
+	return root
 }
 
 // A Sandbox pod runs on the role prompts the daemon inlines from its own directory, not the image's
