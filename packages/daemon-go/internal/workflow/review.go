@@ -75,7 +75,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		if err != nil {
 			return intake.Result{}, err
 		}
-		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), reviewRound(*issue, reviewer, &prior), "a CI result")
+		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), reviewRound(*issue, reviewer, &prior), byChecks)
 		return intake.Result{}, err
 	}
 	if !classify.RedSendsBack(*pr) {
@@ -132,9 +132,9 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	}
 	// The reviewer's answer tells whenever it leaves the round stuck; any other review, only when it
 	// changes how the round is stuck.
-	before, by := reviewRound(*issue, reviewer, pr), "a review that is not the reviewer's answer"
+	before, by := reviewRound(*issue, reviewer, pr), byOtherReview
 	if e.reviewersAnswer(fact, reviewer) {
-		before, by = round{}, "the reviewer's review"
+		before, by = round{}, byAnswer
 	}
 	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
 	// comment written after a decision but delivered before it cannot make the decision look old.
@@ -179,6 +179,17 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), before, by)
 	return intake.Result{}, err
 }
+
+// The fact that wrote a review-stuck notice, its summary. The architect prompt
+// (prompts/go/architect-common.md) reads a notice the reviewer's completion or answer wrote after
+// the architect asked as the reviewer answering, and every other as news about the round.
+const (
+	byCompletion  = "the reviewer's completion"
+	byAnswer      = "the reviewer's review"
+	byOtherReview = "a review that is not the reviewer's answer"
+	byChecks      = "a CI result"
+	byPush        = "a push"
+)
 
 // roundOutcome is what a review round comes to after a fact (reviewRound).
 type roundOutcome int
