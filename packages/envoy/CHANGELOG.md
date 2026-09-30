@@ -44,24 +44,27 @@
   `markdown` answers `INVALID_OP`), naming the row's cells, its table's width and its opening
   words, and both fixes: write a `|` inside a cell as `\|`, or give the header and delimiter rows
   as many cells as the row. A row whose cells past the width are all blank is still read at the
-  table's width. A bare-row insert now answers every line as an upload of the same rows does,
-  because the same parse judges it; it used to count cells itself first, over a fragment trimmed
-  of Unicode spaces and a first row's indentation. So it drops blank cells past the width and
-  refuses text there, where it refused both. A `|` after an even run of backslashes is text to it,
-  as it always was to uploads, so `| A11 | new \\| extra |` under two columns is stored as one
-  cell reading `new \| extra` where it was refused as `TABLE_WIDTH`; the browser editor's reading
-  of such a pipe is LEGION-412. A space outside ASCII, a vertical tab or a form feed at the
-  fragment's edge is a cell's text, so `| A11 | new |` then U+00A0 is refused as three cells where
-  it was stored as two. A line opening a block that interrupts a paragraph (`- | a | b |`,
-  `> | a | b |`) is inserted as that block, where it was refused as `TABLE_WIDTH`. A line the
-  parser refuses as another block (indented code, `2. | a | b |`) is refused as an upload refuses
-  it, `INVALID_OP` on `markdown`, however many cells it holds and wherever it stands. Versions
-  written before 2026-09-19 hold rows with text past their table's width, since the renderer then
-  wrote a code span's pipe unescaped; re-uploading one is refused rather than stored short. A
-  row's closing `|` after an odd run of backslashes (`| x | y \|`) is now kept as the last cell's
-  text, as the browser editor reads it, where it was dropped (`y \`). An image's alt holding a
-  backslash before a pipe in a table cell is written so that the browser editor reads it as one
-  cell too.
+  table's width. A bare-row insert of a fragment whose every line holds a pipe now answers each
+  line as an upload of the same rows does, because the same parse judges it; it used to count
+  cells itself first, line by line, over a fragment trimmed of Unicode spaces and a first row's
+  indentation. So it drops blank cells past the width and refuses text there, where it refused
+  both. A `|` after an even run of backslashes is text to it, as it always was to uploads, so
+  `| A11 | new \\| extra |` under two columns is stored as one cell reading `new \| extra` where it
+  was refused as `TABLE_WIDTH`; the browser editor's reading of such a pipe is LEGION-412. A space
+  outside ASCII, a vertical tab or a form feed at the fragment's edge is a cell's text, so
+  `| A11 | new |` then U+00A0 is refused as three cells where it was stored as two. A line opening
+  a block that interrupts a paragraph (`- | a | b |`, `> | a | b |`) is inserted as that block,
+  where it was refused as `TABLE_WIDTH`. A line the parser refuses as another block (indented code,
+  `2. | a | b |`) is refused as an upload refuses it, `INVALID_OP` on `markdown`, however many
+  cells it holds and wherever it stands. A fragment holding a line with no pipe is no table rows,
+  so it is inserted as blocks after the table even beside a line too wide for it, where it was
+  refused as `TABLE_WIDTH` when the wide line came first; an upload of the same lines under the
+  table reads them as rows and refuses the wide one. Versions written before 2026-09-19 hold rows
+  with text past their table's width, since the renderer then wrote a code span's pipe unescaped;
+  re-uploading one is refused rather than stored short. A row's closing `|` after an odd run of
+  backslashes (`| x | y \|`) is now kept as the last cell's text, as the browser editor reads it,
+  where it was dropped (`y \`). An image's alt holding a backslash before a pipe in a table cell is
+  written so that the browser editor reads it as one cell too.
 
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before
