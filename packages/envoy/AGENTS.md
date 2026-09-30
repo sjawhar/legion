@@ -833,18 +833,19 @@ that fills its table lost the rest of the row's text when it was stored. A row w
 the width are blank loses nothing and is read at the table's width. A bare-row insert
 (`InsertTableRows`) loses only its fragment's blank lines at either end, then `parseTableRows`
 parses the rest under a header it writes at the target table's width. A fragment that parse reads
-as rows alone - every line holds a pipe, none is delimiter-shaped (cells of three hyphens or more,
-`tableDelimiterRow`) and none opens another block - gets an upload's answer for each line: a row
-too wide is `markWideRows`' refusal, answered as `TABLE_WIDTH` for the table under the written
-header alone (a table the fragment makes itself keeps its own refusal), and a line `markBlockRows`
-refuses (indented code, `2. | a | b |`) is refused as an upload refuses it, `INVALID_OP` on
-`markdown`, however many cells it holds, since the refusal walk reads that before the width. Any
-other fragment is read as a document of its own and inserted as blocks after the table, whole:
-its pipe lines become paragraphs, a line opening a block is that block, and a line of one or two
-hyphens, which goldmark takes for a delimiter row, makes a table of the line before it, judged at
-that table's width. So such a fragment can differ from an upload of the same lines under the
-target, which reads them as its rows: its rows are stored as paragraphs, or refused for a width
-the target does not have.
+as rows alone - every line yields a cell and a separator, an unescaped `|` (a lone `|` yields no
+cell, and a line whose only pipe is `\|` no separator), no line is delimiter-shaped (cells of three
+hyphens or more, `tableDelimiterRow`) and no line opens another block - gets an upload's answer
+for each line: a row too wide is `markWideRows`' refusal, answered as `TABLE_WIDTH` for the table
+under the written header alone (a table the fragment makes itself keeps its own refusal), and a
+line `markBlockRows` refuses (indented code, `2. | a | b |`) is refused as an upload refuses it,
+`INVALID_OP` on `markdown`, however many cells it holds, since the refusal walk reads that before
+the width. Any other fragment is read as a document of its own and inserted as blocks after the
+table, whole: its pipe lines become paragraphs, a line opening a block is that block, and a line
+of one or two hyphens, which goldmark takes for a delimiter row, makes a table of the line before
+it, judged at that table's width. So such a fragment can differ from an upload of the same lines
+under the target, which reads them as its rows: its rows are stored as paragraphs, or refused for
+a width the target does not have.
 Goldmark also drops a row's closing `|` whatever stands before it, where that parser reads one
 after an odd run of backslashes as the last cell's text, so that pipe is put back in the cell
 (`keepEscapedClosingPipes`). The renderer writes a cell's pipe `\|` and the header as wide as the

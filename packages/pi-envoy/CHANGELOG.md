@@ -29,7 +29,10 @@
   that never leaves the process. Nothing about it is written to Dispatch's database.
 - The dispatch skill's documents reference says a `|` in a table cell, inside inline code and
   links too, is written `\|`, and that a row holding text in a cell past its table's width is
-  refused on every write path rather than stored short, naming each path's error code.
+  refused on every write path rather than stored short, naming each path's error code. Its
+  document-edits reference says which inserted fragments are table rows: every line yields a cell
+  and an unescaped `|`, none is a delimiter row and none opens another block. Anything else is
+  inserted as blocks.
 
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask
