@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0]
+
+### Added
+
+- With Dispatch configured, every Claude Code session carries the `dispatch-first` skill: a new
+  SessionStart hook (`hooks/dispatch-first-hook.ts`, matcher `startup|clear|compact`) puts it into
+  the model's context as `additionalContext`, a command of its own so the open-asks summary cannot
+  push it past Claude Code's 10,000-character hook limit (LEGION-386). The plugin ships the skill as
+  a third symlink, `skills/dispatch-first`, and the hook reads it from `${CLAUDE_PLUGIN_ROOT}` at
+  run time; an install without it fails the hook naming the file.
+
 ## [0.4.0]
 
 ### Added

@@ -4,12 +4,26 @@
 
 ### Added
 
+- Every session with the Dispatch tools, Legion panes and `task` subagents included, now carries the
+  `dispatch-first` skill in every model request: search Dispatch before planning, filing, asking or
+  starting work; extend the issue that already tracks the work; cite the decision a human already
+  made; close duplicates naming the survivor; write asks and messages that stand on their own; and
+  read `skill://dispatch` before writing a spec (LEGION-386). The extension inserts it as a user
+  message after any compaction summaries on each request, so it survives turn 2 and compaction and
+  keeps the prompt cache's prefix stable; it is read once at load, so a package without
+  `dist/skills/dispatch-first/SKILL.md` fails to load naming the file. A session without Dispatch
+  configured gets nothing.
+- The `dispatch` skill arrives whole: its body is under 500 lines and its detail lives in step-linked
+  `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill threshold, where
+  the 75 KB single file used to reach agents with its middle cut out. A test fails when any skill
+  file reaches the threshold or a `skill://<name>/<path>` link names a missing file.
 - The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
   they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
   which runs that procedure and decides whether the push skips CI: a handoff push that a later push
   follows starts no CI run, and every other push runs CI in full. A worker that pushed with the
   skill's commands by hand would run full CI on every handoff. Under the TypeScript daemon, whose
   `legion` has no `push` command, the commands stay hand-run (LEGION-208).
+
 - The session publishes its own conversation for Dispatch's agent conversation view (LEGION-232):
   every turn, tool call and streamed update becomes a frame on `agentstream.<session id>.frames`
   over core NATS, a subject family the notification stream does not capture, so the bus retains

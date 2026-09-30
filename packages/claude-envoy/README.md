@@ -99,11 +99,13 @@ human approval surface.
 
 ## Skills
 
-The plugin ships two skills, `claude-envoy:envoy` and `claude-envoy:dispatch`, which teach the
-tools above. `skills/` holds one relative symlink per skill into the repository-root `skills/`,
-which stays their only source; Claude Code copies each target into the plugin cache at install.
+The plugin ships three skills, `claude-envoy:envoy`, `claude-envoy:dispatch` and
+`claude-envoy:dispatch-first`, which teach the tools above. `skills/` holds one relative symlink per
+skill into the repository-root `skills/`, which stays their only source; Claude Code copies each
+target into the plugin cache at install. With Dispatch configured, the `dispatch-first` SessionStart
+hook also puts `dispatch-first` into the model's context on startup, `/clear` and `/compact`.
 
-`envoy` and `dispatch` are the two a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch` and `dispatch-first` are the three a standalone Claude Code session uses. The other root skills
 stay out: they belong to Legion's roles (the architect, controller, oracle and retro skills, and the
 phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's `thermonuclear-*`
 pair, and those run on Oh My Pi (`skills/AGENTS.md`). The `thermonuclear-*` rubrics also ship in
