@@ -46,7 +46,7 @@ const IssueAsks = z.array(
       .nullish(),
   })
 );
-/** `GET /api/v1/issues/{key}/events`: a page of the issue's event log, a bare array. */
+/** `GET /api/v1/issues/{key}/events`, every page `seed.ts capture` read, joined: a bare array. */
 const IssueEvents = z.array(
   z.looseObject({
     type: z.string(),

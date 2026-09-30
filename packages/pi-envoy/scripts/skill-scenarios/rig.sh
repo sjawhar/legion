@@ -27,10 +27,10 @@
 #                   proof. GitHub is a recording stand-in and the remote a local bare repository.
 #
 # A batch's services are the e2e harness's real Go Dispatch server
-# (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded through its API
-# (seed.ts), a NATS container, and the Envoy listener built from this checkout. Docker assigns the
-# containers' host ports, the listener and Dispatch bind ports scripts/e2e/lib/rig.sh picks, and the
-# kernel assigns each run's daemon stand-in its port.
+# (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded and read back
+# through its API (seed.ts), a NATS container, and the Envoy listener built from this checkout.
+# Docker assigns the containers' host ports, the listener and Dispatch bind ports
+# scripts/e2e/lib/rig.sh picks, and the kernel assigns each run's daemon stand-in its port.
 #
 # Operator input (no default in this repository):
 #   LEGION_E2E_MODEL_GATEWAY_URL  profile: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
@@ -350,10 +350,8 @@ run_ask_on_message() {
     "$issue" "$issue" "$message" "$issue" >"$R/prompt.txt"
   launch "$R" "$name"
   # What the agent left on Dispatch, and the message it was asked about, for the score.
-  local api=http://127.0.0.1:$dispatch_port/api/v1 auth='Authorization: Bearer e2e-token'
-  curl -fsS -H "$auth" "$api/issues/$issue/messages/$message" >"$R/message.json"
-  curl -fsS -H "$auth" "$api/issues/$issue/asks" >"$R/asks.json"
-  curl -fsS -H "$auth" "$api/issues/$issue/events?limit=200" >"$R/events.json"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" capture "$R/fixture.json" "$R") \
+    >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
 }
 
 # The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the

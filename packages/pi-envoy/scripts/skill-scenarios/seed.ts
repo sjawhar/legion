@@ -1,17 +1,32 @@
-// Seeds rig.sh's scratch Dispatch through its API. DISPATCH_E2E_PORT names the server, which
-// e2e/api.ts addresses. e2e/api.ts addresses PLAYWRIGHT_BASE_URL instead, with E2E_AGENT_TOKEN as
-// its bearer, whenever it is set, so seed.ts refuses to run while either is set.
+// Seeds rig.sh's scratch Dispatch through its API, and reads back what a run left there.
+// DISPATCH_E2E_PORT names the server, which e2e/api.ts addresses. e2e/api.ts addresses
+// PLAYWRIGHT_BASE_URL instead, with E2E_AGENT_TOKEN as its bearer, whenever it is set, so seed.ts
+// refuses to run while either is set.
 //
-//   seed.ts project                 project LWEVAL and LWEVAL-1, the issue the tester's world implements
-//   seed.ts ask-on-message <file>   one run's own issue and the owner's message posting its plan;
-//                                   writes {issue, message} to <file>
-import { writeFileSync } from "node:fs";
+//   seed.ts project                        project LWEVAL and LWEVAL-1, the issue the tester's world
+//                                          implements
+//   seed.ts ask-on-message <file>          one run's own issue and the owner's message posting its
+//                                          plan; writes {issue, message} to <file>
+//   seed.ts capture <file> <run dir>       what the run left on the issue <file> names: the message,
+//                                          every ask and the whole event log, as score.ts reads
+//                                          them (message.json, asks.json, events.json in <run dir>)
+import { readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { z } from "zod";
 import {
   createIssue,
   createIssueArtifact,
   createMessage,
   createProject,
+  getIssueEvents,
+  getMessage,
+  listIssueAsks,
 } from "../../../dispatch/e2e/api";
+
+/** What `ask-on-message` writes and `capture` reads. */
+const Fixture = z.object({ issue: z.string(), message: z.string() });
+/** The most events one `GET /api/v1/issues/{key}/events` page holds. */
+const EVENT_PAGE = 200;
 
 for (const name of ["PLAYWRIGHT_BASE_URL", "E2E_AGENT_TOKEN"]) {
   if (process.env[name] !== undefined) {
@@ -22,7 +37,7 @@ for (const name of ["PLAYWRIGHT_BASE_URL", "E2E_AGENT_TOKEN"]) {
   }
 }
 
-const [command, out] = Bun.argv.slice(2);
+const [command, file, runDir] = Bun.argv.slice(2);
 if (command === "project") {
   await createProject({ key: "LWEVAL", name: "skill scenarios" });
   const issue = await createIssue(
@@ -44,7 +59,7 @@ if (command === "project") {
     { as: "agent" }
   );
   console.log(`seeded ${issue.key}`);
-} else if (command === "ask-on-message" && out !== undefined) {
+} else if (command === "ask-on-message" && file !== undefined) {
   // The owner session's world: an issue whose backfill was proposed and never run, the proposal
   // as an attached table, and the message that posts the plan for the rest of the work. Every run
   // seeds the same issue, so `force` passes Dispatch's duplicate check.
@@ -95,9 +110,28 @@ if (command === "project") {
     },
     owner
   );
-  writeFileSync(out, `${JSON.stringify({ issue: issue.key, message: message.id })}\n`);
+  const fixture: z.infer<typeof Fixture> = { issue: issue.key, message: message.id };
+  writeFileSync(file, `${JSON.stringify(fixture)}\n`);
   console.log(`seeded ${issue.key} with message ${message.id}`);
+} else if (command === "capture" && file !== undefined && runDir !== undefined) {
+  // The event log is read page by page to its end, as the agent bearer the run's session holds.
+  const { issue, message } = Fixture.parse(JSON.parse(readFileSync(file, "utf8")));
+  const reader = { as: "agent" } as const;
+  const events = await getIssueEvents(issue, { limit: EVENT_PAGE }, reader);
+  for (let page = events; page.length === EVENT_PAGE; ) {
+    page = await getIssueEvents(issue, { after: page.at(-1)?.seq, limit: EVENT_PAGE }, reader);
+    events.push(...page);
+  }
+  const records = {
+    message: await getMessage(issue, message, reader),
+    asks: await listIssueAsks(issue, reader),
+    events,
+  };
+  for (const [name, record] of Object.entries(records)) {
+    writeFileSync(path.join(runDir, `${name}.json`), `${JSON.stringify(record)}\n`);
+  }
+  console.log(`captured ${issue}: ${records.asks.length} asks, ${events.length} events`);
 } else {
-  console.error("usage: seed.ts project | ask-on-message <file>");
+  console.error("usage: seed.ts project | ask-on-message <file> | capture <file> <run dir>");
   process.exit(2);
 }
