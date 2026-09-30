@@ -15,6 +15,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
+| `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message and a Legion role notice each arrive as a card; the page shows each message once; and a replay of the Send's own envelope after the session restarts injects nothing. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
 
@@ -730,6 +731,46 @@ which is printed. No secret is written there.
 | `second-start-revokes-the-first` | a second start takes the role and the locator, the daemon logs mints 1 and 2, the first capability's registration is refused 403, and a grant minted before the second start, which redeemed then (500 `DISPATCH_UNAVAILABLE`, past the grant check), is refused 403 `GRANT_UNAVAILABLE` after it (a second start revokes the first's capability) |
 | `liveness-probe-against-the-listener` | `controller.Prober` on the live listener calls the second session alive and the first gone |
 | `exit-code-is-oh-my-pis` | Ctrl-D quits Oh My Pi cleanly and the command exits 0, as Oh My Pi did. A non-zero code is carried through too; the stub-omp unit test (`cmd/legion/controller_test.go`, exit 3) holds that |
+
+## dispatch-user-turns.sh
+
+LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the
+session's own user turn, and everything else keeps its Envoy card. One real session — the pinned
+Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with this checkout's plugin in an isolated
+profile, launched with `controller-start-tmux.sh`'s `operator_env` line, its cwd under `/tmp` —
+registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
+its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
+conversation page as the person the header names. The session's model turns go through the model
+gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+
+```bash
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0, in about seven minutes
+```
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `DISPATCH_USER_TURNS_OMP` | the pinned build, `github:sjawhar/oh-my-pi@$(mise current github:sjawhar/oh-my-pi)` | another Oh My Pi, as a mise tool spec |
+| `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots and the session's pane at exit) and `session.jsonl`, the session's transcript |
+
+Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
+run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
+profile under the HOME it gives Oh My Pi, its tmux server, its listener and Dispatch, and its
+Postgres and NATS containers; a run that finds another's leftovers refuses to start
+([`lib/leftovers.sh`](#libleftoverssh)).
+
+| check | what it holds |
+| :--- | :--- |
+| `session-registers` | the session registers with the listener from its cwd and advertises `aside`, `btw` and `steer` |
+| `send-is-the-persons-own-turn` | the page's composer opens on Send and offers Send, Aside and BTW; a Send typed there is one user message in the session's transcript that is exactly the body, and no card; the session answers it |
+| `aside-is-the-persons-own-turn` | the same for an Aside |
+| `btw-is-a-side-question` | a BTW is answered in Dispatch and is no user message |
+| `a-session-forging-a-person-gets-a-card` | holding the listener token and a Dispatch bearer, as any session does, the driver stores a session's message on an issue and publishes a frame naming it that claims a person wrote it, on no issue: a card, no user message |
+| `a-broadcast-gets-a-card` | a person's broadcast to the session: a card, no user message |
+| `an-issue-message-gets-a-card` | a person's issue message targeted at the session: a card, no user message |
+| `a-legion-notice-gets-a-card` | the Go daemon's `phase-finished` notice on a role topic the session holds: a card, no user message |
+| `the-page-shows-each-message-once` | a fresh page, opened while the session's stream still holds the turns it tagged (the ring lives in the process, so the restart below empties it): the replay the page is served carries the Send and the Aside as user messages tagged with their Dispatch message ids, beside their stored copies, and the page shows each person's message once |
+| `a-replay-after-restart-gets-a-card` | the Send's own envelope, read back from the notification stream, is sent again after Oh My Pi is killed and continued (`--continue`, the same session): a card, and the Send is still one user message |
 
 ## verifiers-staging-token.sh
 
