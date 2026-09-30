@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs this checkout's @sjawhar/pi-legion-envoy into a named OMP profile, packed exactly as the
-# release packs it, so a live proof or a boot-gate test runs the branch-built plugin while the
+# release packs it, so a stage proof runs the branch-built plugin while the
 # user's own profiles stay untouched.
 #
 #   scripts/e2e/lib/install-plugin-profile.sh --profile <name> --home <dir> --dest <dir>

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Packs this checkout's @sjawhar/pi-legion-envoy exactly as the release packs it, into a tarball
 # holding what `npm pack` ships (package.json `files`: dist/ with the bundles and prepack.sh's
-# dist/skills, agents/, the packed manifest). Every caller that installs a branch-built plugin
-# packs through here, so the plugin they run is the one the release publishes.
+# dist/skills, agents/, the packed manifest). Every script that installs a branch-built plugin packs
+# through here (lib/install-plugin-profile.sh and the grant rig's branch mode), so the plugin they run
+# is the one the release publishes. The worker image packs on its own, as release.yaml does, with the
+# same jq rewrite and `bun pm pack`; prepack.sh refuses any other omp.extensions.
 #
 #   scripts/e2e/lib/pack-plugin.sh <out dir>
 #

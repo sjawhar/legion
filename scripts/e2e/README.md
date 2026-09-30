@@ -858,9 +858,14 @@ changed goes unseen. Every caller runs the helper right after its build.
 
 Packs this checkout's `@sjawhar/pi-legion-envoy` the way the release packs it, and prints the
 tarball's path: what `npm pack` ships (`package.json` `files`: `dist/` with the two bundles and
-`prepack.sh`'s `dist/skills`, `agents/`, and the packed manifest). Every install of a branch-built
-plugin packs through it: [`lib/install-plugin-profile.sh`](#libinstall-plugin-profilesh) for the
-stage proofs, and the grant rig's branch mode (`packages/pi-envoy/scripts/grant-rig/setup.sh`).
+`prepack.sh`'s `dist/skills`, `agents/`, and the packed manifest). Every script that installs a
+branch-built plugin packs through it: [`lib/install-plugin-profile.sh`](#libinstall-plugin-profilesh),
+which `controller-start-tmux.sh`, `stage2-tmux-supervision.sh`, `stage3-devbox-workflow.sh`,
+`stage3-4b13b-acceptance.sh` and `stage4b-sandbox-tree.sh` call, and the grant rig's branch mode
+(`packages/pi-envoy/scripts/grant-rig/setup.sh`). The worker image packs on its own, as the release
+does: `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN` rewrites `omp.extensions` with `jq`
+and runs `bun pm pack`, and `prepack.sh` refuses to pack any other `omp.extensions`, which holds all
+of them to the same manifest.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
@@ -902,14 +907,14 @@ Runs in one checkout take turns from the save to the copy back, under a `flock` 
 itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
 has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
 rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
-jj snapshots the rewritten `package.json`. `go test ./...` runs package test binaries in parallel,
-so two callers at once is the expected case.
+jj snapshots the rewritten `package.json`. Two stage proofs in one checkout, or a stage proof and the
+grant rig, can pack at the same time, and the lock takes them in turn.
 
 ## lib/install-plugin-profile.sh
 
 Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
-release packs it, so a stage proof or a boot-gate test runs the branch-built plugin and the user's
-own profiles are never touched.
+release packs it, so a stage proof runs the branch-built plugin and the user's own profiles are never
+touched.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
