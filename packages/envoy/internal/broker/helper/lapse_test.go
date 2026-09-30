@@ -47,17 +47,25 @@ func revoked(r *rig, id string) bool {
 	return slices.Contains(deletes, id)
 }
 
+// lapseReason is the last error a lapse records for the fake's refused renew (LEASE_EXPIRED).
+const lapseReason = "the broker refused this session's renew (LEASE_EXPIRED); enrolling again"
+
 // TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries: once the broker refuses a renew, the
 // enrollment is dead, so the session must stop signing with it at once rather than when its
 // revoke finally succeeds. While the revoke retries, sign answers NOT_ENROLLED (the helper still
-// holds a credential, so the session is enrolling) and the session's record still names the
-// lapsed id, so a helper restart meanwhile revokes it. Once the revoke lands the session enrolls
-// afresh and signs again.
+// holds a credential, so the session is enrolling), naming the refused renew as the last attempt,
+// and a register reply carries the same reason; the session's record still names the lapsed id,
+// so a helper restart meanwhile revokes it. Once the revoke lands the session enrolls afresh and
+// signs again.
 func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
 	r, lapsed, state := lapseRig(t, failAlways)
 	sign := Request{Op: "sign", Method: "GET", URL: "https://secrets.test/v1/enrollments/self"}
-	if resp := r.call(t, sign); resp.OK || resp.Code != CodeNotEnrolled {
-		t.Fatalf("sign while the lapsed enrollment's revoke retries: %+v; want NOT_ENROLLED", resp)
+	want := "this session is not enrolled with the broker yet; last attempt: " + lapseReason
+	if resp := r.call(t, sign); resp.OK || resp.Code != CodeNotEnrolled || resp.Error != want {
+		t.Fatalf("sign while the lapsed enrollment's revoke retries: %+v; want NOT_ENROLLED %q", resp, want)
+	}
+	if reg := r.call(t, Request{Op: "register"}); !reg.OK || reg.State != "enrolling" || reg.Error != lapseReason {
+		t.Fatalf("register while the lapsed enrollment's revoke retries: %+v; want enrolling, %q", reg, lapseReason)
 	}
 	if revoked(r, lapsed) {
 		t.Fatal("the lapsed enrollment was revoked already; this run never reached the retry window")
@@ -97,18 +105,73 @@ func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
 
 // TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt: retire revokes only a live
 // enrollment, so a session that ends while its lapsed id's revoke is backing off must hand that
-// id to the independent revoke rather than abandon it.
+// id to the bounded independent revoke rather than abandon it. Every revoke fails until the
+// session has ended and its own retry loop has stopped, so only the handed-off revoke can land
+// the id: its second try, 2 s after the first.
 func TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt(t *testing.T) {
-	r, lapsed, _ := lapseRig(t, 1)
-	if revoked(r, lapsed) {
-		t.Fatal("the lapsed enrollment was revoked already; this run never reached the retry window")
-	}
+	r, lapsed, _ := lapseRig(t, failAlways)
 	sess := r.srv.Registry.Get(os.Getpid())
+	r.fake.mu.Lock()
+	before := r.fake.revokeAttempts
+	r.fake.mu.Unlock()
 	r.srv.Registry.Remove(sess)
 	if sess.peer != nil {
 		sess.peer.Close()
 	}
-	waitFor(t, func() bool { return revoked(r, lapsed) })
+	// The next attempt after the session ended is the handed-off revoke's first (or, at most, one
+	// last try of the session's own loop, which then returns at once): let it fail, then clear the
+	// fault so the handed-off revoke's next try succeeds.
+	attempted := time.Now().Add(5 * time.Second)
+	for {
+		r.fake.mu.Lock()
+		n := r.fake.revokeAttempts
+		r.fake.mu.Unlock()
+		if n > before {
+			break
+		}
+		if time.Now().After(attempted) {
+			t.Fatal("no revoke of the lapsed id was attempted after the session ended; nothing handed it on")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	r.fake.mu.Lock()
+	r.fake.revokeFailFirst = 0
+	r.fake.mu.Unlock()
+	deadline := time.Now().Add(10 * time.Second)
+	for !revoked(r, lapsed) {
+		if time.Now().After(deadline) {
+			t.Fatal("the handed-off revoke never revoked the lapsed id")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestRegisterWaitWaitsForTheReEnrollmentAfterALapse: a lapse reopens the session's ready
+// channel, so `register --wait` from inside a lapsed session waits for its re-enrollment instead
+// of returning at once with the session still enrolling. The first revoke of the lapsed id fails
+// and the next, a second later, lands, so the re-enrollment comes well inside the wait.
+func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
+	r, lapsed, _ := lapseRig(t, 1)
+	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
+	if !reg.OK || reg.State != "enrolled" || reg.EnrollmentID == "" || reg.EnrollmentID == lapsed {
+		t.Fatalf("register --wait in a lapsed session: %+v; want the fresh enrollment, not %q", reg, lapsed)
+	}
+}
+
+// TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne: a session enrolling with no failure yet
+// (before its first attempt returns) is told only that it is not enrolled; one whose last attempt
+// failed is told why.
+func TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne(t *testing.T) {
+	r := startRig(t, "")
+	sess, _ := newSession(1, 1, "h:1:1", nil)
+	if got := r.srv.notEnrolled(sess); got.Code != CodeNotEnrolled || got.Error != "this session is not enrolled with the broker yet" {
+		t.Fatalf("no attempt yet: %+v", got)
+	}
+	sess.setError("broker 503 DATABASE: postgres unreachable")
+	if got := r.srv.notEnrolled(sess); got.Error != "this session is not enrolled with the broker yet; last attempt: broker 503 DATABASE: postgres unreachable" {
+		t.Fatalf("after a failed attempt: %+v", got)
+	}
 }
 
 // TestAPriorEnrollmentOfAnotherOperatorDoesNotStrandTheSession is the merge queue's finding 3 on
