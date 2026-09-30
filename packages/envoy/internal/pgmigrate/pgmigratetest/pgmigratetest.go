@@ -19,13 +19,15 @@ import (
 //
 // This is where the stores' embed rule is stated. pgmigrate.Load refuses a file named any other way
 // than a migration, but only a file it is given, and a //go:embed pattern can leave an entry out
-// without an error: a directory pattern without all: drops every name beginning with _ or ., so
-// both stores embed all:migrations; no directive embeds a symlink or an empty directory. A migration
-// file left out would go unapplied while it sits in the tree, and an empty directory, which holds
-// nothing to apply, is still an entry Load never judges. On today's tree the all: prefix changes
-// nothing, since neither directory holds a _ or . name; this check fails when an entry on disk is
-// missing from the binary: such a name under a directive without all:, a symlink, or an empty
-// directory.
+// without an error. A directory pattern without all: drops every name beginning with _ or ., so
+// both stores embed all:migrations; beyond that, no directive embeds a symlink, a version-control
+// name (.git, .hg, .svn, .bzr), an empty directory, a file that is not regular (a FIFO, socket or
+// device), or a hidden name Go's module paths refuse (one holding a colon, for instance), all:
+// included. A migration file left out would go unapplied while it sits in the tree, and an empty
+// directory, which holds nothing to apply, is still an entry Load never judges. On today's tree the
+// all: prefix changes nothing, since neither directory holds a _ or . name. This check fails for
+// each of those causes and names it: a _ or . name, a symlink, a version-control name, an empty
+// directory, and a file that is not regular, falling back to the store's pattern for anything else.
 func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 	onDisk, err := os.ReadDir(dir)
 	if err != nil {
@@ -54,7 +56,7 @@ func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 		case !entry.Type().IsRegular():
 			return fmt.Errorf("%s/%s is not a regular file (a FIFO, socket or device), which no //go:embed directive embeds; remove it", dir, name)
 		case strings.HasPrefix(name, "_") || strings.HasPrefix(name, "."):
-			return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
+			return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:, or rename it if all: is already there, since Go's module paths refuse some names (one holding a colon, for instance)", dir, name)
 		}
 		return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; check the store's //go:embed pattern", dir, name)
 	}

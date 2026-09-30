@@ -9,6 +9,7 @@ import (
 // holders is the cancellation race between pg_locks and pg_blocking_pids and is held back; two in a
 // row mean nobody holding the lock can be named - the holder left, or only a prepared transaction,
 // which pg_blocking_pids reports as pid 0, still blocks - and a departed holder must not be named.
+// Each row is the sequence that tells one term of the rule from its absence.
 func TestObserveNamesOnlyAHolderTheLatestReadingsSupport(t *testing.T) {
 	named := func(pid uint32) *LockWait {
 		return &LockWait{LockType: "relation", Mode: "AccessExclusiveLock", Object: "messages", Holders: []LockHolder{{PID: pid}}}
