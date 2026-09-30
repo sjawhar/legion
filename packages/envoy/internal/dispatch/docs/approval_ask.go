@@ -2,9 +2,7 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -47,21 +45,10 @@ func ApprovalAskAt(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifa
 		}
 		// The reason opens with the document, never with a caller's text, so it is never one of
 		// the reasons only settlement writes (SettlementRetractionReason).
-		resolution := model.AskResolution{
-			Kind:   "retracted",
-			Reason: fmt.Sprintf("the document moved on to version %d; %s", version, instead),
-			Actor:  actor,
-			At:     time.Now().UTC(),
-		}
-		encoded, err := json.Marshal(resolution)
+		ask, err := WriteAskResolution(ctx, tx, ask, "retracted", fmt.Sprintf("the document moved on to version %d; %s", version, instead), actor)
 		if err != nil {
-			return nil, nil, fmt.Errorf("encode approval ask retraction: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, encoded); err != nil {
 			return nil, nil, fmt.Errorf("retract stale approval ask: %w", err)
 		}
-		ask.State = "resolved"
-		ask.Resolution = &resolution
 		// A retraction writes no question text, so it moves no references and says so.
 		event, err := broker.Append(ctx, tx, model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
@@ -78,8 +65,13 @@ func ApprovalAskAt(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifa
 
 // RetractStaleApprovalAsks is ApprovalAskAt for a writer that has just written version: every
 // approval ask open on the document names an older version, and each is retracted in the
-// writer's name. Every route that writes a version calls it in the version's transaction.
+// writer's name. Every route that writes a version calls it in the version's transaction. A
+// settlement can know no writer of its version - it names one from its pending authors, else
+// the room's last actor, and after a room reload has neither - and then retracts in its own name.
 func RetractStaleApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version int, actor model.Actor) ([]model.Event, error) {
+	if actor.Kind == "" && actor.ID == "" {
+		actor = SettlementActor
+	}
 	_, retractions, err := ApprovalAskAt(ctx, tx, broker, artifactID, version, actor, "request approval of that version to ask again")
 	return retractions, err
 }

@@ -211,24 +211,9 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 			"reason may not begin with "+strconv.Quote(docs.SettlementRetractionReason)+", which marks a retraction the document's settlement wrote")
 		return
 	}
-	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, s.resolveTransition(actor, kind, reason))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, ask)
-}
-
-// resolveTransition closes an open ask as retracted or resolved, recording the reason.
-func (s *server) resolveTransition(actor model.Actor, kind, reason string) askTransition {
-	return askTransition{
+	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, askTransition{
 		EventType: "ask.resolved",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
-			resolution := model.AskResolution{Kind: kind, Reason: reason, Actor: actor, At: time.Now().UTC()}
-			resolutionJSON, err := encodeJSON(resolution)
-			if err != nil {
-				return model.Ask{}, err
-			}
 			// A block ask's closed state belongs in its block too, written by whoever closed
 			// it: left to settlement, the repair lands on whoever next touches the document.
 			if ask.BlockID != nil {
@@ -242,14 +227,14 @@ func (s *server) resolveTransition(actor model.Actor, kind, reason string) askTr
 					return model.Ask{}, err
 				}
 			}
-			if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, resolutionJSON); err != nil {
-				return model.Ask{}, err
-			}
-			ask.State = "resolved"
-			ask.Resolution = &resolution
-			return ask, nil
+			return docs.WriteAskResolution(ctx, tx, ask, kind, reason, actor)
 		},
+	})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
+	WriteJSON(w, http.StatusOK, ask)
 }
 
 func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, transition askTransition) (model.Ask, error) {
