@@ -91,9 +91,10 @@ export async function getUnsubscribeCalls(): Promise<{ session_id: string; topic
   return (await response.json()) as { session_id: string; topics: string[] }[];
 }
 
-// The Agents page's keyboard rows, in `keyboard-agents.e2e.ts` and in the picker spec the WebKit
-// and Firefox projects also run, share one page: two live sessions, each with Dispatch activity of
-// its own, so both are listed rows rather than folded into `Inactive` or `No Dispatch activity`.
+// The Agents page's keyboard rows, in `keyboard-agents.e2e.ts`, `keyboard-palette.e2e.ts` and the
+// picker spec the WebKit and Firefox projects also run, share one page: two live sessions, each
+// with Dispatch activity of its own, so both are listed rows rather than folded into `Inactive` or
+// `No Dispatch activity`.
 // The Planner's open ask waits on the viewer, which puts it above the Reviewer. Neither carries a
 // `last_seen`, so the fake Envoy stamps each seed when it is made: this module is evaluated once
 // per Playwright worker, at the first spec that imports it, and a time computed here would age with

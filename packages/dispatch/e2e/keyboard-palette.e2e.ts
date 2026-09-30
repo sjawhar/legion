@@ -1,5 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import { openAgents, seedAgents, setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, getIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -14,6 +15,9 @@ async function openIssue(page: Page, issueKey: string, title: string): Promise<v
 
 test.beforeEach(async () => {
   await resetDatabase();
+  if (!process.env.PLAYWRIGHT_BASE_URL) {
+    await setLiveSessions([]);
+  }
 });
 
 test("the palette lists the issue page's actions, guarded like their buttons, and runs one", async ({
@@ -62,15 +66,26 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
       path: testInfo.outputPath(`palette-actions-${testInfo.project.name}.png`),
     });
 
-    // Arrows move over action rows exactly as they move over hits.
-    const closeId = await close.getAttribute("id");
-    expect(closeId).not.toBeNull();
-    await expect(input).toHaveAttribute("aria-activedescendant", closeId as string);
+    // Arrows move over action rows exactly as they move over hits, from the first row. Which row
+    // that is belongs to `actions()`'s sort, so this names none.
+    const rows = actions.getByRole("option");
+    const firstId = await rows.first().getAttribute("id");
+    expect(firstId).not.toBeNull();
+    await expect(input).toHaveAttribute("aria-activedescendant", firstId as string);
     await input.press("ArrowDown");
-    await expect(input).not.toHaveAttribute("aria-activedescendant", closeId as string);
+    await expect(input).not.toHaveAttribute("aria-activedescendant", firstId as string);
     await input.press("ArrowUp");
-    await expect(input).toHaveAttribute("aria-activedescendant", closeId as string);
+    await expect(input).toHaveAttribute("aria-activedescendant", firstId as string);
 
+    // Arrow down to Close issue, wherever the sort put it, and Enter runs the highlighted row.
+    const closeId = await close.getAttribute("id");
+    const ids = await rows.evaluateAll((options) => options.map((option) => option.id));
+    const closeIndex = ids.indexOf(closeId ?? "");
+    expect(closeIndex).toBeGreaterThanOrEqual(0);
+    for (let step = 0; step < closeIndex; step += 1) {
+      await input.press("ArrowDown");
+    }
+    await expect(input).toHaveAttribute("aria-activedescendant", closeId as string);
     await input.press("Enter");
     await expect(dialog).toHaveCount(0);
     await expect.poll(() => getIssue(issue.key).then((read) => read.status)).toBe("done");
@@ -418,6 +433,219 @@ test("a header write in flight withdraws the rows whose buttons it disables", as
     await expect(actions.getByRole("option", { name: "Close issue" })).toHaveCount(0);
     await expect(actions.getByRole("option", { name: "Set priority P2" })).toHaveCount(0);
     release.resolve();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a Set priority row the server refuses is reported by the header, in the digit key's one failure", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Refused palette priority" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openIssue(page, issue.key, "Refused palette priority");
+    let patches = 0;
+    await page.route(`**/api/v1/issues/${issue.key}`, async (route) => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      patches += 1;
+      await route.fulfill({
+        body: JSON.stringify({ error: { code: "INTERNAL", message: "nope" } }),
+        contentType: "application/json",
+        status: 500,
+      });
+    });
+
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    await dialog
+      .getByRole("group", { name: "Actions" })
+      .getByRole("option", { name: "Set priority P2" })
+      .click();
+    await expect(dialog).toHaveCount(0);
+
+    // The row writes through the page's one priority write, so the header reports its refusal
+    // and the badge rolls back, exactly as for the picker and the digit keys.
+    const header = page.getByTestId("issue-header");
+    const failure = header
+      .getByRole("alert")
+      .filter({ hasText: `Could not update the priority of ${issue.key}.` });
+    await expect(failure).toBeVisible();
+    await expect(failure).toHaveCount(1);
+    await expect(failure.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(header.locator("span", { hasText: /^Priority$/ })).toBeVisible();
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
+    expect(patches).toBe(1);
+
+    // A digit is the same write, so its refusal lands in that failure rather than beside it.
+    await page.locator("body").focus();
+    await page.keyboard.press("3");
+    await expect.poll(() => patches).toBe(2);
+    await expect(failure).toHaveCount(1);
+    await expect(header.locator("span", { hasText: /^Priority$/ })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a List row's own row runs on the row that opened the palette, and its movement keys are no rows", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "List palette" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE/issues");
+    const row = page.locator(`[data-issue-row]`, { hasText: "List palette" });
+    await expect(row).toBeVisible();
+    await page.locator("body").focus();
+    await page.keyboard.press("j");
+    await expect(row).toBeFocused();
+
+    await page.keyboard.press("Control+k");
+    const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
+      name: "Actions",
+    });
+    await expect(actions.getByRole("option", { name: "Open issue" })).toHaveCount(1);
+    // `Enter` from the row opens it too, and `Open issue` is already that action's row.
+    // Soft, so one run names every row that should not be there.
+    for (const absent of ["Next issue", "Previous issue", "Open the focused issue"]) {
+      await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
+    }
+    await actions.getByRole("option", { name: "Open issue" }).click();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}$`));
+  } finally {
+    await context.close();
+  }
+});
+
+test("the Inbox offers the selection's snooze but not the keys that mark and clear it", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Inbox selection palette" });
+  await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
+    { actor: { id: "e2e-palette", kind: "session" }, as: "agent" }
+  );
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto("/");
+    const row = page.locator("[data-inbox-row]");
+    await expect(row).toHaveCount(1);
+    await page.locator("body").focus();
+    await page.keyboard.press("j");
+    await expect(row).toBeFocused();
+    await page.keyboard.press("x");
+    const bar = page.getByRole("group", { name: "Selected asks" });
+    await expect(bar).toContainText("1 selected");
+
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const actions = dialog.getByRole("group", { name: "Actions" });
+    const snooze = actions.getByRole("option", {
+      name: "Snooze the focused ask, or every selected ask",
+    });
+    await page.keyboard.press("Control+k");
+    await expect(snooze).toHaveCount(1);
+    await expect
+      .soft(actions.getByRole("option", { name: "Select or deselect the focused ask" }))
+      .toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(row).toBeFocused();
+
+    // Off the row, with the mark still made: Escape here clears the selection, and in the
+    // palette Escape closes the palette, so that binding is no row. The snooze still is.
+    await page.keyboard.press("Escape");
+    await expect(row).not.toBeFocused();
+    await expect(bar).toContainText("1 selected");
+    await page.keyboard.press("Control+k");
+    await expect(snooze).toHaveCount(1);
+    await expect.soft(actions.getByRole("option", { name: "Clear the selection" })).toHaveCount(0);
+
+    // It runs on the page the palette opened over: the bulk picker takes focus, the mark kept.
+    await snooze.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(bar.getByRole("combobox", { name: "Snooze selected asks" })).toBeFocused();
+    await expect(bar).toContainText("1 selected");
+  } finally {
+    await context.close();
+  }
+});
+
+test("the Agents page offers a row's picker, which then commits a keyboard pick on Enter", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await seedAgents();
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openAgents(page);
+    const row = page.locator("[data-agent-row]").nth(0);
+    await page.keyboard.press("j");
+    await expect(row).toBeFocused();
+
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const actions = dialog.getByRole("group", { name: "Actions" });
+    for (const offered of [
+      "Message the focused agent",
+      "Pick an issue for the message",
+      "Pin or unpin the focused agent",
+    ]) {
+      await expect(actions.getByRole("option", { name: offered })).toHaveCount(1);
+    }
+    for (const absent of ["Next agent", "Previous agent", "Select or deselect the focused agent"]) {
+      await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
+    }
+
+    const input = page.getByRole("combobox", { name: "Search" });
+    await input.fill("pick an issue");
+    await expect(actions.getByRole("option")).toHaveCount(1);
+    await input.press("Enter");
+    await expect(dialog).toHaveCount(0);
+
+    // The row lands in the picker exactly as `i` does, and the picker's own rule holds: the
+    // arrows only move the selection, and Enter commits it and hands the reader to the composer.
+    const picker = row.getByRole("combobox", { name: "Issue" });
+    const toggle = row.getByRole("button", { name: "Choose issue" });
+    await expect(picker).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect(picker).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(toggle).toContainText("CORE-2");
+    const field = row.getByRole("textbox", { name: "Comment" });
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue("@Planner");
   } finally {
     await context.close();
   }
