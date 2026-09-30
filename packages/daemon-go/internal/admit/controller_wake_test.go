@@ -5,20 +5,44 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
-// registerController records the project's controller as `legion controller start` leaves it: a
-// session holding the current capability.
+// registerController records the project's controller the way the daemon does when
+// `legion controller start` mints a capability and its session registers with it: through the
+// store's own MintController and RegisterController, under the project token, never the Dispatch
+// key.
 func registerController(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	if _, err := pool.Exec(context.Background(), `insert into controllers (project, capability_hash, generation, session, secret_hash, registered_at)
-		values ($1, $2, 1, 'ses-controller', $3, now())`, testProject, []byte("capability"), []byte("secret")); err != nil {
-		t.Fatalf("register the controller: %v", err)
+	registerControllerAt(t, pool.Config().ConnString(), testProject)
+}
+
+// registerControllerAt is registerController for the Dispatch project key on the database at dsn.
+func registerControllerAt(t *testing.T, dsn, key string) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	defer st.Close()
+	token, err := claim.ProjectToken(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := st.MintController(ctx, token, []byte("capability"))
+	if err != nil {
+		t.Fatalf("mint the controller capability: %v", err)
+	}
+	if ok, err := st.RegisterController(ctx, token, generation, "ses-controller", []byte("secret"), time.Now()); err != nil || !ok {
+		t.Fatalf("register the controller = %t, %v", ok, err)
 	}
 }
 

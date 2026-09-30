@@ -236,8 +236,9 @@ type Store interface {
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
-	// ControllerRegistered says whether a session holds project's current controller registration
-	// (the controllers table), which `legion controller start` makes.
+	// ControllerRegistered says whether a session holds the current controller registration of the
+	// project whose token (claim.ProjectToken) is project: the controllers table, which
+	// `legion controller start` mints and registers under that token.
 	ControllerRegistered(ctx context.Context, tx pgx.Tx, project string) (bool, error)
 	// ControllerNoticePending says whether project's outbox still holds an unpublished controller
 	// notice of kind, so a wake is never queued behind an identical one.

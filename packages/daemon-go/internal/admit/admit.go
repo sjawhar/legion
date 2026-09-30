@@ -214,7 +214,13 @@ func (a *Admission) wakeWhileSlotFree(ctx context.Context, tx pgx.Tx, kind recor
 	if len(own)+len(record.Waiting(issues, own)) >= a.cap {
 		return nil
 	}
-	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
+	// The controllers row is minted and registered under the project token (`legion controller
+	// start`'s mint, api/controller.go), never the Dispatch key admission is keyed by.
+	token, err := claim.ProjectToken(a.project)
+	if err != nil {
+		return err
+	}
+	registered, err := a.store.ControllerRegistered(ctx, tx, token)
 	if err != nil || !registered {
 		return err
 	}

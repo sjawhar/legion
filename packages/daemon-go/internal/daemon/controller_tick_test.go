@@ -10,6 +10,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -20,9 +21,19 @@ import (
 func TestTheControllerTickQueuesOneWakeWhileASlotIsFree(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if _, err := pool.Exec(context.Background(), `insert into controllers (project, capability_hash, generation, session, secret_hash, registered_at)
-		values ('CAPTURE', 'capability', 1, 'ses-controller', 'secret', now())`); err != nil {
-		t.Fatalf("register the controller: %v", err)
+	// The daemon's own path: `legion controller start` mints the capability and its session
+	// registers with it, both under the project token (api/controller.go).
+	st, err := store.Open(context.Background(), pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	defer st.Close()
+	generation, err := st.MintController(context.Background(), "capture", []byte("capability"))
+	if err != nil {
+		t.Fatalf("mint the controller capability: %v", err)
+	}
+	if ok, err := st.RegisterController(context.Background(), "capture", generation, "ses-controller", []byte("secret"), time.Now()); err != nil || !ok {
+		t.Fatalf("register the controller = %t, %v", ok, err)
 	}
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)

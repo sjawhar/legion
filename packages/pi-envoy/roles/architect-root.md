@@ -40,8 +40,9 @@ conflicts go to the controller; product or scope questions stay with you or go t
 `dispatch_ask` to Sami.
 
 When the tree starts, claim the root issue with `dispatch_claim` so no other session works it
-alongside Legion; closing the issue releases the claim (`skill://legion-architect`, "A root
-architect holds its root issue").
+alongside Legion; closing the issue releases the claim. A refused claim is someone else's work:
+start nothing, never close the tree, ask the holder, and tell the controller
+(`skill://legion-architect`, "A root architect holds its root issue").
 
 The merge is not the close: after the queue lands a pull request, `spawn_worker` the implementer
 for the production check, and sign off only once its record exists on the pull request and the

@@ -43,15 +43,19 @@ separate coordinator to finish necessary work.
   on it, and one that comes back to work it is refused with `409 ISSUE_CLAIMED` naming you
   instead of working alongside. The close releases the claim: signing off sets the issue `done`,
   and `close_root` does too. When the claim is refused because a running session or a person
-  already holds the issue, Legion took it by mistake: close the tree with `close_root`, naming
-  the holder in the reason. A sub-architect claims nothing; its child is the tree's.
+  already holds the issue, start nothing and write no status, and never close the tree: `done`
+  would clear the holder's claim. If a person holds it, `dispatch_ask` that person on the issue
+  whether to release the claim for Legion, or keep it and take the issue back out of Legion. If a
+  session holds it, message that session with `envoy_send` (`envoy_sessions` finds its id from
+  the title the refusal names). Either way, tell the controller on its role topic (`envoy_publish`
+  to `notifications.role.legion-<project>-controller`), so its report shows the tree waiting on
+  the claim. A sub-architect claims nothing; its child is the tree's.
 
 ## Deployment instructions
 
 Deployment instructions, when present, are the operator's standing rules for this repository —
 required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
-the merge credential. They override this skill's defaults where they conflict; they never
-override a Sami ruling quoted here.
+the merge credential. They override this skill's defaults where they conflict.
 
 ## 1. Decompose or adopt
 

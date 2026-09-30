@@ -162,10 +162,10 @@ scope.
 you add). With none free, stop.
 
 **Candidates.** The project's open `todo` issues, roots and children alike, that have no children
-at all and do not carry the `legion` label. `todo` alone, as Sami ruled for choosing work on
-2026-09-27 (`skill://dispatch`, "Choosing what to work on"): take the top ready issue, "status
-`todo`, highest priority first, then board rank"; an issue that waits on a deploy or a decision
-belongs in `backlog`, so the walk takes nothing from `backlog` or `triage`. The Go daemon runs
+at all and do not carry the `legion` label. Ready work is `todo` (`skill://dispatch`, "Choosing
+what to work on"): take the top ready issue, highest priority first, then board rank. An issue that
+waits on a deploy or a decision belongs in `backlog`, so the walk takes nothing from `backlog` or
+`triage`. The Go daemon runs
 only labelled roots, so every root it ran since the daemon required the label carries it: a
 labelled root in `todo` is the daemon's to admit or queue, one in `triage` is yours to triage
 (step 2 above), and one anywhere else was parked by Legion or by a person. A child you take becomes
@@ -268,7 +268,10 @@ every pull request by its URL.
 - **Closed without a change.** Those with no pull request, each with the reason its closing
   message gave (the `message.created` just before `issue.closed` among `Events:`).
 - **Running.** Each root in `admission.active` with its `issues.<KEY>.phase`, and the roots in
-  `admission.waiting`.
+  `admission.waiting`. A root whose architect told you its claim was refused is named as waiting
+  on that holder: its architect started nothing and asked them to release it or take the issue
+  back. Nothing in `legion state` records that, so read the tree's issue (its `Claimed by:` line
+  and the ask or message the architect opened) before you name it.
 - **The slots and the walk.** The free slots (`admission.cap` minus `admission.active` and
   `admission.waiting`), then this turn's walk: what it took, and how many candidates each row
   skipped, so a reader can see why a free slot stays empty.
@@ -280,8 +283,7 @@ and the highest-priority issues.
 
 Deployment instructions, when present, are the operator's standing rules for this repository —
 required checks, deploy/smoke commands, code-owner expectations, and standing roles you may
-consult. They override this skill's defaults where they conflict; they never override a Sami ruling
-quoted here.
+consult. They override this skill's defaults where they conflict.
 
 ## Turn discipline
 
@@ -357,8 +359,8 @@ quoted here.
 
 Under the Go daemon nothing reconsiders `backlog` or `icebox` on its own: [Keeping the slots
 full](#keeping-the-slots-full-go-daemon) takes only `todo` issues, since an issue that waits on a
-deploy or a decision belongs in `backlog` (Sami's ruling of 2026-09-27, `skill://dispatch`,
-"Choosing what to work on"). A handed-over root waits for a slot in `todo`, where the daemon's
+deploy or a decision belongs in `backlog` (`skill://dispatch`, "Choosing what to work on"). A
+handed-over root waits for a slot in `todo`, where the daemon's
 admission queue holds it (`admission.waiting`), so a park means "should not run now", and a
 parked root keeps its `legion` label. A parked issue runs again when a person sets it to `todo`,
 or when a wake tells you to re-admit it (`worker-died`, closed-tree activity).
