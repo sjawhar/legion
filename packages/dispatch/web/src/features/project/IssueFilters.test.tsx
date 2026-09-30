@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -219,6 +220,26 @@ test("a search restored from ?q= narrows the list before anyone types", async ()
     await screen.findByText("Guidance");
     expect(screen.queryByText("Navigation")).toBeNull();
     expect(screen.getByRole("button", { name: "Remove Search: guid filter" })).toBeTruthy();
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
+test("the search filter writes at most SEARCH_QUERY_MAX characters into the page URL", async () => {
+  const { getMyState, listIssues, view } = renderStrip([
+    issue({ key: "CORE-1", title: "Guidance" }),
+  ]);
+
+  try {
+    await screen.findByText("Guidance");
+    await openFilters();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search issues" }), {
+      target: { value: "x".repeat(SEARCH_QUERY_MAX + 500) },
+    });
+    const written = new URLSearchParams(screen.getByTestId("location-search").textContent ?? "");
+    expect(written.get("q")).toBe("x".repeat(SEARCH_QUERY_MAX));
   } finally {
     view.unmount();
     getMyState.mockRestore();

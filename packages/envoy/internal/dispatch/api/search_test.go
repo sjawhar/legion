@@ -526,10 +526,10 @@ func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
 				Code  string `json:"code"`
 				Error string `json:"error"`
 			}](t, response)
-			want := fmt.Sprintf("q is %d characters over the %d-character limit (%d/%d); search with a short phrase",
-				test.length-contracts.SearchQueryMax, contracts.SearchQueryMax, test.length, contracts.SearchQueryMax)
-			if body.Code != "SEARCH_QUERY_TOO_LONG" || !strings.HasPrefix(body.Error, want) {
-				t.Fatalf("refusal = %+v, want SEARCH_QUERY_TOO_LONG %q", body, want)
+			want := fmt.Sprintf("q is %d characters over the %d-character limit (%d/%d); %s",
+				test.length-contracts.SearchQueryMax, contracts.SearchQueryMax, test.length, contracts.SearchQueryMax, contracts.SearchQueryHint)
+			if body.Code != "CAP_EXCEEDED" || body.Error != want {
+				t.Fatalf("refusal = %+v, want CAP_EXCEEDED %q", body, want)
 			}
 		})
 	}

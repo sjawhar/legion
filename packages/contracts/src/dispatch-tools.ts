@@ -182,20 +182,16 @@ export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 export const ASK_QUESTION_MAX = 800;
 
 /**
- * Longest `dispatch_search` query the Dispatch server accepts (`GET /api/v1/search`'s `q`, after
- * trimming), in characters (UTF-16 units, JavaScript's `length`). The query travels in the URL,
- * so the limit comes from what the URL can carry: an AWS Application Load Balancer refuses a
- * request line over its fixed 16 K quota with `414 Request-URI Too Large` (measured 2026-09-30 on
- * the deployed one: a 16,369-byte path and query answered, 16,370 bytes refused), while the
- * server's own `http.Server` reads about 1 MiB (Go's default `MaxHeaderBytes`). Percent-encoding
- * costs at most 9 bytes per character (a three-byte UTF-8 character becomes `%XX%XX%XX`), so
- * 1,000 characters stay under 9,000 bytes: the request fits under 16 K with room for the path and
- * the other parameters, whatever the query is written in. A search is a few words; every word
- * must match, so a pasted passage finds nothing anyway. Generated into Go as
- * `contracts.SearchQueryMax`, which the server enforces, so the tool's refusal and the server's
- * are one number.
+ * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
+ * query travels in the URL; percent-encoded at up to 9 bytes a unit, 1,000 stays under the load
+ * balancer's 16 K request-line limit. Generated into Go as `contracts.SearchQueryMax`, which the
+ * server enforces.
  */
 export const SEARCH_QUERY_MAX = 1000;
+
+/** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
+ *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
+export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
@@ -927,7 +923,7 @@ export const dispatchToolSpecs = [
         .string({
           min: 2,
           max: SEARCH_QUERY_MAX,
-          maxHint: "search with a short phrase of a few words, not a passage",
+          maxHint: SEARCH_QUERY_HINT,
         })
         .describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z.string().describe("Optional project key to search within.").optional(),

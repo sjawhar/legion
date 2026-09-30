@@ -95,7 +95,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	// the URL under the load balancer's request-line quota (contracts.SearchQueryMax).
 	if length := len16(searchText); length > contracts.SearchQueryMax {
 		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
-		writeError(w, "SEARCH_QUERY_TOO_LONG", tooLong.status, tooLong.message+"; search with a short phrase of a few words, not a passage")
+		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchQueryHint)
 		return
 	}
 

@@ -36638,6 +36638,7 @@ var SPEC_WRITING_GUIDANCE = `When writing a spec, use these sections in order: $
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var SEARCH_QUERY_MAX = 1000;
+var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -36953,7 +36954,7 @@ var dispatchToolSpecs = [
       query: z2.string({
         min: 2,
         max: SEARCH_QUERY_MAX,
-        maxHint: "search with a short phrase of a few words, not a passage"
+        maxHint: SEARCH_QUERY_HINT
       }).describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z2.string().describe("Optional project key to search within.").optional(),
       limit: z2.number({ int: true, min: 1, max: 50 }).describe("Maximum results, 1-50; default 20.").optional()

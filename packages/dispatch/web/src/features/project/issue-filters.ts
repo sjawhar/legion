@@ -1,3 +1,4 @@
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -90,13 +91,15 @@ export function useIssueFilters(): IssueFiltersState {
   );
   const setLabels = useCallback((next: string[]) => setAll("label", next), [setAll]);
   const setStatuses = useCallback((next: string[]) => setAll("status", next), [setAll]);
+  // The text lands in the page URL, which the load balancer refuses past 16 K on reload or share;
+  // the one search cap keeps it well under that.
   const setSearch = useCallback(
     (next: string) =>
       update((params) => {
         if (next === "") {
           params.delete("q");
         } else {
-          params.set("q", next);
+          params.set("q", next.slice(0, SEARCH_QUERY_MAX));
         }
       }),
     [update]

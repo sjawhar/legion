@@ -152,6 +152,10 @@ const MaxBroadcastRecipients = 100
 // cannot drift apart.
 const SearchQueryMax = 1000
 
+// SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
+// from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
+const SearchQueryHint = "search with a short phrase of a few words, not a passage"
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

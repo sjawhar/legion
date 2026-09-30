@@ -7,7 +7,7 @@ import {
   MAX_BROADCAST_RECIPIENTS,
   RECEIPT_TIMEOUT_CAUSE,
 } from "../src/dispatch-api";
-import { SEARCH_QUERY_MAX } from "../src/dispatch-tools";
+import { SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -95,6 +95,10 @@ const MaxBroadcastRecipients = ${MAX_BROADCAST_RECIPIENTS}
 // SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the dispatch_search tool's
 // cannot drift apart.
 const SearchQueryMax = ${SEARCH_QUERY_MAX}
+
+// SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
+// from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
+const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
