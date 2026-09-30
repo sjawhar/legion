@@ -16,7 +16,7 @@ applies_when:
   - A Go (or any) test runs a Bun script and parses what it prints, and fails now and then on invalid JSON or a bad encoding while the script exited 0
   - The failing case changes between runs and is always one of the larger outputs
   - A Bun script's output is cut at a round size (4096, 8192, 65536 bytes) only on a loaded machine
-  - A Bun script writes a result something parses with console.log, whatever the script reads: a dependency that reads process.stdout (a colour library checking isTTY is enough), or an earlier Bun command on the same pipe that did, leaves the pipe non-blocking
+  - "A Bun script writes a result something parses with console.log, whatever the script reads: a dependency that reads process.stdout (a colour library checking isTTY is enough), or an earlier Bun command on the same pipe that did, leaves the pipe non-blocking"
   - You are about to reach for Bun.write(Bun.stdout, ...) to "flush" a script's output
 ---
 
@@ -56,12 +56,26 @@ run and `empty-items-holding-the-next-line` on the next: lost output, not bad da
    200,001 bytes and exited 0, where the same pair with `bun -e '1'` first delivered all 200,001;
    a command run between the two found `flags: 04001` on the pipe (`01` after `bun -e '1'`); and a
    second command that awaited `process.stdout.write`'s callback delivered all 200,001 with the
-   flag set. So auditing a script and its dependencies is not sufficient on its own: the script
-   loses output to a process it knows nothing about. No consumer in this repository is hit today,
-   because each parsed capture has a pipe of its own: Go's `exec.Cmd` makes one per command, a Bun
-   parent hands each child a fresh socket rather than its own stdout, and each `$(...)` whose
-   output is parsed holds one command (the deep review's census on
-   https://github.com/sjawhar/legion/pull/1622).
+   flag set. How much the later command loses is the pipe's size when it writes, and on this box
+   two sets of runs at the same Bun disagreed about that size, for a reason nobody found. The
+   code-quality review's (https://github.com/sjawhar/legion/pull/1622#issuecomment-5920832376):
+   with nothing between the two commands 4 of 6 runs lost output, and with any command between
+   them the second delivered all 200,001 bytes in 9 of 9; `F_GETPIPE_SZ` read 1,048,576 after the
+   first command exited where it had read 65,536 before (2 runs), one fresh pipe read 1,048,576
+   before any Bun ran, and 2,000,001 bytes came through as exactly 1,048,576, exit 0. The
+   implementer's (https://github.com/sjawhar/legion/pull/1622#issuecomment-5920990160): with
+   `sleep 0.2`, `sh -c true` or a probe between the two, the second delivered 65,536 of 200,001 in
+   10 of 10 runs and 65,536 of 2,000,001 in one, and `F_GETPIPE_SZ` never read anything but
+   65,536. Both `strace`s of the first command show only `F_SETFL O_NONBLOCK`, nothing that
+   resizes the pipe, and the resize did not reproduce on demand. So a probe between the commands
+   may or may not show the loss, and a run that delivers everything disproves nothing: it shows
+   only that the pipe was big enough that time. Auditing a script and its dependencies is not
+   sufficient on its own: the script loses output to a process it knows nothing about. No
+   consumer in this repository is hit today, because no parsed capture shares its pipe with an
+   earlier Bun process: Go's `exec.Cmd` makes a pipe per command, a Bun parent that reads a
+   child's output hands it a fresh socket, each `$(...)` that runs Bun holds one Bun process, and
+   a Go program started on a non-blocking pipe waits rather than drops (the deep review's census,
+   https://github.com/sjawhar/legion/pull/1622#issuecomment-5919556239).
 2. **console.log on a full non-blocking pipe loses the rest.** It writes what the pipe has room
    for, gets `EAGAIN` for the remainder, drops it, and the script exits 0. strace of a 20,000-byte
    `console.log` into a one-page pipe: `write(1, …, 20000) = 4096`, `write(1, …, 15904) = -1
@@ -90,18 +104,20 @@ received the first 4096 bytes twice.
 
 ## Fix: hand the result back in a file
 
-Any dependency can make stdout non-blocking, and whether it does can depend on the environment,
-so a Bun script's stdout is not a safe place for a result a program parses. `decode.ts` and
-`edit-blocks.ts` take an output path as their last argument and `writeFileSync` their result
-there, as `differential.ts` already wrote its result to a file it is given, so no gen script a
-test reads returns anything over a pipe. `writeFileSync` writes the whole result or throws: on a
-full disk the file takes what fits and the call then throws `ENOSPC`, so the script exits 1.
-`fs.writeSync` returns a short count without throwing: on a 16 KiB tmpfs it wrote and returned
-16,384 of a 25,141-byte line, and `differential.ts`, which writes each line with it, exited 0
-with that line cut, so it now checks the count and throws, exiting 1 with the short write named.
-The Go runner (`genResult`, `update_test.go`) reads the file after exit 0 and
-fails the test when the script printed anything to stdout or exited 0 without writing the file,
-so a script moved back to `console.log` fails every test that runs it.
+A dependency, or an earlier Bun command on the same pipe, can make stdout non-blocking, and
+whether it does can depend on the environment, so a Bun script's stdout is not a safe place for a
+result a program parses. `decode.ts` and `edit-blocks.ts` take an output path as their last
+argument and `writeFileSync` their result there, as `differential.ts` already writes its result
+to the file it is given, so no gen script a test reads returns anything over a pipe.
+`writeFileSync` writes the whole result or throws: on a full disk the file takes what fits and the
+call then throws `ENOSPC`, so the script exits 1. `fs.writeSync` returns a short count without
+throwing: on a 16 KiB tmpfs it wrote and returned 16,384 of a 25,141-byte line. `differential.ts`
+writes each line with it, so when the short write fell on its last line it exited 0 with that line
+cut; on an earlier line, the next `writeSync` threw `ENOSPC` and it exited 1. It now checks the
+count and throws, exiting 1 with the short write named. The Go runner (`genResult`,
+`update_test.go`) reads the file after exit 0 and fails the test when the script printed anything
+to stdout or exited 0 without writing the file, so a script moved back to `console.log` fails
+every test that runs it.
 
 A Bun script that has to print its result awaits `process.stdout.write`'s callback: Bun keeps
 what the pipe cannot take and writes it as the reader drains, and the callback runs after the
