@@ -2,11 +2,12 @@
 """Historical replay of the duplicate benchmark: each pair searched against Dispatch as it stood
 when the duplicate was filed.
 
-A case is one pair of duplicate-benchmark-v0. Its corpus is every issue in AGENTC, LEGION and OPS
-created before the duplicate, each with its title (from the latest issue.created or issue.updated
-event before that moment) and its primary spec (the latest version before it). The duplicate's
-title and spec version 1 are the queries, built by bench.query_texts. A pair whose survivor was
-filed after its duplicate is unsupported: no search could have found it.
+A case is one pair of duplicate-benchmark-v0 version 1. Its corpus is every issue in AGENTC, LEGION
+and OPS created before the duplicate, each with its title (from the latest whole-issue event before
+that moment: issue.created, issue.updated or issue.closed) and its primary spec (the latest version
+before it). The duplicate's title and spec version 1 are the queries, built by bench.query_texts. A
+pair whose survivor was filed after its duplicate is unsupported: no search could have found it. A
+pair the production record shows is not a duplicate at all is excluded, with the reason.
 
 Two sides score every supported case against its own corpus:
   baseline   today's search code on that day's data: Dispatch's own GET /api/v1/search on a scratch
@@ -30,7 +31,10 @@ Run order (DATA is internal company text: keep it outside any repository, mode 0
   replay.py report    --data DATA --baseline FILE --candidate FILE   markdown tables; writes results.json
 Embeddings are cached by the SHA-256 of each chunk's text, so identical text (an unchanged issue in
 another case, or an unchanged paragraph of a later spec version) is embedded once. The baseline's
-word check and the candidate share SEARCHBENCH_PG.
+word check and the candidate share SEARCHBENCH_PG. Every command appends its run (arguments, start,
+end, outcome, load average) to DATA/../runs.jsonl; the embedding and rerank commands append their
+provider usage to DATA/../usage.jsonl; report copies both, with the production and scratch servers'
+/healthz readings, into results.json.
 """
 
 import argparse
@@ -43,7 +47,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 
 import bench
 import corpus
@@ -51,9 +55,21 @@ import dget
 import providers as P
 
 PROJECTS = ("AGENTC", "LEGION", "OPS")
-BENCHMARK = ("LEGION-386", "duplicate-benchmark-v0-json")
-QUERY_MANIFEST = ("LEGION-386", "query-manifest-json")
-SNAPSHOT_EVENTS = ("issue.created", "issue.updated")  # both carry the whole issue, title included
+# The two inputs, pinned: the version read is this one, and its bytes must hash to Dispatch's own
+# SHA-256 for it.
+BENCHMARK = ("LEGION-386", "duplicate-benchmark-v0-json", 1)
+QUERY_MANIFEST = ("LEGION-386", "query-manifest-json", 1)
+# The events whose payload is the whole issue (title, status, primary document): issue.created
+# (api/issue_create.go) and every PATCH, which is issue.closed when it moves the status to done and
+# issue.updated otherwise, a reopen included (api/issue_patch.go). One PATCH can retitle and close at
+# once, so a title can change on an issue.closed event and nowhere else.
+SNAPSHOT_EVENTS = ("issue.created", "issue.updated", "issue.closed")
+# Benchmark pairs the production record shows are not duplicates: excluded from every denominator.
+NOT_DUPLICATES = {
+    "LEGION-6": "LEGION-6 was completed, not closed as a duplicate: PR #923 merged and the architect signed "
+                "it off (comment at 2026-09-11T23:00:24Z) before it closed as done; the benchmark's closing "
+                "note is a separate message (2026-09-11T22:43:57Z) folding a different tester finding into LEGION-10",
+}
 
 # The e2e server's fixed identities (packages/dispatch/e2e/run-server.sh): a trusted header login
 # for writes, the shared agent bearer for searches, as an agent's search tool sends one.
@@ -105,33 +121,38 @@ def cget(data: str, path: str, params: dict | None = None):
 # export: GET-only reads of production, and the as-of reconstruction
 
 
-def issue_events(data: str, key: str, until: datetime | None) -> list[dict]:
-    """The issue's events in order, up to the last one at or before `until`."""
+EVENTS_PAGE = 200
+
+
+def issue_events(data: str, key: str) -> list[dict]:
+    """The issue's events in order, all of them."""
     out, after = [], 0
     while True:
-        page = cget(data, f"/issues/{key}/events", {"after": after, "order": "asc", "limit": 200})
-        if not page:
+        page = cget(data, f"/issues/{key}/events", {"after": after, "order": "asc", "limit": EVENTS_PAGE})
+        out.extend(page)
+        if len(page) < EVENTS_PAGE:
             return out
-        for e in page:
-            if until is not None and ts(e["created_at"]) > until:
-                return out
-            out.append(e)
         after = page[-1]["seq"]
 
 
-def issue_history(data: str, key: str, until: datetime | None) -> dict | None:
-    """The issue's creation time and every whole-issue snapshot up to `until`; None when the issue
-    was created after it."""
-    evs = issue_events(data, key, until)
+def issue_history(data: str, key: str) -> dict:
+    """The issue's creation time and every whole-issue snapshot, in order."""
+    evs = issue_events(data, key)
     snaps = [
         {"type": e["type"], "id": e.get("id"), "seq": e["seq"], "at": e["created_at"],
          "title": e["payload"]["title"], "primary_artifact_id": e["payload"].get("primary_artifact_id")}
         for e in evs if e["type"] in SNAPSHOT_EVENTS
     ]
     created = next((e for e in evs if e["type"] == "issue.created"), None)
-    if created is None:
-        return None
+    if created is None or snaps[0]["type"] != "issue.created":
+        raise SystemExit(f"{key}: its first whole-issue event is not issue.created: {snaps[:1]}")
     return {"key": key, "created_at": created["payload"]["created_at"], "snapshots": snaps}
+
+
+def latest_version(data: str, artifact_id: str | None) -> int | None:
+    if not artifact_id:
+        return None
+    return max((v["number"] for v in cget(data, f"/artifacts/{artifact_id}")["versions"]), default=None)
 
 
 def spec_at(data: str, artifact_id: str | None, cutoff: datetime) -> dict | None:
@@ -145,51 +166,79 @@ def spec_at(data: str, artifact_id: str | None, cutoff: datetime) -> dict | None
     v = max(before, key=lambda v: v["number"])
     md = cget(data, f"/artifacts/{artifact_id}/versions/{v['number']}")["markdown"]
     return {"artifact_id": artifact_id, "version": v["number"], "created_at": v["created_at"],
-            "latest_version": max(x["number"] for x in meta["versions"]), "markdown": md}
+            "latest_version": latest_version(data, artifact_id), "markdown": md}
+
+
+def event_ref(s: dict) -> dict:
+    return {k: s[k] for k in ("type", "id", "seq", "at")}
 
 
 def issue_at(data: str, hist: dict, cutoff: datetime) -> dict:
-    """An issue's title and primary spec as they stood just before the cutoff."""
+    """An issue's title and primary spec as they stood just before the cutoff. `title_event` is the
+    event the title is read from, the latest whole-issue event before the cutoff; `title_set_by` is
+    the event that gave the issue that title, the first of the unbroken run of events carrying it."""
     snaps = [s for s in hist["snapshots"] if ts(s["at"]) < cutoff]
     if not snaps:
         # The issue.created row is written a moment after the issue's created_at; take it anyway.
         snaps = hist["snapshots"][:1]
+    first = len(snaps) - 1
+    while first > 0 and snaps[first - 1]["title"] == snaps[-1]["title"]:
+        first -= 1
     s = snaps[-1]
-    return {"title": s["title"], "title_event": {k: s[k] for k in ("type", "id", "seq", "at")},
-            "spec": spec_at(data, s["primary_artifact_id"], cutoff)}
+    return {"title": s["title"], "title_event": event_ref(s), "title_set_by": event_ref(snaps[first]),
+            "primary_artifact_id": s["primary_artifact_id"], "spec": spec_at(data, s["primary_artifact_id"], cutoff)}
 
 
-def artifact_version(data: str, ref: tuple[str, str]) -> tuple[dict, dict]:
-    issue, slug = ref
+def pinned_version(data: str, ref: tuple[str, str, int]) -> tuple[dict, dict]:
+    """The pinned version of an issue's JSON artifact, checked against Dispatch's SHA-256 for it."""
+    issue, slug, number = ref
     meta = cget(data, f"/issues/{issue}/artifacts/{slug}")
-    number = meta["versions"][-1]["number"]
-    return meta, cget(data, f"/artifacts/{meta['id']}/versions/{number}")
+    version = next((v for v in meta["versions"] if v["number"] == number), None)
+    if version is None:
+        raise SystemExit(f"{issue}/{slug} has no version {number}")
+    body = dget.get(f"/artifacts/{meta['id']}/versions/{number}", raw=True)
+    if sha(body) != version["sha256"]:
+        raise SystemExit(f"{issue}/{slug} v{number}: bytes hash to {sha(body)}, Dispatch records {version['sha256']}")
+    pin = {"ref": f"{issue}/{slug}", "artifact_id": meta["id"], "version": number, "created_at": version["created_at"],
+           "sha256": version["sha256"], "latest_version": max(v["number"] for v in meta["versions"])}
+    return pin, json.loads(body)
+
+
+def harness_sources() -> dict[str, str]:
+    """SHA-256 of each harness file this run executes, so a result names the code that produced it."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = {}
+    for name in ("replay.py", "bench.py", "corpus.py", "dget.py", "providers.py"):
+        with open(os.path.join(here, name), "rb") as f:
+            out[name] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def cmd_export(args):
     data = args.data
     os.umask(0o077)
     os.makedirs(data, mode=0o700, exist_ok=True)
-    bmeta, benchmark = artifact_version(data, BENCHMARK)
-    qmeta, qmanifest = artifact_version(data, QUERY_MANIFEST)
+    health_start, started = dget.health(), utcnow()
+    bpin, benchmark = pinned_version(data, BENCHMARK)
+    qpin, qmanifest = pinned_version(data, QUERY_MANIFEST)
     manifest_sha = {q["id"]: q["sha256"] for row in qmanifest["rows"] for q in row["queries"]}
-
-    pair_keys = sorted({k for p in benchmark["pairs"] for k in (p["duplicate"], p["expected"])})
-    pair_hist = {k: issue_history(data, k, None) for k in pair_keys}
-    cutoffs = {p["duplicate"]: ts(pair_hist[p["duplicate"]]["created_at"]) for p in benchmark["pairs"]}
-    until = max(cutoffs.values())
 
     keys = [i["key"] for proj in PROJECTS for i in cget(data, "/issues", {"project": proj})]
     with ThreadPoolExecutor(args.threads) as ex:
-        hists = [h for h in ex.map(lambda k: issue_history(data, k, until), keys) if h]
-    print(f"{len(keys)} issues listed, {len(hists)} created by the last filing ({until.isoformat()})")
+        hist = {h["key"]: h for h in ex.map(lambda k: issue_history(data, k), keys)}
+    cutoffs = {p["duplicate"]: ts(hist[p["duplicate"]]["created_at"]) for p in benchmark["pairs"]}
+    print(f"{len(keys)} issues listed, {sum(ts(h['created_at']) < max(cutoffs.values()) for h in hist.values())} "
+          f"created before the last filing")
 
     snaps: dict[str, dict] = {}
     cases = []
     for row, p in enumerate(benchmark["pairs"], 1):
         dup, survivor, cutoff = p["duplicate"], p["expected"], cutoffs[p["duplicate"]]
-        dh = pair_hist[dup]
-        created = dh["snapshots"][0]
+        created = hist[dup]["snapshots"][0]
         aid = created["primary_artifact_id"]
         dup_v1 = cget(data, f"/artifacts/{aid}/versions/1")["markdown"] if aid else None
         title_q, spec_q, leak = bench.query_texts(created["title"], dup_v1, survivor)
@@ -202,52 +251,64 @@ def cmd_export(args):
             q["matches_query_manifest"] = manifest_sha.get(q["id"]) == q["sha256"]
 
         members = []
-        for h in hists:
+        for h in hist.values():
             if h["key"] == dup or ts(h["created_at"]) >= cutoff:
                 continue
             at = issue_at(data, h, cutoff)
             spec = at["spec"]
             sid = f"{h['key']}:{sha(at['title'])[:10]}:" + (f"{spec['artifact_id'][:8]}v{spec['version']}" if spec else "none")
             if sid not in snaps:
-                snaps[sid] = {"id": sid, "key": h["key"], "title": at["title"], "title_event": at["title_event"],
+                snaps[sid] = {"id": sid, "key": h["key"], "title": at["title"],
                               "spec": {k: v for k, v in spec.items() if k != "markdown"} if spec else None,
                               "markdown": spec["markdown"] if spec else None}
-            members.append({"key": h["key"], "created_at": h["created_at"], "snap": sid})
+            now = h["snapshots"][-1]
+            changed = (now["title"] != at["title"] or now["primary_artifact_id"] != at["primary_artifact_id"]
+                       or latest_version(data, at["primary_artifact_id"]) != (spec["version"] if spec else None))
+            members.append({"key": h["key"], "created_at": h["created_at"], "snap": sid, "title_event": at["title_event"],
+                            "title_set_by": at["title_set_by"], "changed_after_filing": changed})
 
-        survivor_created = ts(pair_hist[survivor]["created_at"])
-        if survivor_created >= cutoff:
+        if dup in NOT_DUPLICATES:
+            status = "not a duplicate: " + NOT_DUPLICATES[dup]
+        elif ts(hist[survivor]["created_at"]) >= cutoff:
             status = "unsupported: the survivor was filed after the duplicate"
         elif not members or not title_q.strip():
             status = "missing data: the as-of corpus or the query is empty"
         else:
             status = "supported"
-        cases.append({"row": row, "duplicate": dup, "survivor": survivor, "cutoff": pair_hist[dup]["created_at"],
-                      "survivor_created_at": pair_hist[survivor]["created_at"], "status": status,
+        cases.append({"row": row, "duplicate": dup, "survivor": survivor, "cutoff": hist[dup]["created_at"],
+                      "survivor_created_at": hist[survivor]["created_at"], "status": status,
                       "queries": queries, "corpus": members})
-        print(f"{row:2} {dup} -> {survivor}: {status}; {len(members)} issues; queries match manifest "
+        print(f"{row:2} {dup} -> {survivor}: {status[:60]}; {len(members)} issues, "
+              f"{sum(m['changed_after_filing'] for m in members)} changed since; queries match manifest "
               f"{[q['matches_query_manifest'] for q in queries]}")
 
+    revisions = {"benchmark": bpin, "query_manifest": qpin, "projects": PROJECTS, "snapshot_events": SNAPSHOT_EVENTS,
+                 "export": {"started_at": started, "finished_at": utcnow()},
+                 "production_health": {"start": health_start, "end": dget.health()}, "harness": harness_sources()}
     with open(os.path.join(data, "snaps.jsonl"), "w") as f:
         for s in snaps.values():
             f.write(json.dumps(s) + "\n")
-    write_json(os.path.join(data, "cases.json"), {
-        "benchmark": {"ref": "/".join(BENCHMARK), "version": bmeta["versions"][-1]["number"]},
-        "query_manifest": {"ref": "/".join(QUERY_MANIFEST), "version": qmeta["versions"][-1]["number"]},
-        "projects": PROJECTS, "cases": cases})
-    write_json(os.path.join(data, "manifest.json"), manifest(cases, snaps))
-    print(f"{len(snaps)} distinct issue snapshots across {len(cases)} cases")
+    write_json(os.path.join(data, "cases.json"), {"revisions": revisions, "cases": cases})
+    write_json(os.path.join(data, "manifest.json"), manifest(revisions, cases, snaps))
+    print(f"{len(snaps)} distinct issue snapshots, {sum(len(c['corpus']) for c in cases)} case members, "
+          f"{len(cases)} cases")
 
 
-def manifest(cases: list[dict], snaps: dict[str, dict]) -> dict:
-    """Each case's corpus by reference: keys, the event each title came from, spec versions and
+def manifest(revisions: dict, cases: list[dict], snaps: dict[str, dict]) -> dict:
+    """Each case's corpus by reference: keys, the events each title came from, spec versions and
     timestamps, and text hashes; no titles or bodies."""
     used = {m["snap"] for c in cases for m in c["corpus"]}
     return {
         "what": "The as-of corpus of every case of the duplicate benchmark's historical replay: for each pair, every "
-                "issue in AGENTC, LEGION and OPS created before the duplicate, with the event its title came from and "
-                "the primary spec version it had then. Titles and bodies are omitted; the hashes identify the text.",
+                "issue in AGENTC, LEGION and OPS created before the duplicate, with the primary spec version it had "
+                "then and, per case, the event its title was read from (title_event, the latest whole-issue event "
+                "before the filing) and the event that gave it that title (title_set_by). changed_after_filing: its "
+                "title, primary document or spec version at the export differs from the filing's. Titles and bodies "
+                "are omitted; the hashes identify the text. revisions pins the inputs, the production server read "
+                "and the harness code.",
+        "revisions": revisions,
         "snapshots": {
-            sid: {"key": s["key"], "title_sha256": sha(s["title"]), "title_event": s["title_event"],
+            sid: {"key": s["key"], "title_sha256": sha(s["title"]),
                   "spec": ({**s["spec"], "markdown_sha256": sha(s["markdown"])} if s["spec"] else None)}
             for sid, s in snaps.items() if sid in used
         },
@@ -255,8 +316,11 @@ def manifest(cases: list[dict], snaps: dict[str, dict]) -> dict:
             {k: c[k] for k in ("row", "duplicate", "survivor", "cutoff", "survivor_created_at", "status")}
             | {"queries": [{k: q[k] for k in q if k != "text"} for q in c["queries"]],
                "corpus_size": len(c["corpus"]),
+               "changed_after_filing": sum(m["changed_after_filing"] for m in c["corpus"]),
                "survivor_snapshot": next((m["snap"] for m in c["corpus"] if m["key"] == c["survivor"]), None),
-               "corpus": [[m["key"], m["created_at"], m["snap"]] for m in c["corpus"]]}
+               "corpus": [{"key": m["key"], "created_at": m["created_at"], "snapshot": m["snap"],
+                           "title_event": m["title_event"], "title_set_by": m["title_set_by"],
+                           "changed_after_filing": m["changed_after_filing"]} for m in c["corpus"]]}
             for c in cases
         ],
     }
@@ -441,7 +505,14 @@ class Scratch:
         host = urllib.parse.urlparse(url).hostname
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise SystemExit(f"refusing {url}: the baseline writes to its server, which must be a local scratch server")
-        self.base = url.rstrip("/") + "/api/v1"
+        self.root = url.rstrip("/")
+        self.base = self.root + "/api/v1"
+
+    def health(self) -> dict:
+        """The scratch server's /healthz: the commit it was built from and its schema version."""
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with urllib.request.urlopen(self.root + "/healthz", timeout=30) as resp:
+            return {"read_at": at, **json.loads(resp.read())}
 
     def call(self, method: str, path: str, body=None, params=None, human: bool = True):
         url = self.base + path + ("?" + urllib.parse.urlencode(params) if params else "")
@@ -485,7 +556,8 @@ def cmd_baseline(args):
     for proj in PROJECTS:
         if s.call("GET", "/issues", params={"project": proj}):
             raise SystemExit(f"the scratch server already holds {proj} issues: start it on an empty database")
-    results = {"server": "scratch Dispatch (e2e run-server.sh)", "queries": {}, "loads": []}
+    results = {"server": "scratch Dispatch (e2e run-server.sh)", "queries": {}, "loads": [],
+               "health": {"start": {"scratch": s.health(), "production": dget.health()}}}
 
     for c in supported(cases):
         t0 = time.time()
@@ -555,6 +627,8 @@ def cmd_baseline(args):
             results["queries"][q["id"]] = rec
             print(" ", q["id"], "rank", rec["rank"], "error" if "error" in rec else "", flush=True)
         write_json(args.out, results)
+    results["health"]["end"] = {"scratch": s.health(), "production": dget.health()}
+    write_json(args.out, results)
 
 
 LEXEMES = "select array(select unnest(tsvector_to_array(to_tsvector('english', %s))) order by 1)"
@@ -604,9 +678,9 @@ def cmd_report(args):
                                ("Fixed keyword search", "B")]
 
     def outcome(qid: str, name: str, case: dict) -> tuple[str, int | None]:
-        """('rank'|'miss'|'error'|'unsupported'|'missing data', rank)."""
+        """('rank'|'miss'|'error'|'unsupported'|'not a duplicate'|'missing data', rank)."""
         if case["status"] != "supported":
-            return ("unsupported" if case["status"].startswith("unsupported") else "missing data"), None
+            return case["status"].split(":")[0], None
         if name == "A":
             b = base[qid]
             if "error" in b:
@@ -655,18 +729,33 @@ def cmd_report(args):
         summary[name]["errors"] = errors
         print("| " + " | ".join(row) + f" | {errors} |")
 
+    def jsonl(name: str) -> list[dict]:
+        path = os.path.join(args.data, "..", name)
+        return [json.loads(line) for line in open(path)] if os.path.exists(path) else []
+
     out = {"what": "Per-case results of the duplicate benchmark's historical replay: for each pair, today's search on a "
                    "scratch Dispatch holding the issues as they stood when the duplicate was filed, and the candidate "
-                   "setups on the same corpus. Ranks count from 1; null is a miss, an error or an unsupported case, as "
-                   "the status and error fields say.",
+                   "setups on the same corpus. Ranks count from 1; null is a miss, an error, an unsupported case or a "
+                   "pair that is not a duplicate, as the status and error fields say. revisions pins the inputs, the "
+                   "production server the export read and the harness code; baseline_health is /healthz of the "
+                   "scratch and production servers when the baseline started and ended; runs and usage are the "
+                   "run and provider-usage ledgers of this replay.",
+           "revisions": cases["revisions"], "baseline_health": baseline["health"],
            "systems": {name: label for label, name in summary_systems}, "candidate_model": m, "candidate_reranker": r,
-           "summary": summary, "scratch_loads": baseline["loads"], "cases": []}
+           "summary": summary, "scratch_loads": baseline["loads"],
+           "runs": jsonl("runs.jsonl"),
+           "usage": {"ledger": jsonl("usage.jsonl"),
+                     "priced": [{"provider": p, "usage": u, "usd": round(usd, 4), "note": note}
+                                for p, u, usd, note in bench.spend(args.data)]},
+           "cases": []}
     for c in cases["cases"]:
         rec = {k: c[k] for k in ("row", "duplicate", "survivor", "cutoff", "survivor_created_at", "status")}
         rec["corpus_size"] = len(c["corpus"])
-        sv = next((x["snap"] for x in c["corpus"] if x["key"] == c["survivor"]), None)
+        rec["changed_after_filing"] = sum(x["changed_after_filing"] for x in c["corpus"])
+        sv = next((x for x in c["corpus"] if x["key"] == c["survivor"]), None)
         if sv:
-            rec["survivor_as_of"] = {"snapshot": sv, "title_event": snaps[sv]["title_event"], "spec": snaps[sv]["spec"]}
+            rec["survivor_as_of"] = {"snapshot": sv["snap"], "title_event": sv["title_event"],
+                                     "title_set_by": sv["title_set_by"], "spec": snaps[sv["snap"]]["spec"]}
         rec["queries"] = {}
         for q in c["queries"]:
             qid = q["id"]
@@ -702,8 +791,22 @@ def main():
             p.add_argument("--baseline", required=True)
             p.add_argument("--candidate", required=True)
     args = ap.parse_args()
-    {"export": cmd_export, "load": cmd_load, "embed": cmd_embed, "candidate": cmd_candidate,
-     "baseline": cmd_baseline, "report": cmd_report}[args.cmd](args)
+    run = {"cmd": args.cmd, "args": {k: v for k, v in vars(args).items() if k != "cmd"}, "started_at": utcnow(),
+           "loadavg_start": os.getloadavg()}
+    try:
+        {"export": cmd_export, "load": cmd_load, "embed": cmd_embed, "candidate": cmd_candidate,
+         "baseline": cmd_baseline, "report": cmd_report}[args.cmd](args)
+        run["outcome"] = "ok"
+    except SystemExit as e:
+        run["outcome"] = f"exit: {e.code}"
+        raise
+    except BaseException as e:
+        run["outcome"] = f"{type(e).__name__}: {str(e)[:300]}"
+        raise
+    finally:
+        run.update(finished_at=utcnow(), loadavg_end=os.getloadavg())
+        with open(os.path.join(args.data, "..", "runs.jsonl"), "a") as f:
+            f.write(json.dumps(run) + "\n")
 
 
 if __name__ == "__main__":

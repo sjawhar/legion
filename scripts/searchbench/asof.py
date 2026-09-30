@@ -61,7 +61,9 @@ def main() -> None:
                "status": None}
         if key["created_at"] < dup["created_at"]:
             cutoff = dup["created_at"]
-            snaps = [e for e in events(key["key"]) if e["type"] in ("issue.created", "issue.updated") and e["created_at"] < cutoff]
+            # Every event whose payload is the whole issue: a close can retitle it (replay.SNAPSHOT_EVENTS).
+            whole = ("issue.created", "issue.updated", "issue.closed")
+            snaps = [e for e in events(key["key"]) if e["type"] in whole and e["created_at"] < cutoff]
             title = snaps[-1]["payload"]["title"] if snaps else key["title"]
             spec_meta = dget.get(f"/issues/{key['key']}/artifacts/{key['spec_slug']}")
             versions = [v for v in spec_meta["versions"] if v["created_at"] < cutoff]

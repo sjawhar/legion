@@ -48,6 +48,18 @@ def get(path: str, params: dict | None = None, raw: bool = False):
             raise RuntimeError(f"GET {url} -> {e.code}: {e.read().decode()[:500]}") from e
 
 
+def health() -> dict:
+    """The server's /healthz (public): whether it serves, and the commit and schema version it runs,
+    with the time it was read."""
+    global _CFG
+    if _CFG is None:
+        _CFG = _config()
+    root = _CFG[0].removesuffix("/api/v1")
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with urllib.request.urlopen(root + "/healthz", timeout=30) as resp:
+        return {"read_at": at, **json.loads(resp.read())}
+
+
 if __name__ == "__main__":
     raw = "--raw" in sys.argv
     args = [a for a in sys.argv[1:] if a != "--raw"]
