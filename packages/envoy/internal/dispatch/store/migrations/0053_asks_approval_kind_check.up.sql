@@ -1,32 +1,27 @@
 -- 0053_asks_approval_kind_check.up.sql
--- An ask of kind approval names the document version it asks a human to approve, and no other
--- kind carries an approval at all. The approval-request route is the only writer of the column
--- and always pairs the two, but nothing refused a row that did not.
+-- An ask of kind approval names the document version it asks a human to approve, and every other
+-- kind carries no approval. The approval-request route is the only writer of the column and
+-- always pairs the two; this check makes every row do so.
 --
 -- docs.ScanAsk reads SQL null as no approval and any other value as a model.AskApproval, and
--- fails on one that does not decode. SQL null on an approval ask dereferenced a nil approval. The
--- JSON null, which encoding a nil *model.AskApproval writes, reads as an approval of artifact ""
--- at version 0, whose answer failed the uuid cast. A value that does not decode, such as a
--- version of 1.5 or a name of 5, fails every read of the ask, the Inbox that lists it among them,
--- and docs.ApprovalAskAt reads every open approval ask of a document on each version write, so
--- one such row also stops the document taking versions. On an approval ask the check admits only
--- an approval whose three keys hold what the approval-request route writes: artifact_id as
--- Postgres writes a uuid (lowercase hex text, which docs.ApprovalAskAt compares as text), name a
+-- fails on one that does not decode. On an approval ask the check admits only an approval whose
+-- three keys hold what the route writes: artifact_id as Postgres writes a uuid (lowercase hex
+-- text, which docs.ApprovalAskAt compares as text and answering the ask casts to uuid), name a
 -- string, and version a JSON number written as a whole number from 1 of at most ten digits, which
--- an int holds. So it refuses every approval whose known keys hold the wrong type, which is what a
--- mistaken hand edit writes. It does not guarantee a decode: encoding/json matches keys to fields
--- ignoring case, Unicode folding included, so "Version": 1.5 or "verſion": 1.5 beside "version"
--- still reaches AskApproval.Version, and it fails on a value nested more than 10,000 deep under
--- any key. Refusing every key but the three would close that; dispatch://LEGION-429 holds that
--- check and why it waits on a count of production rows. On every other kind the check admits
--- only SQL null.
+-- an int holds. A missing key, the JSON null and a key of the wrong type all fail it. Any of them
+-- would otherwise reach the ask's readers: an id not written that way fails the cast or is never
+-- found, and a value that does not decode fails every read of the ask, every Inbox listing it and
+-- every version write on its document, since docs.ApprovalAskAt reads each open approval ask of
+-- the document then.
 --
--- Adding the constraint validates every existing row under an ACCESS EXCLUSIVE lock on asks,
--- which the runner holds until its transaction commits. The lock timeout bounds the wait for that
--- lock, so a migration queued behind a long transaction on asks fails the deploy, naming the
--- lock, instead of holding every read and write of asks queued behind it. SET LOCAL lasts until
--- the runner's transaction ends.
-set local lock_timeout = '5s';
+-- The check tests the three exact keys, and encoding/json matches keys to fields ignoring case,
+-- Unicode folding included, so it guarantees neither a decode nor that the version decoded is the
+-- one it tested. "Version": 1.5 or "verſion": 1.5 beside "version" still reaches
+-- AskApproval.Version and fails to decode, as does a value nested more than 10,000 deep under any
+-- key. "verſion": 2 beside "version": 3 decodes without an error as version 2, since jsonb stores
+-- the longer key after "version" and the decoder keeps the last match. Refusing every key but the
+-- three closes all of these; dispatch://LEGION-429 holds that check and why it waits on a count
+-- of production rows.
 alter table asks add constraint asks_approval_kind_check check (
     case
         when kind = 'approval' then coalesce(

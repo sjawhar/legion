@@ -752,8 +752,9 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 // 0053 pairs an ask's kind with its approval: an approval ask carries an approval whose known keys
 // hold the types model.AskApproval decodes and name a document version, and no other kind carries
 // one, not even the JSON null. A hand-written row that breaks the pairing either way is refused at
-// insert. The rows the residual map names are shapes 0053 admits and ScanAsk still fails on; they
-// document dispatch://LEGION-429 and run once a check refuses them.
+// insert. The rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are
+// skipped, which go test reports only under -v, and dispatch://LEGION-429 deletes their entries
+// when it adds the check that refuses them.
 func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -768,11 +769,11 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		t.Fatalf("seed issue: %v", err)
 	}
 	const approval = `{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`
-	residual := map[string]string{
-		"an approval ask repeating version under another case as a fraction":     `"Version": 1.5 beside "version" is admitted by 0053, which tests only the exact key, and encoding/json decodes it into AskApproval.Version ignoring case and fails, which 500s every reader of the ask; see dispatch://LEGION-429`,
-		"an approval ask repeating name under another case as a number":          `"Name": 5 beside "name" is admitted by 0053, which tests only the exact key, and encoding/json decodes it into AskApproval.Name ignoring case and fails, which 500s every reader of the ask; see dispatch://LEGION-429`,
-		"an approval ask repeating version with a long s as a fraction":          `"verſion": 1.5 (U+017F) is admitted by 0053, which tests only the exact key, and encoding/json folds it onto AskApproval.Version and fails, which 500s every reader of the ask; see dispatch://LEGION-429`,
-		"an approval ask carrying a value nested past the decoder's depth limit": `an extra key nested 10,001 arrays deep is admitted by 0053, which tests only its three keys, and encoding/json refuses to decode past 10,000 levels, which 500s every reader of the ask; see dispatch://LEGION-429`,
+	residual := map[string]bool{
+		"an approval ask repeating version under another case as a fraction":     true,
+		"an approval ask repeating name under another case as a number":          true,
+		"an approval ask repeating version with a long s as a fraction":          true,
+		"an approval ask carrying a value nested past the decoder's depth limit": true,
 	}
 	for _, row := range []struct {
 		name     string
@@ -788,6 +789,16 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// What ScanAsk reads the JSON null as. It separates this check from one that asks only for
 		// an object.
 		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
+		// An id that is not a uuid fails the cast answering the ask makes on it (22P02), and one in
+		// capitals is never found by docs.ApprovalAskAt, which compares the id as text with the
+		// lowercase text Postgres writes, so a new version would never retract the ask.
+		{"an approval ask whose document id is empty at a real version", "approval", new(`{"artifact_id":"","name":"spec.md","version":1}`), true},
+		{"an approval ask whose document id is in capitals", "approval", new(`{"artifact_id":"7C1E8A52-3F4B-4D6E-9A0B-1C2D3E4F5A6B","name":"spec.md","version":1}`), true},
+		// A missing key reads as its zero value, which no writer writes. These are the rows a check
+		// with its coalesce around one conjunct alone would store, since a CHECK that evaluates to
+		// null passes.
+		{"an approval ask naming no version", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md"}`), true},
+		{"an approval ask naming no document name", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","version":1}`), true},
 		// ScanAsk decodes the approval into model.AskApproval, whose version is an int and whose name
 		// is a string, so a number that is no int, or a name that is no string, fails every read of
 		// the ask: the ask itself, its issue, the inbox, answering it, and each new version of its
@@ -798,6 +809,9 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		{"an approval ask whose name is not a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":5,"version":1}`), true},
 		// jsonb stores 1e30 as a 31-digit integer, which a check on the digits alone has to bound.
 		{"an approval ask whose version is 1e30", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1e30}`), true},
+		// The digit pattern matches the text of the string "1" too; only the number test refuses it,
+		// and a string does not decode into the int.
+		{"an approval ask whose version is a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":"1"}`), true},
 		// Version 0 decodes, but no version has that number and the approval-request route never
 		// writes it.
 		{"an approval ask at version 0", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":0}`), true},
@@ -817,8 +831,8 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		{"a question naming none", "question", nil, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			if reason, ok := residual[row.name]; ok {
-				t.Skip(reason)
+			if residual[row.name] {
+				t.Skip("0053 admits this shape and ScanAsk fails on it; dispatch://LEGION-429 refuses it and deletes this entry")
 			}
 			_, err := store.Pool.Exec(ctx, `
 				insert into asks (issue_key, author, question, options, kind, approval)
