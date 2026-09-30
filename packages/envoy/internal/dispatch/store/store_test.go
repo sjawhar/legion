@@ -783,9 +783,9 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	}
 }
 
-// 0053 pairs an ask's kind with its approval: an approval ask names the document version it asks
-// about, and no other kind names one. A hand-written row that breaks the pairing either way is
-// refused at insert.
+// 0053 pairs an ask's kind with its approval: an approval ask names the document id and version
+// its readers use, and no other kind carries an approval, not even the JSON null. A hand-written
+// row that breaks the pairing either way is refused at insert.
 func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -811,7 +811,10 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// approval-request route writes the column), and it names no document either: ScanAsk
 		// reads it as an approval with no artifact, and answering the ask fails on it.
 		{"an approval ask whose approval is the JSON null", "approval", new("null"), true},
+		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
+		{"an approval ask naming no version", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md"}`), true},
 		{"a question naming a document", "question", new(approval), true},
+		{"a question carrying the JSON null", "question", new("null"), true},
 		{"an approval ask naming its document", "approval", new(approval), false},
 		{"a question naming none", "question", nil, false},
 	} {
