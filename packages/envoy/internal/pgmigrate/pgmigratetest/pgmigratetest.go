@@ -17,11 +17,13 @@ import (
 // dir holds on disk, read from the test's working directory, the store's package directory.
 //
 // This is where the stores' embed rule is stated. pgmigrate.Load refuses a file named any other way
-// than a migration, but only a file it is given, and a //go:embed pattern can leave a file out
+// than a migration, but only a file it is given, and a //go:embed pattern can leave an entry out
 // without an error: a directory pattern without all: drops every name beginning with _ or ., so
-// both stores embed all:migrations, and no directive embeds a symlink. A file left out would go
-// unapplied while it sits in the tree. On today's tree the all: prefix changes nothing, since
-// neither directory holds such a name; this check fails in the one state where it would.
+// both stores embed all:migrations; no directive embeds a symlink or an empty directory. An entry
+// left out would go unapplied while it sits in the tree. On today's tree the all: prefix changes
+// nothing, since neither directory holds a _ or . name; this check fails when an entry on disk is
+// missing from the binary: such a name under a directive without all:, a symlink, or an empty
+// directory.
 func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 	onDisk, err := os.ReadDir(dir)
 	if err != nil {
@@ -40,8 +42,11 @@ func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 		if slices.Contains(embeddedNames, name) {
 			continue
 		}
-		if entry.Type()&fs.ModeSymlink != 0 {
+		switch {
+		case entry.Type()&fs.ModeSymlink != 0:
 			return fmt.Errorf("%s/%s is a symlink, which no //go:embed directive embeds, so no runner would see it; replace it with the file it points to, or remove it (an editor's lock file, such as Emacs's .#<file>, is one)", dir, name)
+		case entry.IsDir():
+			return fmt.Errorf("%s/%s is a directory holding nothing //go:embed can carry, such as an empty one, and a migrations directory holds files alone; remove it", dir, name)
 		}
 		return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
 	}
