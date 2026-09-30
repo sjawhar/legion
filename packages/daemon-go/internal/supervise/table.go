@@ -440,7 +440,9 @@ func fillTable(t *builder) {
 	t.ignore(onDeadline, "the agent registered, so the boot watch is over", StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onDeadline, "no boot is being watched", processless...)
 
-	t.row(onTurnTimer, "an acknowledged prompt started no turn", noTurn, []ClaimState{StateLaunching, StateFailed}, prompted...)
+	t.row(onTurnTimer, "an acknowledged prompt started no turn", noTurn, []ClaimState{StateLaunching, StateFailed}, StateReady)
+	t.row(onTurnTimer, "an acknowledged prompt started no turn; retired while a suspension is held, suspend it", noTurn,
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateIdle)
 	t.ignore(onTurnTimer, "the turn started", StateWorking)
 	t.ignore(onTurnTimer, noSend, unready...)
 	t.ignore(onTurnTimer, noSend, gone...)
