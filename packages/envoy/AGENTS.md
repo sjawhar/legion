@@ -1228,12 +1228,13 @@ reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. The send answer
 as the messages are committed and delivers behind the request, four recipients at a time, each
 worker on its own `store.WithTransactionTracking` context derived from the server's lifetime
 (the pool's one-connection guard is per context, and a request's context would strand every
-recipient after the one in flight when a tab closes or a deploy shuts the server down). A
-recipient therefore starts with no attempt, and one still carrying none was not sent to.
+recipient after the one in flight when a tab closes or a deploy shuts the server down). Each
+recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its
+message, which a delivery worker then claims and settles.
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
 `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the
 order the send named them; all three routes are human-only, like the one-session route they are
-from.
+built from.
 
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no
