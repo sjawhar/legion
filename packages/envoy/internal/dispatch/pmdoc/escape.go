@@ -728,13 +728,10 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // and otherwise with every ASCII punctuation character escaped as the text writer escapes it and
 // each line feed written as a character reference, which both parsers read back as the
 // character. That is kept only if it reads back, so an alt that fails for another
-// reason keeps the bytes it had, as inlineWithEscapes does. In a table cell an alt holding a
-// backslash before a pipe takes the second spelling: the first leaves the pipe after two
-// backslashes, which Parse reads back as the alt, while the browser editor's parser, which pairs
-// backslashes before a pipe, ends the cell there.
+// reason keeps the bytes it had, as inlineWithEscapes does.
 func imageAlt(alt string, context inlineContext) string {
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
-	if !(context.tableCell && strings.Contains(alt, "\\|")) && altReadsBack(written, alt, context) {
+	if altReadsBack(written, alt, context) {
 		return written
 	}
 	var out strings.Builder
@@ -758,12 +755,17 @@ func imageAlt(alt string, context inlineContext) string {
 // altReadsBack reports whether an image label written as written reads back as the alt text alt,
 // read in the block it is written in: a table cell, where the cell takes its escaped pipes first
 // and a line ending ends the row; a heading, which a line ending ends; or a paragraph, where a
-// line of the label can open a block.
+// line of the label can open a block. In a table cell a label holding a `|` after an even run of
+// backslashes does not: Parse reads that pipe as escaped, while the browser editor's parser, which
+// pairs backslashes before a pipe, ends the cell there.
 func altReadsBack(written, alt string, context inlineContext) bool {
 	image := "![" + written + "](u)"
 	var markdown string
 	switch {
 	case context.tableCell:
+		if pipeAfterEvenBackslashes(written) {
+			return false
+		}
 		markdown = "| h |\n| - |\n| " + image + " |\n"
 	case context.heading:
 		markdown = "# " + image + "\n"
@@ -787,4 +789,24 @@ func altReadsBack(written, alt string, context inlineContext) bool {
 	}
 	got, _ := nodes[0].Attrs["alt"].(string)
 	return got == alt
+}
+
+// pipeAfterEvenBackslashes reports whether value holds a `|` after an even run of backslashes,
+// none included: the browser editor's parser, which pairs backslashes before a pipe, ends a table
+// cell at such a pipe.
+func pipeAfterEvenBackslashes(value string) bool {
+	run := 0
+	for index := range len(value) {
+		switch value[index] {
+		case '\\':
+			run++
+			continue
+		case '|':
+			if run%2 == 0 {
+				return true
+			}
+		}
+		run = 0
+	}
+	return false
 }

@@ -213,6 +213,15 @@ func tableDelimiterWidth(segment gmtext.Segment, source []byte) (int, bool) {
 }
 
 func tableRowWidth(segment gmtext.Segment, source []byte) int {
+	width := 0
+	rowCells(segment, source, func(int, []byte) { width++ })
+	return width
+}
+
+// rowCells calls visit with each cell goldmark's transformer splits a table line into (parseRow):
+// its first `|` and its last dropped, whatever stands before either, and a cell ending at each
+// other `|` with no backslash right before it.
+func rowCells(segment gmtext.Segment, source []byte, visit func(index int, value []byte)) {
 	segment = segment.TrimLeftSpace(source)
 	segment = segment.TrimRightSpace(source)
 	line := segment.Value(source)
@@ -223,16 +232,14 @@ func tableRowWidth(segment gmtext.Segment, source []byte) int {
 	if limit > 0 && line[limit-1] == '|' {
 		limit--
 	}
-	width := 0
-	for position < limit {
-		width++
+	for index := 0; position < limit; index++ {
 		closure := position
 		for closure < limit && (line[closure] != '|' || closure > 0 && line[closure-1] == '\\') {
 			closure++
 		}
+		visit(index, line[position:closure])
 		position = closure + 1
 	}
-	return width
 }
 
 // transform is goldmark's table transformer, reading the paragraph's lines with their indentation
@@ -261,27 +268,43 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	lazyStarts, _ := lazy.([]int)
 	node.SetLines(tabExpandedLines(lines, reader.Source()))
 	t.table.Transform(node, reader, pc)
+	var table *extensionast.Table
+	rowStarts, rowSegments := starts, segments
 	if node.Parent() != nil {
-		if kept := node.Lines().Len(); kept == len(starts) {
+		kept := node.Lines().Len()
+		if kept == len(starts) {
 			node.SetLines(lines)
-		} else if table, ok := node.NextSibling().(*extensionast.Table); ok {
-			markLazyRows(table, starts[kept:], lazyStarts)
-			markBlockRows(table, segments[kept:], reader.Source())
-			markWideRows(table, segments[kept:], reader.Source())
+			return
 		}
-		return
+		next, ok := node.NextSibling().(*extensionast.Table)
+		if !ok {
+			return
+		}
+		table, rowStarts, rowSegments = next, starts[kept:], segments[kept:]
+	} else {
+		place := parent.FirstChild()
+		if previous != nil {
+			place = previous.NextSibling()
+		}
+		placed, ok := place.(*extensionast.Table)
+		if !ok {
+			return
+		}
+		placed.SetPos(start)
+		placed.SetAttribute(blankAfterAttr, blank)
+		table = placed
 	}
-	place := parent.FirstChild()
-	if previous != nil {
-		place = previous.NextSibling()
-	}
-	if table, ok := place.(*extensionast.Table); ok {
-		table.SetPos(start)
-		table.SetAttribute(blankAfterAttr, blank)
-		markLazyRows(table, starts, lazyStarts)
-		markBlockRows(table, segments, reader.Source())
-		markWideRows(table, segments, reader.Source())
-	}
+	markRows(table, rowStarts, lazyStarts, rowSegments, reader.Source())
+}
+
+// markRows marks table with what its rows hold that the browser editor's parser reads otherwise
+// (markLazyRows, markBlockRows, markWideRows) and puts back a closing pipe that parser reads as
+// text (keepEscapedClosingPipes). starts and lines are the table's lines from its header row on.
+func markRows(table *extensionast.Table, starts, lazy []int, lines []gmtext.Segment, source []byte) {
+	markLazyRows(table, starts, lazy)
+	markBlockRows(table, lines, source)
+	markWideRows(table, lines, source)
+	keepEscapedClosingPipes(table, lines, source)
 }
 
 // lazyRowAttr marks a table a lazy continuation line is a body row of (markLazyRows): goldmark
@@ -428,17 +451,66 @@ type wideRow struct {
 }
 
 // markWideRows marks table (wideRowAttr) where one of its body rows - the lines past its header
-// and delimiter rows, the first two of lines - holds more cells than the table's delimiter row, each
-// row read as goldmark's transformer splits it (tableRowWidth).
+// and delimiter rows, the first two of lines - holds text in a cell past the table's delimiter
+// row, each row split as goldmark's transformer splits it (rowCells). A row whose cells past the
+// width are all blank loses no text where goldmark drops them, and is read at the table's width.
 func markWideRows(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
 	width := len(table.Alignments)
 	for index := 2; index < len(lines); index++ {
 		line := tabExpandedLine(lines[index], source)
-		if cells := tableRowWidth(line, source); cells > width {
+		cells, text := 0, false
+		rowCells(line, source, func(cell int, value []byte) {
+			cells++
+			text = text || cell >= width && !util.IsBlank(value)
+		})
+		if text {
 			opening := openingWords(strings.TrimSpace(string(line.Value(source))))
 			table.SetAttribute(wideRowAttr, wideRow{cells: cells, width: width, opening: opening})
 			return
 		}
+	}
+}
+
+// keepEscapedClosingPipes puts a row's closing `|` back into its last cell where an odd run of
+// backslashes escapes it. Goldmark's transformer drops a row's last `|` whatever stands before
+// it, so `| x | y \|` read `y \`, where the browser editor's parser, which pairs backslashes
+// before a pipe, reads the pipe as the cell's text: `y |`. After an even run the pipe closes the
+// row in both. lines are the table's lines from its header row on; the delimiter row, the second,
+// is no row of the table.
+func keepEscapedClosingPipes(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
+	index := 0
+	for row := table.FirstChild(); row != nil; row, index = row.NextSibling(), index+1 {
+		line := index
+		if index > 0 {
+			line++
+		}
+		if line >= len(lines) {
+			return
+		}
+		segment := tabExpandedLine(lines[line], source)
+		segment = segment.TrimRightSpace(source)
+		value := segment.Value(source)
+		if len(value) < 2 || value[len(value)-1] != '|' {
+			continue
+		}
+		run := 0
+		for run < len(value)-1 && value[len(value)-2-run] == '\\' {
+			run++
+		}
+		written := tableRowWidth(segment, source)
+		if run%2 == 0 || written == 0 || written > row.ChildCount() {
+			continue
+		}
+		cell := row.FirstChild()
+		for range written - 1 {
+			cell = cell.NextSibling()
+		}
+		if cell.Lines().Len() == 0 {
+			continue
+		}
+		last := cell.Lines().At(cell.Lines().Len() - 1)
+		last.Stop = segment.Stop
+		cell.Lines().Set(cell.Lines().Len()-1, last)
 	}
 }
 
