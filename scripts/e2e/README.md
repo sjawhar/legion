@@ -382,7 +382,8 @@ pull requests, best effort: it prints each close to stderr, and a close GitHub r
 pull request open and prints gh's reason, with a line saying some may still be open. Whoever reads
 the run's output can go first, for example a supervised launcher's own `tee` stopped with the run,
 and the transcript's disk can fill. The run keeps going, and the trap still closes its pull
-requests.
+requests. Its output then reaches anyone still reading, and the transcript up to the point its disk
+filled.
 
 ## stage3-4b13b-acceptance.sh
 
@@ -622,9 +623,10 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - a closed pane, a Ctrl-C, or `timeout`'s TERM;
 - the transcript's `tee` ignores those signals and SIGPIPE;
 - whoever reads the run's output can go first, for example a supervised launcher's own `tee` stopped
-  with the run, and the transcript's disk can fill. The run keeps going, and its teardown still runs
-  and reaches whatever output is left. A run whose reader goes and no signal follows runs to its own
-  end, and holds the lock until then;
+  with the run, and the transcript's disk can fill. The run keeps going and its teardown still runs
+  in full. Its output reaches anyone still reading, and the transcript up to the point its disk
+  filled; nothing restores the transcript once a write to it has failed. A run whose reader goes
+  and no signal follows runs to its own end, and holds the lock until then;
 - the teardown ignores a second signal and SIGPIPE;
 - the teardown writes to the transcript even when the signal interrupted a command whose output
   went to `/dev/null`;
