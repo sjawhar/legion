@@ -14,7 +14,16 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
+	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
 )
+
+// The broker's set is numbered 1 to N with none missing; pgmigratetest.CheckNumberedOneToN says
+// why.
+func TestMigrationSetIsNumberedOneToN(t *testing.T) {
+	if err := pgmigratetest.CheckNumberedOneToN(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // The broker's runner applies its whole set in one transaction, so a set it accepted with two
 // files numbered 2 would apply the first, pass over the second as already applied, and commit.

@@ -104,22 +104,15 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	`); err != nil {
 		return fmt.Errorf("create schema migrations table: %w", err)
 	}
-	// A pool of its own, not the shared one: while a migration's transaction holds a shared-pool
-	// connection, a second from the same pool is the nested acquisition ErrNestedAcquire refuses.
-	watchPool, err := pgmigrate.OpenWatchPool(ctx, s.Pool.Config())
-	if err != nil {
-		return err
-	}
-	defer watchPool.Close()
 	for _, migration := range migrations {
-		if err := s.applyMigration(ctx, watchPool, migration); err != nil {
+		if err := s.applyMigration(ctx, migration); err != nil {
 			return fmt.Errorf("apply migration %d: %w", migration.Version, err)
 		}
 	}
 	return nil
 }
 
-func (s *Store) applyMigration(ctx context.Context, watchPool *pgxpool.Pool, migration pgmigrate.Migration) error {
+func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migration) error {
 	// A migration is a transaction like any other, so it is marked like any other: nothing it
 	// runs may take a second pooled connection while it is open.
 	ctx = WithTransactionTracking(ctx)
@@ -131,9 +124,6 @@ func (s *Store) applyMigration(ctx context.Context, watchPool *pgxpool.Pool, mig
 	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock($1)", int64(8150001)); err != nil {
 		return fmt.Errorf("lock migrations: %w", err)
 	}
-	if err := pgmigrate.BoundLockWaits(ctx, tx); err != nil {
-		return err
-	}
 	var applied bool
 	if err := tx.QueryRow(ctx, "select exists(select 1 from schema_migrations where version = $1)", migration.Version).Scan(&applied); err != nil {
 		return fmt.Errorf("check migration: %w", err)
@@ -141,7 +131,7 @@ func (s *Store) applyMigration(ctx context.Context, watchPool *pgxpool.Pool, mig
 	if applied {
 		return tx.Commit(ctx)
 	}
-	if err := pgmigrate.Exec(ctx, tx, watchPool, migration); err != nil {
+	if err := pgmigrate.Exec(ctx, tx, migration); err != nil {
 		return fmt.Errorf("execute migration: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", migration.Version); err != nil {

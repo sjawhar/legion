@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // LockTimeout bounds every lock wait of every migration a runner applies. A migration's
@@ -21,50 +20,35 @@ import (
 // behind its own request for as long as the holder lives. Five seconds is far longer than any of
 // the services' own transactions holds a table, so an ordinary deploy never trips it, and short
 // enough that a deploy stalled behind a stray holder fails, and is noticed, instead of being
-// absorbed by every request queued behind it. A migration that needs another bound sets its own
-// with SET LOCAL lock_timeout, which lasts until the runner's transaction ends.
+// absorbed by every request queued behind it. Exec sets it on every migration it runs; a migration
+// that needs another bound sets its own with SET LOCAL lock_timeout, which lasts until the
+// runner's transaction ends.
 const LockTimeout = 5 * time.Second
 
 // lockNotAvailable is the SQLSTATE Postgres cancels a statement with when its lock_timeout runs
 // out.
 const lockNotAvailable = "55P03"
 
-// BoundLockWaits sets tx's lock_timeout to LockTimeout until tx ends. A runner calls it once it
-// holds its own advisory lock, and not before: a second process's runner waiting for that lock
-// is waiting for the first to finish, which queues no read or write behind it, since nothing but
-// a runner takes that lock.
-func BoundLockWaits(ctx context.Context, tx pgx.Tx) error {
-	setting := strconv.FormatInt(LockTimeout.Milliseconds(), 10) + "ms"
-	if _, err := tx.Exec(ctx, "select set_config('lock_timeout', $1, true)", setting); err != nil {
-		return fmt.Errorf("set lock_timeout: %w", err)
-	}
-	return nil
-}
+// lockTimeoutSetting is LockTimeout as lock_timeout takes it.
+var lockTimeoutSetting = strconv.FormatInt(LockTimeout.Milliseconds(), 10) + "ms"
 
-// OpenWatchPool opens the one-connection pool Exec's watch reads on, from a copy of the runner's
-// pool configuration; the runner closes it when its run ends. The migration's own connection is
-// busy running the statement that waits, so the watch needs another, and taking it from a pool of
-// its own keeps it off a shared pool whose callers the migration may be holding up. It dials only
-// when a migration runs long enough for the watch's first read.
-func OpenWatchPool(ctx context.Context, config *pgxpool.Config) (*pgxpool.Pool, error) {
-	config = config.Copy()
-	config.MaxConns = 1
-	config.MinConns = 0
-	config.MinIdleConns = 0
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("open migration lock watch pool: %w", err)
-	}
-	return pool, nil
-}
-
-// Exec runs migration's statements in tx while a watch on watchPool reads what tx's backend waits
-// for. Postgres cancels a statement whose lock wait outlasts lock_timeout saying only "canceling
+// Exec is how a runner applies one migration's statements in tx. It first sets tx's lock_timeout
+// to LockTimeout, so every migration a runner applies is bounded whatever the migration's file
+// says, and then runs the statements while a watch reads what tx's backend waits for. A runner
+// calls it once it holds its own advisory lock, never before: a second process's runner waiting
+// for that lock is waiting for the first to finish, which queues no read or write behind it,
+// since nothing but a runner takes that lock.
+//
+// Postgres cancels a statement whose lock wait outlasts lock_timeout saying only "canceling
 // statement due to lock timeout", so Exec reports that cancellation as a *LockTimeoutError naming
 // the migration, the lock it wanted and the sessions holding it, as the watch last saw them. Any
 // other error comes back prefixed with the migration's file name.
-func Exec(ctx context.Context, tx pgx.Tx, watchPool *pgxpool.Pool, migration Migration) error {
-	watch := startWatch(ctx, watchPool, tx.Conn().PgConn().PID())
+func Exec(ctx context.Context, tx pgx.Tx, migration Migration) error {
+	if _, err := tx.Exec(ctx, "select set_config('lock_timeout', $1, true)", lockTimeoutSetting); err != nil {
+		return fmt.Errorf("migration %s: set lock_timeout: %w", migration.Name, err)
+	}
+	conn := tx.Conn()
+	watch := startWatch(ctx, conn.Config(), conn.PgConn().PID())
 	_, err := tx.Exec(ctx, migration.SQL)
 	wait, watchErr := watch.stop()
 	if err == nil {
@@ -172,7 +156,11 @@ const lockWaitQuery = `
 	where w.pid = $1 and not w.granted
 	limit 1`
 
-// watch reads, every watchInterval until stopped, what one backend is waiting for.
+// watch reads, every watchInterval until stopped, what one backend is waiting for. It reads on a
+// connection of its own, since the backend's own connection is busy with the statement that
+// waits: dialed from that connection's configuration at the first reading, so a migration that
+// finishes inside one interval dials nothing, and closed when the watch stops. A connection
+// outside every pool keeps it clear of a shared pool whose callers the migration may be holding up.
 type watch struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -181,15 +169,26 @@ type watch struct {
 	err  error
 }
 
-func startWatch(ctx context.Context, pool *pgxpool.Pool, pid uint32) *watch {
+func startWatch(ctx context.Context, config *pgx.ConnConfig, pid uint32) *watch {
 	ctx, cancel := context.WithCancel(ctx)
 	w := &watch{cancel: cancel, done: make(chan struct{})}
-	go w.run(ctx, pool, pid)
+	go w.run(ctx, config, pid)
 	return w
 }
 
-func (w *watch) run(ctx context.Context, pool *pgxpool.Pool, pid uint32) {
+func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
 	defer close(w.done)
+	var conn *pgx.Conn
+	closeConn := func() {
+		if conn == nil {
+			return
+		}
+		closing, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		conn.Close(closing)
+		conn = nil
+	}
+	defer closeConn()
 	ticker := time.NewTicker(watchInterval)
 	defer ticker.Stop()
 	for {
@@ -198,8 +197,18 @@ func (w *watch) run(ctx context.Context, pool *pgxpool.Pool, pid uint32) {
 			return
 		case <-ticker.C:
 		}
+		if conn == nil {
+			dialed, err := pgx.ConnectConfig(ctx, config)
+			if err != nil {
+				if ctx.Err() == nil {
+					w.err = fmt.Errorf("connect the lock watch: %w", err)
+				}
+				continue
+			}
+			conn = dialed
+		}
 		var wait LockWait
-		err := pool.QueryRow(ctx, lockWaitQuery, pid).Scan(&wait.LockType, &wait.Mode, &wait.Object, &wait.Holders)
+		err := conn.QueryRow(ctx, lockWaitQuery, pid).Scan(&wait.LockType, &wait.Mode, &wait.Object, &wait.Holders)
 		switch {
 		case err == nil:
 			w.wait = &wait
@@ -208,6 +217,7 @@ func (w *watch) run(ctx context.Context, pool *pgxpool.Pool, pid uint32) {
 			// since only a later one it did not get past would replace it.
 		case ctx.Err() == nil:
 			w.err = err
+			closeConn()
 		}
 	}
 }
