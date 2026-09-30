@@ -60,6 +60,14 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
+# Refused before anything is written into the evidence directory, the transcript's tee started or
+# any trap set, so it prints the run's verdict line itself (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "CHECK setup: FAIL: $reason"
+  echo "stage 4b e2e: FAIL (check setup)"
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
 # tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
 # TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
@@ -120,7 +128,9 @@ omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$evidence/logs/daemon.log
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 ok=
+was_blocked= # set by blocked: the run stopped on a prerequisite, so it did not run, and did not fail
 torn_down=
 snapshotted=
 compared=
@@ -152,6 +162,7 @@ pair_session=
 
 begin() {
   check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
   echo "== $check"
 }
 note() { echo "   $*"; }
@@ -179,6 +190,7 @@ fail() {
 }
 blocked() {
   echo "CHECK $check: BLOCKED: $*"
+  was_blocked=1
   exit 1
 }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
@@ -1020,7 +1032,7 @@ collect_transcripts() {
   fi
 }
 cleanup() {
-  local status=$? p
+  local status=$? p teardown_failed=""
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -1047,16 +1059,33 @@ cleanup() {
     # own control pods (the memory hog, the reachability pod) go first.
     op delete pod -l "legion.dev/project=$run_label,legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     teardown
-    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
+    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || teardown_failed+="${teardown_failed:+, }namespace-clean"; fi
     delete_consumers
     remove_run_branches
-    if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
+    if [ -z "$audited" ] && [ -n "$prod_baseline" ] && ! production_audit; then
+      teardown_failed+="${teardown_failed:+, }production-audit"
+      echo "CHECK production-audit: FAIL: $(audit_failure)"
+    fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
-  [ -n "$ok" ] || echo "stage 4b e2e: FAIL (check $check)"
+  # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
+  # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
+  # check (a namespace left dirty, a write outside LEGSMOKE) names itself, and only a clean teardown
+  # lets a blocked checkpoint end BLOCKED.
+  if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
+    echo "stage 4b e2e: FAIL (check $check)"
+  elif [ -n "$teardown_failed" ]; then
+    echo "stage 4b e2e: FAIL (check $teardown_failed, in the teardown after check $check)"
+  elif [ -n "$was_blocked" ]; then
+    echo "stage 4b e2e: BLOCKED (check $check): the checkpoint could not run, so the run is no verdict on the change; the checkpoints before it stand"
+  elif [ -z "$ok" ]; then
+    echo "stage 4b e2e: FAIL (check $check)"
+  fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
+  [ -z "$teardown_failed" ] || status=1
   exit "$status"
 }
 trap cleanup EXIT
@@ -1248,6 +1277,8 @@ interests_outside() {
     | select((contains($p) or contains($t) or startswith($space) or startswith($repo) or contains($op) or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
+# audit_failure is what a failed production audit says, in the checkpoint and in the teardown.
+audit_failure() { echo "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"; }
 
 # ==== checkpoints ===================================================================================
 
@@ -1734,7 +1765,7 @@ begin fence
 # claim relaunches with a third uid.
 # (b) needs the boot token of the generation (a) replaces, so it is read before the delete.
 boot_token() { op get secret "$pod-boot" -o json | jq -er '.data.LEGION_BOOT_TOKEN // empty | @base64d' | grep .; }
-old_token=$(boot_token) || blocked "the merger's boot Secret $pod-boot has no LEGION_BOOT_TOKEN"
+old_token=$(boot_token) || fail "the merger's boot Secret $pod-boot has no LEGION_BOOT_TOKEN: the Sandbox runtime under test writes it"
 (umask 077 && printf '%s' "$old_token" >"$work/old-boot-token")
 end_claim_pod "$tree1" merger delete
 uid=$ended_pod_uid
@@ -2320,7 +2351,7 @@ namespace_clean
 begin production-audit
 audit_verdict_ok=
 if production_audit; then audit_verdict_ok=1; fi
-[ -n "$audit_verdict_ok" ] || fail "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"
+[ -n "$audit_verdict_ok" ] || fail "$(audit_failure)"
 printf '["AGENTC-1"]\n' >"$evidence/controls/audit-outside.json"
 expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-interests-outside.json"
 # The interest filter, on the run's own samples with one topic outside the run added for a session
