@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,7 +35,7 @@ function run(script: string, fake: { login?: string; stderr?: string; exit?: num
   const work = join(dir, `run-${++runs}`);
   const log = join(dir, `calls-${runs}`);
   writeFileSync(log, "");
-  Bun.spawnSync(["mkdir", "-p", work]);
+  mkdirSync(work);
   const result = Bun.spawnSync(["bash", "-c", prelude + script], {
     env: {
       PATH: `${dir}:/usr/bin:/bin`,
