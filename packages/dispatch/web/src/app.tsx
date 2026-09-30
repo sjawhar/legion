@@ -20,6 +20,7 @@ import {
   parseProjectPath,
   routeFillsViewport,
   routeHasMargin,
+  routeProjectOf,
 } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
@@ -393,23 +394,18 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // The registry as described when `?` fired (focus still on the caller); `null` while closed.
   const [helpSnapshot, setHelpSnapshot] = useState<readonly KeyBindingDescription[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  // The project the route is about, from a project path or from an issue's key — an issue key is
-  // `<PROJECT>-<n>` (`features/refs/routes.ts:49`), so its project is the part before the last `-`.
-  const routeIssueKey = parseIssuePath(location.pathname)?.key;
-  const routeProject =
-    parseProjectPath(location.pathname)?.project ??
-    routeIssueKey?.slice(0, routeIssueKey.lastIndexOf("-"));
+  const routeProject = routeProjectOf(location.pathname);
   useKeymap("global", [
     {
-      // The palette is its own row in the palette; `?` lists the key instead.
       id: "search",
       inEditable: true,
       keys: "$mod+k",
       label: "Search and actions",
-      palette: false,
       run: () => setPaletteMode((open) => (open === null ? "all" : null)),
     },
     {
+      // No row: chosen from `$mod+k`'s palette it would only reopen that palette with its actions
+      // taken away.
       id: "search-only",
       keys: "/",
       label: "Search only",
@@ -420,7 +416,6 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       id: "help",
       keys: "?",
       label: "Keyboard shortcuts",
-      palette: false,
       run: () => setHelpSnapshot(appKeymap.describe()),
     },
     { id: "create", keys: "c", label: "Create issue", run: () => setCreateOpen(true) },
@@ -435,11 +430,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       when: () => routeProject !== undefined,
     },
     {
-      // The palette is its own row in the palette; `?` lists the key instead.
       id: "go-project",
       keys: "g p",
       label: "Go to project…",
-      palette: false,
       run: () => setPaletteMode("projects"),
     },
     {
@@ -455,7 +448,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       keys: "Shift+M",
       label: "Toggle margin",
       run: () => setMarginHidden(!marginHidden),
-      when: () => hasMargin,
+      // Below `xl` the margin is a sheet the route opens itself: `Margin` reads the preference
+      // only from `xl`, so a toggle there would change nothing on screen and flip it for later.
+      when: () => !isCompactViewport && hasMargin,
     },
   ]);
   const signOut = useMutation({
@@ -471,7 +466,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // genuine page change — a different issue, or a different top-level route —
   // should move focus to the main region.
   const pageIdentity =
-    routeIssueKey ?? parseProjectPath(location.pathname)?.project ?? location.pathname;
+    parseIssuePath(location.pathname)?.key ??
+    parseProjectPath(location.pathname)?.project ??
+    location.pathname;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run only to move focus to main on a real page change
   useEffect(() => {

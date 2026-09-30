@@ -230,6 +230,17 @@ function ArchitectureTreeView({
     pendingFocus.current = level.id;
     update({ component: level.parent, view: null });
   };
+  const openFocused = () => {
+    const id = focusedRowId();
+    if (id === undefined) {
+      return;
+    }
+    if (hasChildren(id)) {
+      descend();
+    } else {
+      rowAround(document.activeElement)?.querySelector("a")?.click();
+    }
+  };
   useKeymapScope("architecture");
   useKeymap("architecture", [
     // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
@@ -256,19 +267,18 @@ function ArchitectureTreeView({
     },
     {
       id: "open",
-      keys: ["Enter", "o"],
+      keys: "o",
       label: "Open the focused component: its children, else its details",
-      run: () => {
-        const id = focusedRowId();
-        if (id === undefined) {
-          return;
-        }
-        if (hasChildren(id)) {
-          descend();
-        } else {
-          rowAround(document.activeElement)?.querySelector("a")?.click();
-        }
-      },
+      run: openFocused,
+      when: () => document.activeElement?.matches(ROW_SELECTOR) === true,
+    },
+    {
+      // Out of the palette, where `open` above is already the row for the same action.
+      id: "open-enter",
+      keys: "Enter",
+      label: "Open the focused component from its row",
+      palette: false,
+      run: openFocused,
       when: () => document.activeElement?.matches(ROW_SELECTOR) === true,
     },
     {

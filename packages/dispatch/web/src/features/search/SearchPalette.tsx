@@ -1,6 +1,14 @@
 import { snippetSegments } from "@legion/contracts/dispatch-snippet";
 import { useQuery } from "@tanstack/react-query";
-import { Fragment, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -251,18 +259,52 @@ function CommandOption({
   );
 }
 
-/* `aria-hidden` for the same reason as an owner row: the group below takes its name from this
-   heading, and a reader would otherwise hear it twice. */
-function GroupHeading({ id, label }: { id: string; label: string }): ReactNode {
+/** One labelled run of command rows: the Actions a page offers, or the Projects `g p` lists. */
+interface CommandSection {
+  id: string;
+  label: string;
+  options: readonly { hint: ReactNode; label: string; row: ActionRow | ProjectRow }[];
+}
+
+/* The heading is `aria-hidden` for the same reason as an owner row: the group below takes its
+   name from it, and a reader would otherwise hear it twice. The group is a `fieldset` named by the
+   heading, as each hit owner's group is, so a reader hears where the list changes from what this
+   page can do to what the query found. */
+function CommandGroup({
+  activeId,
+  onSelect,
+  section,
+}: {
+  activeId: string | undefined;
+  onSelect: (row: PaletteRow) => void;
+  section: CommandSection;
+}): ReactNode {
+  if (section.options.length === 0) {
+    return null;
+  }
   return (
-    <div
-      aria-hidden="true"
-      className={`flex min-w-0 items-center border-b px-3 py-1.5 text-xs font-semibold ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
-      id={id}
-      role="presentation"
-    >
-      {label}
-    </div>
+    <>
+      <div
+        aria-hidden="true"
+        className={`flex min-w-0 items-center border-b px-3 py-1.5 text-xs font-semibold ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
+        id={section.id}
+        role="presentation"
+      >
+        {section.label}
+      </div>
+      <fieldset aria-labelledby={section.id} className="min-w-0">
+        {section.options.map(({ hint, label, row }) => (
+          <CommandOption
+            active={row.id === activeId}
+            hint={hint}
+            id={row.id}
+            key={row.id}
+            label={label}
+            onSelect={() => onSelect(row)}
+          />
+        ))}
+      </fieldset>
+    </>
   );
 }
 
@@ -276,7 +318,7 @@ export function SearchPalette({
   const open = mode !== null;
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   // The rows this open offers, decided on the render that opened it — while focus is still on
@@ -292,11 +334,13 @@ export function SearchPalette({
   });
   if (opened.mode !== mode) {
     setOpened({ actions: mode === "all" ? appKeymap.actions() : emptyActions, mode });
-    // Each open starts empty. The palette stays mounted while closed, so a query left behind
-    // would come back on the next open and filter the new page's actions down to nothing.
+    // Each open starts empty, on its first row. The palette stays mounted while closed, so a
+    // query left behind would come back on the next open and filter the new page's actions down
+    // to nothing, and a highlight would name a row this open may not have.
     if (mode !== null) {
       setQuery("");
       setDebouncedQuery("");
+      setActiveId(null);
     }
   }
   // A chosen row runs once the palette is gone and `useDialog`'s cleanup has put focus back on
@@ -325,8 +369,9 @@ export function SearchPalette({
   const searching = mode !== "projects";
   const queryEnabled = searching && searchText.length >= 2;
 
-  // Declared after `useDialog`, so on the commit that closes the palette React runs that hook's
-  // cleanup — the focus restore — before this effect.
+  // On the commit that closes the palette React runs every passive-effect cleanup before any
+  // passive-effect setup, whatever order they are declared in, so `useDialog`'s cleanup (the focus
+  // restore) has run by the time this effect runs the chosen row.
   useEffect(() => {
     if (mode !== null) {
       return;
@@ -349,7 +394,6 @@ export function SearchPalette({
   const projects = useQuery({ ...projectsQuery(), enabled: mode === "projects" });
   const results = search.data?.results ?? emptyResults;
   const groups = groupResults(results);
-  const visibleResults = groups.flatMap(({ results }) => results);
   const actionRows: ActionRow[] = opened.actions
     .filter((action) => needle === "" || action.label.toLowerCase().includes(needle))
     .map((action) => ({
@@ -374,15 +418,60 @@ export function SearchPalette({
   // below the list says which of "type more", "searching", "failed" and "nothing" it is.
   const waitingForQuery = queryEnabled && debouncedQuery !== searchText;
   const showHits = queryEnabled && !waitingForQuery && !search.isPending && !search.isError;
-  const resultRows: ResultRow[] = showHits
-    ? visibleResults.map((result) => ({ id: optionId(result), kind: "result", result }))
+  const hitGroups = showHits
+    ? groups.map(({ owner, results: ownerResults }) => ({
+        owner,
+        rows: ownerResults.map(
+          (result): ResultRow => ({ id: optionId(result), kind: "result", result })
+        ),
+      }))
     : [];
-  const rows: PaletteRow[] = [...actionRows, ...projectRows, ...resultRows];
-
-  // Anything that re-ranks the list — a new query, another mode, hits arriving — returns the
-  // highlight to its head rather than to whatever row now sits at the old index.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the dependencies are the re-ranking events, not values the effect reads
-  useEffect(() => setActiveIndex(0), [searchText, mode, search.dataUpdatedAt]);
+  const commandSections: readonly CommandSection[] = [
+    {
+      id: ACTIONS_GROUP_ID,
+      label: "Actions",
+      options: actionRows.map((row) => ({
+        hint: <KeyHints keys={row.action.keys} />,
+        label: row.action.label,
+        row,
+      })),
+    },
+    {
+      id: PROJECTS_GROUP_ID,
+      label: "Projects",
+      options: projectRows.map((row) => ({
+        hint: (
+          <span className={`shrink-0 font-mono text-xs ${textMutedOnSurface}`}>
+            {row.project.key}
+          </span>
+        ),
+        label: row.project.name,
+        row,
+      })),
+    },
+  ];
+  // What the list shows, in the order it shows it: the arrows walk this same list.
+  const rows: PaletteRow[] = [
+    ...commandSections.flatMap((section) => section.options.map((option) => option.row)),
+    ...hitGroups.flatMap((group) => group.rows),
+  ];
+  // The highlight follows its row, not a position: hits arriving below the actions, or a refetch
+  // re-ranking them, leave it on the row the reader arrowed to. A new query or a new open sends
+  // it to the head, and so does its row leaving the list.
+  const activeIndex = Math.max(
+    0,
+    rows.findIndex((row) => row.id === activeId)
+  );
+  const activeRow = rows[activeIndex];
+  // Focus stays in the input while the arrows move the highlight (`aria-activedescendant`), so
+  // the list scrolls the highlighted row into its own view: an issue page offers more rows than
+  // the list's height holds.
+  const activeRowId = activeRow?.id;
+  useLayoutEffect(() => {
+    if (activeRowId !== undefined) {
+      document.getElementById(activeRowId)?.scrollIntoView({ block: "nearest" });
+    }
+  }, [activeRowId]);
 
   useCloseOnNavigation(open, onClose);
 
@@ -390,7 +479,6 @@ export function SearchPalette({
     return null;
   }
 
-  const activeRow = rows[activeIndex];
   const selectRow = (row: PaletteRow) => {
     if (row.kind === "action") {
       pendingAction.current = row.action.run;
@@ -402,10 +490,10 @@ export function SearchPalette({
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown" && rows.length > 0) {
       event.preventDefault();
-      setActiveIndex((index) => stepActive(index, 1, rows.length));
+      setActiveId(rows[stepActive(activeIndex, 1, rows.length)]?.id ?? null);
     } else if (event.key === "ArrowUp" && rows.length > 0) {
       event.preventDefault();
-      setActiveIndex((index) => stepActive(index, -1, rows.length));
+      setActiveId(rows[stepActive(activeIndex, -1, rows.length)]?.id ?? null);
     } else if (event.key === "Enter" && activeRow !== undefined) {
       event.preventDefault();
       selectRow(activeRow);
@@ -430,7 +518,11 @@ export function SearchPalette({
               aria-expanded={rows.length > 0}
               aria-label="Search"
               className={`block w-full rounded-lg border px-3 py-2 text-sm outline-none ${inputClasses(true)}`}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                // A new query re-ranks the list, so the highlight returns to its head.
+                setActiveId(null);
+              }}
               onKeyDown={handleKeyDown}
               placeholder={mode === "projects" ? "Go to project" : "Search Dispatch"}
               ref={inputRef}
@@ -440,126 +532,87 @@ export function SearchPalette({
             />
           </div>
           {rows.length === 0 ? null : (
-            <div id="search-results" role="listbox">
-              {actionRows.length === 0 ? null : (
-                <>
-                  <GroupHeading id={ACTIONS_GROUP_ID} label="Actions" />
-                  {/* The hits' owner groups are fieldsets named by the row above them; the
-                      actions are one more such group, so a reader hears where the list changes
-                      from what this page can do to what the query found. */}
-                  <fieldset aria-labelledby={ACTIONS_GROUP_ID} className="min-w-0">
-                    {actionRows.map((row) => (
-                      <CommandOption
-                        active={activeRow?.id === row.id}
-                        hint={<KeyHints keys={row.action.keys} />}
-                        id={row.id}
-                        key={row.id}
-                        label={row.action.label}
-                        onSelect={() => selectRow(row)}
-                      />
-                    ))}
-                  </fieldset>
-                </>
-              )}
-              {mode === "projects" ? (
-                projectRows.length === 0 ? null : (
-                  <>
-                    <GroupHeading id={PROJECTS_GROUP_ID} label="Projects" />
-                    <fieldset aria-labelledby={PROJECTS_GROUP_ID} className="min-w-0">
-                      {projectRows.map((row) => (
-                        <CommandOption
+            <div className="max-h-[60vh] overflow-y-auto" id="search-results" role="listbox">
+              {commandSections.map((section) => (
+                <CommandGroup
+                  activeId={activeRow?.id}
+                  key={section.id}
+                  onSelect={selectRow}
+                  section={section}
+                />
+              ))}
+              {hitGroups.map(({ owner, rows: hitRows }) => {
+                const header =
+                  owner.kind === "issue"
+                    ? {
+                        id: `issue:${owner.key}`,
+                        key: owner.key,
+                        name: owner.title,
+                        status: owner.status,
+                      }
+                    : {
+                        id: `document:${owner.artifact_id}`,
+                        key: owner.project,
+                        name: owner.name,
+                        status: undefined,
+                      };
+                const muted = header.status === "done";
+                return (
+                  <Fragment key={header.id}>
+                    {/* The group's own row: a label for the hits under it, on the recessed
+                        surface so the hits read as the list and this reads as its heading.
+                        Its status is the lifecycle label the rest of the product shows -
+                        `Needs review`, never the raw value. */}
+                    {/* `aria-hidden` because the group below takes its name from this row: a
+                        reader would otherwise hear the owner twice, once as the row and once
+                        as the group's label. `aria-labelledby` computes a name from a hidden
+                        element, so the group keeps it. */}
+                    <div
+                      aria-hidden="true"
+                      aria-label={`${header.key}: ${header.name}`}
+                      className={`flex min-w-0 items-center gap-2 border-b px-3 py-1.5 text-xs ${borderDefault} ${surfaceMutedBg} ${
+                        muted ? textMutedOnSurfaceMuted : ""
+                      }`}
+                      data-status={header.status}
+                      id={`search-group-${header.id}`}
+                      role="presentation"
+                    >
+                      <span className="font-semibold">{header.key}</span>
+                      <span
+                        className={`min-w-0 flex-1 truncate ${
+                          muted ? textMutedOnSurfaceMuted : textSecondaryOnSurfaceMuted
+                        }`}
+                      >
+                        {header.name}
+                      </span>
+                      {header.status === undefined ? null : (
+                        <span
+                          className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}
+                        >
+                          {statusText(header.status)}
+                        </span>
+                      )}
+                    </div>
+                    {/* The hits of one owner are a group named by the row above them, so a
+                        reader who cannot see that row still hears which issue or document a
+                        hit belongs to. The options stay direct children of the group and the
+                        listbox's own arrow navigation is untouched. A `fieldset` carries the
+                        group role implicitly; `min-w-0` overrides its UA `min-inline-size:
+                        min-content`, which a long hit would otherwise widen the palette to. */}
+                    <fieldset aria-labelledby={`search-group-${header.id}`} className="min-w-0">
+                      {hitRows.map((row) => (
+                        <ResultOption
                           active={activeRow?.id === row.id}
-                          hint={
-                            <span className={`shrink-0 font-mono text-xs ${textMutedOnSurface}`}>
-                              {row.project.key}
-                            </span>
-                          }
-                          id={row.id}
+                          muted={muted}
                           key={row.id}
-                          label={row.project.name}
                           onSelect={() => selectRow(row)}
+                          result={row.result}
                         />
                       ))}
                     </fieldset>
-                  </>
-                )
-              ) : !showHits ? null : (
-                groups.map(({ owner, results: ownerResults }) => {
-                  const header =
-                    owner.kind === "issue"
-                      ? {
-                          id: `issue:${owner.key}`,
-                          key: owner.key,
-                          name: owner.title,
-                          status: owner.status,
-                        }
-                      : {
-                          id: `document:${owner.artifact_id}`,
-                          key: owner.project,
-                          name: owner.name,
-                          status: undefined,
-                        };
-                  const muted = header.status === "done";
-                  return (
-                    <Fragment key={header.id}>
-                      {/* The group's own row: a label for the hits under it, on the recessed
-                          surface so the hits read as the list and this reads as its heading.
-                          Its status is the lifecycle label the rest of the product shows -
-                          `Needs review`, never the raw value. */}
-                      {/* `aria-hidden` because the group below takes its name from this row: a
-                          reader would otherwise hear the owner twice, once as the row and once
-                          as the group's label. `aria-labelledby` computes a name from a hidden
-                          element, so the group keeps it. */}
-                      <div
-                        aria-hidden="true"
-                        aria-label={`${header.key}: ${header.name}`}
-                        className={`flex min-w-0 items-center gap-2 border-b px-3 py-1.5 text-xs ${borderDefault} ${surfaceMutedBg} ${
-                          muted ? textMutedOnSurfaceMuted : ""
-                        }`}
-                        data-status={header.status}
-                        id={`search-group-${header.id}`}
-                        role="presentation"
-                      >
-                        <span className="font-semibold">{header.key}</span>
-                        <span
-                          className={`min-w-0 flex-1 truncate ${
-                            muted ? textMutedOnSurfaceMuted : textSecondaryOnSurfaceMuted
-                          }`}
-                        >
-                          {header.name}
-                        </span>
-                        {header.status === undefined ? null : (
-                          <span
-                            className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}
-                          >
-                            {statusText(header.status)}
-                          </span>
-                        )}
-                      </div>
-                      {/* The hits of one owner are a group named by the row above them, so a
-                          reader who cannot see that row still hears which issue or document a
-                          hit belongs to. The options stay direct children of the group and the
-                          listbox's own arrow navigation is untouched. A `fieldset` carries the
-                          group role implicitly; `min-w-0` overrides its UA `min-inline-size:
-                          min-content`, which a long hit would otherwise widen the palette to. */}
-                      <fieldset aria-labelledby={`search-group-${header.id}`} className="min-w-0">
-                        {ownerResults.map((result) => {
-                          const row: ResultRow = { id: optionId(result), kind: "result", result };
-                          return (
-                            <ResultOption
-                              active={activeRow?.id === row.id}
-                              muted={muted}
-                              key={row.id}
-                              onSelect={() => selectRow(row)}
-                              result={result}
-                            />
-                          );
-                        })}
-                      </fieldset>
-                    </Fragment>
-                  );
-                })
-              )}
+                  </Fragment>
+                );
+              })}
             </div>
           )}
           {mode === "projects" ? (

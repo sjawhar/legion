@@ -35,7 +35,9 @@ export interface KeyBinding {
   /** Fires while a control that takes typed text has focus: a `TEXTAREA`, a `SELECT`, a
    *  contentEditable element, or a text-entry `INPUT`. */
   inEditable?: boolean;
-  /** Whether `⌘K` offers this binding as an action; default `true`. Movement keys set `false`. */
+  /** Whether `⌘K` offers this binding as an action; default `true`. Keys that walk a list with
+   *  the row in hand set `false`, as does a second key for an action that already has a row; any
+   *  other binding that sets it says why beside it. */
   palette?: boolean;
 }
 
@@ -225,8 +227,10 @@ export interface KeymapOptions {
 export interface Keymap {
   /**
    * The palette's rows: every enabled, palette-eligible binding of the scopes beneath the
-   * innermost dialog, innermost scope first. A binding with `palette: false`, with more than one
-   * key alternative (one row cannot express several), or that fires in an editable is left out.
+   * innermost dialog, innermost scope first. Left out: a binding with `palette: false`, one that
+   * fires in an editable, and one with more than one key alternative, whose `run` may pick what
+   * it does by the key pressed (the arrows, `1`–`9`) where a row presses only its first. A row
+   * runs its binding only if the binding's `when()` still holds when the row is chosen.
    */
   actions(): KeymapAction[];
   /** Every registered binding with its `when()` evaluated now — the source for `?`. */
@@ -368,7 +372,13 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
             id: binding.id,
             keys,
             label: binding.label,
-            run: () => binding.run(new KeyboardEvent("keydown", { key: keys[0] ?? "" })),
+            // The rows are decided when the palette opens; by the time one is chosen its control
+            // may have gone (another writer reopened the issue), so the row asks again.
+            run: () => {
+              if (binding.when?.() !== false) {
+                binding.run(new KeyboardEvent("keydown", { key: keys[0] ?? "" }));
+              }
+            },
             scope,
           });
         }
