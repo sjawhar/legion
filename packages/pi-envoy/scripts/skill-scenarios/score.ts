@@ -266,9 +266,10 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
 }
 
 /** measure-before-ask: gate 2 of the dispatch skill's "Before you ask": measure first, put the
- * measurement and the size of the affected population in the ask, and drop any option the
- * measurement shows cannot reach most of that population. rig.sh's export lists 430 stranded
- * issues, 412 of them without the owner option A (email each issue's owner) needs. A person judges
+ * measurement and the size of the affected population in the ask, and when the measurement shows an
+ * option cannot repair most of that population and another option can, drop it rather than offer
+ * it cut down. rig.sh's export lists 430 stranded issues, 412 of them without the owner option A
+ * (email each issue's owner) needs, while options B and C repair all 430. A person judges
  * each ask. The count flags an ask that names the population (430), names the measurement (the 412
  * without an owner, or the 18 with one), offers at least two options, none of whose labels mentions
  * emailing or owners, and matches no POINTER phrase. The notes also say whether a tool call named

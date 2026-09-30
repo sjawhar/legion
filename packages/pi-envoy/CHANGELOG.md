@@ -58,8 +58,9 @@
   that merges (an applied simplify head included), and the implementer's production check after
   the merge.
 - The `dispatch` skill's gate 2 states as instructions what only its deleted story implied: put
-  the measurement and the size of the affected population in the ask, and drop any option the
-  measurement shows cannot reach most of that population (LEGION-386). On the skill scenario rig,
+  the measurement and the size of the affected population in the ask, and when the measurement
+  shows an option cannot repair most of that population and another option can, drop it rather
+  than offer it cut down to the part it reaches (LEGION-386). On the skill scenario rig,
   with the rule's first wording ("drops an option the measurement shows cannot work"), an agent
   asked which of three options to take, where an export shows one reaches 18 of 430, left it out
   in 7 of 10 runs, against 1 of 10 with the story and 0 of 10 with gate 2's sentences deleted; in
