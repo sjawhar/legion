@@ -50,8 +50,9 @@
   a build carrying this change.
 - `GET /api/v1/search` refuses a `q` over 1,000 UTF-16 units, counted after trimming, with the
   ordinary `400 CAP_EXCEEDED` and a sentence saying what to send instead (LEGION-386), and a
-  `project` that is not a project key with `400 INVALID_PROJECT`, where a lowercased or mistyped
-  key used to answer an empty result. An empty `project` still searches every project. Both ride
+  `project` that is not a project key with `400 INVALID_PROJECT`, where a lowercased key used to
+  answer an empty result. A mistyped key that still has a key's shape, such as `LEGOIN`, is still
+  searched and still answers empty. An empty `project` still searches every project. Both ride
   in the URL, and the load balancer in front of production Dispatch answers a URL longer than it
   accepts with a bare `414` before the server sees the request. So deploying this names the rule
   only to a request that still fits; it cannot answer the 26,637-character search that prompted
