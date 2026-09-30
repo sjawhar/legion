@@ -154,8 +154,9 @@ When the first line ends `(showing 1-250 of N)`, the next page is `offset: 250`,
 pages only as far as you need: stop listing once the free slots are filled. `<PROJECT>` is the
 Dispatch project key, the prefix of this deployment's issue keys (`AGENTC-12` → `AGENTC`), which is
 also `daemon.project` in `legion state --json`: the project key exactly as `legion.yaml` writes it.
-A row whose line shows `claimed by …` without a closing `· not running` is claimed (the table
-below): skip it without reading it.
+A row that shows `claimed by …` and does not end its claim with `· not running` (the route, when
+the row shows one, comes after the claim) is claimed, as the table below says: skip it without
+reading it.
 
 **Walk.** Take the remaining rows in that order until the free slots are filled. Read each one with
 `dispatch_read({ issue: "<KEY>" })` and skip it when any of these holds:
@@ -163,12 +164,12 @@ below): skip it without reading it.
 | Skip when | How you check it |
 |---|---|
 | It is not a root | `Links:` names a `child_of` issue. Its parent's architect owns it. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
-| Legion ran it before | `legion state --json` records it under `issues`, whatever its status: a running tree, a waiting one, a tree a person pulled back to `triage` or parked, or one you parked yourself. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion; only a person does, by moving it to `todo` or labelling it again. |
+| Legion ran it before | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`. That actor is the daemon's on every `legion status` (yours included) and on its own `in_progress` at admission, so it also finds a tree an earlier daemon store ran and parked. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion; only a person does, with the label and `todo`, which the daemon admits on its own. |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
 | Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
 | A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. You cannot read GitHub, so an open, merged, or closed pull request all count. A person who wants Legion on it anyway hands it over themselves: the label, then `todo`. |
 | Its assignee is working it | `Assignee:` names a person who holds the claim (the row above), or whose own comment or message among `Events:` says they are working on it. The assignee alone is who answers the issue's questions, not who works it. |
-| It was parked on purpose | It is in `backlog`, and the `Events:` line that moved it there (`issue.updated · … · status backlog`) is a person's (`user <login>`) with a comment or message saying why, or yours: its actor is your own session, which `dispatch_whoami({})` names, or it sits beside a controller's triage note. When the events the read shows do not reach back to that move, you cannot tell who parked it: skip it. |
+| A person parked it with a reason | It is in `backlog`, the `Events:` line that moved it there (`issue.updated · … · status backlog`) is a person's (`user <login>`), and a comment or message says why. A move by `session legion-daemon:<PROJECT>` is Legion's own, which the row above already skips. When the events the read shows do not reach back to that move, you cannot tell who parked it: skip it. |
 | It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch_doc_read({ issue: "<KEY>" })`). When in doubt, skip it. |
 
 **Take.** For each candidate that passes, in order:
