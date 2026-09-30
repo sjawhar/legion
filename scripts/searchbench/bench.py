@@ -33,6 +33,10 @@ Systems, per query:
 A name ending @N reranked only the top N (--rerank-depth N).
 
 The database URL comes from SEARCHBENCH_PG (default postgresql://postgres:searchbench@127.0.0.1:55439/searchbench).
+
+Here only the survivor is scored as it stood at filing; every other candidate has its current text.
+replay.py runs the duplicate half as a historical replay: every candidate as it stood, and today's
+search on a scratch Dispatch holding that day's issues.
 """
 
 import argparse
@@ -43,7 +47,6 @@ import os
 import re
 import statistics
 import time
-import urllib.parse
 
 import numpy as np
 import psycopg
@@ -132,6 +135,17 @@ def cmd_embed(args):
 # queries
 
 
+def query_texts(dup_title: str, dup_spec: str | None, survivor: str) -> tuple[str, str, int]:
+    """The two searches a filer would have run: the duplicate's title as filed, and that title, a
+    blank line and spec version 1 with ask blocks and every sentence naming the survivor removed.
+    Returns (title query, spec query, characters removed as naming the survivor)."""
+    spec = corpus.strip_ask_blocks(dup_spec or "")
+    # Drop sentences that name the surviving issue: a filer who already knew it would not be searching.
+    leak = re.compile(rf"[^\n.]*\b{re.escape(survivor)}\b[^\n.]*[.]?")
+    spec_clean = leak.sub("", spec)
+    return dup_title, f"{dup_title}\n\n{spec_clean}".strip(), len(spec) - len(spec_clean)
+
+
 def dup_queries(data: str, items: dict) -> list[dict]:
     """Each pair queries with the duplicate's title and first spec version as filed. When the
     survivor changed after that moment, the expected hit is its filing-time copy, and its live
@@ -141,10 +155,7 @@ def dup_queries(data: str, items: dict) -> list[dict]:
         pairs = [json.loads(line) for line in f]
     for p in pairs:
         dup = items[p["duplicate"]]
-        spec = corpus.strip_ask_blocks(p["dup_spec"] or "")
-        # Drop sentences that name the surviving issue: a filer who already knew it would not be searching.
-        leak = re.compile(rf"[^\n.]*\b{re.escape(p['key'])}\b[^\n.]*[.]?")
-        spec_clean = leak.sub("", spec)
+        title_q, spec_q, leak_removed = query_texts(p["dup_title"], p["dup_spec"], p["key"])
         expected, exclude, asof = p["key"], [dup.id], None
         if p["survivor_changed"]:
             expected, asof = f"{p['key']}@{dup.id}", dup.id
@@ -152,9 +163,8 @@ def dup_queries(data: str, items: dict) -> list[dict]:
         filt = {"kinds": ["issue"], "before": dup.created_at, "exclude": exclude, "asof": asof}
         base = {"expected": expected, "live_key": p["key"], "filter": filt, "source": dup.id,
                 "parent": p.get("dup_parent"), "components": p.get("dup_components") or []}
-        out.append({**base, "set": "dup-title", "id": f"{dup.id}:title", "text": p["dup_title"]})
-        out.append({**base, "set": "dup-spec", "id": f"{dup.id}:spec", "text": f"{p['dup_title']}\n\n{spec_clean}".strip(),
-                    "leak_removed": len(spec) - len(spec_clean)})
+        out.append({**base, "set": "dup-title", "id": f"{dup.id}:title", "text": title_q})
+        out.append({**base, "set": "dup-spec", "id": f"{dup.id}:spec", "text": spec_q, "leak_removed": leak_removed})
     return out
 
 
@@ -237,6 +247,23 @@ def candidates(conn, filt) -> set[str]:
 # systems
 
 
+def collapse_hits(results: list[dict], cands: set[str], alias: dict[str, str] | None = None) -> list[str]:
+    """Dispatch search hits in order, collapsed to their issue (or ask) and kept only when that item
+    is a candidate, each once."""
+    ranked = []
+    for r in results:
+        if r["kind"] == "ask":
+            iid = "ask:" + r["id"]
+        elif r.get("issue"):
+            iid = r["issue"]["key"]
+        else:
+            continue
+        iid = (alias or {}).get(iid, iid)
+        if iid in cands and iid not in ranked:
+            ranked.append(iid)
+    return ranked
+
+
 def sys_production(text: str, cands: set[str], alias: dict[str, str]) -> tuple[list[str], float, str | None]:
     """Today's search sees only the live corpus, so a survivor's live key stands in for its
     filing-time copy; that gives production the post-consolidation text the others don't see."""
@@ -245,22 +272,17 @@ def sys_production(text: str, cands: set[str], alias: dict[str, str]) -> tuple[l
         res = dget.get("/search", {"q": text, "limit": 50})["results"]
     except Exception as e:  # e.g. a whole spec is too long for a URL
         return [], time.time() - t, str(e)[:200]
-    dt = time.time() - t
-    ranked = []
-    for r in res:
-        if r["kind"] == "ask":
-            iid = "ask:" + r["id"]
-        elif r.get("issue"):
-            iid = r["issue"]["key"]
-        else:
-            continue
-        iid = alias.get(iid, iid)
-        if iid in cands and iid not in ranked:
-            ranked.append(iid)
-    return ranked, dt, None
+    return collapse_hits(res, cands, alias), time.time() - t, None
 
 
 NEGATION = re.compile(r"(^|\s)-+(?=\w)")
+# Fixed keyword search's query: the websearch terms joined with OR (websearch_to_tsquery ANDs them).
+KW_TSQUERY = "replace(websearch_to_tsquery('english', %(q)s)::text, ' & ', ' | ')::tsquery"
+
+
+def keyword_text(text: str) -> str:
+    """A leading hyphen would negate a term in websearch syntax; a query quotes prose, not syntax."""
+    return NEGATION.sub(r"\1", text)
 
 
 def sys_keyword(conn, text: str, filt: dict, n: int = FUSE_DEPTH, norm: int = 1) -> tuple[list[str], float]:
@@ -268,10 +290,10 @@ def sys_keyword(conn, text: str, filt: dict, n: int = FUSE_DEPTH, norm: int = 1)
     w, p = _where(filt)
     t = time.time()
     rows = conn.execute(
-        f"""with q as (select replace(websearch_to_tsquery('english', %(q)s)::text, ' & ', ' | ')::tsquery as tsq)
+        f"""with q as (select {KW_TSQUERY} as tsq)
             select i.id from items i, q where i.kw @@ q.tsq and {w}
              order by ts_rank_cd(i.kw, q.tsq, %(norm)s) desc, i.id limit %(n)s""",
-        {**p, "q": NEGATION.sub(r"\1", text), "n": n, "norm": norm},
+        {**p, "q": keyword_text(text), "n": n, "norm": norm},
     ).fetchall()
     return [r[0] for r in rows], time.time() - t
 
@@ -308,6 +330,18 @@ def rrf(*lists: list[str]) -> list[str]:
     return sorted(score, key=lambda k: (-score[k], k))
 
 
+def passage_docs(rows) -> dict[str, str]:
+    """Rows of (item, chunk text, similarity), sorted by item then similarity descending, become one
+    reranker document per item: its best PASSAGES chunks, the first keeping its title line and later
+    ones dropping the repeated title."""
+    best: dict[str, list[str]] = {}
+    for iid, text, _ in rows:
+        if len(best.setdefault(iid, [])) < PASSAGES:
+            best[iid].append(text)
+    return {iid: "\n\n".join([texts[0]] + [t.split("\n", 1)[1] if "\n" in t else t for t in texts[1:]])
+            for iid, texts in best.items()}
+
+
 def passages(conn, model: str, v: np.ndarray, ids: list[str]) -> tuple[dict[str, str], float]:
     t = time.time()
     rows = conn.execute(
@@ -315,15 +349,7 @@ def passages(conn, model: str, v: np.ndarray, ids: list[str]) -> tuple[dict[str,
              where c.item_id = any(%(ids)s) order by c.item_id, s desc""",
         {"v": v, "ids": ids},
     ).fetchall()
-    best: dict[str, list[str]] = {}
-    for iid, text, _ in rows:
-        if len(best.setdefault(iid, [])) < PASSAGES:
-            best[iid].append(text)
-    docs = {}
-    for iid, texts in best.items():
-        # The first passage keeps its title line; later ones drop the repeated title.
-        docs[iid] = "\n\n".join([texts[0]] + [t.split("\n", 1)[1] if "\n" in t else t for t in texts[1:]])
-    return docs, time.time() - t
+    return passage_docs(rows), time.time() - t
 
 
 def rerank(conn, rr, query: str, ids: list[str], docs: dict[str, str]) -> tuple[list[str], float | None]:
