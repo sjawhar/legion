@@ -1,0 +1,35 @@
+name: Scratch A1 worker-image call
+
+# Throwaway probe for sjawhar/legion#1597 (never merged): calls worker-image.yaml the way
+# release.yaml's worker_image job does, with the same job-level permissions, and reads the two
+# workflow_call outputs the worker_image_release_note job consumes.
+on:
+  pull_request:
+    paths: [".github/workflows/scratch-a1-call.yaml"]
+
+permissions:
+  contents: read
+
+jobs:
+  worker_image:
+    uses: ./.github/workflows/worker-image.yaml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      cli_version: ""
+
+  show:
+    needs: worker_image
+    runs-on: ubuntu-24.04
+    permissions: {}
+    env:
+      IMAGE: ${{ needs.worker_image.outputs.image }}
+      DIGEST: ${{ needs.worker_image.outputs.digest }}
+    steps:
+      - name: Print what worker_image_release_note would append
+        run: |
+          test -n "$IMAGE"
+          test -n "$DIGEST"
+          # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
+          printf 'image=%s digest=%s would append: `%s@%s`\n' "$IMAGE" "$DIGEST" "$IMAGE" "$DIGEST"
