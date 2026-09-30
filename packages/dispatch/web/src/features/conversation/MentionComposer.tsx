@@ -126,6 +126,9 @@ export interface AcceptedMention {
 export interface CarriedDraft {
   readonly body: string;
   readonly mentions: readonly AcceptedMention[];
+  /** The reply the draft was written under, so a mount under that same reply keeps the draft
+   *  rather than seeding the reply over it. */
+  readonly replyId?: string;
 }
 
 interface MentionOption {
@@ -485,9 +488,11 @@ interface MentionComposerProps {
   /** Every change to the draft, for a caller that will hand it back after a remount of its own. */
   readonly onCarry?: (draft: CarriedDraft) => void;
   readonly onClose: () => void;
-  /** Whether a send is in flight, from the render that shows it and after that render's `onCarry`.
-   *  A caller that remounts this composer only once it reads `false` hands the next instance the
-   *  draft the send left behind - none after a success - never one the server is still taking. */
+  /** Whether a send is in flight, from the send itself: its start, and its end once any success
+   *  has reset the draft and reported that reset (`onCarry`). The mutation's own callbacks report
+   *  it, so the end arrives even after this composer has unmounted - a caller that mounts a new
+   *  composer only once it reads `false` hands on the draft the send left behind, never one the
+   *  server is still taking. */
   readonly onSending?: (sending: boolean) => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
@@ -527,7 +532,11 @@ export function MentionComposer({
   const focusAddedOption = useRef(false);
   const previousBody = useRef(edit?.body ?? initial.body);
   const pendingTextEdit = useRef<{ before: string; range: TextEditRange } | undefined>(undefined);
-  const previousReply = useRef<string | undefined>(undefined);
+  // A mount under the reply its carried draft was written under has that draft already; seeding
+  // the reply again would put its prefill over the reader's text.
+  const previousReply = useRef<string | undefined>(
+    replyTo !== null && carried?.replyId === replyTo.id ? replyTo.id : undefined
+  );
   const queryClient = useQueryClient();
   const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
@@ -560,27 +569,32 @@ export function MentionComposer({
   }, [autocomplete, options]);
   const compact = inline || edit !== undefined;
   /** The whole draft, gone - the body, its accepted mentions, a suggestion's replacement and an
-   *  ask's options - on a successful send and on Discard alike, in every host: one whose `onClose`
-   *  only moves focus (`AgentsPage`'s rows) keeps the composer mounted and shows it empty, as one
-   *  that unmounts it would. The kind, the urgency and `Allow multiple` are the reader's settings,
-   *  not the draft, and stay. The carry is reported empty with it, from the render that shows it,
-   *  and a send's end is reported only after that (`onSending`), so a host that remounts once the
-   *  send has ended cannot bring a sent or discarded draft back. */
+   *  ask's options - on a successful send and on Discard alike, in every host, leaving what a fresh
+   *  mount shows: a host whose `onClose` only moves focus (`AgentsPage`'s rows) keeps the composer
+   *  mounted, and it must read as a new one would. That includes the channel's own mentions: an
+   *  issue comment an Agents row writes reaches its agent only by mentioning it, so every message
+   *  after the first is seeded as the first was. The kind, the urgency and `Allow multiple` are
+   *  the reader's settings, not the draft, and stay. The reset is reported as the carry at once,
+   *  not from the render that shows it: a send's end can land after this composer has unmounted,
+   *  and is reported (`onSending`) only after this. */
   const clearDraft = () => {
-    setBody("");
-    previousBody.current = "";
-    setMentions([]);
+    const reset = initialDraft(initialMentions, undefined, owner);
+    setBody(reset.body);
+    previousBody.current = reset.body;
+    setMentions(reset.mentions);
     setReplacement("");
     setAskOptions([emptyAskOption()]);
+    onCarry?.({ ...reset, replyId: replyTo?.id });
   };
   const references = useMemo(() => composerReferences(body), [body]);
   const submitGuard = useSubmitGuard();
   const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 
+  const replyId = replyTo?.id;
   useEffect(() => {
-    onCarry?.({ body, mentions });
-  }, [body, mentions, onCarry]);
+    onCarry?.({ body, mentions, replyId });
+  }, [body, mentions, onCarry, replyId]);
   useEffect(() => {
     if (editBody === undefined) return;
     setBody(editBody);
@@ -753,7 +767,11 @@ export function MentionComposer({
         ? api.createComment(owner.issueKey, input)
         : api.createArtifactComment(owner.artifactId, input);
     },
-    onSettled: () => submitGuard.release(),
+    onMutate: () => onSending?.(true),
+    onSettled: () => {
+      submitGuard.release();
+      onSending?.(false);
+    },
     onSuccess: () => {
       clearDraft();
       onSent();
@@ -779,9 +797,6 @@ export function MentionComposer({
       if (!inline && edit === undefined) onClose();
     },
   });
-  useEffect(() => {
-    onSending?.(save.isPending);
-  }, [onSending, save.isPending]);
   const upload = useMutation({
     mutationFn: (file: File) => {
       if (owner.kind === "session")

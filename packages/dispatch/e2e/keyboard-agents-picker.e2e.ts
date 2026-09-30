@@ -333,6 +333,46 @@ test.describe("agents page", () => {
     }
   });
 
+  // A reply started while a direct message is in the air belongs to an issue, but the composer
+  // holding the message is still the direct one, and its reset after the send seeds what a direct
+  // composer seeds - nothing - rather than the issue's mention for the channel it has not moved to.
+  test("a reply started mid-send leaves the direct composer as a direct one", async ({
+    browser,
+  }) => {
+    const issueKey = await seedAgents();
+    await createMessage(issueKey, {
+      body: "Can this ship?",
+      delivery: "btw",
+      target: `session:${plannerSession.session_id}`,
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const send = await holdPosts(page, "**/api/v1/agents/*/messages");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await row.getByRole("button", { name: "Reply" }).first().click();
+      send.release();
+
+      // The send ends the reply it outlived, and the composer is the direct one, empty.
+      await expect(row.getByRole("button", { name: "Cancel reply" })).toHaveCount(0);
+      await expect(row.getByRole("button", { name: "Choose issue" })).toContainText("No issue");
+      await expect(field).toBeEnabled();
+      await expect(field).toHaveValue("");
+      expect(send.posts()).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
   // The list is every open issue, so an issue closed after it was picked drops out of it on the
   // next read. The select keeps showing the committed issue, marked closed - as the issue header's
   // Status select keeps a closed issue's own status among its options - so what the picker shows,
@@ -385,6 +425,79 @@ test.describe("agents page", () => {
       await expect(toggle).toContainText("CORE-2");
       await toggle.click();
       await expect(picker.locator("option", { hasText: issueKey })).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // An issue comment reaches this agent only by mentioning it, so the reset a send makes seeds the
+  // mention again, as a mount does - the next message is as addressed as the first. A direct
+  // message already reaches its session, and its channel seeds nothing.
+  test("every message sent on an issue mentions the agent, and a direct one carries none", async ({
+    browser,
+  }) => {
+    const issueKey = await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator(`[data-agent-row="${plannerSession.session_id}"]`);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const sends: { body: unknown; ok: boolean; path: string }[] = [];
+      page.on("response", (response) => {
+        const request = response.request();
+        const path = new URL(request.url()).pathname;
+        if (request.method() !== "POST" || !/\/(comments|messages)$/.test(path)) return;
+        sends.push({ body: request.postDataJSON(), ok: response.ok(), path });
+      });
+      const send = async (text: string) => {
+        const before = sends.length;
+        await field.click();
+        await page.keyboard.press("End");
+        await page.keyboard.type(text);
+        await page.keyboard.press("Control+Enter");
+        await expect.poll(() => sends.length).toBe(before + 1);
+      };
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Enter");
+      await expect(toggle).toContainText(issueKey);
+      await expect(field).toHaveValue("@Planner");
+
+      await send(" first");
+      await expect(field).toHaveValue("@Planner");
+      await send(" second");
+      await expect(field).toHaveValue("@Planner");
+
+      await toggle.click();
+      await picker.selectOption("");
+      await expect(field).toHaveValue("");
+      await send("third");
+      await expect(field).toHaveValue("");
+
+      const mentions = [{ target: `session:${plannerSession.session_id}` }];
+      expect(sends).toEqual([
+        {
+          body: { body: "@Planner first", delivery: "steer", mentions },
+          ok: true,
+          path: `/api/v1/issues/${issueKey}/comments`,
+        },
+        {
+          body: { body: "@Planner second", delivery: "steer", mentions },
+          ok: true,
+          path: `/api/v1/issues/${issueKey}/comments`,
+        },
+        {
+          body: { body: "third", delivery: "steer" },
+          ok: true,
+          path: `/api/v1/agents/${plannerSession.session_id}/messages`,
+        },
+      ]);
     } finally {
       await context.close();
     }

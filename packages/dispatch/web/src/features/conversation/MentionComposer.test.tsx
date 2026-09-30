@@ -939,8 +939,9 @@ test("an owner mention the reader edited is their prose and stays", async () => 
 
 // "Discard draft?" means the draft is gone, in every host. Where `onClose` unmounts the composer
 // that was true by accident; on the Agents page it only moves focus, so the reset has to be the
-// composer's own - the same one a successful send runs, carry included.
-test("Discard clears the draft and its records, wherever the host takes focus", () => {
+// composer's own - the same one a successful send runs, carry included. What it leaves is what a
+// mount shows: the channel's own mention, seeded again, or the next message would not reach it.
+test("Discard clears the draft to what a mount shows, wherever the host takes focus", () => {
   const carriedDrafts: CarriedDraft[] = [];
   const { view } = renderComposer({
     initialMentions: [plannerMention],
@@ -953,8 +954,11 @@ test("Discard clears the draft and its records, wherever the host takes focus", 
     fireEvent.keyDown(field, { key: "Escape" });
     fireEvent.click(screen.getByRole("button", { name: "Discard" }));
 
-    expect(field.value).toBe("");
-    expect(carriedDrafts.at(-1)).toEqual({ body: "", mentions: [] });
+    expect(field.value).toBe("@Planner");
+    expect(carriedDrafts.at(-1)).toEqual({
+      body: "@Planner",
+      mentions: [{ end: 8, start: 0, target: "session:A", text: "Planner" }],
+    });
   } finally {
     view.unmount();
   }

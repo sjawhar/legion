@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   type FakeSession,
@@ -8,7 +8,7 @@ import {
   seedAgents,
   setLiveSessions,
 } from "./agents";
-import { createMessage } from "./api";
+import { createAgentMessage, createMessage } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -21,6 +21,37 @@ async function nextTask(page: Page): Promise<void> {
     setTimeout(turn.resolve, 0);
     return turn.promise;
   });
+}
+
+/** `seedAgents`, plus `Quiet` and `Silent`: live sessions with no Dispatch activity, which fold
+ *  under `No Dispatch activity` until one is pinned - the rows a pin moves across. */
+async function seedWithFold(): Promise<void> {
+  await seedAgents();
+  const folded = (id: string, title: string): FakeSession => ({
+    capabilities: ["aside", "btw"],
+    dir: `/srv/${id}`,
+    machine_id: "box-1",
+    roles: ["tester"],
+    session_id: `${id}-session`,
+    title,
+  });
+  await setLiveSessions([
+    plannerSession,
+    reviewerSession,
+    folded("quiet", "Quiet"),
+    folded("silent", "Silent"),
+  ]);
+}
+
+/** Opens the fold and roves to its last row, `Silent`, the way a keyboard reader gets there. */
+async function roveToSilent(page: Page): Promise<Locator> {
+  await page.getByRole("button", { name: /^No Dispatch activity/ }).click();
+  await expect(page.locator("[data-agent-row]")).toHaveCount(4);
+  await page.locator("body").focus();
+  for (const _ of [1, 2, 3, 4]) await page.keyboard.press("j");
+  const row = page.locator('[data-agent-row="silent-session"]');
+  await expect(row).toBeFocused();
+  return row;
 }
 
 test.beforeEach(async () => {
@@ -131,34 +162,14 @@ test.describe("agents page", () => {
   test("Shift+P keeps focus on the row it moves, or on the fold it moves into", async ({
     browser,
   }) => {
-    await seedAgents();
-    // No Dispatch activity, so both fold under `No Dispatch activity` until one is pinned.
-    const silent = (id: string, title: string): FakeSession => ({
-      capabilities: ["aside", "btw"],
-      dir: `/srv/${id}`,
-      machine_id: "box-1",
-      roles: ["tester"],
-      session_id: `${id}-session`,
-      title,
-    });
-    await setLiveSessions([
-      plannerSession,
-      reviewerSession,
-      silent("quiet", "Quiet"),
-      silent("silent", "Silent"),
-    ]);
+    await seedWithFold();
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
       await openAgents(page);
       const rows = page.locator("[data-agent-row]");
-      const silentRow = page.locator('[data-agent-row="silent-session"]');
       const fold = page.getByRole("button", { name: /^No Dispatch activity/ });
-      await fold.click();
-      await expect(rows).toHaveCount(4);
-      await page.locator("body").focus();
-      for (const _ of [1, 2, 3, 4]) await page.keyboard.press("j");
-      await expect(silentRow).toBeFocused();
+      const silentRow = await roveToSilent(page);
 
       // Out of the fold and to the top of the open list; `j` then goes on from there.
       await page.keyboard.press("Shift+P");
@@ -188,6 +199,154 @@ test.describe("agents page", () => {
       await expect(silentRow).toHaveCount(0);
       await expect(fold).toHaveAccessibleName("No Dispatch activity (2)");
       await expect(fold).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The same remount drops everything else the row held: whether it is open, the reader's draft
+  // and the issue that draft is addressed to. The page keeps them by session, so the moved row
+  // comes back as it was left - and its draft still goes where it was going.
+  test("Shift+P carries the row's open state, its draft and its issue across the move", async ({
+    browser,
+  }) => {
+    await seedWithFold();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const rows = page.locator("[data-agent-row]");
+      const silentRow = await roveToSilent(page);
+      const opener = silentRow.getByRole("button", { exact: true, name: "Silent" });
+      const toggle = silentRow.getByRole("button", { name: "Choose issue" });
+      const field = silentRow.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await toggle.click();
+      await silentRow.getByRole("combobox", { name: "Issue" }).selectOption("CORE-1");
+      await field.click();
+      await page.keyboard.press("End");
+      await page.keyboard.type(" can you take this");
+      await expect(field).toHaveValue("@Silent can you take this");
+
+      // Back on the row itself - a click beside its controls - to pin it from the keyboard.
+      await silentRow.getByText("box-1 · /srv/silent").click();
+      await expect(silentRow).toBeFocused();
+      await page.keyboard.press("Shift+P");
+      await expect(rows.nth(0)).toHaveAttribute("data-agent-row", "silent-session");
+      await expect(silentRow).toBeFocused();
+      await expect(opener).toHaveAttribute("aria-expanded", "true");
+      await expect(toggle).toContainText("CORE-1");
+      await expect(field).toHaveValue("@Silent can you take this");
+
+      // The mention travelled as a record, not just as text: it is on the wire.
+      const posted = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" && new URL(request.url()).pathname.endsWith("/comments")
+      );
+      await field.click();
+      await page.keyboard.press("Control+Enter");
+      const request = await posted;
+      expect(new URL(request.url()).pathname).toBe("/api/v1/issues/CORE-1/comments");
+      expect(request.postDataJSON()).toMatchObject({
+        body: "@Silent can you take this",
+        mentions: [{ target: "session:silent-session" }],
+      });
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A reply in progress is part of what the row holds: the moved row is still answering the same
+  // message, with the reader's words rather than the reply's fresh start.
+  test("Shift+P keeps a reply in progress, and the reply still answers its message", async ({
+    browser,
+  }) => {
+    await seedWithFold();
+    const asked = await createAgentMessage("silent-session", {
+      body: "Are you free?",
+      delivery: "btw",
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const rows = page.locator("[data-agent-row]");
+      const silentRow = await roveToSilent(page);
+      const field = silentRow.getByRole("textbox", { name: "Comment" });
+      const cancelReply = silentRow.getByRole("button", { name: "Cancel reply" });
+
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await silentRow.getByRole("button", { name: "Reply" }).first().click();
+      await expect(cancelReply).toBeVisible();
+      await field.fill("Yes, go ahead");
+      await silentRow.getByText("box-1 · /srv/silent").click();
+      await page.keyboard.press("Shift+P");
+
+      await expect(rows.nth(0)).toHaveAttribute("data-agent-row", "silent-session");
+      await expect(silentRow).toBeFocused();
+      await expect(cancelReply).toBeVisible();
+      await expect(field).toHaveValue("Yes, go ahead");
+
+      const posted = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" && new URL(request.url()).pathname.endsWith("/messages")
+      );
+      await field.click();
+      await page.keyboard.press("Control+Enter");
+      const request = await posted;
+      expect(new URL(request.url()).pathname).toBe("/api/v1/agents/silent-session/messages");
+      expect(request.postDataJSON()).toMatchObject({
+        body: "Yes, go ahead",
+        in_reply_to: asked.id,
+      });
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A pin made while the row's message is in the air remounts the row with the send still out.
+  // The composer the move mounts waits for the server's answer, so it never starts from text the
+  // server was taking.
+  test("a pin mid-send brings the row back open, without the text it sent", async ({ browser }) => {
+    await seedWithFold();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const rows = page.locator("[data-agent-row]");
+      const { promise: held, resolve: release } = Promise.withResolvers<void>();
+      let posts = 0;
+      await page.route("**/api/v1/agents/*/messages", async (route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        posts += 1;
+        await held;
+        return route.fallback();
+      });
+      const silentRow = await roveToSilent(page);
+      const field = silentRow.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await silentRow.getByText("box-1 · /srv/silent").click();
+      await page.keyboard.press("Shift+P");
+
+      await expect(rows.nth(0)).toHaveAttribute("data-agent-row", "silent-session");
+      await expect(silentRow).toBeFocused();
+      await expect(silentRow.getByRole("button", { exact: true, name: "Silent" })).toHaveAttribute(
+        "aria-expanded",
+        "true"
+      );
+      await expect(field).toHaveCount(0);
+      release();
+      await expect(field).toBeEnabled();
+      await expect(field).toHaveValue("");
+      expect(posts).toBe(1);
     } finally {
       await context.close();
     }

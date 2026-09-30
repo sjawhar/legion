@@ -195,6 +195,34 @@ interface AgentReply {
   readonly target: ReplyTarget;
 }
 
+/**
+ * What the page keeps for one agent row, so that a remount drops none of it. A pin moves a row
+ * between the open list and a fold, whose parents differ, so React mounts it afresh; the row and
+ * its composer render from this instead of holding their own state, and a closure the old row left
+ * behind - a send's end, landing after the move - still reaches the row on screen.
+ */
+interface KeptRow {
+  readonly expanded: boolean;
+  /** What only a mount reads, kept outside render so typing re-renders nothing above the row. */
+  readonly memory: RowMemory;
+  readonly replyTo: AgentReply | null;
+  /** Whether the row's send is in flight (`MentionComposer`'s `onSending`). */
+  readonly sending: boolean;
+  readonly update: (change: Partial<RowView>) => void;
+}
+
+/** A kept row's rendered part: page state, so every change re-renders the row wherever it is. */
+type RowView = Pick<KeptRow, "expanded" | "replyTo" | "sending">;
+
+const CLOSED_ROW: RowView = { expanded: false, replyTo: null, sending: false };
+
+/** A kept row's mount-only part: the issue its composer is addressed to, and the draft in it -
+ *  the composer's own carry (`CarriedDraft`), the one its channel remount hands on. */
+interface RowMemory {
+  draft: CarriedDraft | undefined;
+  issueKey: string;
+}
+
 /** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
  *  most recent attempt across the root and every delivered reply. */
 function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
@@ -519,20 +547,29 @@ function AgentMessageList({
 
 function AgentMessageComposer({
   agent,
+  memory,
   onCancelReply,
   onClose,
+  onSending,
   replyTo,
+  sending,
 }: {
   agent: Agent;
+  memory: RowMemory;
   onCancelReply: () => void;
   /** One level out of the composer: the row it belongs to takes focus. The composer calls it on
    *  Escape from an untouched draft and on Discard - and also right after a successful send,
    *  which is NOT one level out; that case is filtered below. */
   onClose: () => void;
+  onSending: (sending: boolean) => void;
   replyTo: AgentReply | null;
+  /** Whether this row's send is in flight (`MentionComposer`'s `onSending`, kept by the page so
+   *  it outlives a remount). The message is addressed by then, so neither the picker nor the
+   *  channel the composer is mounted for may change until it lands. */
+  sending: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const [issueKey, setIssueKey] = useState("");
+  const [issueKey, setIssueKey] = useState(memory.issueKey);
   const [issuePickerOpen, setIssuePickerOpen] = useState(false);
   // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's
   // `onSuccess`), and a reader who has just sent a message is still writing to this agent: moving
@@ -569,16 +606,18 @@ function AgentMessageComposer({
     watcher.observe(field, { attributeFilter: ["disabled"] });
     refocusWatcher.current = watcher;
   };
-  /** The draft as the composer last held it - body and accepted mentions together - so a pick
-   *  that remounts it to change the message's owner hands the reader's work to the new
-   *  instance rather than dropping it. Opaque here: it is handed back as it was given. */
-  const carried = useRef<CarriedDraft | undefined>(undefined);
-  const keepCarry = useCallback((draft: CarriedDraft) => {
-    carried.current = draft;
-  }, []);
-  /** Whether the composer's send is in flight (`onSending`). The message is addressed by then, so
-   *  neither the picker nor the channel the composer is mounted for may change until it lands. */
-  const [sending, setSending] = useState(false);
+  const keepCarry = useCallback(
+    (draft: CarriedDraft) => {
+      memory.draft = draft;
+    },
+    [memory]
+  );
+  /** Whether this composer mounted while another one's send for this row was still out - the row
+   *  remounted under it, by a pin, say. The draft that send left behind is not known until it
+   *  lands (a success resets it, a refusal keeps it), so until then this composer offers no field
+   *  rather than one holding text the server may be taking. */
+  const [waitingForSend, setWaitingForSend] = useState(sending);
+  if (waitingForSend && !sending) setWaitingForSend(false);
   /** What the picker's selection reads while it is open, which is the reader's until they commit
    *  it: the select's own keys move it, `Enter`, or a pick made with the pointer or in the native
    *  popup, takes it, and leaving the select without committing puts it back on `issueKey`. */
@@ -604,6 +643,7 @@ function AgentMessageComposer({
    *  issue already held leaves alone. */
   const [commits, setCommits] = useState(0);
   const commitIssue = (value: string) => {
+    memory.issueKey = value;
     setIssueKey(value);
     setIssuePickerOpen(false);
     setCommits((count) => count + 1);
@@ -681,9 +721,10 @@ function AgentMessageComposer({
   /** The channel the mounted composer was built for. It follows `channel`, except while a send is
    *  in flight: the instance holding that body is the one the server's answer reaches, so a
    *  channel change made meanwhile - a reply started or cancelled, since the picker is disabled -
-   *  remounts only once the answer is in, when a success has already emptied the draft `carried`
-   *  hands on. Remounted mid-send, the new instance would start from the body in the air, enabled,
-   *  where the old one's `clearDraft` could not reach it: one Ctrl+Enter from sending it twice. */
+   *  remounts only once the answer is in, when a success has already reset the draft the carry
+   *  (`memory.draft`) hands on. Remounted mid-send, the new instance would start from the body in
+   *  the air, enabled, where the old one's reset could not reach it: one Ctrl+Enter from sending it
+   *  twice. */
   const [composerChannel, setComposerChannel] = useState(channel);
   if (!sending && composerChannel !== channel) setComposerChannel(channel);
   // A remount takes the focused field out of the page with the instance it belonged to - after a
@@ -771,41 +812,49 @@ function AgentMessageComposer({
           )}
         </div>
       ) : null}
-      <MentionComposer
-        initialMentions={
-          useDirectChannel
-            ? undefined
-            : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
-        }
-        carried={carried.current}
-        onCarry={keepCarry}
-        // The channel decides which mention the message needs - an issue comment reaches this
-        // agent by mentioning it, a direct message does not - so the composer is remounted when
-        // the channel changes, and only then; one issue to another keeps the same instance. The
-        // pick carries the reader's draft across that remount (`carried`), which waits for a send
-        // in flight to land (`composerChannel`).
-        key={composerChannel}
-        onCancelReply={onCancelReply}
-        onClose={() => {
-          if (sentJustNow.current) {
-            sentJustNow.current = false;
-            return;
+      {waitingForSend ? (
+        <p className={`mt-3 text-sm ${textMutedOnCanvas}`} role="status">
+          Sending…
+        </p>
+      ) : (
+        <MentionComposer
+          // The seed belongs to the channel this instance is built for, which is what its reset
+          // after a send re-seeds; a channel still waiting to remount gets its own on the remount.
+          initialMentions={
+            composerChannel === "session"
+              ? undefined
+              : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
           }
-          onClose();
-        }}
-        onSending={setSending}
-        onSent={() => {
-          sentJustNow.current = true;
-          onCancelReply();
-          void queryClient.invalidateQueries({
-            queryKey: agentMessagesQuery(agent.session_id).queryKey,
-          });
-          // Focus went to the document when the field disabled itself; take it back.
-          refocusComposer();
-        }}
-        owner={composerOwner}
-        replyTo={replyTo?.target ?? null}
-      />
+          carried={memory.draft}
+          onCarry={keepCarry}
+          // The channel decides which mention the message needs - an issue comment reaches this
+          // agent by mentioning it, a direct message does not - so the composer is remounted when
+          // the channel changes, and only then; one issue to another keeps the same instance. The
+          // pick carries the reader's draft across that remount (`memory.draft`), which waits for
+          // a send in flight to land (`composerChannel`).
+          key={composerChannel}
+          onCancelReply={onCancelReply}
+          onClose={() => {
+            if (sentJustNow.current) {
+              sentJustNow.current = false;
+              return;
+            }
+            onClose();
+          }}
+          onSending={onSending}
+          onSent={() => {
+            sentJustNow.current = true;
+            onCancelReply();
+            void queryClient.invalidateQueries({
+              queryKey: agentMessagesQuery(agent.session_id).queryKey,
+            });
+            // Focus went to the document when the field disabled itself; take it back.
+            refocusComposer();
+          }}
+          owner={composerOwner}
+          replyTo={replyTo?.target ?? null}
+        />
+      )}
     </div>
   );
 }
@@ -841,6 +890,7 @@ function AskCountPill({
 
 function AgentRow({
   agent,
+  kept,
   liveAgents,
   needsYou,
   onPin,
@@ -849,6 +899,7 @@ function AgentRow({
   selected,
 }: {
   agent: Agent;
+  kept: KeptRow;
   liveAgents: readonly Agent[];
   needsYou: number;
   onPin: () => void;
@@ -863,8 +914,7 @@ function AgentRow({
   const waitingOnAgent = agent.open_asks - needsYou;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
-  const [expanded, setExpanded] = useState(false);
-  const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
+  const { expanded, replyTo, update } = kept;
   const detailsId = useId();
 
   return (
@@ -893,7 +943,7 @@ function AgentRow({
               aria-expanded={expanded}
               className={`flex min-h-11 max-w-full items-center gap-1 text-left md:min-h-8 ${textPrimaryOnCanvas}`}
               data-agent-toggle=""
-              onClick={() => setExpanded((open) => !open)}
+              onClick={() => update({ expanded: !expanded })}
               title={label}
               type="button"
             >
@@ -941,7 +991,7 @@ function AgentRow({
             <button
               aria-label={`${label} replied: ${unreadReplies} unread`}
               className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
-              onClick={() => setExpanded(true)}
+              onClick={() => update({ expanded: true })}
               title={`Replies from ${label} you have not read`}
               type="button"
             >
@@ -989,13 +1039,20 @@ function AgentRow({
               Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
             </span>
           </div>
-          <AgentMessageList agent={agent} liveAgents={liveAgents} onReply={setReplyTo} />
+          <AgentMessageList
+            agent={agent}
+            liveAgents={liveAgents}
+            onReply={(reply) => update({ replyTo: reply })}
+          />
           <div data-agent-composer="">
             <AgentMessageComposer
               agent={agent}
-              onCancelReply={() => setReplyTo(null)}
+              memory={kept.memory}
+              onCancelReply={() => update({ replyTo: null })}
               onClose={leaveAgentComposer}
+              onSending={(sending) => update({ sending })}
               replyTo={replyTo}
+              sending={kept.sending}
             />
           </div>
         </div>
@@ -1012,6 +1069,7 @@ const INACTIVE_FOLD = "Inactive";
  * absent when empty, closed on every load, and open only while this page stays mounted. */
 function AgentFold({
   agents,
+  keptRow,
   label,
   liveAgents,
   needsYouBySession,
@@ -1020,6 +1078,7 @@ function AgentFold({
   selected,
 }: {
   agents: readonly Agent[];
+  keptRow: (sessionID: string) => KeptRow;
   label: string;
   liveAgents: readonly Agent[];
   needsYouBySession: NeedsYouBySession;
@@ -1044,6 +1103,7 @@ function AgentFold({
             <AgentRow
               agent={agent}
               key={agent.session_id}
+              kept={keptRow(agent.session_id)}
               liveAgents={liveAgents}
               needsYou={needsYouBySession.get(agent.session_id) ?? 0}
               onPin={() => onPin(agent.session_id)}
@@ -1460,6 +1520,36 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
+  // Every row's kept state (`KeptRow`), by session, for as long as the page is mounted - the same
+  // lifetime as the selection above.
+  const [rowViews, setRowViews] = useState<ReadonlyMap<string, RowView>>(() => new Map());
+  const rowMemories = useRef(new Map<string, RowMemory>());
+  const keptRow = (sessionID: string): KeptRow => {
+    let memory = rowMemories.current.get(sessionID);
+    if (memory === undefined) {
+      memory = { draft: undefined, issueKey: "" };
+      rowMemories.current.set(sessionID, memory);
+    }
+    return {
+      ...(rowViews.get(sessionID) ?? CLOSED_ROW),
+      memory,
+      update: (change) =>
+        setRowViews((current) => {
+          const previous = current.get(sessionID) ?? CLOSED_ROW;
+          const view = { ...previous, ...change };
+          // A send reports its end whether or not anything changed; an unchanged view keeps the
+          // same map, so it re-renders nothing.
+          if (
+            view.expanded === previous.expanded &&
+            view.replyTo === previous.replyTo &&
+            view.sending === previous.sending
+          ) {
+            return current;
+          }
+          return new Map(current).set(sessionID, view);
+        }),
+    };
+  };
   const listRef = useRef<HTMLElement>(null);
   useAgentsKeymap(listRef);
   // A layout effect, so the frame the move paints already has focus where the row went.
@@ -1517,6 +1607,7 @@ export function AgentsPage(): ReactNode {
                 <AgentRow
                   agent={agent}
                   key={agent.session_id}
+                  kept={keptRow(agent.session_id)}
                   liveAgents={agents}
                   needsYou={needsYouBySession.get(agent.session_id) ?? 0}
                   onPin={() => togglePin(agent.session_id)}
@@ -1527,6 +1618,7 @@ export function AgentsPage(): ReactNode {
               ))}
               <AgentFold
                 agents={quiet}
+                keptRow={keptRow}
                 label={QUIET_FOLD}
                 liveAgents={agents}
                 needsYouBySession={needsYouBySession}
@@ -1536,6 +1628,7 @@ export function AgentsPage(): ReactNode {
               />
               <AgentFold
                 agents={inactive}
+                keptRow={keptRow}
                 label={INACTIVE_FOLD}
                 liveAgents={agents}
                 needsYouBySession={needsYouBySession}
