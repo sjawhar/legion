@@ -31,6 +31,8 @@ func TestObserveNamesOnlyAHolderTheLatestReadingsSupport(t *testing.T) {
 		{"an empty reading of another lock replaces at once", []*LockWait{named(97), otherLock}, otherLock},
 		{"an empty reading of another mode on the same table replaces at once", []*LockWait{named(97), otherMode}, otherMode},
 		{"a reading of not waiting ends the run, so the next empty one is held back", []*LockWait{named(97), empty(), nil, empty()}, named(97)},
+		{"a first reading that names nobody is recorded, so the refusal names the lock", []*LockWait{empty()}, empty()},
+		{"a reading of not waiting after a named one keeps it, and the next empty one is held back", []*LockWait{named(97), nil, empty()}, named(97)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var w watch

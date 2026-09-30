@@ -231,8 +231,8 @@ func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
 // observe records one reading of what the migration waits for; wait is nil when it was not
 // waiting at that reading. pg_locks and pg_blocking_pids read the lock table in separate passes, so
 // one reading taken as the cancellation dequeues the migration can list its ungranted lock with no
-// blocker: that reading is held back rather than replacing one of the same lock that named its
-// holders. A second empty reading in a row does replace it, since a holder that has left - or one
+// blocker: an empty reading of the recorded wait's lock is held back rather than replacing it. A
+// second empty reading in a row does replace it, since a holder that has left - or one
 // pg_blocking_pids cannot name, such as a prepared transaction, which it reports as pid 0 - must
 // not stay named.
 func (w *watch) observe(wait *LockWait) {
