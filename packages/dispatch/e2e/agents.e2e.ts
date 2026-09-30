@@ -1,6 +1,13 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { Message } from "../web/src/api/types";
-import { type FakeSession, getSentMessages, setLiveSessions, setSessionLive } from "./agents";
+import {
+  agentRow,
+  type FakeSession,
+  getSentMessages,
+  setLiveSessions,
+  setSessionLive,
+  shownAgentRows,
+} from "./agents";
 import {
   createAgentMessage,
   createAsk,
@@ -90,32 +97,24 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     if (testInfo.project.name === "chromium") {
       await expect(page.getByRole("link", { name: "Agents", exact: true })).toBeVisible();
     }
-    const plannerCard = page
-      .locator("article")
-      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
-    const reviewerCard = page
-      .locator("article")
-      .filter({ has: page.getByRole("heading", { level: 2, name: "Reviewer" }) });
+    // Each card is its row by session, shown or hidden, so every assertion below says which.
+    const plannerCard = agentRow(page, planner.session_id);
+    const reviewerCard = agentRow(page, reviewer.session_id);
     await expect(plannerCard).toBeVisible();
     await expect(reviewerCard).toBeVisible();
 
     // Who needs you comes first, whatever Dispatch heard most recently; a live session Dispatch
     // never heard from and a session unseen for ten minutes each sit under a collapsed fold.
-    const silentCard = page
-      .locator("article")
-      .filter({ has: page.getByRole("heading", { level: 2, name: "Silent" }) });
-    const archivistCard = page
-      .locator("article")
-      .filter({ has: page.getByRole("heading", { level: 2, name: "Archivist" }) });
+    const silentCard = agentRow(page, silent.session_id);
+    const archivistCard = agentRow(page, archivist.session_id);
     const quietToggle = agents.getByRole("button", { name: "No Dispatch activity (1)" });
     const inactiveToggle = agents.getByRole("button", { name: "Inactive (1)" });
     await expect(quietToggle).toHaveAttribute("aria-expanded", "false");
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "false");
-    await expect(silentCard).toHaveCount(0);
-    await expect(archivistCard).toHaveCount(0);
-    // A closed fold's rows stay in the one list, mounted and hidden, so the rows a reader sees are
-    // the ones not hidden.
-    const shownTitles = agents.locator("article:not([hidden]) h2");
+    // A closed fold's rows stay in the one list, mounted and hidden, not gone.
+    await expect(silentCard).toBeHidden();
+    await expect(archivistCard).toBeHidden();
+    const shownTitles = shownAgentRows(page).locator("h2");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer"]);
     // Each collapsed fold owns its own row: the second toggle starts below the first one, even
     // on the phone where the global inline-flex button rule would otherwise line them up.
@@ -136,7 +135,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
       silentCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
     ).toBeVisible();
     await quietToggle.click();
-    await expect(silentCard).toHaveCount(0);
+    await expect(silentCard).toBeHidden();
 
     await inactiveToggle.click();
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "true");
@@ -147,13 +146,16 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await archivistCard.getByRole("button", { exact: true, name: "Archivist" }).click();
     await expect(archivistCard.getByRole("textbox", { name: "Comment" })).toBeVisible();
     await inactiveToggle.click();
-    await expect(archivistCard).toHaveCount(0);
+    await expect(archivistCard).toBeHidden();
     await expect(
       plannerCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
     ).toBeVisible();
 
-    // Collapsed by default: no conversation or composer until a card's title is expanded.
-    await expect(agents.getByRole("textbox", { name: "Comment" })).toHaveCount(0);
+    // Collapsed by default: no conversation or composer until a card's title is expanded - none
+    // at all, hidden or not, since a row mounts them on its first open.
+    await expect(agents.getByRole("textbox", { includeHidden: true, name: "Comment" })).toHaveCount(
+      0
+    );
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`agents-collapsed-${width}.png`),
@@ -163,9 +165,14 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await reviewerToggle.click();
     await expect(reviewerToggle).toHaveAttribute("aria-expanded", "true");
     await expect(reviewerCard.getByRole("form", { name: "Comment composer" })).toBeVisible();
-    await expect(plannerCard.getByRole("textbox", { name: "Comment" })).toHaveCount(0);
+    await expect(
+      plannerCard.getByRole("textbox", { includeHidden: true, name: "Comment" })
+    ).toHaveCount(0);
     await reviewerToggle.click();
-    await expect(reviewerCard.getByRole("textbox", { name: "Comment" })).toHaveCount(0);
+    // A card opened once keeps its composer - and its draft - when it collapses, hidden.
+    await expect(
+      reviewerCard.getByRole("textbox", { includeHidden: true, name: "Comment" })
+    ).toBeHidden();
 
     // The identifiers copy from the collapsed row.
     await plannerCard.getByRole("button", { name: "Copy session ID planner-session" }).click();
@@ -272,9 +279,7 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
     const page = await alice.newPage();
     await page.goto("/agents");
     const width = testInfo.project.name === "iphone" ? "390" : "1280";
-    const plannerCard = page
-      .locator("article")
-      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
+    const plannerCard = agentRow(page, planner.session_id);
     const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
     const expand = async () => {
       await plannerCard.getByRole("button", { exact: true, name: "Planner" }).click();
@@ -374,9 +379,7 @@ test("a session's untargeted reply lands in the open conversation", async ({ bro
   try {
     const page = await alice.newPage();
     await page.goto("/agents");
-    const plannerCard = page
-      .locator("article")
-      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
+    const plannerCard = agentRow(page, planner.session_id);
     await plannerCard.getByRole("button", { exact: true, name: "Planner" }).click();
     const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
     await expect(conversation).toContainText("Can this ship?");
@@ -413,9 +416,7 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
   try {
     const page = await alice.newPage();
     await page.goto("/agents");
-    const plannerCard = page
-      .locator("article")
-      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
+    const plannerCard = agentRow(page, planner.session_id);
     await plannerCard.getByRole("button", { exact: true, name: "Planner" }).click();
     const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
     await expect(conversation).toContainText("Can this ship?");
@@ -486,7 +487,7 @@ test("the header checkbox selects and clears only the rows the filters match, by
       agents.getByRole("button", { name: "No Dispatch activity (4, 1 selected)" })
     ).toBeVisible();
     await agents.getByRole("combobox", { name: "Role" }).selectOption("planner");
-    await expect(row("Reviewer")).toHaveCount(0);
+    await expect(row("Reviewer")).toBeHidden();
     await count("2 matching · 1 selected outside the filter");
     await expect(header).not.toBeChecked();
 
@@ -587,12 +588,12 @@ test("select-all ticks the rows in the order the page shows them, not the order 
     const page = await alice.newPage();
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
-    await expect(agents.locator("article h2")).toHaveText(["Alpha", "Mid", "Zeta"]);
+    await expect(shownAgentRows(page).locator("h2")).toHaveText(["Alpha", "Mid", "Zeta"]);
 
     // A pin is the reader's own, held in the browser, so it reorders the rows and nothing the
     // server sends knows about it: the rendered order and the listed order now differ for sure.
     await agents.getByRole("button", { name: "Pin Zeta" }).click();
-    await expect(agents.locator("article h2")).toHaveText(["Zeta", "Alpha", "Mid"]);
+    await expect(shownAgentRows(page).locator("h2")).toHaveText(["Zeta", "Alpha", "Mid"]);
 
     await agents.getByRole("checkbox", { name: "Select all matching agents" }).check();
     const chips = page
@@ -689,11 +690,11 @@ function wholeAbove(box: { y: number; height: number } | null, composerTop: numb
   return box !== null && box.y >= 0 && box.y + box.height <= composerTop;
 }
 
-/** Whole `article` cards above the composer. */
+/** Whole cards above the composer, of the rows a reader sees. */
 async function wholeCardsAbove(agents: Locator, composer: Locator): Promise<number> {
   const composerTop = (await composer.boundingBox())?.y ?? 0;
   const boxes = await Promise.all(
-    (await agents.locator("article").all()).map((card) => card.boundingBox())
+    (await shownAgentRows(agents.page()).all()).map((card) => card.boundingBox())
   );
   return boxes.filter((box) => wholeAbove(box, composerTop)).length;
 }
@@ -763,7 +764,7 @@ test("on a phone the open composer keeps its height budget at forty recipients, 
     // edge, with the fold expanded and forty selected; the height clause is the discriminating
     // one, the row clauses record intent. A third whole card is bounded by the 166 px card, not
     // by the composer.
-    await expect(agents.locator("article")).toHaveCount(40);
+    await expect(shownAgentRows(page)).toHaveCount(40);
 
     // The defined offset: the first card scrolled to the top of the viewport (scrollY 431),
     // message empty. Two whole cards and the third card's checkbox are above the composer.

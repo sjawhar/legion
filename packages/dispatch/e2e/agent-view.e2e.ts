@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
+import { agentRow, type FakeSession, getSentMessages, setLiveSessions } from "./agents";
 import {
   createAgentMessage,
   createIssue,
@@ -299,9 +299,10 @@ test("the conversation view replays what the session held, streams its next turn
   const page = await context.newPage();
   try {
     await page.goto("/agents");
-    // A session Dispatch has never heard from sits in a collapsed fold.
+    // A session Dispatch has never heard from sits in a collapsed fold, its row mounted and
+    // hidden until the fold opens.
     await page.getByRole("button", { name: /No Dispatch activity/ }).click();
-    await page.getByRole("link", { name: "Open" }).first().click();
+    await agentRow(page, planner.session_id).getByRole("link", { name: "Open" }).click();
     await expect(page).toHaveURL(new RegExp(`/agents/${planner.session_id}/live$`));
 
     // What the session replayed: the human's prompt, the reply, and the tool call with its
@@ -365,7 +366,8 @@ test("a session's replies to a direct message are unread until the live view sho
   const page = await context.newPage();
   try {
     await page.goto("/agents");
-    await expect(page.getByText("New replies 2").first()).toBeVisible();
+    // A shown badge: a folded row's text is in the page too, hidden.
+    await expect(page.getByText("New replies 2").filter({ visible: true }).first()).toBeVisible();
 
     await page.goto(`/agents/${planner.session_id}/live`);
     await expect(page.getByTestId("agent-thread")).toContainText("Where is the dashboard?");
@@ -414,7 +416,7 @@ test("the live view shows an unread reply from outside the fifty most active con
   const page = await context.newPage();
   try {
     await page.goto("/agents");
-    await expect(page.getByText("New replies 51").first()).toBeVisible();
+    await expect(page.getByText("New replies 51").filter({ visible: true }).first()).toBeVisible();
 
     await page.goto(`/agents/${planner.session_id}/live`);
     await expect(page.getByTestId("agent-thread")).toContainText("Did the migration land?");

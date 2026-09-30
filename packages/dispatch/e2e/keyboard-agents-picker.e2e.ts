@@ -1,12 +1,14 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  agentRow,
   holdPosts,
   openAgents,
   plannerSession,
   refusePosts,
   seedAgents,
   setLiveSessions,
+  shownAgentRows,
 } from "./agents";
 import { createMessage, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
@@ -50,7 +52,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
 
@@ -101,7 +103,7 @@ test.describe("agents page", () => {
       try {
         const page = await context.newPage();
         await openAgents(page);
-        const row = page.locator("[data-agent-row]").nth(0);
+        const row = shownAgentRows(page).nth(0);
         const toggle = row.getByRole("button", { name: "Choose issue" });
         const picker = row.getByRole("combobox", { name: "Issue" });
         const field = row.getByRole("textbox", { name: "Comment" });
@@ -141,7 +143,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -173,7 +175,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -206,7 +208,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -261,7 +263,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const cancelReply = row.getByRole("button", { name: "Cancel reply" });
 
@@ -301,7 +303,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const send = await holdPosts(page, "**/api/v1/issues/*/messages");
 
@@ -340,7 +342,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const refuse = await refusePosts(page, "**/api/v1/issues/*/messages");
 
@@ -391,7 +393,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const reply = row.getByRole("button", { name: "Reply" }).first();
       const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
@@ -431,7 +433,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const notice = row.getByText("Couldn't send — the server is down");
       const retry = row.getByRole("button", { name: "Retry" });
@@ -484,7 +486,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       // By id: closing the issue closes the Planner's ask on it, which moves its row below the
       // Reviewer's.
-      const row = page.locator(`[data-agent-row="${plannerSession.session_id}"]`);
+      const row = agentRow(page, plannerSession.session_id);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -537,7 +539,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator(`[data-agent-row="${plannerSession.session_id}"]`);
+      const row = agentRow(page, plannerSession.session_id);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });

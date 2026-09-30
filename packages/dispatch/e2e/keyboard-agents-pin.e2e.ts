@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  agentRow,
   type FakeSession,
   holdPosts,
   openAgents,
@@ -8,6 +9,7 @@ import {
   reviewerSession,
   seedAgents,
   setLiveSessions,
+  shownAgentRows,
 } from "./agents";
 import { createAgentMessage, createMessage, replyToMessageDelivery } from "./api";
 import { resetDatabase } from "./seed";
@@ -40,7 +42,7 @@ async function seedWithFold(): Promise<void> {
 
 /** Opens the fold and roves to its last row, `Silent`, the way a keyboard reader gets there. */
 async function roveToSilent(page: Page): Promise<Locator> {
-  const row = page.locator('[data-agent-row="silent-session"]');
+  const row = agentRow(page, "silent-session");
   await page.getByRole("button", { name: /^No Dispatch activity/ }).click();
   await expect(row).toBeVisible();
   await page.locator("body").focus();
@@ -76,7 +78,7 @@ test.describe("agents page pins", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       const fold = page.getByRole("button", { name: /^No Dispatch activity/ });
       const silentRow = await roveToSilent(page);
 
@@ -124,7 +126,7 @@ test.describe("agents page pins", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       const silentRow = await roveToSilent(page);
       const opener = silentRow.getByRole("button", { exact: true, name: "Silent" });
       const toggle = silentRow.getByRole("button", { name: "Choose issue" });
@@ -178,7 +180,7 @@ test.describe("agents page pins", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       const silentRow = await roveToSilent(page);
       const field = silentRow.getByRole("textbox", { name: "Comment" });
       const cancelReply = silentRow.getByRole("button", { name: "Cancel reply" });
@@ -273,7 +275,7 @@ test.describe("agents page pins", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       const send = await holdPosts(page, "**/api/v1/agents/*/messages");
       const silentRow = await roveToSilent(page);
       const field = silentRow.getByRole("textbox", { name: "Comment" });
@@ -332,10 +334,7 @@ test.describe("agents page pins", () => {
       await expect(uploading).toBeDisabled();
 
       await pinFromRow(silentRow, "box-1 · /srv/silent");
-      await expect(page.locator("[data-agent-row]").nth(0)).toHaveAttribute(
-        "data-agent-row",
-        "silent-session"
-      );
+      await expect(shownAgentRows(page).nth(0)).toHaveAttribute("data-agent-row", "silent-session");
       await expect(uploading).toBeDisabled();
       upload.release();
       await expect(field).toHaveValue(/^@Silent\s+dispatch:\/\/\S*notes/);
@@ -378,7 +377,7 @@ test.describe("agents page pins", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const staleRow = page.locator('[data-agent-row="stale-session"]');
+      const staleRow = agentRow(page, "stale-session");
       const conversation = staleRow.getByRole("list", { name: "Conversation with Stale" });
       const field = staleRow.getByRole("textbox", { name: "Comment" });
 
@@ -400,10 +399,7 @@ test.describe("agents page pins", () => {
       await expect(conversation).toContainText("First answer");
 
       await pinFromRow(staleRow, "box-1 · /srv/stale");
-      await expect(page.locator("[data-agent-row]").nth(0)).toHaveAttribute(
-        "data-agent-row",
-        "stale-session"
-      );
+      await expect(shownAgentRows(page).nth(0)).toHaveAttribute("data-agent-row", "stale-session");
       await expect(conversation).toContainText("Third question");
       await expect(conversation).toContainText("Second answer");
       await expect(conversation).toContainText("First answer");

@@ -188,6 +188,14 @@ function card(region: HTMLElement, name: string): HTMLElement {
   return result;
 }
 
+/** A row in a closed fold is on the page, mounted and hidden (`AgentsPage`'s one keyed list): no
+ *  reader can reach its heading, and the row holding it is hidden. */
+function expectFolded(region: HTMLElement, name: string): void {
+  expect(within(region).queryByRole("heading", { name })).toBeNull();
+  const heading = within(region).getByRole("heading", { hidden: true, name });
+  expect(heading.closest("article")?.hidden).toBe(true);
+}
+
 /** Cards collapse by default; the title button toggles the conversation and composer. */
 function expand(agentCard: HTMLElement, name: string): void {
   fireEvent.click(within(agentCard).getByRole("button", { name }));
@@ -220,7 +228,8 @@ test("Agents collapses every card by default and expands each one independently"
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    expect(within(region).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    // Nothing is mounted before a card's first open, hidden or not.
+    expect(within(region).queryByRole("textbox", { hidden: true, name: "Comment" })).toBeNull();
     expect(page.listAgentMessages).not.toHaveBeenCalled();
     const planner = card(region, "Planner");
     const toggle = within(planner).getByRole("button", { name: "Planner" });
@@ -231,14 +240,17 @@ test("Agents collapses every card by default and expands each one independently"
     expect(within(planner).getByRole("textbox", { name: "Comment" })).toBeTruthy();
     await waitFor(() => expect(page.listAgentMessages).toHaveBeenCalledWith("planner-session"));
     const reviewer = card(region, "Reviewer");
-    expect(within(reviewer).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    expect(within(reviewer).queryByRole("textbox", { hidden: true, name: "Comment" })).toBeNull();
 
     expand(reviewer, "Reviewer");
     expect(within(region).getAllByRole("textbox", { name: "Comment" })).toHaveLength(2);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
 
     expand(planner, "Planner");
+    // A card opened once keeps its composer - and its draft - when it collapses, hidden.
     expect(within(planner).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    const kept = within(planner).getByRole("textbox", { hidden: true, name: "Comment" });
+    expect(kept.closest("[hidden]")).not.toBeNull();
     expect(within(reviewer).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
@@ -451,7 +463,7 @@ test("Agents orders who needs you before Dispatch recency before liveness, folds
     const region = await screen.findByRole("region", { name: "Agents" });
     const titles = () =>
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent);
     await within(region).findByText("Needs you 2", { exact: true });
     expect(titles()).toEqual(["Planner", "Alpha", "Zulu"]);
@@ -460,8 +472,7 @@ test("Agents orders who needs you before Dispatch recency before liveness, folds
 
     const disclosure = within(region).getByRole("button", { name: "No Dispatch activity (1)" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    // The folded row is in the one list, mounted and hidden, so no reader can reach it yet.
-    expect(within(region).queryByRole("heading", { name: "None" })).toBeNull();
+    expectFolded(region, "None");
     fireEvent.click(disclosure);
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
     const noneCard = card(region, "None");
@@ -503,14 +514,14 @@ test("Agents lists a pinned silent session among the active rows, and folds it a
     await screen.findByRole("button", { name: "Unpin Silent" });
     expect(
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent)
     ).toEqual(["Silent", "Planner", "Reviewer"]);
     expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
 
     fireEvent.click(within(region).getByRole("button", { name: "Unpin Silent" }));
     expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
-    expect(within(region).queryByRole("heading", { name: "Silent" })).toBeNull();
+    expectFolded(region, "Silent");
   } finally {
     page.view.unmount();
     page.restore();
@@ -533,13 +544,13 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
     const region = await screen.findByRole("region", { name: "Agents" });
     const titles = () =>
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent);
     // Newest Dispatch activity would put Stale first; the grey-dot rule folds it instead.
     expect(titles()).toEqual(["Planner", "Reviewer"]);
     const disclosure = within(region).getByRole("button", { name: "Inactive (1)" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(within(region).queryByRole("heading", { name: "Stale" })).toBeNull();
+    expectFolded(region, "Stale");
 
     fireEvent.click(disclosure);
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
@@ -580,14 +591,14 @@ test("Agents keeps a pinned session in the active list however long it has been 
     await screen.findByRole("button", { name: "Unpin Stale" });
     expect(
       within(region)
-        .getAllByRole("heading", { level: 2 })
+        .getAllByRole("heading", { hidden: false, level: 2 })
         .map((heading) => heading.textContent)
     ).toEqual(["Stale", "Planner", "Reviewer"]);
     expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
 
     fireEvent.click(within(region).getByRole("button", { name: "Unpin Stale" }));
     expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy();
-    expect(within(region).queryByRole("heading", { name: "Stale" })).toBeNull();
+    expectFolded(region, "Stale");
   } finally {
     page.view.unmount();
     page.restore();

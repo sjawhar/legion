@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { fakeEnvoyPort } from "./harness-ports";
@@ -141,6 +141,19 @@ export async function openAgents(page: Page): Promise<void> {
   await page.goto("/agents");
   await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
   await page.locator("body").focus();
+}
+
+/** The rows a reader sees. A closed fold's rows stay mounted and hidden in the page's one keyed
+ *  list, so a bare `[data-agent-row]` counts them too; counting, indexing or ordering the page's
+ *  rows goes through this. */
+export function shownAgentRows(page: Page): Locator {
+  return page.locator("[data-agent-row]:not([hidden])");
+}
+
+/** One session's row, shown or hidden - a folded row is in the page either way - so a row that
+ *  asserts where the row is says which it expects (`toBeVisible`, `toBeHidden`). */
+export function agentRow(page: Page, sessionID: string): Locator {
+  return page.locator(`[data-agent-row="${sessionID}"]`);
 }
 
 /** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them. */

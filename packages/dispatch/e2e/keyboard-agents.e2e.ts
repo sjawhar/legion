@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { openAgents, plannerSession, seedAgents, setLiveSessions } from "./agents";
+import { openAgents, plannerSession, seedAgents, setLiveSessions, shownAgentRows } from "./agents";
 import { createMessage } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -31,7 +31,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       await expect(rows).toHaveCount(2);
       const planner = rows.nth(0);
       const reviewer = rows.nth(1);
@@ -94,7 +94,7 @@ test.describe("agents page", () => {
       await expect(planner.getByRole("button", { name: "Unpin Planner" })).toBeVisible();
       await page.reload();
       await expect(
-        page.locator("[data-agent-row]").nth(0).getByRole("button", { name: "Unpin Planner" })
+        shownAgentRows(page).nth(0).getByRole("button", { name: "Unpin Planner" })
       ).toBeVisible();
 
       // `?` lists the new scope: a scope missing from `SCOPE_ORDER` is dropped silently.
@@ -128,7 +128,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await page.keyboard.press("i");
       const toggle = row.getByRole("button", { name: "Choose issue" });
@@ -155,7 +155,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await page.keyboard.press("i");
       const toggle = row.getByRole("button", { name: "Choose issue" });
@@ -192,7 +192,7 @@ test.describe("agents page", () => {
         return route.fallback();
       });
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
 
       await page.keyboard.press("j");
       await page.keyboard.press("i");
@@ -223,7 +223,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
 
@@ -272,7 +272,7 @@ test.describe("agents page", () => {
         return route.fallback();
       });
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
 
       await page.keyboard.press("j");
@@ -313,7 +313,7 @@ test.describe("agents page", () => {
         });
       });
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
 
       // While the read is still out: no select, focus on the row, Escape closes what it opened.
@@ -355,7 +355,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -413,7 +413,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -450,7 +450,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -479,7 +479,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -510,7 +510,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -547,7 +547,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const pick = async (value: string) => {
@@ -593,7 +593,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const pick = async (value: string) => {
@@ -641,7 +641,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
 
@@ -671,7 +671,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await expect(row).toBeFocused();
       await page.keyboard.press("Enter");
@@ -699,7 +699,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       const planner = rows.nth(0);
       const reviewer = rows.nth(1);
 
@@ -749,7 +749,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
       await expect(row.getByRole("textbox", { name: "Comment" })).toBeFocused();
