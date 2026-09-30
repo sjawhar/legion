@@ -64,7 +64,9 @@ another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocumen
 document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
 `ParseForWrite` reads back the whole document a spec, an upload or a version writes
 (`400 INVALID_MARKDOWN`). An `insert` takes one of two paths. A fragment of only table rows
-anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:865`), which returns
+anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:876`), which the route
+tries before it reads the fragment as a document of its own, since read that way a line of one or
+two hyphens makes a table of the fragment's first row. It returns
 before any read-back, so a table-row insert is not read back, and it can leave a live document
 its own markdown reads back otherwise: a row inserted under an aligned column is stored without
 alignment and reads back with the column's, and a row whose cells the upload path refuses for
@@ -831,7 +833,8 @@ that fills its table lost the rest of the row's text when it was stored. A row w
 the width are blank loses nothing and is read at the table's width. A bare-row insert
 (`InsertTableRows`) of a fragment whose every line holds a pipe gets an upload's answer for each
 of its lines, because the same parse judges them: `parseTableRows` parses the rows under a header
-it writes and answers `markWideRows`' refusal as `TABLE_WIDTH`. Its fragment loses only its blank
+it writes and answers `markWideRows`' refusal of that table as `TABLE_WIDTH`, while a table nested
+in a block the fragment opens keeps its own refusal. Its fragment loses only its blank
 lines at either end, so a row at its edge is read as on any other line. A line opening a block
 that interrupts a paragraph (`- | a | b |`, `> | a | b |`) is no row, and the edit route inserts
 it as that block. A line `markBlockRows` refuses (indented code, `2. | a | b |`) is refused as an
@@ -839,7 +842,8 @@ upload refuses it, `INVALID_OP` on `markdown`, however many cells it holds, sinc
 reads that before the width. A fragment holding a line with no pipe is no table rows at all, so
 the edit route inserts the whole fragment as blocks after the table, even beside a line too wide
 for it, where an upload of the same lines under the table reads them as rows and refuses the wide
-one.
+one. Nor is a fragment holding a delimiter-shaped line (`| --- | --- |`, three hyphens or more a
+cell), which marks it as a whole table, even where an upload reads that line as a row.
 Goldmark also drops a row's closing `|` whatever stands before it, where that parser reads one
 after an odd run of backslashes as the last cell's text, so that pipe is put back in the cell
 (`keepEscapedClosingPipes`). The renderer writes a cell's pipe `\|` and the header as wide as the

@@ -444,11 +444,13 @@ var wideRowAttr = []byte("pmdoc-wide-row")
 
 // wideRow is the first body row markWideRows found holding text past its table's width: how many
 // cells it holds, the table's width, and the row's opening words, which name it. It is the reason
-// the refusal walk gives (blockRefusal); a bare-row insert answers it as ErrTableWidth instead
-// (parseTableRows).
+// the refusal walk gives (blockRefusal), which also records whether the table is the document's
+// first block; a bare-row insert answers that table's refusal, the rows it parses under a header
+// of its own, as ErrTableWidth instead (parseTableRows).
 type wideRow struct {
 	cells, width int
 	opening      string
+	leading      bool
 }
 
 func (row wideRow) Error() string {

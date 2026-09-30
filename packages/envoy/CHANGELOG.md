@@ -59,12 +59,14 @@
   cells it holds and wherever it stands. A fragment holding a line with no pipe is no table rows,
   so it is inserted as blocks after the table even beside a line too wide for it, where it was
   refused as `TABLE_WIDTH` when the wide line came first; an upload of the same lines under the
-  table reads them as rows and refuses the wide one. Versions written before 2026-09-19 hold rows
-  with text past their table's width, since the renderer then wrote a code span's pipe unescaped;
-  re-uploading one is refused rather than stored short. A row's closing `|` after an odd run of
-  backslashes (`| x | y \|`) is now kept as the last cell's text, as the browser editor reads it,
-  where it was dropped (`y \`). An image's alt holding a backslash before a pipe in a table cell is
-  written so that the browser editor reads it as one cell too.
+  table reads them as rows and refuses the wide one. The edit route now tries a fragment as rows
+  before it reads it as a document of its own, so rows that reading refused, such as `[x]: |`, a
+  link reference definition to it, are inserted as the rows an upload reads. Versions written
+  before 2026-09-19 hold rows with text past their table's width, since the renderer then wrote a
+  code span's pipe unescaped; re-uploading one is refused rather than stored short. A row's closing
+  `|` after an odd run of backslashes (`| x | y \|`) is now kept as the last cell's text, as the
+  browser editor reads it, where it was dropped (`y \`). An image's alt holding a backslash before a
+  pipe in a table cell is written so that the browser editor reads it as one cell too.
 
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before

@@ -96,7 +96,9 @@ func blockRefusal(node ast.Node, source []byte) error {
 			return refuse("a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, or indented code - which the browser editor's parser reads as that block after the table")
 		}
 		if value, wide := current.Attribute(wideRowAttr); wide {
-			return fmt.Errorf("%w: %w", ErrSchema, value.(wideRow))
+			row := value.(wideRow)
+			row.leading = current.PreviousSibling() == nil && current.Parent().Kind() == ast.KindDocument
+			return fmt.Errorf("%w: %w", ErrSchema, row)
 		}
 	default:
 		if node.Type() == ast.TypeBlock && !convertedBlocks[node.Kind()] {

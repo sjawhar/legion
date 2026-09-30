@@ -870,13 +870,16 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 		if pmdoc.EmptyDocument(tree) {
 			at = pmdoc.Range{From: 0, To: pmdoc.Size(tree)}
 		}
+		// Rows are tried first, judged by their own parse under the target table's width. Read as a
+		// document of its own, a fragment holding a line of one or two hyphens is a table of its own
+		// first row, which would judge the rest against that row's width instead.
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
+			return out, invalidSchemaOp("markdown", err)
+		}
 		// Front matter opens only the document's start, so only there does the insert read it.
 		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, at.From), budget)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
-		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
-			return out, invalidSchemaOp("markdown", err)
 		}
 		out, err := pmdoc.Splice(tree, at, with)
 		if err != nil {

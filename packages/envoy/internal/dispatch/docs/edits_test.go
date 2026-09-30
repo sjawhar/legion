@@ -2178,6 +2178,66 @@ func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
 	}
 }
 
+// A table-row insert is judged against the table it lands in, as a whole-document write of the same
+// rows is. Read as a document of its own, a fragment holding a line of one or two hyphens is a table
+// of its own first row, so the edit route tries the rows before it reads the fragment that way; a
+// table nested in a block the fragment opens keeps its own refusal.
+func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
+	const three = "| K | V | W |\n| --- | --- | --- |\n| a | b | c |\n"
+	const two = "| K | V |\n| --- | --- |\n| a | c |\n"
+	for _, test := range []struct {
+		name, table, markdown string
+		// want is the refusal the insert answers, or nil where it stores the rows as the whole-document
+		// write of the table and the markdown does.
+		want error
+	}{
+		{"dash row under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |", nil},
+		{"dash row of one cell under three columns", three, "| A11 |\n| - |\n| A12 | y |", nil},
+		{"dash row above a wide row", two, "| A11 | x |\n| - | - |\n| A12 | y | z |", pmdoc.ErrTableWidth},
+		{"wide row", two, "| A11 | x |\n| A12 | y | z |", pmdoc.ErrTableWidth},
+		{"wide row in a list's own table", two, "- | h |\n  | - |\n  | a | b |", pmdoc.ErrSchema},
+		{"wide row in a table after a heading", two, "# h | x\n| a |\n| - |\n| b | c |", pmdoc.ErrSchema},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.table)
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch, err := applyOperations(tree, []model.EditOp{{Op: "insert", Markdown: test.markdown, After: "c"}})
+			switch {
+			case test.want == pmdoc.ErrSchema:
+				var invalid *ErrInvalidOp
+				if !errors.As(err, &invalid) || errors.Is(err, pmdoc.ErrTableWidth) {
+					t.Fatalf("insert = %v, want INVALID_OP and not TABLE_WIDTH", err)
+				}
+			case test.want != nil:
+				if !errors.Is(err, test.want) {
+					t.Fatalf("insert = %v, want %v", err, test.want)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("insert = %v, want the rows stored", err)
+				}
+				written, err := pmdoc.ParseForWrite(test.table+test.markdown+"\n", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := pmdoc.Render(batch.tree)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := pmdoc.Render(written)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Fatalf("insert stored %q, the document write %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // blockAskHarness seeds a document with the ask fixture, settles it, and returns the ask's
 // id plus helpers that settle the room and count the events on that ask.
 func blockAskHarness(t *testing.T) (*Service, string, string, func(), func() int) {

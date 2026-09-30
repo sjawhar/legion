@@ -442,7 +442,9 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 	}
 
 	parsed, err := parseStamped(syntheticTableHeader(width)+strings.Join(lines, "\n")+"\n", budget)
-	if wide := (wideRow{}); errors.As(err, &wide) {
+	// Only the table this parse leads with holds the rows; a table nested in a block the fragment
+	// opens keeps its own refusal.
+	if wide := (wideRow{}); errors.As(err, &wide) && wide.leading {
 		return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, wide.cells, wide.width)
 	}
 	if err != nil {
