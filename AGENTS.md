@@ -150,8 +150,8 @@ agents; a dedicated project hands its issues over the same way. A human sets the
 issue header in the Dispatch dashboard, an agent with `dispatch_issue` or `dispatch_issue_update`.
 The controller hands over work itself: at its start, and whenever the daemon wakes it with
 `slot-free` because a released admission slot stayed empty, it labels and admits the
-highest-priority open root nobody else is working (`skills/legion-controller/SKILL.md`, "Keeping
-the slots full").
+highest-priority open leaf issue (one with no open children) nobody else is working
+(`skills/legion-controller/SKILL.md`, "Keeping the slots full").
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
 the controller. A child needs none: it runs under its tree's architect once its root is admitted. A
 child whose tree is not live is an orphan, admitted as a root of its own, so it needs the label as
