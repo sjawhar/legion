@@ -6,7 +6,8 @@ name: Security
 # scanner job ends in one Gate step, the only step that can fail on findings or tool errors, and
 # while .github/security-window.json keeps that check report-only (report_only.zizmor for the
 # workflows job, report_only.dependencies for the dependencies job) the step runs under
-# continue-on-error, so the job concludes success and blocks no merge. Installs and tool runs
+# continue-on-error, so the job concludes success and blocks no merge. Once a check's flag is false
+# its job fails on a finding, and the security job's last step fails with it. Installs and tool runs
 # record a tool error instead of failing. The daily scheduled run also runs
 # scripts/security-report.sh, whose exit is that run's conclusion: it fails once the report-only
 # window has closed while a check is still report-only, and the window watcher reads that off this
@@ -398,3 +399,11 @@ jobs:
         run: |
           scripts/security-report.sh --repo "$GITHUB_REPOSITORY" --decision "$DECISION" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
+
+      # The step that fails this job on a promoted check's finding: a check whose flag is false is
+      # blocking, and its job's failure fails this job too, so a ruleset that requires `security`
+      # refuses what a promoted check found. While a check is report-only its job concludes
+      # success and this step passes it by (.github/scripts/deps-summary.sh enforce).
+      - name: Enforce the promoted checks
+        if: always() && steps.report.outcome == 'success'
+        run: .github/scripts/deps-summary.sh enforce security-report.json

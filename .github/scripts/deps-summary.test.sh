@@ -201,4 +201,45 @@ check "a run id that is not a number exits 2" "$(is "$rc" 2)"
 report bad-flag "$work/zizmor-findings.json" "$work/deps.json" --report-only-dependencies maybe
 check "a flag other than true, false or empty exits 2" "$(is "$rc" 2)"
 
+# --- enforce -----------------------------------------------------------------------------------
+# enforce NAME: runs `deps-summary.sh enforce` on $work/NAME.json (a report written above); output
+# in $work/NAME.enforce, exit code in $rc.
+enforce() {
+  rc=0
+  "$summary_script" enforce "$work/$1.json" > "$work/$1.enforce" 2>&1 || rc=$?
+}
+
+echo "=== 10. enforce: the security job fails only for a promoted check whose gate failed ==="
+report open-failed "$work/zizmor-findings.json" "$work/deps.json" --workflows failure --dependencies failure
+enforce open-failed
+check "both checks report-only, both gates failed: exits 0" "$(is "$rc" 0)"
+check "and says neither is enforced" \
+  "$(contains "$(cat "$work/open-failed.enforce")" "^zizmor: report-only (report_only.zizmor is true); not enforced$")"
+report zizmor-failed "$work/zizmor-findings.json" "$work/deps.json" --report-only-zizmor false \
+  --workflows failure --dependencies failure
+enforce zizmor-failed
+check "zizmor promoted and its workflows job failed: exits 1" "$(is "$rc" 1)"
+check "naming the check and the job" \
+  "$(contains "$(cat "$work/zizmor-failed.enforce")" "zizmor is blocking (report_only.zizmor is false) and its workflows job concluded failure")"
+check "the report-only dependency gate's failure is not enforced" \
+  "$(contains "$(cat "$work/zizmor-failed.enforce")" "^dependencies: report-only")"
+report zizmor-passed "$work/zizmor-findings.json" "$work/deps.json" --report-only-zizmor false \
+  --workflows success --dependencies failure
+enforce zizmor-passed
+check "zizmor promoted and its job succeeded, dependencies report-only and failed: exits 0" "$(is "$rc" 0)"
+report dependencies-skipped "$work/zizmor-findings.json" "$work/deps.json" --report-only-dependencies false \
+  --dependencies skipped
+enforce dependencies-skipped
+check "a promoted check whose job did not run is not a pass: exits 1" "$(is "$rc" 1)"
+report flags-unknown "$work/zizmor-findings.json" "$work/deps.json" --report-only-zizmor "" \
+  --report-only-dependencies "" --workflows failure --dependencies failure
+enforce flags-unknown
+check "flags unknown (the window job did not run): report-only, exits 0" "$(is "$rc" 0)"
+rc=0
+"$summary_script" enforce "$work/nowhere.json" > /dev/null 2>&1 || rc=$?
+check "a missing report exits 2" "$(is "$rc" 2)"
+jq 'del(.gate)' "$work/zizmor-failed.json" > "$work/no-gate.json"
+enforce no-gate
+check "a report without its gate results exits 2" "$(is "$rc" 2)"
+
 summary "deps-summary.sh summarizes the dependency scanners and assembles the security report"

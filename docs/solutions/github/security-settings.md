@@ -74,6 +74,9 @@ the file sets its flag to `false`. A missing file, a document that is not an obj
 report-only, and the `window` job's step summary and an annotation name the problem. A bare
 boolean (`{"report_only": true}`, the file's first form) applies to both checks. The `security` job
 gathers each run's counts and both flags into the `security-report` artifact and the step summary.
+Its last step enforces: once a check's flag is `false`, `security` fails whenever that check's job
+did not succeed, so a ruleset that requires the `security` check refuses what a promoted check
+found; while the flag is `true`, `security` stays `success` whatever the check found.
 
 A pull request or merge group reads the flags from its base's copy of the file, not its own; a
 push to `main` and the daily run read `main`'s. So a promotion takes effect on `main` from its

@@ -7,6 +7,7 @@
 #       --event EVENT --head SHA --base SHA --report-only-zizmor true|false
 #       --report-only-dependencies true|false --workflows RESULT --dependencies RESULT
 #       --out security-report.json
+#   deps-summary.sh enforce security-report.json
 #
 # summarize — the dependencies job's numbers. --osv is osv-scanner's `--format json` output, given
 # only when osv-scanner ran to completion; each --govulncheck is one module's `govulncheck -format
@@ -34,7 +35,15 @@
 # workflow's {"tool_error": true} form; deps-summary.json is summarize's output. The step summary's
 # markdown table goes to stdout.
 #
-# Exit codes: 0 written; 2 a usage error.
+# enforce — the security job's last step. A check whose flag in security-report.json is false is
+# blocking, and enforce exits 1 when that check's job (workflows for zizmor, dependencies for the
+# dependency scanners) concluded anything but success: that job's Gate no longer runs under
+# continue-on-error, so its failure is the finding. A check whose flag is true or unknown (the
+# window job did not run) is report-only and never fails here, so requiring the security check
+# refuses nothing a report-only check found.
+#
+# Exit codes: 0 written or nothing to enforce; 1 a blocking check's job did not succeed; 2 a usage
+# error, or a report enforce cannot read.
 # CI runs its tests (deps-summary.test.sh) in the test job of pr-and-main.yaml.
 set -euo pipefail
 
@@ -47,7 +56,9 @@ USAGE = """usage: deps-summary.sh summarize [--osv osv.json] [--govulncheck govu
        deps-summary.sh report --zizmor zizmor-findings.json --deps deps-summary.json --run-id ID --event EVENT
                               --head SHA --base SHA --report-only-zizmor true|false
                               --report-only-dependencies true|false --workflows RESULT
-                              --dependencies RESULT --out security-report.json"""
+                              --dependencies RESULT --out security-report.json
+       deps-summary.sh enforce security-report.json"""
+GATE_JOBS = {"zizmor": "workflows", "dependencies": "dependencies"}
 CHECKS = ("zizmor", "dependencies")
 FLAG_TEXT = {True: "true", False: "false", None: "unknown"}
 TOOL_ERROR = {
@@ -309,12 +320,40 @@ def write(path, document):
         handle.write("\n")
 
 
+def enforce(args):
+    if len(args) != 1:
+        usage("enforce takes one security-report.json")
+    try:
+        document = read_json(args[0])
+        need(isinstance(document, dict) and isinstance(document.get("report_only"), dict)
+             and isinstance(document.get("gate"), dict), "has no report_only and gate objects")
+        for check, job in GATE_JOBS.items():
+            flag = document["report_only"].get(check, "missing")
+            need(flag is None or isinstance(flag, bool), f"has no report_only.{check} of true, false or null")
+            need(isinstance(document["gate"].get(job), str), f"has no gate.{job}")
+    except Malformed as error:
+        usage(f"enforce: {args[0]} {error}")
+    failed = False
+    for check, job in GATE_JOBS.items():
+        flag, result = document["report_only"][check], document["gate"][job]
+        if flag is not False:
+            print(f"{check}: report-only (report_only.{check} is {FLAG_TEXT[flag]}); not enforced")
+        elif result == "success":
+            print(f"{check}: blocking, and its {job} job succeeded")
+        else:
+            print(f"::error::{check} is blocking (report_only.{check} is false) and its {job} job concluded {result}")
+            failed = True
+    sys.exit(1 if failed else 0)
+
+
 args = sys.argv[1:]
 command = args.pop(0) if args else None
 if command == "summarize":
     summarize(args)
 elif command == "report":
     report(args)
+elif command == "enforce":
+    enforce(args)
 else:
-    usage("the first argument is summarize or report")
+    usage("the first argument is summarize, report or enforce")
 PY
