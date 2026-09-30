@@ -1401,9 +1401,11 @@ cat >"$work/instructions.md" <<'EOF'
 This is a throwaway workflow proof on the disposable LEGSMOKE project. A tree's root architect
 starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
 issue's own primary document and registers the gate, then waits. Apart from that, do not act until
-a targeted human Dispatch message gives the next exact proof operation. Follow that instruction
-precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
-smoke branch.
+a targeted human Dispatch message gives the next exact proof operation. A phase worker's first
+message is the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`): it names your
+phase and is not that message. Read what your role says to read, then reply WAITING and wait for
+the targeted message. Follow that instruction precisely, use the Go-daemon Legion tools and
+handoffs, and do not create work outside the issue's smoke branch.
 
 ## Scope of this proof
 
