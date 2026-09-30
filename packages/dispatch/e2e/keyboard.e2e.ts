@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { setLiveSessions } from "./agents";
+import { openAgents, setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, getIssue, patchIssue } from "./api";
 import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
@@ -26,14 +26,6 @@ async function openInbox(page: Page): Promise<void> {
   await page.locator("body").focus();
 }
 
-// The keymap is bound only once sign-in resolves (`AuthGate` renders a skeleton until
-// `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
-async function openAgents(page: Page): Promise<void> {
-  await page.goto("/agents");
-  await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
-  await page.locator("body").focus();
-}
-
 test.beforeEach(async () => {
   await resetDatabase();
   if (!process.env.PLAYWRIGHT_BASE_URL) {
@@ -49,16 +41,18 @@ test("g then i goes to the Inbox, showing the pending chord until it completes",
     const page = await context.newPage();
     await openAgents(page);
 
+    // The chord's second key must follow within the keymap's 1000 ms window, so nothing slow sits
+    // between the two keys: the screenshot is taken once the Inbox is reached.
     const indicator = page.getByTestId("chord-indicator");
     await page.keyboard.press("g");
     await expect(indicator).toBeVisible();
     await expect(indicator).toHaveText(/g/);
-    await page.screenshot({
-      path: testInfo.outputPath(`chord-indicator-${testInfo.project.name}.png`),
-    });
     await page.keyboard.press("i");
     await expect(page).toHaveURL(/\/$/);
     await expect(indicator).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath(`chord-g-i-${testInfo.project.name}.png`),
+    });
   } finally {
     await context.close();
   }

@@ -377,6 +377,10 @@ export function AskCard({
           ? "relative mt-3"
           : `relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`
       }
+      // The one handle on a card as a whole: a page-level key that must not fire while the reader
+      // is answering an ask (the issue page's priority digits, beside this card's own options)
+      // asks for it by name rather than matching a test id.
+      data-ask-card=""
       data-testid={`ask-${displayedAsk.id}`}
     >
       {hasUrgencyNotch ? (
