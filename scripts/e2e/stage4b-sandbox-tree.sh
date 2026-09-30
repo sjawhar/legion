@@ -1532,7 +1532,9 @@ set_status "$tree2" backlog
 until_true 300 "the daemon to set $tree2 back from backlog" status_set_back "$tree2" backlog
 needle=$(notice_needle status-reasserted "$tree2")
 until_true 300 "tree 2's architect to be told of the proof human's backlog" notice_delivered "$tree2" architect "$needle"
-told=$(claim_session_text "$tree2" architect | grep -F '"customType":"envoy-message"' | grep -F -- "$needle" | head -1)
+# head ends the pipeline early, which pipefail would report as a failure, hence `|| true`: an empty
+# line fails the check below, naming it.
+told=$(claim_session_text "$tree2" architect | grep -F '"customType":"envoy-message"' | grep -F -- "$needle" | head -1 || true)
 printf '%s\n' "$told" >"$evidence/notice-status-reasserted.jsonl"
 grep -qF -- "$dispatch_actor" <<<"$told" || fail "tree 2's status-reasserted notice does not name the proof human $dispatch_actor: $told"
 dispatch_events "$tree2" >"$evidence/tree2-events-set-back.json" || fail "tree 2's events could not be read"
