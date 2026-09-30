@@ -168,7 +168,8 @@ function errorResponse(status: number, code: string, error: string): Response {
   return Response.json({ code, error }, { status });
 }
 
-const notFound = () => errorResponse(404, "NOT_FOUND", "not found");
+const notFoundBody = { code: "NOT_FOUND", error: "not found" };
+const notFound = () => Response.json(notFoundBody, { status: 404 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -291,6 +292,30 @@ function version(number: number, author: Actor, summary: string | null): Version
   return { number, named: false, summary, authors: [author], created_at: now() };
 }
 
+/** The fields an issue read adds to the issue; a create, update or claim answers without them. */
+type IssueReadOnlyField =
+  | "artifacts"
+  | "open_asks"
+  | "children"
+  | "referenced_by_count"
+  | "route_status"
+  | "route_holder";
+
+function issueOf<T extends Partial<Record<IssueReadOnlyField, unknown>>>(
+  details: T
+): Omit<T, IssueReadOnlyField> {
+  const {
+    artifacts: _a,
+    open_asks: _o,
+    children: _c,
+    referenced_by_count: _r,
+    route_status: _s,
+    route_holder: _h,
+    ...issue
+  } = details;
+  return issue;
+}
+
 async function readBody(request: Request): Promise<unknown> {
   const type = request.headers.get("content-type") ?? "";
   if (type.includes("multipart/form-data")) {
@@ -332,6 +357,11 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
   const record = async (line: Record<string, unknown>) => {
     seq += 1;
     await appendFile(options.writesFile, `${JSON.stringify({ seq, at: now(), ...line })}\n`);
+  };
+
+  const refuse = async (method: string, url: URL, error: string): Promise<Response> => {
+    await record({ kind: "refused", method, path: url.pathname, query: url.search, status: 403 });
+    return errorResponse(403, "EVAL_PROXY_REFUSED", error);
   };
 
   const upstreamGet = async (path: string, query = ""): Promise<Response> =>
@@ -536,16 +566,9 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
       (candidate) => candidate.params !== undefined
     );
     if (!found?.params) {
-      await record({
-        kind: "refused",
-        method: "GET",
-        path: url.pathname,
-        query: url.search,
-        status: 403,
-      });
-      return errorResponse(
-        403,
-        "EVAL_PROXY_REFUSED",
+      return refuse(
+        "GET",
+        url,
         `the evaluation proxy forwards only its GET allow-list; GET ${url.pathname} is not on it`
       );
     }
@@ -606,7 +629,7 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
       };
     } else if (await addressesExcluded(found.params, url)) {
       status = 404;
-      response = { code: "NOT_FOUND", error: "not found" };
+      response = notFoundBody;
     } else {
       [status, response] = await fake(found.name, found.params, body, url);
     }
@@ -677,16 +700,10 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
         overlay.issues.set(issueKey, issue);
         overlay.baseSeq.set(issueKey, 0);
         appendEvent(issueKey, "issue.created", actor, issue);
-        const {
-          artifacts: _a,
-          open_asks: _o,
-          children: _c,
-          referenced_by_count: _r,
-          route_status: _s,
-          route_holder: _h,
-          ...created
-        } = issue;
-        return [201, { ...created, last_seq: overlay.lastSeq(issueKey) } satisfies Advised<Issue>];
+        return [
+          201,
+          { ...issueOf(issue), last_seq: overlay.lastSeq(issueKey) } satisfies Advised<Issue>,
+        ];
       }
       case "update-issue": {
         await noteIssue(key);
@@ -851,7 +868,7 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
           ? undefined
           : await upstreamJson(`/api/v1/asks/${encodeURIComponent(id)}`);
         const ask = stored ?? (isRecord(upstreamAsk) ? (upstreamAsk.ask as Ask) : undefined);
-        if (!ask) return [404, { code: "NOT_FOUND", error: "not found" }];
+        if (!ask) return [404, notFoundBody];
         const { actor: _actor, ...fields } = input;
         const updated: Ask =
           name === "resolve-ask"
@@ -880,7 +897,7 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
           : await upstreamJson(`/api/v1/comments/${encodeURIComponent(id)}`);
         const comment =
           stored ?? (isRecord(upstreamComment) ? (upstreamComment.comment as Comment) : undefined);
-        if (!comment) return [404, { code: "NOT_FOUND", error: "not found" }];
+        if (!comment) return [404, notFoundBody];
         const resolved: Comment = {
           ...comment,
           resolved: true,
@@ -923,31 +940,11 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
 
   const currentIssue = async (key: string): Promise<Issue> => {
     const created = overlay.issues.get(key);
-    if (created) {
-      const {
-        artifacts: _a,
-        open_asks: _o,
-        children: _c,
-        referenced_by_count: _r,
-        route_status: _s,
-        route_holder: _h,
-        ...issue
-      } = created;
-      return { ...issue, last_seq: overlay.lastSeq(key) };
-    }
+    if (created) return { ...issueOf(created), last_seq: overlay.lastSeq(key) };
     const upstreamIssue = await upstreamJson(`/api/v1/issues/${encodeURIComponent(key)}`);
     const base = isRecord(upstreamIssue) ? upstreamIssue : { key };
-    const {
-      artifacts: _a,
-      open_asks: _o,
-      children: _c,
-      referenced_by_count: _r,
-      route_status: _s,
-      route_holder: _h,
-      ...issue
-    } = base;
     return {
-      ...issue,
+      ...issueOf(base),
       ...overlay.patches.get(key),
       last_seq: overlay.lastSeq(key),
     } as unknown as Issue;
@@ -959,18 +956,7 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
     async fetch(request) {
       const url = new URL(request.url);
       if (!url.pathname.startsWith("/api/v1/")) {
-        await record({
-          kind: "refused",
-          method: request.method,
-          path: url.pathname,
-          query: url.search,
-          status: 403,
-        });
-        return errorResponse(
-          403,
-          "EVAL_PROXY_REFUSED",
-          `${url.pathname} is not a Dispatch API route`
-        );
+        return refuse(request.method, url, `${url.pathname} is not a Dispatch API route`);
       }
       const segments = url.pathname
         .slice("/api/v1/".length)
@@ -979,18 +965,7 @@ export async function startEvalProxy(options: EvalProxyOptions): Promise<EvalPro
         .map((segment) => decodeURIComponent(segment));
       if (request.method === "GET") return read(url, segments);
       if (Object.hasOwn(WRITE_METHODS, request.method)) return write(request, url, segments);
-      await record({
-        kind: "refused",
-        method: request.method,
-        path: url.pathname,
-        query: url.search,
-        status: 403,
-      });
-      return errorResponse(
-        403,
-        "EVAL_PROXY_REFUSED",
-        `the evaluation proxy refuses ${request.method}`
-      );
+      return refuse(request.method, url, `the evaluation proxy refuses ${request.method}`);
     },
   });
   const port = server.port ?? 0;

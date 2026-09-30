@@ -31,9 +31,14 @@ test("every skill file is under Oh My Pi's spill threshold, so a skill:// read a
   expect(oversized).toEqual([]);
 });
 
-test("the dispatch skill's body stays under 500 lines, its detail in references", () => {
-  const body = readFileSync(path.join(skillsRoot, "dispatch/SKILL.md"), "utf8");
-  expect(body.split("\n").length).toBeLessThan(500);
+test("the dispatch and legion-worker bodies stay under 500 lines, their detail in references", () => {
+  const long = ["dispatch", "legion-worker"]
+    .map((skill) => ({
+      skill,
+      lines: readFileSync(path.join(skillsRoot, skill, "SKILL.md"), "utf8").split("\n").length,
+    }))
+    .filter(({ lines }) => lines >= 500);
+  expect(long).toEqual([]);
 });
 
 test("the injected dispatch-first skill fits its budget on every host", () => {
