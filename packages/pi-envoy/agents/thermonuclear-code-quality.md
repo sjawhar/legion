@@ -13,7 +13,7 @@ Review only the supplied diff and changed-file context. Return findings with fil
 
 ## Process
 
-1. Apply the complete rubric of `skill://thermonuclear-code-quality`, loaded above by `autoloadSkills`; do not read it again.
+1. Apply the complete rubric of `skill://thermonuclear-code-quality`, already in your context; do not read it again.
 2. Look first for structural simplification and deletion of accidental complexity.
 3. Trace module boundaries, call sites, and type contracts before claiming a problem.
 4. Prioritize structural issues over cosmetic nits.
