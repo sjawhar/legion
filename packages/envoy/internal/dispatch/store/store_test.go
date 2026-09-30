@@ -795,6 +795,12 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// lowercase text Postgres writes, so a new version would never retract the ask.
 		{"an approval ask whose document id is empty at a real version", "approval", new(`{"artifact_id":"","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id is in capitals", "approval", new(`{"artifact_id":"7C1E8A52-3F4B-4D6E-9A0B-1C2D3E4F5A6B","name":"spec.md","version":1}`), true},
+		// A character before or after the uuid, or a letter past f in it, also fails that cast, and
+		// docs.ApprovalAskAt never finds the ask. Each row is refused only while its anchor, or the
+		// pattern's hex class, is as written.
+		{"an approval ask whose document id has a digit after the uuid", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b0","name":"spec.md","version":1}`), true},
+		{"an approval ask whose document id has a digit before the uuid", "approval", new(`{"artifact_id":"07c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`), true},
+		{"an approval ask whose document id has a letter that is not hex", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6g","name":"spec.md","version":1}`), true},
 		// A missing key reads as its zero value, which no writer writes. These are the rows a check
 		// with its coalesce around one conjunct alone would store, since a CHECK that evaluates to
 		// null passes.
@@ -810,6 +816,9 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		{"an approval ask whose name is not a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":5,"version":1}`), true},
 		// jsonb stores 1e30 as a 31-digit integer, which a check on the digits alone has to bound.
 		{"an approval ask whose version is 1e30", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1e30}`), true},
+		// The first version past ten digits, which no integer version reaches; it is refused only
+		// while the digit pattern's bound is ten.
+		{"an approval ask whose version has eleven digits", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10000000000}`), true},
 		// The digit pattern matches the text of the string "1" too; only the number test refuses it,
 		// and a string does not decode into the int.
 		{"an approval ask whose version is a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":"1"}`), true},
