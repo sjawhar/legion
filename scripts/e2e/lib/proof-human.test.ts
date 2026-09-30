@@ -111,6 +111,25 @@ describe("require_proof_human", () => {
     expect(r.stderr.trimEnd().split("\n")).toHaveLength(1);
     expect(r.stderr).toContain(reason);
   });
+
+  // Three ways reach a wrong account, and gh can fail outright: a plain shell (the user's login),
+  // a Legion pane (its own App), an agent session with a personal GH_TOKEN (the token's owner). The
+  // gh-failure reason is one no requirement word appears in, so the words below are the refusal's.
+  test("every refusal states the one requirement, whatever reached the wrong account", () => {
+    const causes = [
+      { login: "sjawhar" },
+      { login: "legion-implementer[bot]" },
+      { login: "sjawhar", stderr: "gh shim: inherited from the environment (a PERSONAL token)" },
+      { stderr: "gh: Bad credentials (HTTP 401)", exit: 4 },
+    ];
+    for (const fake of causes) {
+      const r = run("require_proof_human", fake);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/own Oh My Pi session/);
+      expect(r.stderr).toMatch(/not a Legion pane/);
+      expect(r.stderr).toMatch(/no personal GH_TOKEN/);
+    }
+  });
 });
 
 describe("close_unpassed_run_pull_requests", () => {

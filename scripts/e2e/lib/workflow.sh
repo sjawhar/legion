@@ -191,29 +191,28 @@ drive_gate() {
 
 # ---- the proof human on the smoke repository ------------------------------------------------------
 
-# The proof human is the devbox's ordinary gh acting as the sjawhar-agent App. The dotfiles gh shim
-# routes a call to the repository owner's App only in an agent session (an Oh My Pi session's bash
-# tool, which carries OMP_SESSION_ID); from any other shell, a plain tmux window included, gh acts as
-# the user's own login, and a run started there reviews, comments and merges as that person.
-# require_proof_human asks gh which account it acts as for the smoke repository and fails the check,
-# naming that account, unless it is the App's bot; every stage proof that writes to GitHub as the
-# proof human calls it before its first gh call, and the EXIT trap's GitHub teardown runs only once
-# it has passed. The probe is GraphQL's viewer, which answers an App installation token with the
-# App's bot login, where REST's GET /user refuses one (403, "Resource not accessible by
-# integration"). GH_REPO names the owner the shim routes by, as each write's own repository does.
-# A refusal carries what gh wrote to stderr, joined into its one line: an agent session that
-# inherited a personal GH_TOKEN still reaches the user's account, and the shim says so there.
+# The proof human is the devbox's ordinary gh acting as the sjawhar-agent App, which the dotfiles gh
+# shim routes to only from the operator's own Oh My Pi session. A plain shell's gh is the user's own
+# login, a Legion pane's is one of Legion's Apps, and a personal GH_TOKEN in the environment makes
+# any session's gh that token's owner. require_proof_human asks gh which account it acts as for the
+# smoke repository and fails the check unless it is the App's bot, in one line naming the account,
+# that one requirement, and whatever gh wrote to stderr (the shim names an inherited GH_TOKEN there).
+# The probe is GraphQL's viewer, which answers an App installation token with the App's bot login,
+# where REST's GET /user refuses one (403, "Resource not accessible by integration"); GH_REPO names
+# the owner the shim routes by, as each write's own repository does. Every stage proof that writes
+# to GitHub as the proof human calls it before its first gh call. Of their teardowns, Stage 3's
+# close_unpassed_run_pull_requests reads the account it recorded; 4b.13b's github_cleanup waits for
+# main_sha and Stage 4b's remove_run_branches for locked, each set after the check.
 proof_human_login='sjawhar-agent[bot]'
 proof_human=
 require_proof_human() {
-  local login status=0 said
+  local login said
   login=$(GH_REPO="$repo" gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>"$work/proof-human.err") ||
-    status=$?
+    login=
   said=$(<"$work/proof-human.err")
   said=${said//$'\n'/ }
-  [ "$status" = 0 ] || fail "the devbox gh could not say which account it acts as for $repo: $said"
   [ "$login" = "$proof_human_login" ] ||
-    fail "the devbox gh acts as ${login:-no account} for $repo, not the proof human $proof_human_login: start the run from an agent session (an Oh My Pi session's bash tool, whose OMP_SESSION_ID the dotfiles gh shim routes to the App), never a plain shell${said:+; gh said on stderr: $said}"
+    fail "the devbox gh acts as ${login:-no account} for $repo, not the proof human $proof_human_login: run the script from the operator's own Oh My Pi session, not a Legion pane, with no personal GH_TOKEN in its environment${said:+; gh said: $said}"
   proof_human=$login
   note "the proof human: the devbox gh acts as $login for $repo"
 }
