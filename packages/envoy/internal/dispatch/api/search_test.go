@@ -535,6 +535,37 @@ func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
 	}
 }
 
+// A project is a key or nothing. A value no project can have, a lowercased key among them, is
+// refused by name instead of answering an empty result; an empty project still searches every
+// project, and a key is read after trimming, as q is.
+func TestSearchRefusesAProjectThatIsNotAKey(t *testing.T) {
+	handler := newTestHandler(t)
+	seedSearchCorpus(t, handler)
+	search := func(project string) *httptest.ResponseRecorder {
+		return searchRequest(t, handler, url.Values{"q": {"astrolabe"}, "project": {project}}.Encode())
+	}
+
+	for _, project := range []string{"", "  SRCH  "} {
+		response := search(project)
+		if response.Code != http.StatusOK {
+			t.Fatalf("project %q: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+		if hits := decodeBody[model.SearchResponse](t, response).Results; len(hits) == 0 {
+			t.Fatalf("project %q: no hits, want the SRCH issue", project)
+		}
+	}
+	for _, project := range []string{"srch", "SRCH-1", strings.Repeat("中", 100)} {
+		response := search(project)
+		body := decodeBody[struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}](t, response)
+		if response.Code != http.StatusBadRequest || body.Code != "INVALID_PROJECT" || body.Error != "project must be a project key such as CORE" {
+			t.Fatalf("project %q: status=%d refusal=%+v, want 400 INVALID_PROJECT", project, response.Code, body)
+		}
+	}
+}
+
 func TestSearchAuthentication(t *testing.T) {
 	handler := newTestHandler(t)
 

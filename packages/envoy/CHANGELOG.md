@@ -48,6 +48,17 @@
   across a restart too. A rolled-back listener ignores the field. A listener built with #1526 but
   without this change publishes the whole backlog, so every head-gated listener moves straight to
   a build carrying this change.
+- `GET /api/v1/search` refuses a `q` over 1,000 UTF-16 units, counted after trimming, with the
+  ordinary `400 CAP_EXCEEDED` and a sentence saying what to send instead (LEGION-386), and a
+  `project` that is not a project key with `400 INVALID_PROJECT`, where a lowercased key used to
+  answer an empty result. A mistyped key that still has a key's shape, such as `LEGOIN`, is still
+  searched and still answers empty. An empty `project` still searches every project. Both ride
+  in the URL, and the load balancer in front of production Dispatch answers a URL longer than it
+  accepts with a bare `414` before the server sees the request. So deploying this names the rule
+  only to a request that still fits; it cannot answer the 26,637-character search that prompted
+  LEGION-386. Only an updated `@sjawhar/pi-legion-envoy` in a session's profile (or the OpenCode
+  or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
+  because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
 
