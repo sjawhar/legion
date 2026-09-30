@@ -15,6 +15,42 @@ export interface DeliveryOutcome {
   /** ISO-8601, as both `MessageDelivery.created_at` and `CommentDelivery.created_at` carry it. */
   readonly createdAt: string;
   readonly duplicate?: boolean;
+  /** The session the attempt went to answered it with an error instead of a reply (a BTW whose
+   *  side turn failed, a frame the host refused), as `rowAnsweredWithError` or
+   *  `receiptAnsweredWithError` reads it off the attempt. Absent means it did not. */
+  readonly answeredWithError?: boolean;
+}
+
+/**
+ * Whether an attempt row records its session's error answer. Dispatch writes an envelope id only
+ * for a send the listener accepted (`sendResolvedDelivery`), and every failure Dispatch records
+ * itself leaves it null, so a failed row that carries one was failed by the session's own error
+ * reply after Dispatch recorded the send. A session that refuses the frame before Dispatch records
+ * the send leaves a row no different from a failed send, which a row cannot tell apart; the
+ * receipt can (`receiptAnsweredWithError`).
+ */
+export function rowAnsweredWithError(row: {
+  readonly state: string;
+  readonly envelope_id: string | null;
+}): boolean {
+  return row.state === "failed" && row.envelope_id !== null;
+}
+
+/**
+ * Whether a delivery receipt records its session's error answer: the session's error reply
+ * appends the attempt's receipt itself, as the session the attempt went to, whichever of it and
+ * Dispatch's own record of the send landed first. Every other receipt is appended by whoever sent
+ * the attempt.
+ */
+export function receiptAnsweredWithError(receipt: {
+  readonly actor: { readonly kind: string; readonly id: string };
+  readonly payload: { readonly state: string; readonly session_id: string | null };
+}): boolean {
+  return (
+    receipt.payload.state === "failed" &&
+    receipt.actor.kind === "session" &&
+    receipt.actor.id === receipt.payload.session_id
+  );
 }
 
 /**
@@ -50,11 +86,19 @@ function insideDuplicateWindow(createdAt: string, now: number): boolean {
  *
  * An attempt already recorded `duplicate` is excluded for a different reason: it reached the
  * listener and changed nothing, so there is no failure left to retry.
+ *
+ * So is an attempt the session answered with an error, because its Retry could not be promised
+ * to arrive. The notification stream stored the first frame under that key, so it stores the
+ * Retry no more than any other repeat, and a session the listener pushes to from the stream is
+ * never handed it while the attempt reads as a duplicate. The dashboard cannot tell that session
+ * from one whose host takes the Retry, so it points at a mode change, a new key, for both
+ * (`answeredWithErrorGuidance`).
  */
 export function isSafeRetry(attempt: DeliveryOutcome, now: number = Date.now()): boolean {
   return (
     attempt.state === "failed" &&
     attempt.duplicate !== true &&
+    attempt.answeredWithError !== true &&
     insideDuplicateWindow(attempt.createdAt, now)
   );
 }
@@ -76,6 +120,18 @@ export function safeRetryGuidance(surface: "card" | "mention", cause?: string | 
   const safe = `Retry won't deliver it twice ${unlessRestarted}`;
   if (surface === "mention" || cause !== RECEIPT_TIMEOUT_CAUSE) return `${safe}.`;
   return `${safe}; sending in a different mode delivers it again.`;
+}
+
+/**
+ * The guidance an attempt the session answered with an error earns in place of a Retry: send it
+ * again under a new key. On a card that is one of the mode-change actions beside it; the mention
+ * surface has none, so a new comment is its new key.
+ */
+export function answeredWithErrorGuidance(surface: "card" | "mention"): string {
+  const answered = "The session answered with an error";
+  return surface === "card"
+    ? `${answered}; send it in another mode instead.`
+    : `${answered}; mention it in a new comment to send it again.`;
 }
 
 /**

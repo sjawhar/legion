@@ -4495,9 +4495,9 @@ describe("envoy OMP extension", () => {
     expect(fixture.deliveries).toEqual([]);
   });
 
-  // Dispatch records a BTW answered with an error as failed and offers a same-mode Retry, which
-  // repeats the attempt's dedupe key. The agent never answered the first, so the Retry has to run
-  // the side turn again; a repeat of one that was answered is still dropped.
+  // Dispatch records a BTW answered with an error as failed, and a same-mode re-send of it
+  // repeats the attempt's dedupe key. The agent never answered the first, so the re-send has to
+  // run the side turn again; a repeat of one that was answered is still dropped.
   test("runs a BTW side turn again for a Retry of one whose side turn failed", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";

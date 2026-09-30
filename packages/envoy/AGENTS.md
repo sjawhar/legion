@@ -696,10 +696,17 @@ stream nor a host remembers the key, so a same-mode retry is a second delivery -
 row stores only the CAUSE of a receipt timeout and never the advice. Every delivery surface
 composes the advice from `packages/dispatch/web/src/features/conversation/delivery.ts`:
 `isSafeRetry` shows the "retrying is safe" sentence, and offers the same-mode **Retry** at all,
-only for a failed attempt inside the window that is not itself a duplicate, and the broadcast
-page's row for a send nobody is carrying takes its sentence from `strandedRetryGuidance`; both
-read the window through the one age check, `insideDuplicateWindow`, which reads a negative age
-as young, because `created_at` is Postgres-stamped while the browser supplies `now`. The
+only for a failed attempt inside the window that is not itself a duplicate and that its session
+did not answer with an error, and the broadcast page's row for a send nobody is carrying takes
+its sentence from `strandedRetryGuidance`; both read the window through the one age check,
+`insideDuplicateWindow`, which reads a negative age as young, because `created_at` is
+Postgres-stamped while the browser supplies `now`. An attempt its session answered with an error
+is one the stream already stored under the Retry's key, so a session the listener pushes to
+would never be handed that Retry; the card points at a mode change instead
+(`answeredWithErrorGuidance`), and sending it under a new key is LEGION-431. The dashboard reads
+the error answer off the attempt: a failed row that carries an envelope id
+(`rowAnsweredWithError`, since every failure Dispatch records itself leaves it null), or a failed
+receipt the attempt's own session appended (`receiptAnsweredWithError`). The
 mode-change actions are not gated: they always deliver. Their clause ("sending in a different
 mode delivers it again") is added only for a receipt timeout, the one cause whose send may
 already have reached the recipient; `RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that

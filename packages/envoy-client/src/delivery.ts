@@ -168,8 +168,8 @@ export interface DedupeIdentity {
  * still being delivered (on an overlapping subscription, or behind a Dispatch reply in flight) is
  * already a repeat. It releases the claim when its agent was not handed the frame after all: the
  * hand-off threw, or the host answered the frame with an error instead (a BTW whose side turn
- * failed, a frame it could not read). Dispatch records that attempt failed and offers a same-mode
- * Retry, which must then reach the agent.
+ * failed, a frame it could not read). Dispatch records that attempt failed, and a same-mode
+ * re-send of it must then reach the agent.
  */
 export interface DeliveryDedupe {
   /**

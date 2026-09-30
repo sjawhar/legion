@@ -9,7 +9,13 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
-import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  answeredWithErrorGuidance,
+  duplicateText,
+  isSafeRetry,
+  safeRetryGuidance,
+  withGuidance,
+} from "./delivery";
 import { ReplyButton } from "./ReplyButton";
 
 /** The current live capabilities behind a stored delivery target - a bare session, or a role
@@ -36,6 +42,8 @@ export function capabilitiesForTarget(
 
 export interface TargetedMessageAttempt {
   readonly attempt: number;
+  /** The session answered this attempt with an error (`DeliveryOutcome.answeredWithError`). */
+  readonly answeredWithError?: boolean;
   readonly createdAt: string;
   readonly delivery: MessageDeliveryMode;
   /** The listener already held this message, so this attempt reached it and changed nothing. */
@@ -57,17 +65,25 @@ function deliveryHeadline(
   answeredBy: string | undefined,
   delivery: TargetedMessageAttempt | undefined,
   targetName: string,
-  retryOffered: boolean
+  retryRow: boolean
 ): { text: string; asking: boolean } {
   if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
   if (delivery?.state === "failed") {
     const cause = `Failed: ${delivery.error ?? "delivery failed"}`;
-    // The promise belongs to the button: it is only true of the Retry this card is actually
-    // offering, and only while that Retry is offered at all.
-    return {
-      text: retryOffered ? withGuidance(cause, safeRetryGuidance("card", delivery.error)) : cause,
-      asking: false,
-    };
+    // Each sentence belongs to a button in the retry row, and is said only while that row is
+    // shown: the promise to the same-mode Retry, and the pointer at the mode-change actions to
+    // an attempt the session answered with an error, which gets no Retry.
+    if (!retryRow) return { text: cause, asking: false };
+    if (isSafeRetry(delivery)) {
+      return {
+        text: withGuidance(cause, safeRetryGuidance("card", delivery.error)),
+        asking: false,
+      };
+    }
+    if (delivery.answeredWithError === true) {
+      return { text: withGuidance(cause, answeredWithErrorGuidance("card")), asking: false };
+    }
+    return { text: cause, asking: false };
   }
   const mode = delivery?.delivery ?? "steer";
   if (delivery?.state === "pending")
@@ -98,20 +114,22 @@ export function offersSafeRetry(
 }
 
 /** What became of a targeted message: answered, failed, asking (BTW), or sent - then the
- *  earlier attempts, oldest first. Shared by the card and by a delivered reply in its thread. */
+ *  earlier attempts, oldest first. Shared by the card and by a delivered reply in its thread.
+ *  `retryRow` is whether the surface shows `DeliveryRetry` beneath it, whose buttons the
+ *  failure's guidance names. */
 export function DeliveryStatus({
   answeredBy,
   deliveries,
-  retryOffered = false,
+  retryRow = false,
   targetName,
 }: {
   answeredBy?: string;
   deliveries: readonly TargetedMessageAttempt[];
-  retryOffered?: boolean;
+  retryRow?: boolean;
   targetName: string;
 }): ReactNode {
   const delivery = deliveries.at(-1);
-  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryOffered);
+  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryRow);
   return (
     <>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
@@ -138,8 +156,8 @@ export function DeliveryStatus({
  *  Retry re-sends in the attempt's OWN mode, and appears only while `isSafeRetry` holds: that
  *  send carries the same idempotency key, so if the message already landed the repeat is
  *  recognised and dropped - but only inside `DELIVERY_DUPLICATE_WINDOW_MS`, and only for an
- *  attempt that actually failed. Offering it otherwise would be offering a second delivery under
- *  a promise of none.
+ *  attempt that actually failed and that the session did not answer with an error. Offering it
+ *  otherwise would be offering a second delivery, or no delivery, under a promise of one.
  *  The mode-change actions have no such limit: they are a different key and are honestly
  *  labelled "instead". */
 export function DeliveryRetry({
@@ -287,7 +305,7 @@ export function TargetedMessageCard({
       <DeliveryStatus
         answeredBy={answeredBy}
         deliveries={deliveries}
-        retryOffered={sameModeRetry}
+        retryRow={retry !== undefined}
         targetName={targetName}
       />
       {retry === undefined ? null : (

@@ -101,7 +101,7 @@ function BroadcastRecipientRow({
         <DeliveryStatus
           answeredBy={answeredBy}
           deliveries={attempts}
-          retryOffered={offersSafeRetry(attempts, answeredBy === undefined)}
+          retryRow={answeredBy === undefined && latest.state === "failed"}
           targetName={label}
         />
       )}

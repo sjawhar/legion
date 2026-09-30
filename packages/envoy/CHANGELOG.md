@@ -21,6 +21,13 @@
   answers `duplicate: true` and is stored once, and the Legion daemon's copy of a role-lane notice
   (LEGION-108). Before, only Dispatch and webhook delivery-id keys earned a MsgId. The same rule,
   `dedupeKeyNamesItsEvent`, now decides what a core-NATS host drops.
+- The Dispatch dashboard no longer offers a same-mode **Retry** for a targeted message or comment
+  mention its session answered with an error (a BTW whose side turn failed, a frame its host
+  refused). The stream already stored that attempt's frame under the Retry's key, so a session the
+  listener pushes to from the stream was never handed the Retry, and the attempt then read
+  "Delivered by an earlier attempt". The card now says the session answered with an error and
+  points at its mode-change actions; the mention list points at a new comment. Sending that Retry
+  under a new key is LEGION-431.
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it

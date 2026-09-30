@@ -5,6 +5,8 @@ import {
   type DeliveryOutcome,
   duplicateText,
   isSafeRetry,
+  receiptAnsweredWithError,
+  rowAnsweredWithError,
   safeRetryGuidance,
   strandedRetryGuidance,
   withGuidance,
@@ -49,6 +51,35 @@ test("a delivered attempt has no failure to retry", () => {
 test("an attempt the stream already had is not a safe retry either", () => {
   expect(isSafeRetry(attempt({ state: "sent", duplicate: true }), now)).toBe(false);
   expect(isSafeRetry(attempt({ duplicate: true }), now)).toBe(false);
+});
+
+// A same-mode Retry repeats the key the stream stored the answered frame under, so a session the
+// listener pushes to from the stream would never be handed it. A promise that cannot be kept is
+// not made, however young the attempt.
+test("an attempt the session answered with an error is not offered a same-mode retry", () => {
+  expect(isSafeRetry(attempt({ answeredWithError: true }), now)).toBe(false);
+  expect(isSafeRetry(attempt({ answeredWithError: false }), now)).toBe(true);
+});
+
+// Every failure Dispatch records itself leaves the envelope id null; only the session's own error
+// reply fails a row whose send the listener accepted.
+test("a row reads as answered with an error only when a send that reached the listener failed", () => {
+  expect(rowAnsweredWithError({ state: "failed", envelope_id: "envelope-1" })).toBe(true);
+  expect(rowAnsweredWithError({ state: "failed", envelope_id: null })).toBe(false);
+  expect(rowAnsweredWithError({ state: "sent", envelope_id: "envelope-1" })).toBe(false);
+});
+
+// The session's error reply appends the receipt as that session. A receipt appended by whoever
+// sent the attempt, a person or another session, is Dispatch recording the send's own failure.
+test("a receipt reads as answered with an error only when the attempt's own session failed it", () => {
+  const receipt = (actor: { kind: string; id: string }, state = "failed") => ({
+    actor,
+    payload: { state, session_id: "s1" },
+  });
+  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }))).toBe(true);
+  expect(receiptAnsweredWithError(receipt({ kind: "user", id: "alice" }))).toBe(false);
+  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "sender" }))).toBe(false);
+  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }, "sent"))).toBe(false);
 });
 
 // The browser's clock is not the server's. `createdAt` is Postgres-stamped and `now` defaults to

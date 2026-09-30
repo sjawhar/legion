@@ -73,7 +73,14 @@ import {
   type ThreadReply,
   visibleConversationItems,
 } from "./conversation-model";
-import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  answeredWithErrorGuidance,
+  duplicateText,
+  isSafeRetry,
+  receiptAnsweredWithError,
+  safeRetryGuidance,
+  withGuidance,
+} from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -113,6 +120,7 @@ function eventItems(data: { pages: Event[][] } | undefined): Event[] {
 function attemptsOf(deliveries: readonly MessageDeliveryEvent[]): TargetedMessageAttempt[] {
   return deliveries.map((attempt) => ({
     attempt: attempt.payload.attempt,
+    answeredWithError: receiptAnsweredWithError(attempt),
     createdAt: attempt.created_at,
     delivery: attempt.payload.delivery,
     duplicate: attempt.payload.duplicate,
@@ -460,13 +468,20 @@ function CommentDeliveryList({
           state: delivery.state,
           createdAt: delivery.created_at,
           duplicate: delivery.duplicate,
+          answeredWithError: delivery.answeredWithError,
         };
         // The same rule the targeted-message card applies: a mention's Retry re-sends its own
         // mode under its own key, so it can only be offered while the stream would still
-        // recognise the repeat. The list offers no mode-change action, so its guidance says
-        // nothing about one.
+        // recognise the repeat, and never for an attempt the session answered with an error. The
+        // list offers no mode-change action, so its guidance says nothing about one; an error
+        // answer is pointed at a new comment instead, while the issue is open to take one.
         const safeRetry = isSafeRetry(outcome);
         const canRetry = capabilities === undefined || capabilities.includes(delivery.delivery);
+        const guidance = safeRetry
+          ? safeRetryGuidance("mention", delivery.error)
+          : delivery.answeredWithError === true && !disabled
+            ? answeredWithErrorGuidance("mention")
+            : undefined;
         return (
           <li
             className="flex flex-wrap items-center gap-x-2"
@@ -476,14 +491,8 @@ function CommentDeliveryList({
               {delivery.target} · {delivery.duplicate === true ? duplicateText : delivery.state}
               {delivery.error === null
                 ? ""
-                : ` · ${
-                    safeRetry
-                      ? withGuidance(delivery.error, safeRetryGuidance("mention", delivery.error))
-                      : delivery.error
-                  }`}
-              {delivery.error === null && safeRetry
-                ? ` · ${safeRetryGuidance("mention", delivery.error)}`
-                : ""}
+                : ` · ${guidance === undefined ? delivery.error : withGuidance(delivery.error, guidance)}`}
+              {delivery.error === null && guidance !== undefined ? ` · ${guidance}` : ""}
             </span>
             {disabled || !canRetry || !safeRetry ? null : (
               <button

@@ -99,10 +99,7 @@ export function ReplyTurn({
             <DeliveryStatus
               answeredBy={delivery.answeredBy}
               deliveries={delivery.attempts}
-              retryOffered={offersSafeRetry(
-                delivery.attempts,
-                delivery.answeredBy === undefined && delivery.retry !== undefined
-              )}
+              retryRow={delivery.answeredBy === undefined && delivery.retry !== undefined}
               targetName={delivery.targetName}
             />
             {delivery.answeredBy === undefined && delivery.retry !== undefined ? (

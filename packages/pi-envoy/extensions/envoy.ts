@@ -576,9 +576,9 @@ export default function envoyExtension(pi: PiApi): void {
         if (inbox.length > 50) inbox.pop();
       }
       // An error reply means the agent was not handed the frame: Dispatch records the attempt
-      // failed and offers a same-mode Retry, which must reach this session again, so the claim is
+      // failed, and a same-mode re-send of it must reach this session again, so the claim is
       // released before the reply goes out. A BTW side turn adds nothing to the transcript, so
-      // running it again for that Retry repeats no work the session kept.
+      // running it again for that re-send repeats no work the session kept.
       const refuse = async (delivery: DispatchDelivery, error: string): Promise<void> => {
         delivered.release(envelope);
         await postDispatchReply(delivery, { error });

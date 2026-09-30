@@ -1,4 +1,5 @@
 import type { MessageDelivery } from "../../api/types";
+import { rowAnsweredWithError } from "../conversation/delivery";
 import type { TargetedMessageAttempt } from "../conversation/TargetedMessageCard";
 
 /** A message's delivery attempts as `TargetedMessageCard` shows them, all aimed at one
@@ -10,6 +11,7 @@ export function deliveryAttempts(
 ): TargetedMessageAttempt[] {
   return deliveries.map((attempt) => ({
     attempt: attempt.attempt,
+    answeredWithError: rowAnsweredWithError(attempt),
     createdAt: attempt.created_at,
     delivery: attempt.delivery,
     duplicate: attempt.duplicate,
