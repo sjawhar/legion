@@ -119,8 +119,11 @@ export interface ChannelInboxEntry {
 }
 
 export interface ChannelDelivery {
-  /** Queue one rendered envelope onto the MCP stdio transport. */
-  enqueue(input: { readonly subject: string; readonly raw: string }): Promise<void>
+  /**
+   * Queue one rendered envelope onto the MCP stdio transport. Resolves whether it went to Claude
+   * Code: `false` for a frame skipped, dropped, or answered on Dispatch with an error instead.
+   */
+  enqueue(input: { readonly subject: string; readonly raw: string }): Promise<boolean>
   /**
    * Tell the model, once per ask, that a Dispatch write made this session follow an ask
    * (`details.follows.ask`); no write subscribes the session to the whole issue.
@@ -282,7 +285,7 @@ export function createChannelDelivery(input: {
   return {
     enqueue({ subject, raw }) {
       const rendered = renderInbound(raw, input.identity.id, subject)
-      if (rendered.skip) return tail
+      if (rendered.skip) return tail.then(() => false)
       // A targeted Dispatch delivery the shared renderer could not validate is
       // never shown to the model: it is answered on Dispatch when it names a
       // message, and dropped with a log line when it does not.
@@ -293,17 +296,21 @@ export function createChannelDelivery(input: {
         )
         return postDispatchReply(input.identity, rejected, {
           error: "Invalid Dispatch targeted delivery frame",
-        }).catch((error: unknown) => {
-          process.stderr.write(
-            `envoy-channel: could not report the rejected delivery to Dispatch — ${messageFor(error)}\n`,
-          )
-        })
+        }).then(
+          () => false,
+          (error: unknown) => {
+            process.stderr.write(
+              `envoy-channel: could not report the rejected delivery to Dispatch — ${messageFor(error)}\n`,
+            )
+            return false
+          },
+        )
       }
       if (rendered.malformedDelivery === true) {
         process.stderr.write(
           "envoy-channel: dropping malformed Dispatch targeted delivery without a reply address\n",
         )
-        return tail
+        return tail.then(() => false)
       }
       const envelope = rendered.envelope
       if (envelope !== undefined) {
@@ -315,7 +322,7 @@ export function createChannelDelivery(input: {
         })
         if (inbox.length > CHANNEL_INBOX_LIMIT) inbox.pop()
       }
-      return queue({
+      const queued = queue({
         method: CHANNEL_NOTIFICATION_METHOD,
         params: {
           content: rendered.content,
@@ -333,6 +340,7 @@ export function createChannelDelivery(input: {
           }),
         },
       })
+      return queued.then(() => true)
     },
     announceFollow(details) {
       return announce(details) ?? tail
@@ -362,18 +370,18 @@ async function writePersistedRole(
 }
 
 /**
- * Queues a channel event, then answers a forwarded lane's receipt. The receipt
- * proves only this local queue accepted the request; Claude Code does not
- * acknowledge it. Which frames wait for one is `expectsLaneReceipt`'s rule.
+ * Queues a channel event, then answers a forwarded lane's receipt, and resolves whether Claude
+ * Code was handed the event. The receipt proves only this local queue accepted the request; Claude
+ * Code does not acknowledge it. Which frames wait for one is `expectsLaneReceipt`'s rule.
  */
 export async function enqueueChannelMessage(
   delivery: ChannelDelivery,
   connection: ChannelForwarderConnection,
   directSubject: string,
   message: ChannelInboundMessage,
-): Promise<void> {
+): Promise<boolean> {
   const queued = message.duplicate
-    ? Promise.resolve()
+    ? Promise.resolve(false)
     : delivery.enqueue({ subject: message.subject, raw: message.raw })
   const lane = {
     subject: message.subject,
@@ -382,7 +390,7 @@ export async function enqueueChannelMessage(
     reply: message.reply,
   }
   if (expectsLaneReceipt(lane)) connection.publish(lane.reply, EMPTY_RECEIPT)
-  await queued
+  return queued
 }
 
 /**
@@ -439,7 +447,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
           )
         })
       }
-      await enqueueChannelMessage(delivery, options.connection, directSubject, message)
+      return enqueueChannelMessage(delivery, options.connection, directSubject, message)
     },
   })
 

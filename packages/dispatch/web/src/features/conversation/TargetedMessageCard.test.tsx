@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { fireEvent, render, screen } from "@testing-library/react";
 
+import { duplicateText, safeRetryGuidance } from "./delivery";
 import { type TargetedMessageAttempt, TargetedMessageCard } from "./TargetedMessageCard";
 
 function attempt(overrides: Partial<TargetedMessageAttempt> = {}): TargetedMessageAttempt {
@@ -91,9 +92,7 @@ test("a duplicate attempt says the listener already had the message", () => {
     card({ attempts: [attempt({ delivery: "steer", state: "sent", duplicate: true })] })
   );
   try {
-    expect(
-      screen.getByText("Delivered by an earlier attempt, so not delivered again")
-    ).toBeTruthy();
+    expect(screen.getByText(duplicateText)).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -117,8 +116,11 @@ test("a failed attempt inside the duplicate window promises a safe retry and off
     // A cause with no trailing punctuation gets a separator, and a failure that never reached
     // the listener is not told a different mode would deliver it "again".
     expect(
-      screen.getByText("Failed: no live session s1. Retry won't deliver it twice.")
+      screen.getByText(
+        `Failed: no live session s1. ${safeRetryGuidance("card", "no live session s1")}`
+      )
     ).toBeTruthy();
+    expect(screen.queryByText(/sending in a different mode/)).toBeNull();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     view.unmount();
@@ -132,9 +134,10 @@ test("a receipt timeout is told what a mode change would do", () => {
   try {
     expect(
       screen.getByText(
-        `Failed: ${RECEIPT_TIMEOUT_CAUSE} Retry won't deliver it twice; sending in a different mode delivers it again.`
+        `Failed: ${RECEIPT_TIMEOUT_CAUSE} ${safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE)}`
       )
     ).toBeTruthy();
+    expect(screen.getByText(/sending in a different mode delivers it again/)).toBeTruthy();
   } finally {
     view.unmount();
   }

@@ -14531,6 +14531,23 @@ var EnvelopeSchema = exports_external.object({
   urgency: exports_external.enum(["low", "med", "high", "blocking"]).optional(),
   expects_reply: exports_external.enum(["none", "optional", "required"]).optional()
 });
+var MINTED_DEDUPE_KEY_PATTERN = "^(?:envoy\\.role\\.forward\\.)?(?:publish|agent\\.[^.]+)\\.(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$";
+var mintedDedupeKey = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+function dedupeKeyNamesItsEvent(envelope) {
+  const key = envelope.dedupe_key;
+  if (key === undefined)
+    return false;
+  if (envelope.source === "dispatch" || mintedDedupeKey.test(key))
+    return true;
+  switch (envelope.source) {
+    case "github":
+    case "slack":
+    case "ghostwispr":
+      return envelope.source_event_id !== undefined && envelope.source_event_id !== "" && key === `${envelope.source}.${envelope.source_event_id}`;
+    default:
+      return false;
+  }
+}
 // ../contracts/src/handoff-schema.ts
 var HANDOFF_SCHEMA_VERSION = 1;
 var HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"];

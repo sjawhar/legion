@@ -13,6 +13,14 @@
 
 ### Changed
 
+- The stream stores an envelope under a MsgId, and so recognises its repeat, when its dedupe key was
+  minted once for its message: the listener's own `publish.<id>` and `agent.<session>.<id>`, and the
+  same around the shared transport's UUID idempotency key (`contracts.MintedDedupeKeyPattern`,
+  generated from `MINTED_DEDUPE_KEY_PATTERN` in `packages/contracts`). Only a re-send of that
+  message repeats such a key: the transport's retry of a send whose answer was lost, which now
+  answers `duplicate: true` and is stored once, and the Legion daemon's copy of a role-lane notice
+  (LEGION-108). Before, only Dispatch and webhook delivery-id keys earned a MsgId. The same rule,
+  `dedupeKeyNamesItsEvent`, now decides what a core-NATS host drops.
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { EnvelopeSchema } from "./envelope";
+import { dedupeKeyNamesItsEvent, EnvelopeSchema } from "./envelope";
 import {
   agentSubject,
   dispatchDocumentSubject,
@@ -392,5 +392,56 @@ describe("githubWorkflowSubject", () => {
     const workflow = githubWorkflowSubject("acme", "widgets", "ci.yml", "completed");
     const repoLevel = githubSubject("acme", "widgets", "workflow");
     expect(workflow.startsWith(`${repoLevel}.`)).toBe(true);
+  });
+});
+
+// The same table as `TestDedupeKeyNamesTheUpstreamEvent` in packages/envoy/internal/contracts: the
+// stream's MsgId and every host's dedupe answer one question, so a key either side misjudges is a
+// repeat one of them drops and the other does not, or a distinct event both lose.
+describe("dedupeKeyNamesItsEvent", () => {
+  test.each([
+    ["a Dispatch key", { source: "dispatch", dedupe_key: "agent.ses_a.m1:aside" }, true],
+    [
+      "a webhook key of its delivery id",
+      { source: "github", source_event_id: "delivery-7", dedupe_key: "github.delivery-7" },
+      true,
+    ],
+    [
+      "a publish key the listener minted",
+      { source: "agent", dedupe_key: "publish.0123456789abcdef0123456789abcdef" },
+      true,
+    ],
+    [
+      "a send key the listener minted",
+      { source: "agent", dedupe_key: "agent.ses_a.0123456789abcdef0123456789abcdef" },
+      true,
+    ],
+    [
+      "a key around the transport's idempotency key",
+      { source: "agent", dedupe_key: "agent.ses_a.3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b" },
+      true,
+    ],
+    [
+      "a minted key the role arbiter forwarded",
+      {
+        source: "agent",
+        dedupe_key: "envoy.role.forward.publish.0123456789abcdef0123456789abcdef",
+      },
+      true,
+    ],
+    [
+      "the MCP bridge's content hash",
+      { source: "github", source_event_id: "mcp://acme/alerts", dedupe_key: "github.3f2a" },
+      false,
+    ],
+    ["the Go daemon's outbox row", { source: "agent", dedupe_key: "legion-outbox:1" }, false],
+    [
+      "a caller's own idempotency key",
+      { source: "agent", dedupe_key: "agent.ses_a.retry-abc" },
+      false,
+    ],
+    ["a publish key of another shape", { source: "agent", dedupe_key: "publish.abc" }, false],
+  ])("%s", (_name, envelope, names) => {
+    expect(dedupeKeyNamesItsEvent(envelope)).toBe(names);
   });
 });

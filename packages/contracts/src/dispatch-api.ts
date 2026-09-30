@@ -792,27 +792,33 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * same for every attempt, and the listener makes that key, scoped to the recipient
  * (`agent.<session>.<key>`), the envelope's `dedupe_key`. A same-mode Retry of a send that already
  * landed therefore repeats that frame's dedupe key, and only that: the listener mints a new
- * `event_id` for every send. Two things recognise the repeat inside this window, and a recipient
- * is protected by whichever of them sits between it and the bus:
+ * `event_id` for every send. Two things recognise the repeat inside this window, both only for a
+ * key that names its event (`dedupeKeyNamesItsEvent` in `envelope.ts`, which every Dispatch key
+ * does), and a recipient is protected by whichever of them sits between it and the bus:
  *
- * - The notification stream stores a Dispatch frame under a MsgId of its dedupe key and topic, so
- *   it keeps one copy and answers the repeat as a duplicate, which the attempt records as
+ * - The notification stream stores such a frame under a MsgId of its dedupe key and topic, so it
+ *   keeps one copy and answers the repeat as a duplicate, which the attempt records as
  *   `duplicate`. That protects a session the listener pushes to from the stream. It does not
  *   protect a session that subscribes over core NATS: JetStream's check applies to the stream's
  *   copy only, and a core subscriber is handed every publish, repeats included.
  * - Each host that subscribes over core NATS (the Oh My Pi extension, the Claude Code channel)
- *   hands its agent at most one frame per dedupe key inside this window, through
- *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`, for a key that names its event:
- *   every Dispatch key, and a webhook key equal to its source and delivery id (the stream's own
- *   MsgId rule, `DedupeKeyNamesTheUpstreamEvent`). Any other key is remembered only among the
- *   latest 1,000, because some producers give distinct events one key. It holds those keys in
- *   memory: a host process that restarts after the first frame landed has forgotten it, and a
- *   Retry then reaches that agent a second time.
+ *   hands its agent at most one frame per such key inside this window, through
+ *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. A frame the host answered with an
+ *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
+ *   key and the Retry Dispatch then offers reaches the agent.
+ *
+ * It fails in two places. A host holds its keys in memory, so one that restarts after the first
+ * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
+ * not rare: `claude --resume` starts a new channel process on the same conversation, and a
+ * Sandbox pod resumes its session in a new process. And the stream stores a Retry of an attempt
+ * the session answered with an error no more than any other repeat, so a session the listener
+ * pushes to never receives that Retry, and its attempt reads as a duplicate.
  *
  * Past the window neither remembers the key, and a same-mode retry is a second delivery, so the
- * dashboard makes the promise only inside it (`isSafeRetry`). `scripts/gen-go.ts` emits this as
- * `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's duplicate
- * window and its retention.
+ * dashboard makes the promise only inside it, and names the restart
+ * (`packages/dispatch/web/src/features/conversation/delivery.ts`). `scripts/gen-go.ts` emits this
+ * as `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's
+ * duplicate window and its retention.
  *
  * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope is stored
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a

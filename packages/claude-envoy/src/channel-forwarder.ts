@@ -51,7 +51,11 @@ export interface ChannelForwarder {
 }
 
 export interface ChannelForwarderOptions {
-  readonly deliver: (message: ChannelInboundMessage) => Promise<void>
+  /**
+   * Hands one frame on and resolves whether Claude Code got it; `false`, or a rejection, releases
+   * the frame's dedupe claim, so a re-send of it still arrives.
+   */
+  readonly deliver: (message: ChannelInboundMessage) => Promise<boolean>
   /** How long close waits for a broker drain before closing outright. */
   readonly drainTimeoutMs?: number
 }
@@ -108,14 +112,11 @@ export function createChannelForwarder(
       for await (const message of subscription) {
         const raw = decoder.decode(message.data)
         const identity = deliveryIdentity(raw)
-        const duplicate = dedupe.isRepeat(identity)
-        // Remembered before the await, so the same frame arriving on an overlapping subscription
-        // meanwhile is already a repeat; forgotten if Claude Code never got it.
-        if (!duplicate) dedupe.remember(identity)
+        const duplicate = !dedupe.claim(identity)
         try {
           // A nats.js Msg exposes subject/data/reply through prototype getters,
           // which an object spread would silently drop; copy the fields by name.
-          await options.deliver({
+          const handed = await options.deliver({
             subject: message.subject,
             data: message.data,
             raw,
@@ -124,8 +125,9 @@ export function createChannelForwarder(
             ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),
             ...(duplicate ? { duplicate: true } : {}),
           })
+          if (!handed && !duplicate) dedupe.release(identity)
         } catch (error) {
-          if (!duplicate) dedupe.forget(identity)
+          if (!duplicate) dedupe.release(identity)
           report(`could not deliver a message on ${message.subject}`, error)
         }
       }

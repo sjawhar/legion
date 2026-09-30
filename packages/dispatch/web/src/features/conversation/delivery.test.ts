@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 
-import { type DeliveryOutcome, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  type DeliveryOutcome,
+  duplicateText,
+  isSafeRetry,
+  safeRetryGuidance,
+  strandedRetryGuidance,
+  withGuidance,
+} from "./delivery";
 
 const now = Date.parse("2026-09-25T12:00:00Z");
 
@@ -80,10 +87,25 @@ test("the guidance is separated from a cause that has no trailing punctuation", 
 // reached the recipient. For a failure that never got there, nothing was delivered to deliver
 // "again"; and the mention surface has no mode-change button to name at all.
 test("the mode-change clause is offered only for a receipt timeout, and never on a mention", () => {
-  expect(safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE)).toBe(
-    "Retry won't deliver it twice; sending in a different mode delivers it again."
-  );
-  expect(safeRetryGuidance("card", "no live session s1")).toBe("Retry won't deliver it twice.");
-  expect(safeRetryGuidance("card", null)).toBe("Retry won't deliver it twice.");
-  expect(safeRetryGuidance("mention", RECEIPT_TIMEOUT_CAUSE)).toBe("Retry won't deliver it twice.");
+  const modeChange = "sending in a different mode delivers it again";
+  expect(safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE)).toContain(modeChange);
+  expect(safeRetryGuidance("card", "no live session s1")).not.toContain(modeChange);
+  expect(safeRetryGuidance("card", null)).not.toContain(modeChange);
+  expect(safeRetryGuidance("mention", RECEIPT_TIMEOUT_CAUSE)).not.toContain(modeChange);
+});
+
+// A host holds the keys it was handed in memory, so a session that restarted after the first
+// send (`claude --resume`, a resumed pod) is handed the repeat again. No sentence that promises a
+// single delivery may leave that case out (`DELIVERY_DUPLICATE_WINDOW_MS`).
+test("every single-delivery promise names the restart it does not survive", () => {
+  const inWindow = new Date(now - 60_000).toISOString();
+  for (const promise of [
+    safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE),
+    safeRetryGuidance("mention", null),
+    duplicateText,
+    strandedRetryGuidance("aside", inWindow, now),
+    strandedRetryGuidance("aside", undefined, now),
+  ]) {
+    expect(promise).toContain("unless the session restarted since it was sent");
+  }
 });

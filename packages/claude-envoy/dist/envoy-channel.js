@@ -37038,6 +37038,23 @@ var EnvelopeSchema = exports_external.object({
   urgency: exports_external.enum(["low", "med", "high", "blocking"]).optional(),
   expects_reply: exports_external.enum(["none", "optional", "required"]).optional()
 });
+var MINTED_DEDUPE_KEY_PATTERN = "^(?:envoy\\.role\\.forward\\.)?(?:publish|agent\\.[^.]+)\\.(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$";
+var mintedDedupeKey = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+function dedupeKeyNamesItsEvent(envelope) {
+  const key = envelope.dedupe_key;
+  if (key === undefined)
+    return false;
+  if (envelope.source === "dispatch" || mintedDedupeKey.test(key))
+    return true;
+  switch (envelope.source) {
+    case "github":
+    case "slack":
+    case "ghostwispr":
+      return envelope.source_event_id !== undefined && envelope.source_event_id !== "" && key === `${envelope.source}.${envelope.source_event_id}`;
+    default:
+      return false;
+  }
+}
 // ../contracts/src/handoff-schema.ts
 var HANDOFF_SCHEMA_VERSION = 1;
 var HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"];
@@ -38132,58 +38149,29 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
-var UNNAMED_KEYS_REMEMBERED = 1000;
-function keyNamesTheEvent(frame) {
-  switch (frame.source) {
-    case "dispatch":
-      return true;
-    case "github":
-    case "slack":
-    case "ghostwispr":
-      return frame.source_event_id !== undefined && frame.source_event_id !== "" && frame.dedupe_key === `${frame.source}.${frame.source_event_id}`;
-    default:
-      return false;
-  }
-}
 function createDeliveryDedupe(now = Date.now) {
-  const named = new Map;
-  const unnamed = new Set;
+  const claimed = new Map;
   return {
-    isRepeat(frame) {
+    claim(frame) {
       const key = frame?.dedupe_key;
-      if (key === undefined)
-        return false;
-      const at = named.get(key);
-      return at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS || unnamed.has(key);
-    },
-    remember(frame) {
-      const key = frame?.dedupe_key;
-      if (frame === undefined || key === undefined)
-        return;
-      if (!keyNamesTheEvent(frame)) {
-        unnamed.delete(key);
-        unnamed.add(key);
-        if (unnamed.size > UNNAMED_KEYS_REMEMBERED) {
-          const oldest = unnamed.values().next();
-          if (!oldest.done)
-            unnamed.delete(oldest.value);
-        }
-        return;
-      }
+      if (frame === undefined || key === undefined || !dedupeKeyNamesItsEvent(frame))
+        return true;
       const at = now();
-      for (const [oldest, deliveredAt] of named) {
+      const claimedAt = claimed.get(key);
+      if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS)
+        return false;
+      for (const [oldest, deliveredAt] of claimed) {
         if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
           break;
-        named.delete(oldest);
+        claimed.delete(oldest);
       }
-      named.delete(key);
-      named.set(key, at);
+      claimed.delete(key);
+      claimed.set(key, at);
+      return true;
     },
-    forget(frame) {
-      if (frame?.dedupe_key === undefined)
-        return;
-      named.delete(frame.dedupe_key);
-      unnamed.delete(frame.dedupe_key);
+    release(frame) {
+      if (frame?.dedupe_key !== undefined)
+        claimed.delete(frame.dedupe_key);
     }
   };
 }
@@ -43951,11 +43939,9 @@ function createChannelForwarder(connection, options) {
       for await (const message of subscription) {
         const raw = decoder.decode(message.data);
         const identity = deliveryIdentity(raw);
-        const duplicate = dedupe.isRepeat(identity);
-        if (!duplicate)
-          dedupe.remember(identity);
+        const duplicate = !dedupe.claim(identity);
         try {
-          await options.deliver({
+          const handed = await options.deliver({
             subject: message.subject,
             data: message.data,
             raw,
@@ -43963,9 +43949,11 @@ function createChannelForwarder(connection, options) {
             ...identity?.topic === undefined ? {} : { envelopeTopic: identity.topic },
             ...duplicate ? { duplicate: true } : {}
           });
+          if (!handed && !duplicate)
+            dedupe.release(identity);
         } catch (error48) {
           if (!duplicate)
-            dedupe.forget(identity);
+            dedupe.release(identity);
           report(`could not deliver a message on ${message.subject}`, error48);
         }
       }
@@ -44214,22 +44202,23 @@ function createChannelDelivery(input) {
     enqueue({ subject: subject2, raw }) {
       const rendered = renderInbound(raw, input.identity.id, subject2);
       if (rendered.skip)
-        return tail;
+        return tail.then(() => false);
       if (rendered.rejectedDelivery !== undefined) {
         const rejected = rendered.rejectedDelivery;
         process.stderr.write(`envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.id}
 `);
         return postDispatchReply(input.identity, rejected, {
           error: "Invalid Dispatch targeted delivery frame"
-        }).catch((error48) => {
+        }).then(() => false, (error48) => {
           process.stderr.write(`envoy-channel: could not report the rejected delivery to Dispatch \u2014 ${messageFor(error48)}
 `);
+          return false;
         });
       }
       if (rendered.malformedDelivery === true) {
         process.stderr.write(`envoy-channel: dropping malformed Dispatch targeted delivery without a reply address
 `);
-        return tail;
+        return tail.then(() => false);
       }
       const envelope2 = rendered.envelope;
       if (envelope2 !== undefined) {
@@ -44242,7 +44231,7 @@ function createChannelDelivery(input) {
         if (inbox.length > CHANNEL_INBOX_LIMIT)
           inbox.pop();
       }
-      return queue({
+      const queued = queue({
         method: CHANNEL_NOTIFICATION_METHOD,
         params: {
           content: rendered.content,
@@ -44258,6 +44247,7 @@ function createChannelDelivery(input) {
           })
         }
       });
+      return queued.then(() => true);
     },
     announceFollow(details) {
       return announce(details) ?? tail;
@@ -44281,7 +44271,7 @@ async function writePersistedRole(roleFile, state) {
 `);
 }
 async function enqueueChannelMessage(delivery, connection, directSubject, message) {
-  const queued = message.duplicate ? Promise.resolve() : delivery.enqueue({ subject: message.subject, raw: message.raw });
+  const queued = message.duplicate ? Promise.resolve(false) : delivery.enqueue({ subject: message.subject, raw: message.raw });
   const lane = {
     subject: message.subject,
     directSubject,
@@ -44290,7 +44280,7 @@ async function enqueueChannelMessage(delivery, connection, directSubject, messag
   };
   if (expectsLaneReceipt(lane))
     connection.publish(lane.reply, EMPTY_RECEIPT);
-  await queued;
+  return queued;
 }
 async function startChannelSession(options) {
   const { identity } = options;
@@ -44324,7 +44314,7 @@ async function startChannelSession(options) {
 `);
         });
       }
-      await enqueueChannelMessage(delivery, options.connection, directSubject, message);
+      return enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
   function dropFromForwarderAndRegistry(topics) {

@@ -18,6 +18,7 @@ import {
   DispatchTargetedDeliverySchema,
   DispatchTargetedMessagePayloadSchema,
   DispatchTargetedResourceIDSchema,
+  dedupeKeyNamesItsEvent,
   EnvelopeSchema,
   IssueEventPayloadSchema as IssuePayloadSchema,
   MessageDeliveryEventPayloadSchema as MessageDeliveryPayloadSchema,
@@ -158,87 +159,60 @@ export interface DedupeIdentity {
   readonly source_event_id?: string | undefined;
 }
 
-/** How many keys a host remembers of frames whose dedupe key does not name their event. */
-const UNNAMED_KEYS_REMEMBERED = 1_000;
-
-/**
- * Whether a frame's dedupe key is the identity its upstream gave the event, so a second frame under
- * it is that event again: always for Dispatch, and for a webhook source when the key is the source
- * plus the upstream's delivery id. The Go side's `contracts.DedupeKeyNamesTheUpstreamEvent`
- * (`packages/envoy/internal/contracts/dedupe.go`), which decides the stream's MsgId, is the same rule.
- */
-function keyNamesTheEvent(frame: DedupeIdentity): boolean {
-  switch (frame.source) {
-    case "dispatch":
-      return true;
-    case "github":
-    case "slack":
-    case "ghostwispr":
-      return (
-        frame.source_event_id !== undefined &&
-        frame.source_event_id !== "" &&
-        frame.dedupe_key === `${frame.source}.${frame.source_event_id}`
-      );
-    default:
-      return false;
-  }
-}
-
 /**
  * A host's record of the frames it handed its agent, which drops a repeat. The whole promise it is
  * part of is stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`; every host that
  * subscribes over core NATS (the Oh My Pi extension, the Claude Code channel) keeps one.
+ *
+ * A host claims a frame before anything it awaits, so a repeat that arrives while the first is
+ * still being delivered (on an overlapping subscription, or behind a Dispatch reply in flight) is
+ * already a repeat. It releases the claim when its agent was not handed the frame after all: the
+ * hand-off threw, or the host answered the frame with an error instead (a BTW whose side turn
+ * failed, a frame it could not read). Dispatch records that attempt failed and offers a same-mode
+ * Retry, which must then reach the agent.
  */
 export interface DeliveryDedupe {
-  /** Whether a frame under this dedupe key was already handed to the agent and is still remembered. */
-  isRepeat(frame: DedupeIdentity | undefined): boolean;
-  /** Records a frame handed to the agent. */
-  remember(frame: DedupeIdentity | undefined): void;
-  /** Drops a frame whose delivery failed, so the agent still gets it when it is sent again. */
-  forget(frame: DedupeIdentity | undefined): void;
+  /**
+   * Records the frame's dedupe key and answers whether the agent should be handed it: `false` for
+   * a key that names its event and was claimed inside the window, `true` for any other frame.
+   */
+  claim(frame: DedupeIdentity | undefined): boolean;
+  /**
+   * Undoes the claim of a frame the agent was not handed, so it still arrives when it is sent
+   * again.
+   */
+  release(frame: DedupeIdentity | undefined): void;
 }
 
 /**
- * A key that names its event is remembered for `DELIVERY_DUPLICATE_WINDOW_MS`, the window the retry
- * promise is made for. Any other key is remembered only among the latest 1,000: some producers mint
- * a key two distinct events share (the MCP bridge's content hash), and a long window would silence
- * the later one.
+ * Only a key that names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`) is recorded,
+ * for `DELIVERY_DUPLICATE_WINDOW_MS`, the window the retry promise is made for. Any other key is not
+ * a dedupe key, and dropping on it would lose a distinct event that shares it.
+ *
+ * A key is kept no longer than the window, because a repeat never refreshes it and every claim
+ * first evicts the keys past the window, so the record holds at most the keys the host was handed
+ * in the last 72 hours. A clock that steps backwards keeps a key longer by the size of the step.
  */
 export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
   // Insertion order is delivery order, so the entries past the window are always at the front.
-  const named = new Map<string, number>();
-  const unnamed = new Set<string>();
+  const claimed = new Map<string, number>();
   return {
-    isRepeat(frame) {
+    claim(frame) {
       const key = frame?.dedupe_key;
-      if (key === undefined) return false;
-      const at = named.get(key);
-      return (at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS) || unnamed.has(key);
-    },
-    remember(frame) {
-      const key = frame?.dedupe_key;
-      if (frame === undefined || key === undefined) return;
-      if (!keyNamesTheEvent(frame)) {
-        unnamed.delete(key);
-        unnamed.add(key);
-        if (unnamed.size > UNNAMED_KEYS_REMEMBERED) {
-          const oldest = unnamed.values().next();
-          if (!oldest.done) unnamed.delete(oldest.value);
-        }
-        return;
-      }
+      if (frame === undefined || key === undefined || !dedupeKeyNamesItsEvent(frame)) return true;
       const at = now();
-      for (const [oldest, deliveredAt] of named) {
+      const claimedAt = claimed.get(key);
+      if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) return false;
+      for (const [oldest, deliveredAt] of claimed) {
         if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS) break;
-        named.delete(oldest);
+        claimed.delete(oldest);
       }
-      named.delete(key);
-      named.set(key, at);
+      claimed.delete(key);
+      claimed.set(key, at);
+      return true;
     },
-    forget(frame) {
-      if (frame?.dedupe_key === undefined) return;
-      named.delete(frame.dedupe_key);
-      unnamed.delete(frame.dedupe_key);
+    release(frame) {
+      if (frame?.dedupe_key !== undefined) claimed.delete(frame.dedupe_key);
     },
   };
 }

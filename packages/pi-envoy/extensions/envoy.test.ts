@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -401,16 +402,19 @@ function commandContext(notifications: string[]): CommandContext {
   };
 }
 
-function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string) {
+// The role arbiter forwards an envelope under its original key behind the forward mark, and a
+// publish the daemon makes carries a key the listener minted, 32 hex digits: `label` stands for it.
+function forwardedRoleEnvelope(role: string, summary: string, label: string) {
+  const minted = createHash("sha256").update(label).digest("hex").slice(0, 32);
   return JSON.stringify({
-    event_id: `evt-${dedupeKey}`,
+    event_id: `evt-${label}`,
     source: "envoy",
-    source_event_id: `source-${dedupeKey}`,
+    source_event_id: `source-${label}`,
     topic: `notifications.role.${role}`,
-    dedupe_key: `envoy.role.forward.${dedupeKey}`,
+    dedupe_key: `envoy.role.forward.publish.${minted}`,
     issued_at: 1,
     payload_summary: summary,
-    trace_id: `trace-${dedupeKey}`,
+    trace_id: `trace-${label}`,
   });
 }
 
@@ -3296,7 +3300,7 @@ describe("envoy OMP extension", () => {
       summary: "note to self",
     });
   });
-  test("deduplicates a dispatch event without suppressing a later envelope", async () => {
+  test("deduplicates a webhook redelivery without suppressing a later envelope", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-echo");
     const fixture = createPi();
     const afterEcho = Promise.withResolvers<void>();
@@ -3311,32 +3315,22 @@ describe("envoy OMP extension", () => {
     const agent = natsState.controls.get("notifications.agent.ses_omp");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
-    agent.push(
-      JSON.stringify({
-        event_id: "evt-dispatch-echo",
-        source: "github",
-        source_event_id: "github-dispatch-echo",
-        topic: "notifications.agent.ses_omp",
-        dedupe_key: "github.dispatch.echo",
-        issued_at: 1,
-        payload_summary: "Keep the thread open?",
-        payload: JSON.stringify({}),
-        trace_id: "trace-dispatch-echo",
-      })
-    );
-    agent.push(
-      JSON.stringify({
-        event_id: "evt-dispatch-later-copy",
-        source: "github",
-        source_event_id: "github-dispatch-later-copy",
-        topic: "notifications.agent.ses_omp",
-        dedupe_key: "github.dispatch.echo",
-        issued_at: 1,
-        payload_summary: "Keep the thread open?",
-        payload: JSON.stringify({}),
-        trace_id: "trace-dispatch-later-copy",
-      })
-    );
+    // GitHub redelivers one delivery id under a new event id: the key names the delivery.
+    for (const eventID of ["evt-webhook-echo", "evt-webhook-redelivery"]) {
+      agent.push(
+        JSON.stringify({
+          event_id: eventID,
+          source: "github",
+          source_event_id: "webhook-echo",
+          topic: "notifications.agent.ses_omp",
+          dedupe_key: "github.webhook-echo",
+          issued_at: 1,
+          payload_summary: "Keep the thread open?",
+          payload: JSON.stringify({}),
+          trace_id: `trace-${eventID}`,
+        })
+      );
+    }
     agent.push(
       JSON.stringify({
         event_id: "evt-after-dispatch-echo",
@@ -4499,6 +4493,59 @@ describe("envoy OMP extension", () => {
       },
     ]);
     expect(fixture.deliveries).toEqual([]);
+  });
+
+  // Dispatch records a BTW answered with an error as failed and offers a same-mode Retry, which
+  // repeats the attempt's dedupe key. The agent never answered the first, so the Retry has to run
+  // the side turn again; a repeat of one that was answered is still dropped.
+  test("runs a BTW side turn again for a Retry of one whose side turn failed", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const replies: unknown[] = [];
+    let posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      if (
+        new URL(input.toString()).pathname ===
+        "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
+      ) {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-retry");
+    const fixture = createPi();
+    let sideTurns = 0;
+    envoyExtension({
+      ...fixture.pi,
+      askEphemeral: async () => {
+        sideTurns += 1;
+        if (sideTurns === 1) throw new Error("No API key for provider: openai");
+        return { replyText: `Answer ${sideTurns}` };
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    const send = async (dedupeKey: string): Promise<void> => {
+      posted = Promise.withResolvers<void>();
+      agent.push(targetedDispatchEnvelope("btw", dedupeKey));
+      await posted.promise;
+    };
+
+    await send("targeted-btw-retry");
+    await send("targeted-btw-retry");
+    // Answered now: a third copy is a repeat and runs nothing, so the next reply is the sentinel's.
+    agent.push(targetedDispatchEnvelope("btw", "targeted-btw-retry"));
+    await send("targeted-btw-sentinel");
+
+    expect(sideTurns).toBe(3);
+    const actor = { id: "ses_delivery", kind: "session" };
+    expect(replies).toEqual([
+      { actor, attempt: 1, error: "No API key for provider: openai" },
+      { actor, attempt: 1, body: "Answer 2" },
+      { actor, attempt: 1, body: "Answer 3" },
+    ]);
   });
 
   test("answers a targeted BTW through the session context's runEphemeralTurn in the /btw prompt", async () => {

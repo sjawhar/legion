@@ -8,6 +8,7 @@ import {
   RECEIPT_TIMEOUT_CAUSE,
 } from "../src/dispatch-api";
 import { SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
+import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -81,6 +82,12 @@ const RoleTopicPrefix = "notifications.role."
 // DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, whose doc comment states the retry promise
 // this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = ${DELIVERY_DUPLICATE_WINDOW_MS} * time.Millisecond
+
+// MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
+// or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
+// naming its event. Generated from MINTED_DEDUPE_KEY_PATTERN in packages/contracts, which the
+// hosts' dedupe reads too, so the stream and the hosts answer one question the same way.
+const MintedDedupeKeyPattern = ${JSON.stringify(MINTED_DEDUPE_KEY_PATTERN)}
 
 // ReceiptTimeoutCause is what a delivery attempt records when the listener never answered its
 // send. Generated from RECEIPT_TIMEOUT_CAUSE in packages/contracts so the string Dispatch writes

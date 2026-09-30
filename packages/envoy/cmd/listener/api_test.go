@@ -1823,9 +1823,10 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 
 // LEGION-271. The send handler publishes before it answers, so a caller whose window expires
 // cannot tell whether the message landed. Its retry under the same idempotency key is a
-// JetStream duplicate and reaches the agent no second time; the answer has to say so, or
+// JetStream duplicate, which the stream stores no second time; the answer has to say so, or
 // Dispatch records the retry as an ordinary send and the attempt history claims a delivery that
-// never happened. An agent-sourced send carries no MsgId, so it can never be one.
+// never happened. A send under a key its caller chose carries no MsgId, so it can never be one;
+// a key minted once for its message can.
 func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
@@ -1864,11 +1865,22 @@ func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 		t.Fatalf("a different idempotency key must not answer duplicate: %+v", fresh)
 	}
 
-	// An agent-sourced send carries no MsgId, so the stream cannot recognise a repeat.
+	// An agent-sourced send under a key its caller chose carries no MsgId, so the stream cannot
+	// recognise a repeat.
 	const agentSend = `{"target_session":"ses_target","source":"agent","message":"ship it","idempotency_key":"agent-dup:steer"}`
 	send(t, agentSend)
 	if repeated := send(t, agentSend); repeated.Duplicate {
-		t.Fatalf("an agent-sourced send cannot be a duplicate: %+v", repeated)
+		t.Fatalf("an agent-sourced send under its caller's own key cannot be a duplicate: %+v", repeated)
+	}
+
+	// The shared transport mints a UUID idempotency key once per message and re-sends under it only
+	// when the answer to a send that landed was lost, so that key names its event.
+	const transportSend = `{"target_session":"ses_target","source":"agent","message":"ship it","idempotency_key":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}`
+	if first := send(t, transportSend); first.Duplicate {
+		t.Fatalf("first transport send reported a duplicate; the stream held nothing")
+	}
+	if repeated := send(t, transportSend); !repeated.Duplicate {
+		t.Fatalf("the transport's re-send under its minted key must answer duplicate: %+v", repeated)
 	}
 }
 func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {

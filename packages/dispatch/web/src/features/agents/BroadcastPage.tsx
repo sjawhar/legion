@@ -25,7 +25,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
-import { insideDuplicateWindow } from "../conversation/delivery";
+import { strandedRetryGuidance } from "../conversation/delivery";
 import {
   capabilitiesForTarget,
   DeliveryRetry,
@@ -106,8 +106,8 @@ function BroadcastRecipientRow({
         />
       )}
       {answeredBy !== undefined || latest?.state === "sent" ? null : latest?.state === "failed" ? (
-        // A failure is settled news: the same-mode retry the stream deduplicates, and, since
-        // nothing is outstanding, the mode-change sends too.
+        // A failure is settled news: the same-mode retry, whose promise is `offersSafeRetry`'s,
+        // and, since nothing is outstanding, the mode-change sends too.
         <DeliveryRetry
           canAside={capabilities?.includes("aside") !== false}
           canBtw={capabilities?.includes("btw") !== false}
@@ -132,9 +132,7 @@ function BroadcastRecipientRow({
             Retry
           </button>
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
-            {latest === undefined || insideDuplicateWindow(latest.createdAt)
-              ? `Nobody is carrying this send. Retry uses ${latest?.delivery ?? delivery} again, which cannot deliver it twice.`
-              : `Nobody is carrying this send. Retry uses ${latest.delivery} again, and may deliver it twice: the send is older than the window in which a repeat is recognised.`}
+            {strandedRetryGuidance(latest?.delivery ?? delivery, latest?.createdAt)}
           </p>
         </div>
       ) : null}

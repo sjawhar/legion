@@ -216,10 +216,11 @@ func (s *server) recordPendingMessageDelivery(
 			break
 		}
 		// The same mode: resume it under its original number, and so its original
-		// idempotency key, which the stream deduplicates against a send that did land. An
-		// attempt that already names a session keeps it; one stranded before anything was
-		// resolved takes the recipient this resolution found, so the row names the session
-		// its frame is going to either way and that session can answer it.
+		// idempotency key, whose repeat of a send that did land is recognised and dropped
+		// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). An attempt that already names
+		// a session keeps it; one stranded before anything was resolved takes the recipient
+		// this resolution found, so the row names the session its frame is going to either
+		// way and that session can answer it.
 		pending.attempt = stranded.Attempt
 		if err := tx.QueryRow(ctx, `
 			update message_deliveries

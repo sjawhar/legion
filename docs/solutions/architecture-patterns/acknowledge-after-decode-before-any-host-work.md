@@ -65,9 +65,10 @@ Three consequences of the placement, each deliberate:
   share one `try/catch` because their consequence is identical — no receipt reaches the listener —
   and so is the response: log with the event id, continue. A thrown receipt must not lose the
   message locally. Splitting the two failure modes adds nothing a reader of the log could act on.
-- **Dedupe is untouched.** `delivered.remember(…)` (the shared `createDeliveryDedupe`) still runs only after a successful injection. The
-  daemon's re-send path (LEGION-107) relies on that: a copy that did arrive is acknowledged and
-  dropped by the receiver; one whose injection threw is unrecorded, so a re-send injects it.
+- **Dedupe is untouched.** The receipt says nothing to the shared `createDeliveryDedupe`: the host
+  claims the key before the injection and releases it when the injection throws. The daemon's
+  re-send path (LEGION-107) relies on that: a copy that did arrive is acknowledged and dropped by
+  the receiver; one whose injection threw is released, so a re-send injects it.
 
 ## Name what the move makes silent
 

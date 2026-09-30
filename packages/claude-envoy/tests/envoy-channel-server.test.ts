@@ -28,10 +28,13 @@ import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
 
-/** A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for. */
+/**
+ * A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for,
+ * under the key the listener minted for the publish behind the arbiter's forward mark.
+ */
 const roleForwardRaw = JSON.stringify({
   event_id: "evt-role-7",
-  dedupe_key: "envoy.role.forward.role-7",
+  dedupe_key: "envoy.role.forward.publish.0123456789abcdef0123456789abcdef",
   source: "agent",
   source_session: "ses_sender",
   topic: "notifications.role.reviewer",
@@ -107,6 +110,7 @@ test("enqueues a forwarded role-lane event before publishing its adapter receipt
   const delivery = {
     enqueue: async () => {
       nats.order.push("enqueue")
+      return true
     },
     announceFollow: async () => undefined,
     inbox: () => [],
@@ -133,6 +137,7 @@ test("never answers the reply inbox of a JetStream publish to the direct subject
   const delivery = {
     enqueue: async () => {
       nats.order.push("enqueue")
+      return true
     },
     announceFollow: async () => undefined,
     inbox: () => [],
@@ -264,8 +269,11 @@ test("a send whose notification failed is delivered when it is sent again", asyn
     await settled()
     nats.emit(directSubject, listenerSend("retry"))
     await settled()
+    nats.emit(directSubject, listenerSend("third"))
+    await settled()
 
-    // Claude never saw the first send, so its key must not turn the second away as a repeat.
+    // Claude never saw the first send, so its key must not turn the second away as a repeat; it
+    // did see the second, so the third is one.
     expect(delivered).toEqual(["evt-retry"])
   } finally {
     await session.shutdown()
@@ -438,7 +446,9 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
   })
 
   try {
-    await delivery.enqueue({ subject: directSubject, raw: rejectedFrameRaw })
+    // Not handed to Claude Code, so the forwarder releases its claim: Dispatch records the attempt
+    // failed, and a same-mode Retry is answered again rather than dropped as a repeat.
+    expect(await delivery.enqueue({ subject: directSubject, raw: rejectedFrameRaw })).toBe(false)
 
     expect(notifier.notifications).toEqual([])
     expect(replies).toEqual([

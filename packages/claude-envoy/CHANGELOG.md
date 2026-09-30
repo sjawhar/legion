@@ -9,10 +9,14 @@
   message that had already reached the session arrived as a new event and was notified again, while the
   dashboard promised "Retry won't deliver it twice". The channel now recognises a repeat by its
   `dedupe_key`, which a Retry shares with the send before it, through the same
-  `createDeliveryDedupe` the Oh My Pi extension uses: a Dispatch key is remembered for the 72-hour
-  duplicate window, any key that does not name its event among the latest 1,000, and a send whose notification failed
-  is forgotten, so its re-send still arrives. Keys live in memory; a restarted channel server
-  forgets them.
+  `createDeliveryDedupe` the Oh My Pi extension uses, for the 72-hour duplicate window and only for
+  a key that names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`): every Dispatch key,
+  a webhook key of its delivery id, and a key the listener or the shared transport minted once for
+  its message. Any other key is never dropped, so two distinct events that share one (the MCP
+  bridge's, the Go daemon's outbox row id) both arrive. A send whose notification failed, or a
+  Dispatch frame the channel answered with an error instead of showing it, is released, so its
+  re-send still arrives. Keys live in memory; a restarted channel server (`claude --resume`
+  included) forgets them.
 
 ## [0.5.0]
 

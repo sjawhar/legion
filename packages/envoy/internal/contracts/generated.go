@@ -138,6 +138,12 @@ const RoleTopicPrefix = "notifications.role."
 // this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = 259200000 * time.Millisecond
 
+// MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
+// or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
+// naming its event. Generated from MINTED_DEDUPE_KEY_PATTERN in packages/contracts, which the
+// hosts' dedupe reads too, so the stream and the hosts answer one question the same way.
+const MintedDedupeKeyPattern = "^(?:envoy\\.role\\.forward\\.)?(?:publish|agent\\.[^.]+)\\.(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+
 // ReceiptTimeoutCause is what a delivery attempt records when the listener never answered its
 // send. Generated from RECEIPT_TIMEOUT_CAUSE in packages/contracts so the string Dispatch writes
 // and the string the dashboard keys its retry wording on cannot drift apart.

@@ -6,11 +6,13 @@ import { FakeNatsServer } from "./fake-nats-server"
 const THREAD = "notifications.github.acme-org.example-repo.issue.3.>"
 const COMMENT = "notifications.github.acme-org.example-repo.issue.3.comment"
 
+// A webhook envelope as the normalizers mint it: its key is the source plus the delivery id.
 function envelope(eventId: string): string {
   return JSON.stringify({
     event_id: eventId,
-    dedupe_key: `delivery-${eventId}`,
+    dedupe_key: `github.delivery-${eventId}`,
     source: "github",
+    source_event_id: `delivery-${eventId}`,
     topic: THREAD,
     payload_summary: `event ${eventId}`,
   })
@@ -25,12 +27,13 @@ test("delivers each dedupe key once even when concrete and wildcard subscription
   const second = Promise.withResolvers<void>()
   const forwarder = createChannelForwarder(connection, {
     deliver: async (message) => {
-      if (message.duplicate) return
+      if (message.duplicate) return false
       // Real nats.js messages: subject, data, and the envelope topic must all survive.
       subjects.push(message.subject)
       envelopeTopics.push(message.envelopeTopic)
       received.push(new TextDecoder().decode(message.data))
       if (received.length === 2) second.resolve()
+      return true
     },
   })
 
@@ -54,7 +57,7 @@ test("delivers each dedupe key once even when concrete and wildcard subscription
 test("closes all NATS subscriptions and the connection during channel shutdown", async () => {
   const broker = new FakeNatsServer()
   const connection = await connect({ servers: broker.url })
-  const forwarder = createChannelForwarder(connection, { deliver: async () => undefined })
+  const forwarder = createChannelForwarder(connection, { deliver: async () => true })
 
   try {
     forwarder.follow(THREAD)
@@ -74,7 +77,7 @@ test("closes all NATS subscriptions and the connection during channel shutdown",
 test("unfollow drops a topic from topics() before it waits for the drain", async () => {
   const broker = new FakeNatsServer()
   const connection = await connect({ servers: broker.url })
-  const forwarder = createChannelForwarder(connection, { deliver: async () => undefined })
+  const forwarder = createChannelForwarder(connection, { deliver: async () => true })
 
   try {
     forwarder.follow(COMMENT)

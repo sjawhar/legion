@@ -59,9 +59,9 @@ func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
 		t.Fatalf("a different dedupe key must not report a duplicate")
 	}
 
-	// An agent-sourced envelope carries no MsgId at all, because its key names no upstream event
-	// (contracts.DedupeKeyNamesTheUpstreamEvent), so the stream cannot recognise a repeat and never
-	// reports one.
+	// An agent-sourced envelope under a key its caller chose carries no MsgId at all, because
+	// that key names no event (contracts.DedupeKeyNamesTheUpstreamEvent), so the stream cannot
+	// recognise a repeat and never reports one.
 	agent := envelope("fourth")
 	agent.Source = "agent"
 	agent.Topic = "notifications.agent.ses_dup"

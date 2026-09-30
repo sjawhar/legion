@@ -29,10 +29,15 @@
 ### Fixed
 
 - `createDeliveryDedupe` replaces `rememberBounded` as the one dedupe both core-NATS hosts keep: it
-  recognises a repeat by `dedupe_key` alone, remembers a key that names its event (every Dispatch
-  key, a webhook key equal to its source and delivery id) for `DELIVERY_DUPLICATE_WINDOW_MS` and any
-  other among the latest 1,000, and a host `forget`s the key of a delivery that failed so its
-  re-send still arrives.
+  recognises a repeat by `dedupe_key` alone, and only for a key that names its event
+  (`dedupeKeyNamesItsEvent` in `@legion/contracts`: every Dispatch key, a webhook key of its
+  delivery id, a key the listener or this package's transport minted once for its message), which
+  it remembers for `DELIVERY_DUPLICATE_WINDOW_MS`. Any other key is never a repeat: the latest-1,000
+  memory it replaces dropped a later event that shared a key with an earlier one (the MCP bridge's
+  content hash, the Go daemon's outbox row id). A host `claim`s a frame before anything it
+  awaits, which records the key and says whether the frame is a repeat in one step, and
+  `release`s the claim of a frame its agent was not handed (a delivery that threw, a frame it
+  answered with an error) so its re-send still arrives.
 - `getArchitectureSource` reads both answers a server gives for a project with no architecture
   source as `null`: a current server's `200 null` and an older server's `404 SOURCE_NOT_FOUND`.
   A client meets both while a rollout mixes versions. Before, only `200 null` read as none, so

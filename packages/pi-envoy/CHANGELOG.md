@@ -113,13 +113,21 @@
 
 ### Fixed
 
-- A session remembers the dedupe key of every Dispatch frame (and every webhook frame keyed by its
-  delivery id) for the 72-hour duplicate window (`DELIVERY_DUPLICATE_WINDOW_MS`), where it kept only
-  the latest 1,000; other keys keep that bound. A session that
-  follows a busy repository's topics saw those 1,000 in about an hour, so a Dispatch Retry made
-  later than that reached the agent a second time while the dashboard promised it would not. The
-  keys still live in memory, so a restarted session no longer recognises a frame it received
-  before the restart.
+- A session drops a repeated dedupe key only when the key names its event
+  (`dedupeKeyNamesItsEvent` in `@legion/contracts`: every Dispatch key, a webhook key of its
+  delivery id, a key the listener or the shared transport minted once for its message), and
+  remembers it for the 72-hour duplicate window (`DELIVERY_DUPLICATE_WINDOW_MS`). It kept every key
+  among the latest 1,000, which failed both ways: a session that follows a busy repository's topics
+  saw those 1,000 in about an hour, so a Dispatch Retry made later than that reached the agent a
+  second time while the dashboard promised it would not; and two distinct events under one key (the
+  MCP bridge's content hash, the Go daemon's outbox row id, which starts over with each new store)
+  lost the later one. The keys still live in memory, so a restarted session no longer recognises a
+  frame it received before the restart. A frame's key is now recorded before its delivery awaits
+  anything, where it was recorded once the delivery finished, so a repeat that arrives while a BTW
+  answer or a Dispatch reply is still in flight is dropped too; a delivery that throws, or that
+  ends in an error reply (a BTW whose side turn failed, a malformed frame), leaves the key
+  unrecorded, so the Retry Dispatch offers for that failed attempt runs the side turn again. Before,
+  that Retry was dropped as a repeat and nothing answered it.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
