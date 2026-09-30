@@ -116,14 +116,18 @@ func (m *Machine) suspended(ctx context.Context) error {
 
 // suspendHeld runs the held suspension's stop. One the runtime refuses stays held and is tried
 // again at the probe interval, as the registration deadline retries its own: the operator's
-// suspend, answered 202, has nothing else to retry it.
+// suspend, answered 202, has nothing else to retry it. A stop that landed has let the process go
+// and the hold with it (letGo), whether or not its write then failed; nothing is retried then, and
+// m.held is nil — which is how a caller tells the two apart.
 func (m *Machine) suspendHeld(ctx context.Context) error {
 	request := m.held
 	if request == nil {
 		return fmt.Errorf("supervise: no suspension of %s is held", m.claim.Token)
 	}
 	if err := m.suspendNow(ctx, *request); err != nil {
-		m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
+		if m.held != nil {
+			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
+		}
 		return err
 	}
 	return nil

@@ -785,12 +785,16 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
 	if m.held != nil {
-		err := m.suspendHeld(ctx)
-		if err == nil {
-			return nil
+		if err := m.suspendHeld(ctx); err != nil {
+			if m.held == nil {
+				// The stop landed and let the process go; only its write failed, and the claim is
+				// suspended in memory (suspended).
+				return err
+			}
+			m.claim.State = StateIdle
+			return errors.Join(err, m.persist(ctx))
 		}
-		m.claim.State = StateIdle
-		return errors.Join(err, m.persist(ctx))
+		return nil
 	}
 	m.claim.State = StateIdle
 	if err := m.persist(ctx); err != nil {

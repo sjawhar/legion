@@ -117,6 +117,28 @@ func TestAHeldSuspensionWhoseStopFailsIsTriedAgainUntilItLands(t *testing.T) {
 	}
 }
 
+// A held suspension whose stop lands at the turn's end but whose write fails leaves the claim
+// suspended in memory, its process let go (suspended), not idle: an idle claim with no locator is
+// one the next connection close would probe through a nil locator, crashing the daemon.
+func TestAHeldSuspensionWhoseStopLandsButWhoseWriteFailsStaysSuspended(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateWorking)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
+	}
+	h.store.fail("PutClaim", errBoom)
+
+	if err := h.handle(StreamTurnEnd{Claim: testToken}); !errors.Is(err, errBoom) {
+		t.Fatalf("turn end with a failing write returned %v, want the store's error", err)
+	}
+	h.store.fail("PutClaim", nil)
+	h.must(StreamClosed{Claim: testToken})
+
+	h.wantState(StateSuspended)
+	h.wantCalls("Suspend", 1)
+	h.wantCalls("Probe", 0)
+}
+
 // A start run against the claim while its suspension is held hands it work again: the suspension it
 // supersedes neither runs at the turn's end nor at the stop timeout, as the outbox finishes a
 // suspend older than the newest start without acting (workflow.StopActs).
