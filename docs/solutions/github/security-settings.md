@@ -13,12 +13,16 @@ status: "active"
 | Setting | What it does | Who can change it |
 | --- | --- | --- |
 | Secret scanning | GitHub scans pushed content for credentials and raises alerts | a repository admin |
-| Push protection | refuses a push (git or REST) that contains a supported credential pattern, for every pusher | a repository admin |
+| Push protection | blocks a push (git, the web editor or REST) that contains a supported credential pattern | a repository admin |
 | Private vulnerability reporting | gives an outside reporter a private *Report a vulnerability* channel | a repository admin |
 
-Push protection is repository-wide with delegated bypass off: there is no bypass list.
-Non-provider (generic) patterns such as private keys stay disabled, so the fake PEM in
-`packages/daemon/src/daemon/__tests__/config.test.ts` is not refused.
+Push protection is a block with a bypass, not a hard refusal. By default anyone with write access
+can push past a block by giving a reason (used in tests, a false positive, or fix it later), and
+GitHub records each bypass as a secret-scanning alert and in the audit log, and emails the
+repository's watching admins. Delegated bypass is the setting that narrows who may bypass; the
+settings script reports its state and never changes it. Non-provider (generic) patterns such as
+private keys stay disabled, so the fake PEM in
+`packages/daemon/src/daemon/__tests__/config.test.ts` is not blocked.
 
 Only an admin reads or writes `security_and_analysis` and enables private vulnerability
 reporting. An agent session's `gh` acts as the owner's GitHub App: it reads
@@ -26,24 +30,18 @@ reporting. An agent session's `gh` acts as the owner's GitHub App: it reads
 private-vulnerability-reporting status but not change it.
 
 `scripts/security-settings.sh` is the recorded form of these settings. It reads the current
-state, prints it, and by default prints the command it would run:
+state, prints it, and by default prints the exact command it would send; that dry run is the one
+copy of the commands, which an admin can also run by hand from a shell where `gh auth status`
+shows their own login:
 
 ```bash
 scripts/security-settings.sh                                    # secret scanning and push protection
 scripts/security-settings.sh --private-vulnerability-reporting  # private vulnerability reporting
 APPLY_SECURITY_SETTINGS=1 scripts/security-settings.sh          # applies, then refuses unless a readback shows it
+scripts/security-settings.sh --help                             # its modes
 ```
 
-The two commands it runs, which an admin can also run by hand from a shell where
-`gh auth status` shows their own login:
-
-```bash
-gh api --method PATCH repos/sjawhar/legion --input - <<<'{"security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}' --jq .security_and_analysis
-gh api --method PUT repos/sjawhar/legion/private-vulnerability-reporting
-```
-
-It also warns when push protection's delegated bypass is on, and when CodeQL default setup is
-configured.
+It also warns when CodeQL default setup is configured.
 
 ## CodeQL
 

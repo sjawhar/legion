@@ -3,19 +3,25 @@
 #
 #   scripts/security-settings.sh                                   secret scanning + push protection
 #   scripts/security-settings.sh --private-vulnerability-reporting private vulnerability reporting
+#   scripts/security-settings.sh --help                            this text
 #
-# Both modes read the current state first — security_and_analysis, private vulnerability
-# reporting and CodeQL default setup — print it, and then either say there is nothing to change,
-# print the exact command (a dry run, the default), or, with APPLY_SECURITY_SETTINGS=1, send it and
-# refuse unless a readback shows the requested state. The printed commands are the ones the
-# settings asks on AGENTC-1305 carry, so the asks and this script cannot drift.
+# Each mode reads the current state first (security_and_analysis, private vulnerability reporting
+# and CodeQL default setup) and prints it. Then it says there is nothing to change, or prints the
+# exact command it would send (a dry run, the default), or, with APPLY_SECURITY_SETTINGS=1, sends
+# it and refuses unless a readback shows the requested state. The dry run is where the commands
+# are written down: the settings asks on AGENTC-1305 carry its output, and
+# docs/solutions/github/security-settings.md points to it rather than copying it.
+#
+# Push protection blocks a push that carries a supported credential. By default anyone with write
+# access can bypass a block by giving a reason, which GitHub records as a secret-scanning alert and
+# in the audit log. Delegated bypass is the setting that narrows who may bypass; this script
+# reports its state and never changes it.
 #
 # Only a repository admin reads or writes security_and_analysis and enables private vulnerability
 # reporting. An agent session's gh acts as the owner's GitHub App, which reads
 # security_and_analysis as null and whose writes GitHub refuses with 403, so the first mode stops
 # before any write when it reads null; the App can read private vulnerability reporting, so the
-# second mode still prints its state and the command. See
-# docs/solutions/github/security-settings.md.
+# second mode still prints its state and the command.
 #
 # SECURITY_SETTINGS_REPOSITORY overrides the repository (default sjawhar/legion).
 set -euo pipefail
@@ -39,7 +45,7 @@ case "${1:-}" in
   "") ;;
   --private-vulnerability-reporting) mode=private-vulnerability-reporting ;;
   -h | --help)
-    sed -n '2,20s/^# \{0,1\}//p' "$0"
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
     exit 0
     ;;
   *) die "unknown argument: $1 (see $0 --help)" ;;
@@ -114,40 +120,42 @@ printf '%s\n' "Security settings for ${repository}:" \
 if [[ "$default_setup" == configured ]]; then
   printf '%s\n' "warning: CodeQL default setup is configured; GitHub refuses the advanced-setup analyses .github/workflows/codeql.yaml uploads while it is. Turn it off as an admin: gh api --method PATCH repos/${repository}/code-scanning/default-setup -f state=not-configured"
 fi
-if [[ "$delegated_bypass" == enabled ]]; then
-  printf '%s\n' "warning: push protection's delegated bypass is enabled; this repository's policy is push protection with no bypass list (docs/solutions/github/security-settings.md)"
-fi
+
+# The modes' one flow. A mode defines requested (true when the state it asks for holds), send (its
+# one request), refresh (re-reads that state) and readback (prints it), then calls apply_mode with
+# the state it asks for, the command a dry run prints, and its flag.
+apply_mode() { # apply_mode WHAT COMMAND [FLAG]
+  local what=$1 command=$2 flag=${3:-}
+  if requested; then
+    printf 'nothing to change: %s\n' "$what"
+    return
+  fi
+  if [[ "${APPLY_SECURITY_SETTINGS:-}" != 1 ]]; then
+    printf '%s\n' "Dry run: no request sent. As a repository admin, run APPLY_SECURITY_SETTINGS=1 $0${flag:+ $flag}, or:" \
+      "  ${command}"
+    return
+  fi
+  send
+  refresh
+  printf '%s\n' "Applied; readback:"
+  readback
+  requested || die "the readback does not show ${what}"
+}
 
 if [[ "$mode" == secret-scanning ]]; then
-  if [[ "$secret_scanning" == enabled && "$push_protection" == enabled ]]; then
-    printf '%s\n' "nothing to change: secret scanning and push protection are enabled"
-    exit 0
-  fi
-  if [[ "${APPLY_SECURITY_SETTINGS:-}" != 1 ]]; then
-    printf '%s\n' "Dry run: no request sent. As a repository admin, run APPLY_SECURITY_SETTINGS=1 $0, or:" \
-      "  ${patch_command}"
-    exit 0
-  fi
-  gh api --method PATCH "repos/${repository}" --input - <<<"$patch_body" --jq .security_and_analysis >/dev/null
-  security_and_analysis=$(read_security_and_analysis)
-  secret_scanning=$(status_of "$security_and_analysis" secret_scanning)
-  push_protection=$(status_of "$security_and_analysis" secret_scanning_push_protection)
-  printf '%s\n' "Applied; readback:" "  secret scanning: ${secret_scanning}" "  push protection: ${push_protection}"
-  [[ "$secret_scanning" == enabled && "$push_protection" == enabled ]] ||
-    die "the readback does not show secret scanning and push protection enabled"
+  requested() { [[ "$secret_scanning" == enabled && "$push_protection" == enabled ]]; }
+  send() { gh api --method PATCH "repos/${repository}" --input - <<<"$patch_body" --jq .security_and_analysis >/dev/null; }
+  refresh() {
+    security_and_analysis=$(read_security_and_analysis)
+    secret_scanning=$(status_of "$security_and_analysis" secret_scanning)
+    push_protection=$(status_of "$security_and_analysis" secret_scanning_push_protection)
+  }
+  readback() { printf '%s\n' "  secret scanning: ${secret_scanning}" "  push protection: ${push_protection}"; }
+  apply_mode "secret scanning and push protection enabled" "$patch_command"
 else
-  if [[ "$private_vulnerability_reporting" == enabled ]]; then
-    printf '%s\n' "nothing to change: private vulnerability reporting is enabled"
-    exit 0
-  fi
-  if [[ "${APPLY_SECURITY_SETTINGS:-}" != 1 ]]; then
-    printf '%s\n' "Dry run: no request sent. As a repository admin, run APPLY_SECURITY_SETTINGS=1 $0 --private-vulnerability-reporting, or:" \
-      "  ${put_command}"
-    exit 0
-  fi
-  gh api --method PUT "repos/${repository}/private-vulnerability-reporting"
-  private_vulnerability_reporting=$(read_private_vulnerability_reporting)
-  printf '%s\n' "Applied; readback:" "  private vulnerability reporting: ${private_vulnerability_reporting}"
-  [[ "$private_vulnerability_reporting" == enabled ]] ||
-    die "the readback does not show private vulnerability reporting enabled"
+  requested() { [[ "$private_vulnerability_reporting" == enabled ]]; }
+  send() { gh api --method PUT "repos/${repository}/private-vulnerability-reporting"; }
+  refresh() { private_vulnerability_reporting=$(read_private_vulnerability_reporting); }
+  readback() { printf '%s\n' "  private vulnerability reporting: ${private_vulnerability_reporting}"; }
+  apply_mode "private vulnerability reporting enabled" "$put_command" --private-vulnerability-reporting
 fi

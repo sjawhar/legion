@@ -177,11 +177,12 @@ check "exits 0" "$(is "$rc" 0)"
 check "says default setup is configured" "$(has "$output" "default setup is configured")"
 check "names codeql.yaml" "$(has "$output" "codeql.yaml")"
 
-echo "=== 7. delegated bypass enabled: warned ==="
+echo "=== 7. delegated bypass enabled: reported, never warned against ==="
 fixture bypass enabled enabled enabled true not-configured
 settings bypass
 check "exits 0" "$(is "$rc" 0)"
-check "says delegated bypass is enabled" "$(has "$output" "delegated bypass is enabled")"
+check "reports it" "$(has "$output" "push protection delegated bypass: enabled")"
+check "does not warn against the setting that narrows who may bypass" "$(is "$(has "$output" "warning:")" false)"
 
 echo "=== 8. --private-vulnerability-reporting as a caller that is not an admin: a dry run ==="
 fixture pvr-app null null null false 403
@@ -198,5 +199,14 @@ touch "$work/ignored/ignore-writes"
 APPLY=1 settings ignored
 check "exits 1" "$(is "$rc" 1)"
 check "names the readback" "$(has "$output" "readback")"
+
+echo "=== 10. --help prints the whole header comment and none of the code ==="
+fixture help enabled enabled disabled true not-configured
+settings help --help
+header=$(awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$settings")
+check "exits 0" "$(is "$rc" 0)"
+check "prints every header line, the last included" "$(is "$output" "$header")"
+check "and no line of the code" "$(is "$(has "$output" "set -euo pipefail")" false)"
+check "reads nothing from GitHub" "$(is "$(count "$work/help/calls.log" -- "api")" 0)"
 
 summary "security-settings.sh reads, plans and applies the security settings"
