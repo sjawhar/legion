@@ -56,6 +56,11 @@
   deployment instructions never override: no deferrals, bringing the base in only on a real
   conflict or a retarget, the implementer's own proof on a production-like surface before the
   merge, and the implementer's production check after it.
+- The `dispatch` skill's gate 2 states as rules what only its deleted story implied: an ask
+  carries the measurement and the size of the affected population, and drops an option the
+  measurement shows cannot work (LEGION-386). On the skill scenario rig, an agent asked which of
+  three options to take, where an export shows one cannot work, dropped it in 7 of 10 runs with
+  this text, against 1 of 10 with the old one and 0 of 10 with gate 2's sentences deleted.
 - The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
   `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
   `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found
