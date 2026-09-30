@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -628,7 +629,8 @@ type syncedPeer struct {
 	connection *gws.Conn
 	socketID   string
 	readerDone chan struct{}
-	synced     chan struct{}
+	// answers carries the content of each sync step 2 the room sends, once read has applied it.
+	answers chan []byte
 }
 
 // syncedPeerLocal tags the peer's own transactions. It must remain non-zero sized because ygo
@@ -648,16 +650,16 @@ func (p *syncedPeer) connect(t *testing.T) {
 	p.connection = connection
 	p.socketID = socketID
 	p.readerDone = make(chan struct{})
-	p.synced = make(chan struct{}, 16)
-	readerDone, synced := p.readerDone, p.synced
+	p.answers = make(chan []byte, 16)
+	readerDone, answers := p.readerDone, p.answers
 	p.mu.Unlock()
-	go p.read(connection, readerDone, synced)
+	go p.read(connection, readerDone, answers)
 	p.barrier(t)
 }
 
 // read applies every sync frame the room sends. It answers the room's sync step 1 with the
-// updates the room lacks, and signals synced for each sync step 2 it applies.
-func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, synced chan<- struct{}) {
+// updates the room lacks, and hands barrier the content of each sync step 2 it applies.
+func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, answers chan<- []byte) {
 	defer close(done)
 	for {
 		_, message, err := connection.ReadMessage()
@@ -672,7 +674,7 @@ func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, synced cha
 			continue
 		}
 		payload := decoder.RemainingBytes()
-		kind, _, err := ygsync.ReadSyncMessage(payload)
+		kind, content, err := ygsync.ReadSyncMessage(payload)
 		if err != nil {
 			return
 		}
@@ -687,7 +689,7 @@ func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, synced cha
 		}
 		if kind == ygsync.MsgSyncStep2 {
 			select {
-			case synced <- struct{}{}:
+			case answers <- content:
 			default:
 			}
 		}
@@ -704,26 +706,48 @@ func (p *syncedPeer) write(connection *gws.Conn, syncMessage []byte) error {
 	return connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
 }
 
-// barrier returns once the room answered a sync step 1 sent now. The room writes to one
-// connection in order, so every update it sent before the answer has been applied.
+// barrier returns once the room holds everything the peer sent. It asks for the room's whole
+// state, a sync step 1 naming no state, until an answer holds the peer's document. Each answer is
+// applied to the peer before barrier sees it, so the peer then also holds what the room did. The
+// room answers one connection in order, but a sync step 2 already on its way cannot tell barrier
+// that: the one the room opens every connection with, or another peer's that the room relays, can
+// arrive after the request and predate an update the peer sent just before it.
 func (p *syncedPeer) barrier(t *testing.T) {
 	t.Helper()
 	p.mu.Lock()
-	connection, synced, done := p.connection, p.synced, p.readerDone
+	connection, answers, done := p.connection, p.answers, p.readerDone
 	p.mu.Unlock()
-	for len(synced) > 0 {
-		<-synced
+	deadline := time.After(5 * time.Second)
+	for {
+		if err := p.write(connection, ygsync.EncodeSyncStep1(crdt.New())); err != nil {
+			t.Fatalf("send browser peer sync step 1: %v", err)
+		}
+		select {
+		case state := <-answers:
+			if p.roomHolds(t, state) {
+				return
+			}
+		case <-done:
+			t.Fatal("browser peer connection closed before the room answered its sync")
+		case <-deadline:
+			t.Fatal("the room never answered with a state holding everything the browser peer sent")
+		}
 	}
-	if err := p.write(connection, ygsync.EncodeSyncStep1(p.doc)); err != nil {
-		t.Fatalf("send browser peer sync step 1: %v", err)
+}
+
+// roomHolds reports whether state, the content of a sync step 2, holds everything in the peer's
+// document: applying the peer's document on top of it changes nothing.
+func (p *syncedPeer) roomHolds(t *testing.T, state []byte) bool {
+	t.Helper()
+	room := crdt.New()
+	if err := crdt.ApplyUpdateV1(room, state, nil); err != nil {
+		t.Fatalf("decode the room's sync step 2: %v", err)
 	}
-	select {
-	case <-synced:
-	case <-done:
-		t.Fatal("browser peer connection closed before the room answered its sync")
-	case <-time.After(5 * time.Second):
-		t.Fatal("room did not answer the browser peer's sync")
+	before := crdt.EncodeStateAsUpdateV1(room, nil)
+	if err := crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(p.doc, nil), nil); err != nil {
+		t.Fatalf("apply the browser peer's document to the room's state: %v", err)
 	}
+	return bytes.Equal(before, crdt.EncodeStateAsUpdateV1(room, nil))
 }
 
 func (p *syncedPeer) reconnect(t *testing.T) {

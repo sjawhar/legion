@@ -724,12 +724,12 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 		f.peers = append(f.peers, peer)
 		return peer
 	}
-	// typeNote types a paragraph as peer and returns once the room holds it: the room credits the
-	// peers connected when it applies the edit, which can be after the peer's own sync answer.
-	typeNote := func(t *testing.T, f *fixture, peer *syncedPeer, text string) {
+	// typeNote types a paragraph as peer and returns once the room holds it, so the peers the room
+	// credits with it are the ones connected now.
+	typeNote := func(t *testing.T, peer *syncedPeer, text string) {
 		t.Helper()
 		peer.appendParagraph(t, text)
-		waitForLiveText(t, f.documentService, f.artifactID, text)
+		peer.barrier(t)
 	}
 	type actorRead struct {
 		Kind string `json:"kind"`
@@ -747,7 +747,7 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 	}{
 		{"two connected peers where the second types", func(t *testing.T, f *fixture) {
 			connect(t, f, askerPeer)
-			typeNote(t, f, connect(t, f, humanPeer), "A note from bob.")
+			typeNote(t, connect(t, f, humanPeer), "A note from bob.")
 		}, 2, docs.SettlementActor, true},
 		{"an agent's joined write and a human's typing in one settlement window", func(t *testing.T, f *fixture) {
 			typist := connect(t, f, humanPeer)
@@ -767,11 +767,11 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 			}
 			waitForLiveText(t, f.documentService, f.artifactID, "A revised spec")
 			typist.barrier(t)
-			typeNote(t, f, typist, "A note from bob.")
+			typeNote(t, typist, "A note from bob.")
 		}, 2, docs.SettlementActor, true},
 		{"a human's typing and then an agent's edit that versions both", func(t *testing.T, f *fixture) {
 			typist := connect(t, f, humanPeer)
-			typeNote(t, f, typist, "A note from bob.")
+			typeNote(t, typist, "A note from bob.")
 			if edited := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/artifacts/"+f.artifactID+"/edits", map[string]any{
 				"ops": []map[string]string{{"op": "replace", "find": "A spec", "with": "A revised spec"}}, "actor": sessionActor(),
 			}); edited.Code != http.StatusOK {
@@ -779,10 +779,10 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 			}
 		}, 2, docs.SettlementActor, true},
 		{"the only connected peer types", func(t *testing.T, f *fixture) {
-			typeNote(t, f, connect(t, f, humanPeer), "A note from bob.")
+			typeNote(t, connect(t, f, humanPeer), "A note from bob.")
 		}, 1, bob, true},
 		{"the asking session alone types over its connection", func(t *testing.T, f *fixture) {
-			typeNote(t, f, connect(t, f, askerPeer), "A note from the asker.")
+			typeNote(t, connect(t, f, askerPeer), "A note from the asker.")
 		}, 1, asker, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
