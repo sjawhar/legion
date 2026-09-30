@@ -34,7 +34,7 @@ test("a spec's approval is a human review pinned to its version: requested by th
   const artifactID = issue.primary_artifact_id;
 
   // The agent asks for approval; the Inbox shows a fixed-option approval ask.
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   expect(requested.version).toBe(1);
   const alice = await asUser(browser, "alice");
   try {
@@ -134,7 +134,7 @@ test("an approval ask's Inbox card shows a question carrying a long summary whol
   const summary = filler.slice(0, filler.lastIndexOf(" ") + 1) + ending;
   expect(summary.length).toBeGreaterThan(750);
   expect(summary.length).toBeLessThanOrEqual(771);
-  const requested = await requestApproval(issue.primary_artifact_id, session, summary);
+  const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
   expect(requested.ask.question).toBe(`Approve spec.md (version 1)? ${summary}`);
 
   const alice = await asUser(browser, "alice");
@@ -183,7 +183,7 @@ test("reading an approved spec and moving the caret through its numbered list le
     title: "Design gate",
   });
   const artifactID = issue.primary_artifact_id;
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   const bob = await asUser(browser, "bob");
   try {
@@ -233,7 +233,7 @@ test("an agent's comment on part of an identifier in an approved spec leaves its
     title: "Design gate",
   });
   const artifactID = issue.primary_artifact_id;
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -284,7 +284,7 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
     },
     session
   );
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -324,7 +324,7 @@ test("an approval request for an unassigned issue's non-primary document remains
     { content: "Supporting review target.", name: "supporting-design.md" },
     session
   );
-  const nonPrimary = await requestApproval(supporting.artifact.id, session);
+  const nonPrimary = await requestApproval(supporting.artifact.id, {}, session);
   await expect
     .poll(
       async () => (await getArtifact(issue.primary_artifact_id, { login: "alice" })).approval?.state
