@@ -36464,15 +36464,6 @@ function actorLabel(actor, titles) {
   }
   return `${name} (as ${serviceSubjectLabel(service)})`;
 }
-function claimHolds(claim, titles) {
-  if (claim.actor.kind !== "session") {
-    return true;
-  }
-  if (titles === undefined) {
-    return;
-  }
-  return titles.has(claim.actor.id);
-}
 // ../contracts/src/agent-stream.ts
 var AGENT_STREAM_LIMITS = {
   partChars: 16000,
@@ -36481,6 +36472,16 @@ var AGENT_STREAM_LIMITS = {
   historyBytes: 512 * 1024,
   snapshotIntervalMs: 100
 };
+// ../contracts/src/claim-holds.ts
+function claimHolds(claim, titles) {
+  if (claim.actor.kind !== "session") {
+    return "holds";
+  }
+  if (titles === undefined) {
+    return "unknown";
+  }
+  return titles.has(claim.actor.id) ? "holds" : "lapsed";
+}
 // ../contracts/src/dispatch-href.ts
 function itemFromSearch(search) {
   const params = new URLSearchParams(search);
@@ -39950,8 +39951,8 @@ function componentsLine(components) {
   }
 }
 function claimText(claim, titles) {
-  const holds = claimHolds(claim, titles);
-  const marker = holds === undefined ? " \xB7 liveness unknown" : holds ? "" : " \xB7 not running";
+  const holding = claimHolds(claim, titles);
+  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
 async function liveSessionTitles(client, needed) {

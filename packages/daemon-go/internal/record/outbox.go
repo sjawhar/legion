@@ -382,7 +382,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
 		}
 	case ControllerNotice:
-		if value.Kind != TriageNotice && value.Kind != SlotFreeNotice && !validNoticeKind(value.Kind) {
+		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
 		}
 	case SuperviseRequest:
@@ -417,6 +417,17 @@ func validateOutboxPayload(payload OutboxPayload) error {
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
 	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "catch-up", "checks-red":
+		return true
+	default:
+		return false
+	}
+}
+
+// controllerOnlyNoticeKind says whether kind is a notice for the controller alone, never an
+// architect's.
+func controllerOnlyNoticeKind(kind NoticeKind) bool {
+	switch kind {
+	case TriageNotice, SlotFreeNotice:
 		return true
 	default:
 		return false

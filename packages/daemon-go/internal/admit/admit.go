@@ -69,31 +69,28 @@ func New(store record.Store, engine *workflow.Engine, cap int, project string, l
 // free after that (wakeForFreeSlot). The workflow handler runs first: it records every live-tree
 // child, leaving admission to record only a still-unrecorded root or orphan.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	done, err := a.releaseDoneSlots(ctx, tx)
+	if err != nil {
+		return intake.Result{}, err
+	}
 	released, err := a.applyFact(ctx, tx, fact)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, a.wakeForFreeSlot(ctx, tx, released)
+	return intake.Result{}, a.wakeForFreeSlot(ctx, tx, append(done, released...))
 }
 
-// applyFact is Apply's work, and reports the issues whose slots it released.
+// applyFact is Apply's work once the workflow's completed slots are released, and reports the
+// issues whose slots it released itself.
 func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) ([]string, error) {
-	released, err := a.releaseDoneSlots(ctx, tx)
-	if err != nil {
-		return nil, err
-	}
-
 	if position, ok := fact.(intake.DispatchConsumerPosition); ok {
-		more, err := a.release(ctx, tx, position)
-		return append(released, more...), err
+		return a.release(ctx, tx, position)
 	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
-		if _, err := a.promote(ctx, tx); err != nil {
-			return nil, err
-		}
-		return released, nil
+		_, err := a.promote(ctx, tx)
+		return nil, err
 	}
 
 	stored, err := a.store.Issue(ctx, tx, observation.Key)
@@ -123,12 +120,12 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// found it would have release admit on that stale information instead.
 		if observation.Status != "todo" {
 			a.refreshHeldSummary(observation)
-			return released, nil
+			return nil, nil
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
-			return released, nil
+			return nil, nil
 		}
 		a.mu.Lock()
 		summary, held := a.pending[observation.Key]
@@ -146,7 +143,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 			// event already acknowledged as processed. promote's own pending membership check —
 			// not this one — is what still holds the freshly recorded candidate back from a slot
 			// until pending is actually clear; a later pass once the hold clears promotes it.
-			return released, nil
+			return nil, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
 			return nil, err
@@ -155,14 +152,14 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		return nil, err
 	}
 
-	inactive, err := a.releaseInactiveSlots(ctx, tx)
+	released, err := a.releaseInactiveSlots(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := a.promote(ctx, tx); err != nil {
 		return nil, err
 	}
-	return append(released, inactive...), nil
+	return released, nil
 }
 
 // wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left

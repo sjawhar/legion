@@ -36,8 +36,8 @@ func TestAnUnrecordedRootInTriageWakesTheControllerWhenItCarriesTheLabel(t *test
 	apply(t, pool, admission, "labeled", labeled, engineStub{})
 	apply(t, pool, admission, "created-labeled", intake.DispatchIssue{Key: "LEGION-305", Seq: 1, Type: "issue.created", Status: "triage", Title: "Handed over at creation", Rank: "B", HandedOver: handed}, engineStub{})
 	assertEffects(t, pool, []effect{
-		{kind: record.OutboxKindControllerNotice, issue: "LEGION-300", payload: record.ControllerNotice{Kind: "triage"}},
-		{kind: record.OutboxKindControllerNotice, issue: "LEGION-305", payload: record.ControllerNotice{Kind: "triage"}},
+		{kind: record.OutboxKindControllerNotice, issue: "LEGION-300", payload: record.ControllerNotice{Kind: record.TriageNotice}},
+		{kind: record.OutboxKindControllerNotice, issue: "LEGION-305", payload: record.ControllerNotice{Kind: record.TriageNotice}},
 	})
 	assertWaiting(t, pool, nil)
 	if got := maybeIssue(t, pool, "LEGION-300"); got != nil {

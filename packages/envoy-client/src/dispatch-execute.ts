@@ -1178,8 +1178,9 @@ function componentsLine(components: IssueComponents): string {
  * session runs. A person's claim, and a session the registry lists, carry no marker.
  */
 function claimText(claim: IssueClaim, titles: ReadonlyMap<string, string> | undefined): string {
-  const holds = claimHolds(claim, titles);
-  const marker = holds === undefined ? " · liveness unknown" : holds ? "" : " · not running";
+  const holding = claimHolds(claim, titles);
+  const marker =
+    holding === "unknown" ? " · liveness unknown" : holding === "lapsed" ? " · not running" : "";
   return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
 

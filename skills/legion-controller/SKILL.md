@@ -109,7 +109,8 @@ ran never arrives as a wake. At every start, before anything else:
    the daemon holds that a human pulled back: never re-admit it yourself; name it in your summary to
    the human ("<KEY> was pulled back to triage; what do you want?").
 3. Fill the free admission slots ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
-4. Post the day's report when it is due ([Daily report](#daily-report-go-daemon)).
+4. Post the day's report when this is your first turn of the UTC day
+   ([Daily report](#daily-report-go-daemon)).
 
 The issue record and Dispatch are the truth; the topic is the wake.
 
@@ -121,7 +122,8 @@ without the label, and wakes you for a root in `triage` only while the root carr
 unrecorded: on its creation with the label, and on each change to it after that while it stays
 in triage, the change that adds the label included (the dashboard creates an issue without
 labels, so a human adds it from the issue header). Two parties hand work over: a person, who sets
-the label from the issue header, and you, when you fill a free slot (below). A person's label is
+the label from the issue header, and you, when you fill a free slot (below). You label an issue
+only when you take it, so the label means Legion has the issue or had it. A person's label is
 their decision: never take it off. A child needs no label: it runs under its tree's architect
 once its root is admitted. `legion status <KEY> todo` admits a root only while it carries the
 label, so a root you hand over or file for Legion to run carries it first (`labels` in
@@ -148,10 +150,14 @@ issue of the project is in scope.
 `admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything
 you add). With none free, stop.
 
-**Candidates.** The project's open issues in `todo`, `backlog`, or `triage`, taken one priority at
-a time: `priority: [0]` first, then `[1]`, `[2]`, `[3]`, and `[null]` (no priority) last. Within
-one priority, list `todo`, then `backlog`, then `triage`, since `todo` is what a person already
-called ready; within one status, keep the listing's order, which is the board's rank:
+**Candidates.** The project's open issues in `todo`, `backlog`, or `triage` that do not carry the
+`legion` label. The Go daemon runs only labelled roots, so every root it ran carries the label: a
+labelled root in `todo` is the daemon's to admit or queue, one in `triage` is yours to triage
+(step 2 above), and one anywhere else was parked by Legion or by a person, and the walk leaves it.
+Take the candidates one priority at a time: `priority: [0]` first, then `[1]`, `[2]`, `[3]`, and
+`[null]` (no priority) last. Within one priority, list `todo`, then `backlog`, then `triage`, since
+`todo` is what a person already called ready; within one status, keep the listing's order, which
+is the board's rank:
 
 ```text
 dispatch_issues({ project: "<PROJECT>", status: "todo", priority: [0], limit: 250, offset: 0 })
@@ -166,24 +172,26 @@ the row shows one, comes after the claim) is claimed, as the table below says: s
 reading it.
 
 **Walk.** Take the remaining rows in that order until the free slots are filled. Read each one with
-`dispatch_read({ issue: "<KEY>" })` and skip it when any of these holds:
+`dispatch_read({ issue: "<KEY>" })` and skip it when any of these holds. `dispatch_read` shows only
+the issue's last 10 events, so the rows that read `Events:` are best-effort: the pull-request row
+leans on `External links:`, and the label row is the one that never depends on history.
 
 | Skip when | How you check it |
 |---|---|
+| It carries the `legion` label | `Labels:` lists `legion`, in any case. Legion has the issue or had it, as **Candidates** above says. |
 | It is not a root | `Links:` names a `child_of` issue. Its parent's architect owns it. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
-| Legion ran it before | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`. That actor is the daemon's on every `legion status` (yours included) and on its own `in_progress` at admission, so it also finds a tree an earlier daemon store ran and parked. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion; only a person does, with the label and `todo`, which the daemon admits on its own. |
+| Legion ran it before and a person took the label off | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every `legion status` (yours included) and on its own `in_progress` at admission. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`, closed-tree activity). |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
 | Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
 | A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. You cannot read GitHub, so an open, merged, or closed pull request all count. A person who wants Legion on it anyway hands it over themselves: the label, then `todo`. |
 | Its assignee is working it | `Assignee:` names a person who holds the claim (the row above), or whose own comment or message among `Events:` says they are working on it. The assignee alone is who answers the issue's questions, not who works it. |
-| A person parked it with a reason | It is in `backlog`, the `Events:` line that moved it there (`issue.updated · … · status backlog`) is a person's (`user <login>`), and a comment or message says why. A move by `session legion-daemon:<PROJECT>` is Legion's own, which the row above already skips. When the events the read shows do not reach back to that move, you cannot tell who parked it: skip it. |
+| A person parked it with a reason | It is in `backlog`, the `Events:` line that moved it there (`issue.updated · … · status backlog`) is a person's (`user <login>`), and a comment or message says why. When the events the read shows do not reach back to that move, you cannot tell who parked it: skip it. |
 | It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch_doc_read({ issue: "<KEY>" })`). When in doubt, skip it. With no scope stated, every issue of the project is in scope. |
 
 **Take.** For each candidate that passes, in order:
 
 1. Add the label and keep the labels it has, which `Labels:` lists (`none` is no labels). `labels`
-   replaces the whole set, so a label you leave out is removed. An issue already labelled `legion`
-   skips this step.
+   replaces the whole set, so a label you leave out is removed.
 
    ```text
    dispatch_issue_update({ issue: "<KEY>", labels: ["<each current label>", "legion"] })
@@ -192,16 +200,13 @@ reading it.
 2. Admit it with `legion status <KEY> todo`. One already in `todo` needs no status write: the
    label admits it. Labelling a `triage` root wakes you with its own `triage on <KEY>`; by the time
    you read it the root is recorded, and that wake needs nothing.
-3. Post one short comment that says Legion took it and who is asked at its design gate, from the
-   `Assignee:` line:
+3. Post one short comment that says Legion took it and names who is asked at its design gate, from
+   the `Assignee:` line, with the assignee sentence [New issue triage](#new-issue-triage) step 4
+   gives:
 
    ```text
-   dispatch_comment({ issue: "<KEY>", body: "Legion took this issue: it was the highest-priority open issue nobody else was working on. Assigned to <login>, who approves its design and answers its questions." })
+   dispatch_comment({ issue: "<KEY>", body: "Legion took this issue: it was the highest-priority open issue nobody else was working on. Assigned to <login>, who will get this tree's questions and its design approval." })
    ```
-
-   When the line says `unassigned`, end the body with `Unassigned: nobody's Inbox shows its design
-   approval or its questions until someone takes it from the issue header (Assignee, beside
-   Priority).` instead.
 
 The daemon admits each root when Dispatch's event reaches it; the next `legion state --json`
 shows it in `admission.active`. When the candidates run out with slots still free, leave those
@@ -223,10 +228,10 @@ dispatch_issue({ project: "<PROJECT>", title: "Legion daily report", spec: "## S
 legion status <report KEY> icebox
 ```
 
-**When.** At every start and on the first wake of each UTC day: read the report issue with
-`dispatch_read`, and post when its `Events:` show no `message.created` from today. You have no
-clock of your own, so the report rides the day's first wake; the next one covers a day that had
-none.
+**When.** On your first turn of each UTC day, whatever it is: your start, or a wake of any kind.
+Read the report issue with `dispatch_read`, and post when its `Events:` show no `message.created`
+from today. You have no clock of your own, so a day with no turn has no report; the next one
+covers it.
 
 **What.** One `dispatch_message({ issue: "<report KEY>", body })` of at most 2,000 characters,
 written as `skill://dispatch`'s "Writing for the human" says: every issue by its key and title,
@@ -257,7 +262,8 @@ quoted here.
 - **Direct user message always first.** If this turn includes a direct user message, answer
   it before handling every other wake.
 - **One wake = one turn.** Handle exactly the wake's implication, then end the turn. Never
-  poll, idle-loop, or wait for another event.
+  poll, idle-loop, or wait for another event. The one addition: your first turn of each UTC day,
+  whatever woke you, also posts the day's report ([Daily report](#daily-report-go-daemon)).
 - **Wakes are advisory.** Before any side effect, verify the current daemon state and the
   relevant Dispatch issue. A stale or duplicate wake may cost a read, never a wrong action.
 - **Controller state is disposable.** Do not reconstruct or preserve local controller
@@ -273,7 +279,7 @@ quoted here.
 |---|---|---|
 | New issue created in the Dispatch project (`issue.created`, status `triage`; under the TypeScript daemon resync heals misses, under the Go daemon the boot step above does). From the Go daemon: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above) | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
 | Backlog eligibility (TypeScript daemon) | slot freed / priority change | Reconsider parked items and move the eligible root to `todo` |
-| `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `legion state --json`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) and post the day's report if it is due |
+| `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `legion state --json`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |
 | Resync report: `admission-drift` entry | issue key + whether the daemon added it to, or removed it from, its admission list (the detail says which) | No action: the daemon already repaired it in the same run. An issue that reappears in consecutive reports is a live leak — file a LEGION issue on Dispatch with both reports pasted as evidence (never a GitHub issue) |
@@ -309,20 +315,29 @@ quoted here.
 
    (or `icebox` for longer-term deferral). Dispatch status is the durable record; there is no
    other marker to maintain, beyond the Go daemon's `legion` label, which parking leaves in
-   place. Do not triage a system-created child as a root issue.
+   place. Under the Go daemon a root never waits for capacity in `backlog`: in `todo` the
+   daemon's admission queue holds it (`admission.waiting`), so park only a root that should not
+   run now. Do not triage a system-created child as a root issue.
 4. When you post a triage note (a `dispatch_comment` on the issue saying what you decided and
-   why), name who will be asked: `Assigned to <login>, who will get this tree's questions`,
-   or, when the `Assignee:` line says `unassigned`, `Unassigned — nobody's Inbox shows this
-   tree's questions until someone takes it from the issue header (Assignee, beside Priority)`.
-   An unassigned root still runs; the architect's asks wait in every Inbox's Unassigned band.
+   why), name who will be asked with the assignee sentence: `Assigned to <login>, who will get
+   this tree's questions and its design approval`, or, when the `Assignee:` line says
+   `unassigned`, `Unassigned — nobody's Inbox shows this tree's questions or its design approval
+   until someone takes it from the issue header (Assignee, beside Priority)`. An unassigned root
+   still runs; the architect's asks wait in every Inbox's Unassigned band.
 
 ## Backlog eligibility
+
+Under the Go daemon nothing reconsiders a parked root on its own. A handed-over root waits for a
+slot in `todo`, where the daemon's admission queue holds it (`admission.waiting`), so a park in
+`backlog` or `icebox` means "should not run now", and the root keeps its `legion` label, which
+[Keeping the slots full](#keeping-the-slots-full-go-daemon) leaves alone. A parked root runs again
+when a person sets it to `todo`, or when a wake tells you to re-admit it (`worker-died`,
+closed-tree activity).
 
 Under the TypeScript daemon, when a slot frees or priority changes, use `legion state --json` and
 the current Dispatch issue to reconsider parked roots. Admit the selected root with
 `legion status <KEY> todo`. Moving an item to or from `backlog`/`icebox` is a deliberate
-controller decision, not a no-op. Under the Go daemon, [Keeping the slots
-full](#keeping-the-slots-full-go-daemon) is the procedure.
+controller decision, not a no-op.
 
 ## Architect escalation
 
@@ -335,8 +350,10 @@ and the Dispatch issue. If the work belongs in an independent root:
 
 1. File a **fresh root issue** with `dispatch_issue({ project, title, spec })` (no `parent`;
    under the Go daemon add `labels: ["legion"]`, without which it is never admitted).
-   `project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`) — not
-   the role-token `<project>` (the daemon's own project, e.g. `acme`), a different string.
+   `project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`): the
+   project key exactly as `legion.yaml` writes it, which `legion state --json` shows as
+   `daemon.project`. It is not the lowercase project token in role names such as
+   `legion-<project>-controller`.
 2. Park the child (`legion status <child> icebox`) and leave
    a pointer to the new root issue. The controller's capability is `todo`/`backlog`/`icebox`
    only — only the owning architect or the daemon closes an issue as `done`.

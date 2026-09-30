@@ -27,7 +27,7 @@ export interface AgentRegistry {
  */
 export function claimHasLapsed(claim: IssueClaim, registry: AgentRegistry): boolean {
   const loaded = registry.isPending || registry.isError ? undefined : registry.titles;
-  return claimHolds(claim, loaded) === false;
+  return claimHolds(claim, loaded) === "lapsed";
 }
 
 /**

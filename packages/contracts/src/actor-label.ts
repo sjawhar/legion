@@ -1,4 +1,4 @@
-import { type Actor, type IssueClaim, serviceSubjectLabel } from "./dispatch-api";
+import { type Actor, serviceSubjectLabel } from "./dispatch-api";
 
 /**
  * The one way an actor is named, shared by every surface that names one: the Dashboard's
@@ -54,27 +54,4 @@ export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): 
     return name;
   }
   return `${name} (as ${serviceSubjectLabel(service)})`;
-}
-
-/**
- * Whether a claim still holds its issue, judged against the live agent registry: `titles` by
- * session id once it has loaded, or `undefined` while it has not or when it could not be read. A
- * person's claim always holds: there is no session to end, and only a person releases or forces
- * it. A session's claim holds while the registry lists the session, and has lapsed (`false`) once a
- * loaded registry does not, which is exactly when the server lets any agent take the issue. With no
- * registry nothing can say (`undefined`); a surface that read that as lapsed would mark every claim
- * free whenever the listener is unreachable. The dashboard's claim chip and the agent tools both
- * judge a claim here.
- */
-export function claimHolds(
-  claim: IssueClaim,
-  titles: ReadonlyMap<string, string> | undefined
-): boolean | undefined {
-  if (claim.actor.kind !== "session") {
-    return true;
-  }
-  if (titles === undefined) {
-    return undefined;
-  }
-  return titles.has(claim.actor.id);
 }
