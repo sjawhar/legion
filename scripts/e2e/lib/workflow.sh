@@ -215,7 +215,7 @@ reviewer_requested_changes() {
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
 # within the spec, whose architect was told a review may ask for one more line in the smoke file.
-round_line() { printf 'Stage 3 review round %s (%s)' "$1" "$project"; }
+round_line() { printf 'Legion proof review round %s (%s)' "$1" "$project"; }
 # round_correction_pushed ROUND: that round's line is added to the smoke file, the one the round's
 # review names; the line in any other file (a notes file, or a .legion/ handoff that quotes it) is
 # not the correction.
@@ -430,6 +430,7 @@ post_bot_thread() {
 # on the first line, then each reply's author (GraphQL names an App by its bare slug) and first
 # line, tab-separated.
 bot_thread_replies() {
+  # shellcheck disable=SC2016 # a GraphQL query: its $ are GraphQL's
   timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { pullRequest(number: $number) {
@@ -450,6 +451,44 @@ bot_thread_resolved_on_acceptance() {
   local replies
   replies=$(bot_thread_replies "$1") || return 1
   [ "$(head -1 <<<"$replies")" = true ] && grep -q $'^legion-reviewer\tAccepted:' <<<"$replies"
+}
+# review_threads prints every review thread on the proof's pull request as one JSON array: each
+# thread's node id, its isResolved, and each comment's author (GraphQL names an App by its bare
+# slug), body and state (a draft in a pending review is PENDING). A pull request with more threads
+# or comments than one page holds fails rather than print part of them.
+review_threads() {
+  local page
+  # shellcheck disable=SC2016 # a GraphQL query: its $ are GraphQL's
+  page=$(timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved
+          comments(first: 100) { pageInfo { hasNextPage } nodes { author { login } body state } } } } } } }') || return 1
+  jq -ce '.data.repository.pullRequest.reviewThreads
+    | if .pageInfo.hasNextPage or any(.nodes[]; .comments.pageInfo.hasNextPage) then error("more review threads or comments than one page") else . end
+    | [.nodes[] | {id, isResolved, comments: [.comments.nodes[] | {author: .author.login, body, state}]}]' <<<"$page"
+}
+# reviewer_thread prints the node id of the one review thread the Legion reviewer opened on the
+# proof's pull request, or fails naming how many it opened.
+reviewer_thread() {
+  local threads
+  threads=$(review_threads) || return 1
+  jq -er '[.[] | select(.comments[0].author == "legion-reviewer")] as $mine
+    | if ($mine | length) == 1 then $mine[0].id else error("the Legion reviewer opened \($mine | length) review threads, want exactly one") end' <<<"$threads"
+}
+# review_thread ID prints that thread, as review_threads prints each.
+review_thread() { review_threads | jq -ce --arg id "$1" '.[] | select(.id == $id)'; }
+# thread_accepted_unresolved FILE: the thread FILE holds (review_thread's output) is unresolved and
+# its newest submitted comment is the Legion reviewer's `Accepted:`, the state an approval that does
+# not wait on resolution lands in.
+thread_accepted_unresolved() {
+  jq -e '.isResolved == false
+    and ([.comments[] | select(.state == "SUBMITTED")] | last | .author == "legion-reviewer" and (.body | test("^[ \t\r\n]*Accepted:")))' "$1" >/dev/null
+}
+# threads_all_resolved FILE ID: every review thread FILE holds (review_threads' output) is resolved,
+# and the thread ID is one of them.
+threads_all_resolved() {
+  jq -e --arg id "$2" 'all(.[]; .isResolved) and any(.[]; .id == $id)' "$1" >/dev/null
 }
 # assert_review_of_own_handoff ISSUE ROUND STATE: the reviewer's newest STATE review
 # (CHANGES_REQUESTED or APPROVED) on the proof's pull request names the commit carrying its round
