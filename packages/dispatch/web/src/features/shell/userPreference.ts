@@ -44,6 +44,8 @@ function preferenceValue<T>(
 /**
  * Reads a browser preference for a resolved signed-in identity. Pending and failed identity use
  * the caller's explicit fallback when one differs from `read(null)`; neither state persists.
+ * `read` runs when the hook mounts and when the signed-in identity or `preference` changes, and
+ * at no other time: a `read` that consults other state sees that state as it was then.
  */
 export function useUserPreference<T>(
   preference: UserPreference,

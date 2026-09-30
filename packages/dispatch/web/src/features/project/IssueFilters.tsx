@@ -44,12 +44,15 @@ export function IssueFilters({
   ];
   const noIdentityFiltersExpanded = labels.length > 0;
   // The saved preference is the only owner of the open state: the strip reads it when it mounts
-  // and when the signed-in identity resolves, never because the filter count moved. A route
-  // that arrives with filters mounts a new strip, so its own read opens it; while a strip is up
-  // the count moves because the reader is filtering in it, and a re-read there would collapse
-  // it the moment the last filter goes (clearing the search box), taking the control they are
-  // typing in with it. So it stays as they left it until they close it or leave the project or
-  // its Issues tab, both of which unmount it (`ProjectPage`).
+  // and when the signed-in identity resolves, never because the filter count moved. Arriving from
+  // another page, tab or project mounts a new strip, so that read covers the filters the route
+  // brings. On a strip that is up the count moves when the reader filters in it, when the view
+  // toggle folds `?status=` in or out (the List counts it, the Board does not), and when Back or
+  // Forward crosses entries of the Issues tab. A re-read would collapse the strip the moment the
+  // last filter goes (clearing the search box), taking the control being typed in with it, or
+  // open or close it against the reader's choice on the others, while its trigger and chips
+  // already show every filter. So it stays as they left it until they close it or leave the
+  // project or its Issues tab.
   const [filtersExpanded, setFiltersExpanded] = useUserPreference(
     "project.issue-filters",
     (stored) => activeFilterCount > 0 && stored !== "collapsed",

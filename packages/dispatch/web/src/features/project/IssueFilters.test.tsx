@@ -79,8 +79,8 @@ function renderStrip(
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["whoami"], { kind: "user", login });
   // `ProjectPage` keeps one strip across the List/Board toggle and flips `showStatus`, so
-  // re-rendering this tree with the other value is that toggle. A test that restated the tree
-  // instead would remount the strip, and a remount re-reads the disclosure preference.
+  // re-rendering this tree with the other value is that toggle. It has to be a re-render of this
+  // root: a second `render` mounts a second strip, whose own mount read is not the rule tested.
   const tree = (status: boolean) => (
     <MemoryRouter initialEntries={[initialEntry]}>
       <QueryClientProvider client={queryClient}>
@@ -356,8 +356,8 @@ test("collapses a saved filter disclosure when no filters are active", async () 
 
 // The saved preference is the only owner of the open state: the strip reads it when it mounts
 // and when identity resolves, never because the filter count moved. The List folding a
-// `?status=` into the count is the one way that count rises on a strip already up, so it is the
-// case that would reopen one the reader left closed.
+// `?status=` into the count on the view toggle is one of two ways that count rises on a mounted,
+// closed strip (Back or Forward within the Issues tab is the other), and neither opens it.
 test("the List and Board toggle leaves a closed strip closed; the reader still opens it", async () => {
   window.localStorage.clear();
   const { getMyState, listIssues, tree, view } = renderStrip(

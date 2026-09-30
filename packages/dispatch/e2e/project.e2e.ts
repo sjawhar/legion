@@ -189,8 +189,8 @@ test("project page groups issues by status in board order; filters narrow issues
   }
 });
 
-// The search filter holds up to 1,000 characters, and its chip laid every one of them out on one
-// line: the page grew to 7,535 px at 1280, and a phone zoomed out until its layout was 1,560 px.
+// The search filter holds up to 1,000 characters, and its chip stays inside its row: that text
+// on one line makes the page 7,535 px wide at 1280, and a phone zooms out until it is 1,560 px.
 test("a 1,000-character search filter's chip ends in an ellipsis inside its row", async ({
   browser,
 }, testInfo) => {
@@ -229,8 +229,8 @@ test("a 1,000-character search filter's chip ends in an ellipsis inside its row"
   }
 });
 
-// Clearing the box dropped the active count to 0, and the strip re-read its saved open state on
-// that change and collapsed: the input being typed in vanished and the next key went nowhere.
+// Clearing the box takes the active count to 0, and the strip stays open through it: the input
+// being typed in stays on screen and focused, so the next key lands in it.
 test("clearing the issue search keeps the strip open and the next keystroke in the search box", async ({
   browser,
 }) => {
