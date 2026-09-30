@@ -244,6 +244,20 @@ def cmd_export(args):
             needed[(key, lo, hi)] = True
     print(f"{len(needed)} issue states seen by at least one search", flush=True)
 
+    def version_at(item) -> tuple[str, int] | None:
+        """The (document, version) replay.issue_at will read for this state, from metadata alone."""
+        key, _, hi = item
+        snaps = [s for s in hists[key]["snapshots"] if ts(s["at"]) < hi] or hists[key]["snapshots"][:1]
+        aid = snaps[-1]["primary_artifact_id"]
+        before = [v["number"] for v in metas[aid]["versions"] if ts(v["created_at"]) < hi] if aid else []
+        return (aid, max(before)) if before else None
+
+    # Each version is fetched once, before the states are built (two threads writing one cache file race).
+    versions = sorted({v for v in map(version_at, needed) if v})
+    print(f"{len(versions)} spec versions to read", flush=True)
+    with ThreadPoolExecutor(args.threads) as ex:
+        list(ex.map(lambda v: replay.cget(data, f"/artifacts/{v[0]}/versions/{v[1]}"), versions))
+
     def state(item):
         key, lo, hi = item
         at = replay.issue_at(data, hists[key], hi)
@@ -251,15 +265,14 @@ def cmd_export(args):
         return key, lo, hi, at, max((s["at"] for s in snaps), default=hists[key]["created_at"])
 
     states, rows = {}, []
-    with ThreadPoolExecutor(args.threads) as ex:
-        for key, lo, hi, at, updated in ex.map(state, list(needed)):
-            spec = at["spec"]
-            sid = f"{key}:{sha(at['title'])[:10]}:" + (f"{spec['artifact_id'][:8]}v{spec['version']}" if spec else "none")
-            if sid not in states:
-                states[sid] = {"id": sid, "key": key, "title": at["title"], "title_event": at["title_event"],
-                               "spec": {k: v for k, v in spec.items() if k != "markdown"} if spec else None,
-                               "markdown": spec["markdown"] if spec else None}
-            rows.append({"state": sid, "key": key, "lo": iso(lo), "hi": None if hi == FAR else iso(hi), "updated_at": updated})
+    for key, lo, hi, at, updated in map(state, list(needed)):
+        spec = at["spec"]
+        sid = f"{key}:{sha(at['title'])[:10]}:" + (f"{spec['artifact_id'][:8]}v{spec['version']}" if spec else "none")
+        if sid not in states:
+            states[sid] = {"id": sid, "key": key, "title": at["title"], "title_event": at["title_event"],
+                           "spec": {k: v for k, v in spec.items() if k != "markdown"} if spec else None,
+                           "markdown": spec["markdown"] if spec else None}
+        rows.append({"state": sid, "key": key, "lo": iso(lo), "hi": None if hi == FAR else iso(hi), "updated_at": updated})
     write_jsonl(os.path.join(store, "corpus", "states.jsonl"), states.values())
     write_jsonl(os.path.join(store, "corpus", "intervals.jsonl"), sorted(rows, key=lambda r: (r["key"], r["lo"])))
     with open(os.path.join(store, "corpus", "issues.json"), "w") as f:
