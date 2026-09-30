@@ -18,9 +18,10 @@
   for every other message, absent from a Dispatch older than the field. Added optional
   `AgentStreamMessage.dispatchMessageId`, the Dispatch message a streamed user message delivered
   when a person's direct message became the session's own turn (LEGION-394). Added optional
-  `MessageDelivery.requested_by`, `accepted_as` and `accepted_at`, the `message.accepted` event
-  (`MessageAcceptedEventPayload`), and `broadcast_id` on `DispatchTargetedMessagePayloadSchema`
-  (LEGION-394).
+  `MessageDelivery.requested_by`, `accepted_as` and `accepted_at`, `AcceptedMessageDelivery` (the
+  accept route's answer: the attempt with the message's stored `body`), the `message.accepted`
+  event (`MessageAcceptedEventPayload`), and `broadcast_id` on
+  `DispatchTargetedMessagePayloadSchema` (LEGION-394).
 
 ### Removed
 

@@ -17,17 +17,25 @@ Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn` on Oh M
 `pi.askEphemeral` on the earlier fork releases Legion pins) and posts its body or error to the
 correlated delivery attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective
 delivery mode. A person's direct Send or Aside from Dispatch's Agents page is the exception: it
-becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame that names a broadcast keeps
-its card with no read-back. Otherwise the extension resolves its Dispatch configuration and reads the message
-back with its own Dispatch bearer (`GET /api/v1/messages/{id}?session=`, parsed with a schema);
-the stored author must be a person, the message must have no issue, its thread must be aimed at
-this session, no broadcast may have sent it, and a stored attempt must name this session. It then
-accepts that attempt (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), which Dispatch
-allows once per message, for its latest attempt, which a person asked for within the last minute,
-and only on that 200 sends the stored body with `pi.sendUserMessage` (`deliverAs: "aside"` for an
-Aside, nothing for a Send, as the stored attempt says). Every refusal, error and timeout (10 s for
-the read and the accept together), a configuration that no longer resolves included, keeps the
-card and posts nothing, so a replayed or forged frame, even after a restart, is a card. The stream
+becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
+(`isUserTurnCandidate`: Dispatch's `message.created` on no issue, a person as actor, aside or
+steer, naming no broadcast), since the listener takes a frame's source from whoever sends it; a
+frame that names a broadcast keeps its card with no call to Dispatch. For a candidate the
+extension asks Dispatch to accept that attempt
+(`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`, with its own Dispatch bearer), and the
+accept is the only gate: Dispatch allows it once per message, only for a person's own Send or
+Aside to this session, on no issue and from no broadcast, at its latest attempt, which a person
+asked for within the last minute and which did not fail, and answers the body it stored. Only on
+that 200 does the extension send that stored body with `pi.sendUserMessage` (`deliverAs: "aside"`
+for an Aside, nothing for a Send, as the accepted attempt says; `turnFromAccept`), never the
+frame's text. The one check the extension makes itself is that it never accepts an attempt it
+already delivered, as a card or as a turn: before either goes out it writes a transcript entry
+(`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), rebuilt from every entry of the session
+file (`sessionManager.getEntries()`) on each restore, and a frame naming a recorded attempt is a
+card with no accept call. So a replay, a frame forged inside the minute for a Send that arrived as
+a card, and one forged after a restart are each a card, while a person's retry, a new attempt, can
+still be their turn. Every refusal, error and timeout (10 s), a Dispatch configuration that no
+longer resolves included, keeps the card and posts nothing. The stream
 tags that user message with the message id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
 message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the

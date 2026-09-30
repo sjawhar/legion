@@ -55,7 +55,7 @@ const AcceptedDeliverySchema = z.object({
 /**
  * The turn Dispatch's 200 from the accept route says to inject: the message's stored body in the
  * stored attempt's mode, never the frame's text or mode. The answer is JSON off the network, so
- * one without that shape (a Dispatch whose accept predates the body) injects nothing.
+ * one without that shape injects nothing.
  */
 export function turnFromAccept(accepted: unknown): AcceptedUserTurn | undefined {
   const parsed = AcceptedDeliverySchema.safeParse(accepted);

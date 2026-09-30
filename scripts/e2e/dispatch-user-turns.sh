@@ -338,9 +338,9 @@ pass
 
 begin a-session-re-sending-a-persons-btw-gets-a-card
 # Deep's first construction. Any bearer may retry a targeted message (POST .../deliveries takes a
-# session actor), so a session re-sends the person's BTW to this session as a steer. The read-back
-# then confirms a person's message aimed at this session with a steer attempt naming it; only the
-# accept, which refuses an attempt no person asked for, keeps it a card.
+# session actor), so a session re-sends the person's BTW to this session as a steer: a person's
+# message aimed at this session, with a steer attempt naming it. Only the accept, which refuses an
+# attempt no person asked for, keeps it a card.
 btw_id=$(message_id "$btw_body")
 btw_cards=$(cards "$btw_body")
 resent=$(bearer -X POST "http://127.0.0.1:$dispatch_port/api/v1/messages/$btw_id/deliveries" \

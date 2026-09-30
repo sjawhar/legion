@@ -1235,6 +1235,17 @@ first reply with its own `message.answered` event (201). Every answer that poste
 `follow_up` is `true`, `false` or absent; any other value is `400 MESSAGE_INPUT`, so a caller's
 typo is refused rather than answered as a retry.
 
+Every attempt records `requested_by`, the actor whose send opened it (the message's author, the
+person or bearer who retried it, the human whose reply inherited the thread's target; kept on a
+resume; null on a row from before migration 0053), and at most one attempt of a message records
+`accepted_at` and `accepted_as: "user_turn"`: the session it went to took it as its user's own turn,
+through `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` (its conditions are that route's
+row in `packages/envoy/cmd/dispatch/AGENTS.md`). Because a bearer's retry records a session as its
+requester, re-sending a person's message through the retry route never opens an attempt that can
+be accepted. The accept answers the stored body, and pi-envoy injects that and nothing else
+(`packages/pi-envoy/AGENTS.md`). The Agents page reads `accepted_as` on the latest attempt: only
+an accepted attempt says it reached the session's conversation.
+
 A human reaches many sessions at once with `POST /api/v1/broadcasts`
 `{body, delivery, session_ids}`. A broadcast is a grouping over the targeted messages above,
 not a second delivery mechanism: one row in `broadcasts` plus one issue-less message per

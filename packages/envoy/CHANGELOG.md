@@ -12,14 +12,17 @@
 - Dispatch redelivers the GitHub App webhook's failed deliveries, which GitHub never redelivers on its own. Every two minutes it lists the webhook's attempts whose status is not OK and asks GitHub to redeliver each one the listener answered 5xx or GitHub could not complete. A failed or refused redelivery is retried after a doubling backoff, at most five times, and a 4xx is never redelivered. Requests go a second apart, and a GitHub rate limit stops the sweep until the time GitHub gives. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep over a chosen window.
 - Every Dispatch message read returns `broadcast_id`, the broadcast the message is one
   recipient's copy of, or null: the thread read (`GET /api/v1/messages/{id}`), the Agents page's
-  conversation list, each reply, and every message event. A session confirming a person's direct
-  message reads it, since a broadcast keeps its envelope (LEGION-394).
+  conversation list, each reply, and every message event (LEGION-394).
 - `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: the attempt's session records, once
   per message, that it took a person's fresh, latest attempt of a direct message to it as its
-  user's own turn, or is refused with a 409 naming the check (`ACCEPT_NOT_DIRECT` for a message on
-  an issue, a broadcast's copy or a reply in a broadcast's thread, `ACCEPT_SUPERSEDED`,
-  `ACCEPT_ALREADY_ACCEPTED`, `ACCEPT_NOT_REQUESTED_BY_PERSON`, `ACCEPT_STALE`) or 403
-  `ACCEPT_FORBIDDEN`. It appends `message.accepted`. Every delivery attempt now reads
+  user's own turn, and is answered that attempt with the message's stored `body`, which is what
+  the session injects. Anything else is refused with a 409 naming the check (`ACCEPT_NOT_DIRECT`
+  for a message on an issue, a broadcast's copy or a reply in a broadcast's thread,
+  `ACCEPT_NOT_WRITTEN_BY_PERSON`, `ACCEPT_NOT_ASIDE_OR_STEER` for a BTW,
+  `ACCEPT_ALREADY_ACCEPTED`, `ACCEPT_SUPERSEDED`, `ACCEPT_NOT_REQUESTED_BY_PERSON`,
+  `ACCEPT_FAILED` for an attempt Dispatch recorded as failed, `ACCEPT_STALE`) or 403
+  `ACCEPT_FORBIDDEN`. It appends `message.accepted`, which reaches the dashboard's event stream
+  and never NATS, since the outbox publishes no issue-less event. Every delivery attempt now reads
   `requested_by` (who asked for it, kept on a resume, null before migration 0053), `accepted_at`
   and `accepted_as` (LEGION-394).
 
@@ -31,7 +34,11 @@
   session took it, still naming its author, and only when the streamed text is the stored one.
   The Agents page shows an attempt the session accepted as delivered to the session's
   conversation, with no retry, even after a later `failed`; every other attempt keeps its states
-  (LEGION-394).
+  (LEGION-394). Every label the dashboard writes for a mode now uses the composer's names (Send,
+  Aside, BTW): the Agents list's card headlines and attempt lines, the retry reasons, the mention
+  composer's warning, the broadcast picker, pills and exclusions, each agent row's capabilities
+  and the issue event feed. A delivery error or broadcast exclusion reason Dispatch stored keeps
+  its wire name (`does not advertise steer`), as agents and scripts read it (LEGION-394).
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it
@@ -55,6 +62,9 @@
 
 ### Fixed
 
+- A targeted message's delivery claim no longer deadlocks with the session's reply to the same
+  message: it takes the message row `FOR NO KEY UPDATE`, as the new accept does, which the
+  reply's foreign-key `FOR KEY SHARE` does not wait for (LEGION-394).
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before
   this ordering was stored retain their existing timestamp-and-UUID fallback order.

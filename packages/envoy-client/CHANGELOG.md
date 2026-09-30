@@ -11,6 +11,11 @@
 - `activeDispatchConfig` is the one "is Dispatch configured" check every host shares: the resolved
   URL and token, null when none is configured, and a `dispatch config: <reason>` throw on a broken
   configuration.
+- `DispatchClient.acceptMessageDelivery(id, attempt, {actor})` calls
+  `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` and returns the accepted attempt with
+  the message's stored `body` (`AcceptedMessageDelivery`); a refusal throws a
+  `DispatchServiceError` naming Dispatch's check. A rendered Dispatch message delivery carries the
+  frame's `broadcast_id` as `DispatchDelivery.broadcastId` (LEGION-394).
 
 ### Changed
 

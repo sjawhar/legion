@@ -23,6 +23,16 @@ production build from `web/dist`.
   even after a later `failed` (`takenAsUserTurn` in
   `features/conversation/TargetedMessageCard.tsx`); every other attempt, a Claude Code session's
   or an older plugin's included, keeps today's states. The page refreshes on `message.accepted`.
+- Every label the dashboard writes for a delivery mode comes from one mapping, `MODE_LABELS` in
+  `features/conversation/delivery.ts` (`steer` is Send, `aside` Aside, `btw` BTW), and a session's
+  advertised capability reads through `capabilityLabel`: the composer's picker, the Agents list's
+  card headlines and attempt lines (`Sent to X (Send)`), the retry reasons, the mention composer's
+  warning, the broadcast picker, pills and exclusions, the agent rows' capabilities and the issue
+  event feed. The mention composer suggests only a prefix every refusing target advertises, and a
+  card offers BTW only when its session takes it. Text Dispatch stored keeps the wire's names and
+  is shown as written: a delivery error such as `session … does not advertise steer` and a
+  broadcast's server-side exclusion reason are diagnostics agents and scripts read, so the SPA does
+  not rewrite them.
 - The Agents broadcast page renders recipients in the order the server returns them: the send's
   tick order after exclusions.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only

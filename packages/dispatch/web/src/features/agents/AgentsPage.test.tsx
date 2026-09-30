@@ -928,8 +928,8 @@ const accepted = { accepted_as: "user_turn", accepted_at: recentAttemptAt } as c
 // A person's direct Send or Aside that an Oh My Pi session took as its own user turn is answered
 // in the session's conversation, never with a Dispatch reply, so its card waits on no reply and
 // offers no other way to send it. The session records that with Dispatch; nothing else says it,
-// so every attempt the session did not accept - a Claude Code session's, an older plugin's, a
-// read-back that failed - keeps today's card and its mode-change row.
+// so every attempt the session did not accept - a Claude Code session's, an older plugin's, an
+// accept Dispatch refused - keeps today's card and its mode-change row.
 for (const [name, session, read, headline, retries] of [
   [
     "a person's direct Aside the session took as its own turn",

@@ -1989,8 +1989,8 @@ export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.ex
   target: z.string(),
   in_reply_to: z.string().nullable(),
   // The broadcast a frame's message is one recipient's copy of. A frame is untrusted, so its null
-  // or its absence proves nothing, but one that names a broadcast needs no read-back to be kept as
-  // a card: a forged claim of one only yields the card.
+  // or its absence proves nothing, but one that names a broadcast is kept as a card with no call
+  // to Dispatch: a forged claim of one only yields the card.
   broadcast_id: z.string().nullish(),
   deliveries: z.array(z.unknown()),
   created_at: z.string(),
