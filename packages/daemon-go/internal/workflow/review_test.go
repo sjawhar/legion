@@ -575,7 +575,8 @@ func TestARetryOfAStuckRoundTellsTheArchitectAndTheReviewer(t *testing.T) {
 func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 	const reviewApp = "legion-reviewer[bot]"
 	// testEngine's clock applies the completion at midnight; GitHub stamps each review's submission.
-	early, late := time.Date(2026, 9, 22, 23, 59, 0, 0, time.UTC), time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)
+	early, late := time.Date(2026, 9, 22, 23, 59, 0, 0, time.UTC), time.Date(2026, 9, 23, 0, 3, 0, 0, time.UTC)
+	withinSkew := time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name   string
 		before []string
@@ -595,6 +596,8 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 		{name: "the reviewer completes, then its COMMENT submitted before the completion, delivered after", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought", SubmittedAt: early}},
 			told: 1, decision: "changes_requested", want: phase.Implementing},
 		{name: "the reviewer completes, then its COMMENT with no submission time", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought"}},
+			told: 1, decision: "approved", want: phase.Retro},
+		{name: "the reviewer completes, then its COMMENT submitted within the clocks' skew of the completion", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought", SubmittedAt: withinSkew}},
 			told: 1, decision: "approved", want: phase.Retro},
 		{name: "the reviewer completes, then its approval submitted before the completion, delivered after", after: []intake.PullRequestReview{{State: "approved", Author: reviewApp, Body: "ship it", SubmittedAt: early}},
 			told: 1, ended: phase.Retro},

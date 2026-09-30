@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -91,6 +92,10 @@ func redAt(pr record.PullRequest) string {
 	return reason
 }
 
+// answerSkew is how much later than the reviewer's completion a review must be submitted to be its
+// answer to a round it left undecided (review).
+const answerSkew = 2 * time.Minute
+
 func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestReview) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
@@ -110,8 +115,12 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	// the round is stuck: a review submitted before the completion but delivered after it, since the
 	// completion comes through the API and the review by webhook; a reply on a review thread, which
 	// GitHub records as a review with no body; a review with no submission time; anyone else's.
+	// GitHub stamps the review and the daemon stamps the completion, and no ordering between the two
+	// avoids comparing their clocks: the delivery order is the race itself, and the completion has no
+	// GitHub-side stamp. answerSkew bounds the two clocks' disagreement, far above an NTP-synced skew
+	// and far below the architect's request and the reviewer's reply after the stuck notice.
 	before := ""
-	if !e.byReviewApp(fact.Author) || fact.Body == "" || !fact.SubmittedAt.After(reviewer.CompletedAt) {
+	if !e.byReviewApp(fact.Author) || fact.Body == "" || !fact.SubmittedAt.After(reviewer.CompletedAt.Add(answerSkew)) {
 		before = stuckReview(*issue, reviewer, pr)
 	}
 	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
