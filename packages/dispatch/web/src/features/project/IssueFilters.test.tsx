@@ -247,6 +247,28 @@ test("the search filter writes at most SEARCH_QUERY_MAX characters into the page
   }
 });
 
+test("a ?q= over the cap from a link is cut on a code point, never leaving half an emoji", async () => {
+  const long = `${"x".repeat(SEARCH_QUERY_MAX - 1)}😀`;
+  const { getMyState, listIssues, view } = renderStrip(
+    [issue({ key: "CORE-1", title: "Guidance" })],
+    {},
+    `/projects/CORE?q=${encodeURIComponent(long)}`
+  );
+
+  try {
+    await openFilters();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search issues" }), {
+      target: { value: `${long}y` },
+    });
+    const written = new URLSearchParams(screen.getByTestId("location-search").textContent ?? "");
+    expect(written.get("q")).toBe("x".repeat(SEARCH_QUERY_MAX - 1));
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
 test("one or many statuses narrow the List as an OR, each in the URL and each a chip", async () => {
   const { getMyState, listIssues, view } = renderStrip([
     issue({ key: "CORE-1", status: "todo", title: "Planned" }),
