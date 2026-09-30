@@ -33,6 +33,16 @@
   across a restart too. A rolled-back listener ignores the field. A listener built with #1526 but
   without this change publishes the whole backlog, so every head-gated listener moves straight to
   a build carrying this change.
+- `GET /api/v1/search` refuses a `q` over 1,000 UTF-16 units (LEGION-386) and a `project` over
+  100, each counted after trimming, with the ordinary `400 CAP_EXCEEDED` and a sentence saying
+  what to send instead, before it runs anything. Both ride in the URL, and the load balancer in
+  front of production Dispatch answers a path and query over 16,369 bytes with a bare `414`
+  before the server sees the request. So deploying this gives the named `400` only to a request
+  that still fits under that line; it cannot answer a longer one, such as the 26,637-character
+  search that prompted LEGION-386. Only an updated `@sjawhar/pi-legion-envoy` in a session's
+  profile (or the OpenCode or Claude Code plugin built from the same executor) keeps that URL
+  from being sent at all, because its `dispatch_search` refuses the same limits before any
+  request.
 
 ### Fixed
 

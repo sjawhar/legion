@@ -535,6 +535,48 @@ func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
 	}
 }
 
+// The project rides in the same URL as the query, so it is capped the same way: dispatch_search
+// refuses a project over contracts.SearchProjectMax UTF-16 units before sending it, and the
+// server refuses a longer one from any other client by name, counting after trimming as it does
+// for q, so its count is never the higher of the two.
+func TestSearchRefusesAProjectOverTheLimit(t *testing.T) {
+	handler := newTestHandler(t)
+	search := func(project string) *httptest.ResponseRecorder {
+		return searchRequest(t, handler, url.Values{"q": {"astrolabe"}, "project": {project}}.Encode())
+	}
+
+	// At the limit in UTF-16 units once trimmed, and three times it in bytes.
+	if atLimit := search("  " + strings.Repeat("中", contracts.SearchProjectMax) + "  "); atLimit.Code != http.StatusOK {
+		t.Fatalf("project at the limit: status=%d body=%s", atLimit.Code, atLimit.Body.String())
+	}
+
+	cases := map[string]struct {
+		project string
+		length  int
+	}{
+		"one character over": {strings.Repeat("P", contracts.SearchProjectMax+1), contracts.SearchProjectMax + 1},
+		// 51 characters outside the Basic Multilingual Plane are 102 UTF-16 units.
+		"counted in UTF-16 units": {strings.Repeat("😀", contracts.SearchProjectMax/2+1), contracts.SearchProjectMax + 2},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			response := search(test.project)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			body := decodeBody[struct {
+				Code  string `json:"code"`
+				Error string `json:"error"`
+			}](t, response)
+			want := fmt.Sprintf("project is %d characters over the %d-character limit (%d/%d); %s",
+				test.length-contracts.SearchProjectMax, contracts.SearchProjectMax, test.length, contracts.SearchProjectMax, contracts.SearchProjectHint)
+			if body.Code != "CAP_EXCEEDED" || body.Error != want {
+				t.Fatalf("refusal = %+v, want CAP_EXCEEDED %q", body, want)
+			}
+		})
+	}
+}
+
 func TestSearchAuthentication(t *testing.T) {
 	handler := newTestHandler(t)
 

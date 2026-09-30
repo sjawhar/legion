@@ -6,6 +6,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
+  SEARCH_PROJECT_MAX,
   SEARCH_QUERY_MAX,
   SPEC_SECTIONS,
 } from "./dispatch-tools";
@@ -213,6 +214,17 @@ describe("dispatchToolSpecs", () => {
     const over = schema.safeParse({ query: "x".repeat(SEARCH_QUERY_MAX + 1) });
     expect(over.error?.issues.map((issue) => issue.message)).toEqual([
       `is 1 characters over the ${SEARCH_QUERY_MAX}-character limit (${SEARCH_QUERY_MAX + 1}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage`,
+    ]);
+  });
+
+  test("dispatch_search accepts a project at the limit and refuses one character over by name", () => {
+    const schema = schemaFor("dispatch_search");
+
+    const atLimit = schema.safeParse({ query: "ok", project: "P".repeat(SEARCH_PROJECT_MAX) });
+    expect(atLimit.success).toBe(true);
+    const over = schema.safeParse({ query: "ok", project: "P".repeat(SEARCH_PROJECT_MAX + 1) });
+    expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+      `is 1 characters over the ${SEARCH_PROJECT_MAX}-character limit (${SEARCH_PROJECT_MAX + 1}/${SEARCH_PROJECT_MAX}); send one project key, such as LEGION, or leave project out to search every project`,
     ]);
   });
 

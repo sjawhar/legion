@@ -156,6 +156,15 @@ const SearchQueryMax = 1000
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = "search with a short phrase of a few words, not a passage"
 
+// SearchProjectMax is the longest GET /api/v1/search project, in UTF-16 units. Generated from
+// SEARCH_PROJECT_MAX in packages/contracts so the server's refusal and the dispatch_search tool's
+// cannot drift apart.
+const SearchProjectMax = 100
+
+// SearchProjectHint follows a refusal over SearchProjectMax, saying what to send instead.
+// Generated from SEARCH_PROJECT_HINT in packages/contracts so the server and the tool word it once.
+const SearchProjectHint = "send one project key, such as LEGION, or leave project out to search every project"
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

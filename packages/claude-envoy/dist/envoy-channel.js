@@ -36639,6 +36639,8 @@ var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+var SEARCH_PROJECT_MAX = 100;
+var SEARCH_PROJECT_HINT = "send one project key, such as LEGION, or leave project out to search every project";
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -36956,7 +36958,7 @@ var dispatchToolSpecs = [
         max: SEARCH_QUERY_MAX,
         maxHint: SEARCH_QUERY_HINT
       }).describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
-      project: z2.string().describe("Optional project key to search within.").optional(),
+      project: z2.string({ max: SEARCH_PROJECT_MAX, maxHint: SEARCH_PROJECT_HINT }).describe("Optional project key to search within.").optional(),
       limit: z2.number({ int: true, min: 1, max: 50 }).describe("Maximum results, 1-50; default 20.").optional()
     })
   },

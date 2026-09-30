@@ -193,6 +193,20 @@ export const SEARCH_QUERY_MAX = 1000;
  *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
 export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 
+/**
+ * Longest `dispatch_search` project (`GET /api/v1/search`'s `project`, trimmed), in UTF-16 units.
+ * It rides in the same URL as the query: at 9 bytes a unit, a maximal query, a project at this
+ * cap and `&limit=50` make a 9,935-byte request line, under the load balancer's 16,369. A project
+ * key is at most 10 characters (the server's key pattern). Generated into Go as
+ * `contracts.SearchProjectMax`, which the server enforces.
+ */
+export const SEARCH_PROJECT_MAX = 100;
+
+/** What a refusal over `SEARCH_PROJECT_MAX` tells the caller to send instead; generated into Go
+ *  as `contracts.SearchProjectHint`, so the tool and the server word it once. */
+export const SEARCH_PROJECT_HINT =
+  "send one project key, such as LEGION, or leave project out to search every project";
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -926,7 +940,10 @@ export const dispatchToolSpecs = [
           maxHint: SEARCH_QUERY_HINT,
         })
         .describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
-      project: z.string().describe("Optional project key to search within.").optional(),
+      project: z
+        .string({ max: SEARCH_PROJECT_MAX, maxHint: SEARCH_PROJECT_HINT })
+        .describe("Optional project key to search within.")
+        .optional(),
       limit: z
         .number({ int: true, min: 1, max: 50 })
         .describe("Maximum results, 1-50; default 20.")
