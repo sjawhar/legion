@@ -65,11 +65,12 @@ another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocumen
 document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
 `ParseForWrite` reads back the whole document a spec, an upload or a version writes
 (`400 INVALID_MARKDOWN`). An `insert` takes one of two paths. A fragment of only table rows
-anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:865`), which returns
-before any read-back, so a table-row insert is not read back, and it can leave a live document
-its own markdown reads back otherwise: a row inserted under an aligned column is stored without
-alignment and reads back with the column's, and a row whose cells the upload path refuses for
-reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
+anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:859`), which the route
+tries first; the table-row paragraph under the reading rules below says which fragments are rows.
+It returns before any read-back, so a table-row insert is not read back, and it can leave a live
+document its own markdown reads back otherwise: a row inserted under an aligned column is stored
+without alignment and reads back with the column's, and a row whose cells the upload path refuses
+for reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
 Every other insert is spliced and read back on the document it leaves against the one it started
 from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans
 unwritten: it runs once for each insert of a batch, and an insert, written between document-level
@@ -835,7 +836,32 @@ made of with the line, where the browser editor's parser ends the table, and eve
 line does not continue, before it. So is a table a line opening another block would be a row of - a
 list item that cannot interrupt a paragraph, whatever its marker, or indented code
 (`markBlockRows`): goldmark's table is a paragraph, which such a line continues, where that parser's
-table is no paragraph and ends there, reading the line as that block. A setext underline under a
+table is no paragraph and ends there, reading the line as that block. So is a table a body row of
+which holds text in a cell past its delimiter row's width (`markWideRows`), naming the row and both
+fixes (a pipe inside a cell written `\|`, or header and delimiter rows as wide as the row):
+goldmark drops the cells past the table's width, where that parser keeps them, and a cell ends at
+every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a row
+that fills its table lost the rest of the row's text when it was stored. A row whose cells past
+the width are blank loses nothing and is read at the table's width. A bare-row insert
+(`InsertTableRows`) decides in three steps. First, its fragment, less its blank lines at either
+end, must have every line yield a cell and an unescaped `|` (a lone `|` yields no cell, and a line
+whose only pipe is `\|` has no separator), with no line delimiter-shaped (cells of three hyphens
+or more, `tableDelimiterRow`). Each line is trimmed there as goldmark trims a row (`rowSpace`:
+space, tab, line feed, carriage return), so `|` then U+00A0 is a row whose cell holds it. Second,
+`parseTableRows` parses such a fragment under a header it writes at the target table's width, and
+what that parse refuses is refused: a wide row of the table under that header is `markWideRows`'
+refusal answered as `TABLE_WIDTH`, and anything else keeps its own refusal, `INVALID_OP` on
+`markdown` (a line `markBlockRows` refuses, such as indented code or `2. | a | b |`, however many
+cells it holds, since the refusal walk reads that before the width, or a table the fragment makes
+itself). Third, when that parse refuses nothing and reads one table holding every line, those rows
+are inserted. Every other fragment goes to the block path whole, which reads it as a document of
+its own and writes whatever blocks that reading makes, paragraphs or a table of its own (a line of
+hyphens, one or more a cell, is a delimiter row there), or refuses them, so its answer can differ
+from an upload of the same lines under the target.
+Goldmark also drops a row's closing `|` whatever stands before it, where that parser reads one
+after an odd run of backslashes as the last cell's text, so that pipe is put back in the cell
+(`keepEscapedClosingPipes`). The renderer writes a cell's pipe `\|` and the header as wide as the
+widest row (`tableGrid`), so no rendering holds a wide row. A setext underline under a
 table is the table's row, as that parser reads it (`underlineAfterTable`), all but a lone `-`, an
 empty list item there: goldmark's setext heading took the table's paragraph, then wrote the
 underline as a paragraph after the table, or made the lines before the table a heading after it.

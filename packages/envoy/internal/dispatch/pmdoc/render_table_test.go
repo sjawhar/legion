@@ -260,3 +260,23 @@ func TestRenderWritesASpanAsAPeersUpdateCarriesIt(t *testing.T) {
 		t.Fatalf("Render() = %q, want %q", markdown, want)
 	}
 }
+
+// The table-cell-pipes fixture's tree is what the browser editor's parser reads its markdown as, so
+// a renderer that writes the tree as that markdown writes cells the browser editor reads back as
+// they were: a `|` in a cell's text, code, link or image, and one after a backslash. A backslash
+// before a pipe ends the cell in that parser unless it is one of an odd run, so an image's alt
+// written `one\\|two`, which Parse reads back as `one\|two`, is two cells there.
+func TestRenderWritesTableCellPipesAsTheBrowserEditorReadsThem(t *testing.T) {
+	fx := fixtureNamed(t, "table-cell-pipes")
+	tree, err := FromJSON(fx.PMJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != fx.Markdown {
+		t.Fatalf("Render() = %q, want the markdown the browser editor read the tree from, %q", markdown, fx.Markdown)
+	}
+}

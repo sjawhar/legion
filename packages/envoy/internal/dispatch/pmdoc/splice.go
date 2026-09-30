@@ -120,10 +120,7 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 	if err != nil || !supported {
 		return nil, supported, err
 	}
-	rows, err = normalizeTableRows(rows, table.Children[0], width)
-	if err != nil {
-		return nil, true, err
-	}
+	rows = normalizeTableRows(rows, table.Children[0], width)
 
 	out := cloneNode(doc)
 	outTable := nodeAtPath(out, tablePath)
@@ -142,12 +139,12 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 	return out, true, nil
 }
 
-func normalizeTableRows(rows []*Node, header *Node, width int) ([]*Node, error) {
+// normalizeTableRows pads each parsed row to width with cells taking the header's attributes. No
+// row holds more: goldmark cuts every body row at its synthetic header's width, and the parse
+// refuses one holding text past it (markWideRows).
+func normalizeTableRows(rows []*Node, header *Node, width int) []*Node {
 	out := make([]*Node, 0, len(rows))
 	for _, row := range rows {
-		if len(row.Children) > width {
-			return nil, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, len(row.Children), width)
-		}
 		normalized := cloneNode(row)
 		for len(normalized.Children) < width {
 			template := header.Children[len(normalized.Children)]
@@ -161,7 +158,7 @@ func normalizeTableRows(rows []*Node, header *Node, width int) ([]*Node, error) 
 		}
 		out = append(out, normalized)
 	}
-	return out, nil
+	return out
 }
 
 type insertionBoundary struct {
