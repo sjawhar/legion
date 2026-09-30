@@ -372,6 +372,57 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 	}
 }
 
+// A spec seeded at issue creation that cites an issue in bold and another project's issue in a
+// code span, as LEGION-437's did, mentions both, and so does an autolink, which the spec stores as
+// a link whose text is its target. The source of each mention is the spec document, not the issue
+// that owns it: the issue node writes no mention, and each target's backlink names the spec.
+func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
+	handler := newTestHandler(t)
+	createReferenceAPIProject(t, handler, "LEGION")
+	createReferenceAPIProject(t, handler, "AGENTC")
+	sameProject := createReferenceAPIIssue(t, handler, "LEGION")
+	otherProject := createReferenceAPIIssue(t, handler, "AGENTC")
+	autolinkedResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "LEGION", "title": "Autolinked target",
+	}, "alice")
+	if autolinkedResponse.Code != http.StatusCreated {
+		t.Fatalf("create autolinked target: status=%d body=%s", autolinkedResponse.Code, autolinkedResponse.Body.String())
+	}
+	autolinked := decodeBody[model.Issue](t, autolinkedResponse)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "LEGION", "title": "Due dates",
+		"spec": "Tied to **dispatch://" + sameProject.Key + "** and `dispatch://" + otherProject.Key + "`, " +
+			"see <dispatch://" + autolinked.Key + ">.\n",
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue with spec: status=%d body=%s", response.Code, response.Body.String())
+	}
+	citing := decodeBody[model.Issue](t, response)
+	specRef := "dispatch://" + citing.Key + "/spec"
+	targets := []model.Issue{sameProject, otherProject, autolinked}
+
+	mentioned := map[string]bool{}
+	for _, edge := range graphEdges(t, handler, url.Values{"from": {specRef}, "kind": {"mentions"}}).Edges {
+		mentioned[edge.Node.Ref] = true
+	}
+	want := map[string]bool{}
+	for _, target := range targets {
+		want["dispatch://"+target.Key] = true
+	}
+	if !reflect.DeepEqual(mentioned, want) {
+		t.Fatalf("spec mentions = %v; want %v", mentioned, want)
+	}
+	if fromIssue := graphEdges(t, handler, url.Values{"from": {"dispatch://" + citing.Key}, "kind": {"mentions"}}); len(fromIssue.Edges) != 0 {
+		t.Fatalf("issue node mentions = %#v; want none, the spec document writes them", fromIssue.Edges)
+	}
+	for _, target := range targets {
+		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
+		if len(backlinks) != 1 || backlinks[0].Node.Kind != "artifact" || backlinks[0].Node.ID != citing.PrimaryArtifactID || backlinks[0].Node.Ref != specRef {
+			t.Fatalf("%s backlinks = %#v; want one mention from %s", target.Key, backlinks, specRef)
+		}
+	}
+}
+
 type refRow struct {
 	FromKind, FromID, ToKind, ToID, Kind string
 	SourceSeq                            *int64

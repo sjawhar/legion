@@ -738,6 +738,16 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to`
 (comment and message threads), `followed_by` (`ask_followers`). Artifact targets are addressed by
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
+A mention's source is the node whose text holds it, never the issue that text belongs to: a
+citation in an issue's spec is an edge out of the spec document, so
+`GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
+issue's own `child_of` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+A reference ends at whitespace, `<`, `>`, a quote or a backtick, a `dispatch://` one at a square
+bracket too, and the sentence punctuation, emphasis and strikethrough delimiters (`*`, `_`, `~`)
+and unbalanced closing bracket after it are dropped (`text.trimReference`): `**dispatch://KEY**`,
+`` `dispatch://KEY` `` and `[dispatch://KEY](dispatch://KEY)` (how a document stores
+`<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
+link.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.

@@ -90,6 +90,48 @@ func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
 	}
 }
 
+// Markdown's emphasis, strikethrough and code-span delimiters end a reference of every kind, as
+// they already ended an artifact slug: `**dispatch://AGENTC-1400**` is the issue a reader sees
+// linked, not the unparseable key `AGENTC-1400**`. A backtick ends one outright, so two code spans
+// joined by punctuation are two references; `*`, `_` and `~` are dropped only at the end, as
+// GFM's autolinks drop them, so a URL keeps an underscore inside it.
+func TestExtractEndsReferencesAtMarkdownDelimiters(t *testing.T) {
+	body := "Tied to **dispatch://AGENTC-1400** and `dispatch://LEGION-437`. " +
+		"_dispatch://CORE-1/spec_, ~~dispatch://CORE-2~~ and __dispatch://CORE-3/ask/a1__. " +
+		"(**https://dispatch.example/issues/CORE-4**) `dispatch://CORE-5`/`dispatch://CORE-6` " +
+		"*https://example.com/snake_case_path*."
+	want := []Ref{
+		{Kind: "issue", IssueKey: "AGENTC-1400", ID: "AGENTC-1400"},
+		{Kind: "issue", IssueKey: "LEGION-437", ID: "LEGION-437"},
+		{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"},
+		{Kind: "issue", IssueKey: "CORE-2", ID: "CORE-2"},
+		{Kind: "ask", IssueKey: "CORE-3", ID: "a1"},
+		{Kind: "issue", IssueKey: "CORE-4", ID: "CORE-4"},
+		{Kind: "issue", IssueKey: "CORE-5", ID: "CORE-5"},
+		{Kind: "issue", IssueKey: "CORE-6", ID: "CORE-6"},
+		{Kind: "url", ID: "https://example.com/snake_case_path"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v; want %#v", got, want)
+	}
+}
+
+// A document stores `<dispatch://CORE-7/spec>` as a link whose text is its own target, so the text
+// ends at the link's `]` and the target is read on its own: both name the spec. Bold link text
+// ends the same way.
+func TestExtractReadsALinkWhoseTextIsItsTarget(t *testing.T) {
+	body := "See [dispatch://CORE-7/spec](dispatch://CORE-7/spec) and [**dispatch://CORE-8**](dispatch://CORE-8)."
+	want := []Ref{
+		{Kind: "artifact", IssueKey: "CORE-7", ID: "spec"},
+		{Kind: "artifact", IssueKey: "CORE-7", ID: "spec"},
+		{Kind: "issue", IssueKey: "CORE-8", ID: "CORE-8"},
+		{Kind: "issue", IssueKey: "CORE-8", ID: "CORE-8"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v; want %#v", got, want)
+	}
+}
+
 func TestInvalidArtifactReferencesDoNotProduceGraphEdges(t *testing.T) {
 	body := "dispatch://CORE-1/artifact/design-notes/extra " +
 		"https://dispatch.example/projects/CORE/documents/design%2Fnotes " +

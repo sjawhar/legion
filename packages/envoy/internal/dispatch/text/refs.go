@@ -7,7 +7,12 @@ import (
 	"strings"
 )
 
-var referencePattern = regexp.MustCompile(`dispatch://[^\s<>"']+|https?://[^\s<>"']+`)
+// referencePattern stops a reference at whitespace, an angle bracket, a quote or a backtick, none
+// of which a Dispatch reference or a URL holds, so a reference in a code span ends at its closing
+// backtick. A dispatch:// reference also stops at a square bracket, which it never holds either:
+// a document stores `<dispatch://CORE-1>` as the link `[dispatch://CORE-1](dispatch://CORE-1)`,
+// whose text would otherwise run into its target as one unparseable reference.
+var referencePattern = regexp.MustCompile("dispatch://[^\\s<>\"'`\\[\\]]+|https?://[^\\s<>\"'`]+")
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$`)
 var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
 var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
@@ -78,9 +83,12 @@ func ExtractAt(body, serverURL string) []Located {
 	return refs
 }
 
+// trimReference drops what trails a reference in prose: sentence punctuation, the `*`, `_` and `~`
+// that close emphasis and strikethrough around it (GFM's autolinks drop the same characters,
+// keeping them inside a link), and a closing bracket that opens nowhere in the reference.
 func trimReference(raw string) string {
 	for {
-		trimmed := strings.TrimRight(raw, ".,;:!?")
+		trimmed := strings.TrimRight(raw, ".,;:!?*_~")
 		if trimmed != raw {
 			raw = trimmed
 			continue
