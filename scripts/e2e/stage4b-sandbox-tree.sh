@@ -1946,10 +1946,11 @@ pass
 begin node-release
 # Tree 1 lingers (linger_hours 0.3): its Sandboxes stay Suspended, its volume stays Bound, and no pod
 # of the run is left on its node. The pool consolidates a node only once it is empty, so the node is
-# gone after consolidateAfter unless another project's pod now runs there: a tree pod refuses only a
+# gone after consolidateAfter unless another project's pod is now on it: a tree pod refuses only a
 # node holding another tree's pod (the runtime's affinity, internal/runtime/sandbox/manifest.go), and
 # the image probe carries no tree label, so a production daemon running beside the run can place a
-# pod on the node tree 1 emptied. Either case passes, and the note says which one it saw.
+# pod on the node tree 1 emptied. That pod keeps the node from the moment it is bound, Pending through
+# its init containers included. Either case passes, and the note says which one it saw.
 node=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | tail -1)
 [ -n "$node" ] || fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
 node_release=
@@ -1962,11 +1963,29 @@ node_released() {
   fi
   pods=$(timeout 120 kubectl --context "$operator" -n "$namespace" get pods --field-selector "spec.nodeName=$1" -o json) || return 1
   jq -e --arg run "$run_label" '[.items[] | select(.metadata.labels["legion.dev/project"] == $run and .status.phase != "Succeeded" and .status.phase != "Failed")] | length == 0' <<<"$pods" >/dev/null || return 1
-  others=$(jq -r --arg run "$run_label" '[.items[] | select(.status.phase == "Running") | .metadata.labels["legion.dev/project"] // empty | select(. != $run)] | unique | join(",")' <<<"$pods")
+  others=$(jq -r --arg run "$run_label" '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed") | (.metadata.labels["legion.dev/project"] // empty) as $p | select($p != $run) | "\($p)/\(.metadata.name) \(.status.phase)"] | join(", ")' <<<"$pods")
   [ -n "$others" ] || return 1
-  node_release="node $1 stays, carrying no pod of the run while a pod of project $others runs on it"
+  node_release="node $1 stays, carrying no pod of the run while another project's pod is on it ($others)"
 }
-until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod runs on it" node_released "$node"
+# A timed-out wait says what the node held: a pod of the run that never left, another project's pod,
+# or nothing the pool ever deleted.
+report_node_release() {
+  local out
+  if ! out=$(timeout 120 kubectl --context "$operator" get node "$node" -o name --ignore-not-found 2>&1); then
+    note "node $node could not be read: $out"
+    return
+  fi
+  if [ -z "$out" ]; then
+    note "node $node no longer exists"
+    return
+  fi
+  note "node $node still exists; its pods (namespace/name, project label, phase):"
+  timeout 120 kubectl --context "$operator" get pods -A --field-selector "spec.nodeName=$node" -o json |
+    jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(.status.phase)"'
+}
+timeout_hook=report_node_release
+until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
+timeout_hook=
 modes=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].spec.operatingMode}')
 bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
 if [ -z "$modes" ] || grep -qv Suspended <<<"$(tr ' ' '\n' <<<"$modes")"; then fail "tree 1's Sandboxes are '$modes' after its node was released ($node_release), want all Suspended"; fi
