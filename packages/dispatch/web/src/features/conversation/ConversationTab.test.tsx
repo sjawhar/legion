@@ -418,8 +418,8 @@ test("hides targeted-message retries on a closed issue", async () => {
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient, true)).unmount;
     await screen.findByText("Failed: no live session s1");
 
-    expect(screen.queryByRole("button", { name: "Send as BTW instead" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Send normally instead" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use BTW instead" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use Send instead" })).toBeNull();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1244,9 +1244,9 @@ test("a root targeted-message retry checks the role's current holder after a han
     // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
     const sendNormally = await screen.findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
-    expect(
-      screen.getByRole("button", { name: "Send as BTW instead" }).hasAttribute("disabled")
-    ).toBe(false);
+    expect(screen.getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")).toBe(
+      false
+    );
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1377,9 +1377,9 @@ test("a reply's targeted-message retry checks the thread's current role holder a
     // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
     const sendNormally = await screen.findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
-    expect(
-      screen.getByRole("button", { name: "Send as BTW instead" }).hasAttribute("disabled")
-    ).toBe(false);
+    expect(screen.getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")).toBe(
+      false
+    );
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;

@@ -181,7 +181,8 @@ func TestAcceptRecordsAPersonsFreshAttemptAsTheSessionsTurnOnce(t *testing.T) {
 // make a person's earlier message a fresh turn in another session: a retry any bearer can
 // request, and a frame forged later naming an attempt a person asked for long ago. The session's
 // own reply a person retried, a person's BTW retry and a failed attempt are each a message pi-envoy
-// never takes as a turn, so the page must never say one reached the conversation.
+// never takes as a turn, so the page must never say one reached the conversation. Another
+// person's retry is refused too: only the author's own Send or Aside becomes their turn.
 func TestAcceptRefusesEveryAttemptThatIsNotAPersonsFreshLatestDeliveryToThisSession(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -278,6 +279,16 @@ func TestAcceptRefusesEveryAttemptThatIsNotAPersonsFreshLatestDeliveryToThisSess
 			session: "s1", status: http.StatusConflict, code: "ACCEPT_NOT_REQUESTED_BY_PERSON",
 		},
 		{
+			name: "another person's retry",
+			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				if retry := retryDelivery(t, handler, root.ID, "steer", "bob"); retry.Code != http.StatusCreated {
+					t.Fatalf("bob's retry of alice's message: status=%d body=%s", retry.Code, retry.Body.String())
+				}
+				return root.ID, 2
+			},
+			session: "s1", status: http.StatusConflict, code: "ACCEPT_NOT_REQUESTED_BY_AUTHOR",
+		},
+		{
 			name: "an attempt that records no requester",
 			prepare: func(t *testing.T, _ http.Handler, database *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
 				if _, err := database.Pool.Exec(context.Background(), `
@@ -314,6 +325,28 @@ func TestAcceptRefusesEveryAttemptThatIsNotAPersonsFreshLatestDeliveryToThisSess
 			}
 			assertNothingAccepted(t, database, messageID, attempt, before)
 		})
+	}
+}
+
+// A person's own retry of their direct message is still their turn when their login reaches
+// Dispatch cased differently from the first send: a GitHub login names one person however it is
+// cased, as the sign-in allowlist compares it (canonicalLogin), so the accept's check that the
+// requester is the message's author compares logins the same way.
+func TestAcceptTakesTheAuthorsOwnRetryHoweverTheirLoginIsCased(t *testing.T) {
+	handler, database, root, _, _ := directConversationFrom(t, "Alice")
+	if retry := retryDelivery(t, handler, root.ID, "steer", "alice"); retry.Code != http.StatusCreated {
+		t.Fatalf("alice's retry: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+
+	accepted := acceptDelivery(t, handler, root.ID, 2, "s1")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept: status=%d body=%s, want 200", accepted.Code, accepted.Body.String())
+	}
+	if got := decodeBody[acceptedAttempt](t, accepted); got.AcceptedAs == nil || *got.AcceptedAs != "user_turn" || got.Attempt != 2 {
+		t.Fatalf("accepted = %#v, want attempt 2 accepted as user_turn", got)
+	}
+	if len(acceptedEvents(t, database, root.ID)) != 1 {
+		t.Fatalf("message.accepted events = %d, want 1", len(acceptedEvents(t, database, root.ID)))
 	}
 }
 

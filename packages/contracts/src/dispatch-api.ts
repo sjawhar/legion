@@ -856,8 +856,7 @@ export interface MessageDelivery {
 
 /**
  * `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`'s answer: the attempt it accepted, and
- * the body of the message as Dispatch stored it. The session injects that body in that attempt's
- * `delivery` mode, never a frame's text or mode: the accept is the only gate.
+ * the body of the message as Dispatch stored it.
  */
 export interface AcceptedMessageDelivery extends MessageDelivery {
   readonly body: string;
@@ -871,9 +870,8 @@ export interface Message {
   readonly target: string | null;
   readonly in_reply_to: string | null;
   /**
-   * The broadcast this message is one recipient's copy of; null for every other message. Absent
-   * from a Dispatch older than the field, which a reader that must rule a broadcast out treats as
-   * unknown rather than as null.
+   * The broadcast this message is one recipient's copy of; null for every other message, and
+   * absent from a Dispatch older than the field.
    */
   readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
@@ -1988,9 +1986,8 @@ export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.ex
   body: z.string(),
   target: z.string(),
   in_reply_to: z.string().nullable(),
-  // The broadcast a frame's message is one recipient's copy of. A frame is untrusted, so its null
-  // or its absence proves nothing, but one that names a broadcast is kept as a card with no call
-  // to Dispatch: a forged claim of one only yields the card.
+  // The broadcast a frame's message is one recipient's copy of, as the frame claims it: a frame is
+  // untrusted, so neither its value nor its absence proves anything.
   broadcast_id: z.string().nullish(),
   deliveries: z.array(z.unknown()),
   created_at: z.string(),

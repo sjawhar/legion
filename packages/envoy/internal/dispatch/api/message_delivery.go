@@ -64,6 +64,14 @@ const acceptedAsUserTurn = "user_turn"
 // frame already reached it (pi-envoy's handled attempts, `src/dispatch-user-turn.ts`).
 const acceptFresh = `created_at >= now() - interval '1 minute'`
 
+// acceptByAuthor is the check that the person who asked for the attempt (its requested_by) is
+// the person who wrote message $1, so a message becomes a session's turn only on its author's own
+// Send or Aside, never on another person's retry of it. Logins are compared case-insensitively,
+// as a GitHub login and the sign-in allowlist (canonicalLogin) are.
+const acceptByAuthor = `coalesce(
+	lower(requested_by ->> 'id') = (select lower(author ->> 'id') from messages where id = $1),
+	false)`
+
 // acceptDirect is the check that the message is the one kind pi-envoy takes as a turn, a direct
 // message from the Agents page: on no issue, neither a broadcast's copy nor a reply in a
 // broadcast's thread, in a thread whose root targets the accepting session ($3). Who wrote it and
@@ -79,20 +87,19 @@ const acceptDirect = `coalesce((
 ), false)`
 
 // acceptedDelivery is the accept route's answer: the attempt it accepted and the body of the
-// message as Dispatch stored it, which is what the session injects - never a frame's text.
+// message as Dispatch stored it.
 type acceptedDelivery struct {
 	model.MessageDelivery
 	Body string `json:"body"`
 }
 
 // acceptDelivery is POST /api/v1/messages/{id}/deliveries/{attempt}/accept: the session an
-// attempt went to records that it took the message as its user's own turn, the one write
-// pi-envoy makes before it injects anything, and it is the only gate: the session takes the
-// stored body and mode it answers and decides nothing itself about who wrote the message. It is
-// one compare-and-set under the message's row lock, and it succeeds only for a person's direct
-// message to that session (acceptDirect) which that person wrote, sent as a Send or an Aside,
-// and only for the latest attempt of one none of whose attempts was accepted before, which a
-// person asked for within the last minute and which did not fail; a refusal names the check.
+// attempt went to records that it took the message as its user's own turn, and is answered the
+// message's stored body in that attempt's mode. It is one compare-and-set under the message's
+// row lock, and it succeeds only for a person's direct message to that session (acceptDirect)
+// which that person wrote, sent as a Send or an Aside, and only for the latest attempt of one
+// none of whose attempts was accepted before, which the message's own author asked for within
+// the last minute and which did not fail; a refusal names the check.
 //
 // It may land while the attempt is still pending, since pi-envoy answers the frame before
 // Dispatch settles the send, so it writes neither state nor claimed_at, which the settle is
@@ -154,7 +161,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sessionID, delivery, state string
-	var direct, byPerson, latest, fresh bool
+	var direct, byPerson, latest, byAuthor, fresh bool
 	var taken *int
 	var requester *string
 	err = tx.QueryRow(ctx, messageThreadCTE+`
@@ -164,11 +171,12 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		       attempt = (select max(attempt) from message_deliveries where message_id = $1),
 		       (select attempt from message_deliveries where message_id = $1 and accepted_at is not null),
 		       requested_by ->> 'kind',
+		       `+acceptByAuthor+`,
 		       `+acceptFresh+`
 		from message_deliveries
 		where message_id = $1 and attempt = $2
 	`, message.ID, number, actor.ID).Scan(
-		&sessionID, &delivery, &state, &direct, &byPerson, &latest, &taken, &requester, &fresh,
+		&sessionID, &delivery, &state, &direct, &byPerson, &latest, &taken, &requester, &byAuthor, &fresh,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message delivery not found")
@@ -205,6 +213,10 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 	case requester == nil || *requester != "user":
 		writeError(w, "ACCEPT_NOT_REQUESTED_BY_PERSON", http.StatusConflict,
 			fmt.Sprintf("no person requested attempt %d", number))
+		return
+	case !byAuthor:
+		writeError(w, "ACCEPT_NOT_REQUESTED_BY_AUTHOR", http.StatusConflict,
+			fmt.Sprintf("attempt %d was requested by someone other than the person who wrote the message", number))
 		return
 	case state != "pending" && state != "sent":
 		// Dispatch told the person this attempt failed, and they may already have sent the message

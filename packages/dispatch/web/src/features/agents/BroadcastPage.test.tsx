@@ -145,7 +145,7 @@ test("a failed attempt offers the same-mode retry and the mode changes", async (
     const buttons = within(row)
       .getAllByRole("button")
       .map((button) => button.textContent);
-    expect(buttons).toEqual(["Retry", "Send as BTW instead"]);
+    expect(buttons).toEqual(["Retry", "Use BTW instead"]);
   } finally {
     page.view.unmount();
     page.restore();

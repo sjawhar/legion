@@ -849,8 +849,7 @@ type Message struct {
 	Target    *string `json:"target"`
 	InReplyTo *string `json:"in_reply_to"`
 	// BroadcastID names the broadcast this message is one recipient's copy of, and is null for
-	// every other message. A session confirming a direct message reads it: a broadcast keeps its
-	// envelope and its reply counts, so a person's broadcast never becomes the session's own turn.
+	// every other message.
 	BroadcastID *string           `json:"broadcast_id"`
 	CreatedAt   time.Time         `json:"created_at"`
 	Deliveries  []MessageDelivery `json:"deliveries"`

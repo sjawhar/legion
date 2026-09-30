@@ -7,12 +7,12 @@ import { z } from "zod";
  * a person wrote it is not proof of that: the listener takes an envelope's source from whoever
  * sends it, and every session holds that token. So a frame is only a candidate
  * (`isUserTurnCandidate`), and the session takes the turn only once Dispatch records that this
- * session accepted that very attempt (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`).
- * That accept is the only gate: Dispatch allows it once per message, for a person's own Send or
- * Aside to this session, of the last minute, that did not fail, and answers the body it stored,
- * which is what the session injects (`turnFromAccept`). The session only refuses to accept an
- * attempt it already delivered, as a card or as a turn (`handledAttempts`). Anything else keeps
- * today's card, which is the delivery.
+ * session accepted that very attempt (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`):
+ * only that accept's success makes a turn, and it answers the body Dispatch stored, which is what
+ * the session injects (`turnFromAccept`). The session's own checks can only keep a card: it rules
+ * out frames no person's direct message could be, and never accepts an attempt it already
+ * delivered, as a card or as a turn (`handledAttempts`). Anything else keeps today's card, which
+ * is the delivery.
  */
 
 /**

@@ -848,7 +848,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
+    const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(false);
     const sameMode = within(planner).getByRole("button", { name: "Retry" });
     expect(sameMode.hasAttribute("disabled")).toBe(false);
@@ -890,7 +890,7 @@ test("Send normally disables when the target does not advertise steer", async ()
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
+    const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     expect(retry.hasAttribute("title")).toBe(false);
     await within(planner).findByText("Planner does not support Send — use BTW.");
@@ -1021,7 +1021,7 @@ for (const [name, session, read, headline, retries] of [
       const target = card(await screen.findByRole("region", { name: "Agents" }), session);
       expand(target, session);
       await within(target).findByText(headline);
-      expect(within(target).queryAllByRole("button", { name: "Send as BTW instead" })).toHaveLength(
+      expect(within(target).queryAllByRole("button", { name: "Use BTW instead" })).toHaveLength(
         retries
       );
     } finally {
@@ -1465,9 +1465,7 @@ test("a root targeted-message retry on the Agents page checks the role's current
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard)
-        .getByRole("button", { name: "Send as BTW instead" })
-        .hasAttribute("disabled")
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();
@@ -1543,9 +1541,7 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard)
-        .getByRole("button", { name: "Send as BTW instead" })
-        .hasAttribute("disabled")
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();

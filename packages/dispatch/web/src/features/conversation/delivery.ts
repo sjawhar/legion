@@ -43,9 +43,9 @@ export interface DeliveryOutcome {
  *
  * It can only be promised while the notification stream still recognises the repeat. The key a
  * retry carries is scoped to (message, mode, recipient), so inside the stream's duplicate window
- * a same-mode retry of a send that landed is dropped before the agent's subject sees it. Past
- * that window the stream holds neither the message nor its MsgId, and the same retry publishes a
- * second frame — the very defect this promise exists to rule out.
+ * a same-mode retry of a send that landed is stored nowhere new, and the session it reaches again
+ * drops it by that key. Past that window the stream holds neither the message nor its MsgId, and
+ * the same retry publishes a second frame — the very defect this promise exists to rule out.
  *
  * An attempt already recorded `duplicate` is excluded for a different reason: it reached the
  * listener and changed nothing, so there is no failure left to retry.

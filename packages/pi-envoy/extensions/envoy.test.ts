@@ -4722,8 +4722,8 @@ describe("envoy OMP extension", () => {
       });
     }
 
-    // Dispatch is the only gate: whatever it refuses, and whatever keeps it from answering, keeps
-    // the card, and the session posts nothing and injects nothing.
+    // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
+    // keeps the card, and the session posts nothing and injects nothing.
     for (const [name, answer] of [
       ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }],
       ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }],
@@ -4735,7 +4735,7 @@ describe("envoy OMP extension", () => {
       ["Dispatch predates the accept route", { status: 404 }],
       ["Dispatch fails", { status: 500 }],
       ["the accept never reaches Dispatch", { reject: "fetch failed" }],
-      // A Dispatch whose accept predates the body answers the attempt alone.
+      // A 200 that carries no stored body has nothing to inject.
       ["Dispatch accepts it without the stored body", { accepted: true, body: null }],
     ] as const satisfies readonly (readonly [string, AcceptAnswer])[]) {
       test(`stays a card when ${name}`, async () => {

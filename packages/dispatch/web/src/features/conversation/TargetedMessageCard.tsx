@@ -218,7 +218,7 @@ export function DeliveryRetry({
             onClick={() => onRetry("btw")}
             type="button"
           >
-            Send as BTW instead
+            Use {MODE_LABELS.btw} instead
           </button>
           {canBtw ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
@@ -235,7 +235,7 @@ export function DeliveryRetry({
             onClick={() => onRetry("steer")}
             type="button"
           >
-            Send normally instead
+            Use {MODE_LABELS.steer} instead
           </button>
           {canSteer ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
