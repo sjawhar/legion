@@ -145,9 +145,9 @@ it.
 **Scope first.** The scope the deployment instructions state decides which issues are candidates
 at all, before anything below. When they say you hand Legion no issue yourself, or that Legion
 runs only issues someone else sets to `todo`, the walk takes nothing: stop here, whatever slots
-are free. When they narrow the scope (a repository, a kind of change, paths never to touch), a
-candidate outside it is skipped (the last row of the table below). With no scope stated, every
-issue of the project is in scope.
+are free. When they narrow the scope (a repository, a kind of change), a candidate outside it is
+skipped (the last row of the table below). With no scope stated, every issue of the project is in
+scope.
 
 **How many.** Read `legion state --json`. The free slots are `admission.cap` minus the roots in
 `admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything
@@ -188,7 +188,7 @@ leans on `External links:`, and the label row is the one that never depends on h
 |---|---|
 | It carries the `legion` label | `Labels:` lists `legion`, in any case. Legion has the issue or had it, as **Candidates** above says. |
 | It has any child | `dispatch_read({ ref: "dispatch://<KEY>/children" })` lists any child, open or `done`. It is an umbrella, and a finished umbrella is still no leaf. That also skips an issue whose only child is done, which is accepted. Its open children are candidates themselves, each in its own place in the order. |
-| An ancestor is Legion's or someone's | Follow `Links:` up through each `child_of` parent, reading each one, and skip when any ancestor carries the `legion` label, is recorded under `issues` in `legion state --json`, holds a claim (its `Claimed by:` names anyone and does not end `· not running`; `· liveness unknown` counts as holding), or has a route that reaches a running session (read as the route row below reads the issue's own), whatever its status. A Legion ancestor, running or parked, owns its children, and a claimed or routed one means a session owns that area. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
+| An ancestor is Legion's | Follow `Links:` up through each `child_of` parent, reading each one, and skip when any ancestor carries the `legion` label or is recorded under `issues` in `legion state --json`, whatever its status: a Legion tree, running or parked, owns its children. An ancestor's claim or route does not skip the issue: a coordinator holding an umbrella files `todo` leaves for others to pick up, and the claim on the issue itself is what keeps two sessions off the same work. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
 | Someone is designing it | `Open asks:` lists any ask, a `Spec approval: awaiting …` line shows the spec waits on a human, or `Events:` show an `artifact.version` or an `ask.opened` from the last seven days: a session or a person is shaping it even when nobody claims or routes it. |
 | Legion ran it without the label now on it | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every `legion status` (yours included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`, closed-tree activity). |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
