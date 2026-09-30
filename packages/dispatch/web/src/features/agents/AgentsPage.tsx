@@ -243,6 +243,7 @@ function AgentExchangeReply({
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
   const userTurn = sentAsUserTurn(reply, read.message, agent.session_id);
+  const capabilities = capabilitiesForTarget(read.message.target, liveAgents);
   return (
     <ReplyTurn
       at={reply.created_at}
@@ -262,15 +263,9 @@ function AgentExchangeReply({
               retry: userTurn
                 ? undefined
                 : {
-                    canAside:
-                      capabilitiesForTarget(read.message.target, liveAgents)?.includes("aside") !==
-                      false,
-                    canBtw:
-                      capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !==
-                      false,
-                    canSteer:
-                      capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !==
-                      false,
+                    canAside: capabilities?.includes("aside") !== false,
+                    canBtw: capabilities?.includes("btw") !== false,
+                    canSteer: capabilities?.includes("steer") !== false,
                     onRetry: retry.mutate,
                     retrying: retry.isPending,
                   },
