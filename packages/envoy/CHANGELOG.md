@@ -61,7 +61,7 @@
   `|` then U+00A0 is a row holding it, as an upload reads it, where it was a lone `|` that sent the
   fragment to blocks. A line the parser refuses as another block (indented code, `2. | a | b |`)
   is refused as an upload refuses it, `INVALID_OP` on `markdown`, however many cells it holds and
-  wherever it stands. A fragment that goes to the block path was refused as `TABLE_WIDTH` wherever
+  on any row. A fragment that goes to the block path was refused as `TABLE_WIDTH` wherever
   the old count met a line too wide before whatever sends the fragment there, as with
   `- | a | b |` (counted as three cells), or `| A11 | x | y |` then a lone `|` or a line whose only
   pipe is `\|` under two columns; it is now written as the blocks it reads as.
