@@ -22,9 +22,14 @@ const headlessOnly = [
   "roleToken",
   "spawn_worker",
   "legion-worker",
-  // A task subagent the interactive fragment starts dispatches none of its own.
-  'task(agent="',
+  // A task subagent the interactive fragment starts dispatches none of its own. The needle is the
+  // boot gate's own form (packages/daemon-go/internal/promptrefs/promptrefs.go), so a dispatch that
+  // carries other arguments is caught too.
+  'agent="',
 ];
+// The task agents a prompt dispatches, read as the Go daemon's boot gate reads them.
+const dispatchedAgents = (text: string) =>
+  [...text.matchAll(/agent="([a-z0-9][a-z0-9._-]*)"/g)].map(([, name]) => name);
 const repoSpecific = [
   "Inspect",
   "inspect_ai",
@@ -152,10 +157,7 @@ describe("role prompt parts", () => {
       file.endsWith(".md")
     );
     const dispatched = parts.flatMap((file) =>
-      [...read(file).matchAll(/task\(agent="([a-z0-9][a-z0-9._-]*)"\)/g)].map(([, name]) => ({
-        file,
-        name,
-      }))
+      dispatchedAgents(read(file)).map((name) => ({ file, name }))
     );
     expect(dispatched.map(({ name }) => name)).toContain("deep-worker");
     for (const { file, name } of dispatched) {
@@ -165,5 +167,11 @@ describe("role prompt parts", () => {
         `${file} dispatches ${name}, which agents/ does not ship`
       ).toBe(true);
     }
+  });
+
+  test("a dispatch with other arguments is read as a dispatch, by both rules", () => {
+    const ghost = 'Run `task(agent="ghost-worker", isolated: false)` for the code.';
+    expect(dispatchedAgents(ghost)).toEqual(["ghost-worker"]);
+    expect(headlessOnly.filter((needle) => ghost.includes(needle))).toEqual(['agent="']);
   });
 });

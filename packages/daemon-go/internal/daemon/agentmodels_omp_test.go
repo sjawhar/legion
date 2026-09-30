@@ -5,7 +5,6 @@ import (
 	"context"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/testbin"
-	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -143,26 +142,10 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 func shippedPromptPlugin(t *testing.T, dir string) string {
 	t.Helper()
 	pluginSource := filepath.Dir(daemonTestRolePromptsDir(t))
-	files := map[string]string{}
-	for source, target := range map[string]string{
-		filepath.Join(pluginSource, "agents"):             "agents",
-		filepath.Join(pluginSource, "..", "..", "skills"): filepath.Join("dist", "skills"),
-	} {
-		if err := fs.WalkDir(os.DirFS(source), ".", func(path string, entry fs.DirEntry, err error) error {
-			if err != nil || entry.IsDir() {
-				return err
-			}
-			body, err := os.ReadFile(filepath.Join(source, path))
-			if err != nil {
-				return err
-			}
-			files[filepath.Join(target, path)] = string(body)
-			return nil
-		}); err != nil {
-			t.Fatalf("copy the shipped prompts from %s: %v", source, err)
-		}
-	}
-	return testPlugin(t, dir, files)
+	root := testPlugin(t, dir, nil)
+	copyPromptBundle(t, filepath.Join(pluginSource, "agents"), filepath.Join(root, "agents"))
+	copyPromptBundle(t, filepath.Join(pluginSource, "..", "..", "skills"), filepath.Join(root, "dist", "skills"))
+	return root
 }
 
 // The implementer's role prompt hands its code to the deep-worker the plugin ships, whose model is
