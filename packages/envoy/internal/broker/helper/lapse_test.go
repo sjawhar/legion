@@ -56,6 +56,51 @@ func revoked(r *rig, id string) bool {
 	return slices.Contains(deletes, id)
 }
 
+// endSessionThenReleaseRevokes ends sess while every revoke is failing (reg.Remove, as retire and
+// unregister do) and waits for the next revoke attempt after that. That attempt is the handed-off
+// revoke's first, or at most one last try of the session's own loop, which then returns at once.
+// It lets that attempt fail and only then clears the fake's revoke fault, so the id can land only
+// through the handed-off revoke's next try, 2 s later. It fails the test when no attempt comes
+// within 5 s: nothing handed the id on.
+func endSessionThenReleaseRevokes(t *testing.T, r *rig, reg *Registry, sess *Session) {
+	t.Helper()
+	r.fake.mu.Lock()
+	before := r.fake.revokeAttempts
+	r.fake.mu.Unlock()
+	reg.Remove(sess)
+	if sess.peer != nil {
+		sess.peer.Close()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.fake.mu.Lock()
+		n := r.fake.revokeAttempts
+		r.fake.mu.Unlock()
+		if n > before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no revoke was attempted after the session ended; nothing handed its id on")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	r.fake.mu.Lock()
+	r.fake.revokeFailFirst = 0
+	r.fake.mu.Unlock()
+}
+
+// testGate returns a gate for the fake's enrollGate or renewGate and the func that opens it, once
+// however often it is called. Call it after the rig starts: the open it registers for cleanup then
+// runs before the fake's own Close, which waits for any request still held at the gate.
+func testGate(t *testing.T) (chan struct{}, func()) {
+	gate := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	return gate, open
+}
+
 // lapseReason is the last error a lapse records for the fake's refused renew (LEASE_EXPIRED).
 const lapseReason = "the broker refused this session's renew (LEASE_EXPIRED); enrolling again"
 
@@ -120,33 +165,7 @@ func TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries(t *testing.T) {
 func TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt(t *testing.T) {
 	r, lapsed, _ := lapseRig(t, failAlways)
 	sess := r.srv.Registry.Get(os.Getpid())
-	r.fake.mu.Lock()
-	before := r.fake.revokeAttempts
-	r.fake.mu.Unlock()
-	r.srv.Registry.Remove(sess)
-	if sess.peer != nil {
-		sess.peer.Close()
-	}
-	// The next attempt after the session ended is the handed-off revoke's first (or, at most, one
-	// last try of the session's own loop, which then returns at once): let it fail, then clear the
-	// fault so the handed-off revoke's next try succeeds.
-	attempted := time.Now().Add(5 * time.Second)
-	for {
-		r.fake.mu.Lock()
-		n := r.fake.revokeAttempts
-		r.fake.mu.Unlock()
-		if n > before {
-			break
-		}
-		if time.Now().After(attempted) {
-			t.Fatal("no revoke of the lapsed id was attempted after the session ended; nothing handed it on")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	time.Sleep(200 * time.Millisecond)
-	r.fake.mu.Lock()
-	r.fake.revokeFailFirst = 0
-	r.fake.mu.Unlock()
+	endSessionThenReleaseRevokes(t, r, r.srv.Registry, sess)
 	deadline := time.Now().Add(10 * time.Second)
 	for !revoked(r, lapsed) {
 		if time.Now().After(deadline) {
@@ -164,10 +183,7 @@ func TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt(t *testing.T)
 // answers while the gate is still shut, and the test fails.
 func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
 	r, lapsed, _ := lapseRig(t, failAlways)
-	gate := make(chan struct{})
-	var release sync.Once
-	open := func() { release.Do(func() { close(gate) }) }
-	t.Cleanup(open) // runs before the fake's own Close, which waits for the held request
+	gate, open := testGate(t)
 	r.fake.mu.Lock()
 	r.fake.enrollGate = gate
 	r.fake.revokeFailFirst = 0 // the lapsed id's next revoke lands; the re-enrollment then waits at the gate

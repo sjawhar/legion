@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -687,33 +686,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	if alreadyRevoked {
 		t.Fatal("the old enrollment was revoked while every revoke was failing")
 	}
-	r.fake.mu.Lock()
-	before := r.fake.revokeAttempts
-	r.fake.mu.Unlock()
-	srv2.Registry.Remove(sess)
-	if sess.peer != nil {
-		sess.peer.Close()
-	}
-	// The next attempt after the session ended is the handed-off revoke's first (or, at most, one
-	// last try of the session's own loop, which then returns at once): let it fail, then clear the
-	// fault so only the handed-off revoke's next try, 2 s later, can land the id.
-	attempted := time.Now().Add(5 * time.Second)
-	for {
-		r.fake.mu.Lock()
-		n := r.fake.revokeAttempts
-		r.fake.mu.Unlock()
-		if n > before {
-			break
-		}
-		if time.Now().After(attempted) {
-			t.Fatal("no revoke of the old enrollment was attempted after the session ended; nothing handed it on")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	time.Sleep(200 * time.Millisecond)
-	r.fake.mu.Lock()
-	r.fake.revokeFailFirst = 0
-	r.fake.mu.Unlock()
+	endSessionThenReleaseRevokes(t, r, srv2.Registry, sess)
 	// The independent fallback must still revoke the old enrollment even though the session that
 	// was supposed to revoke it is gone.
 	revokeDeadline := time.Now().Add(10 * time.Second)
@@ -784,10 +757,7 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 // enrollment cannot lapse again under the assertions.
 func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 	r := startRig(t, "")
-	gate := make(chan struct{})
-	var release sync.Once
-	open := func() { release.Do(func() { close(gate) }) }
-	t.Cleanup(open) // runs before the fake's own Close, which waits for the held request
+	gate, open := testGate(t)
 	r.fake.mu.Lock()
 	r.fake.lease = 60 * time.Millisecond
 	r.fake.renewGate = gate
