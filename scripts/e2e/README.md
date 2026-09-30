@@ -605,6 +605,10 @@ namespace label `legion.dev/project=legsmoke` are shared.
 - It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
   `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.
 - A run refused at any of the four removes nothing.
+- Each daemon start checks both ports again, since another process can take one after the
+  prerequisites; once the daemon answers `/healthz`, both ports must be held by that daemon's
+  process, or the boot fails naming the holder. A `/healthz` answer alone could come from another
+  daemon on the same address.
 
 **What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
 the run that owns it. A signal to the whole process group does not stop the removal:

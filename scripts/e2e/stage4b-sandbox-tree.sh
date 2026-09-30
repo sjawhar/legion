@@ -492,7 +492,28 @@ create_providers_secret() {
   rm -f "$seed_file"
   note "[operator] Secret $providers_secret: NATS_NKEY_SEED from the operator's seed, label legion.dev/project=$run_label"
 }
+# ports_free fails naming the holder when anything listens on the daemon's API or worker-stream
+# port.
+ports_free() {
+  local port
+  for port in "$port_daemon" "$port_worker_stream"; do
+    [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
+  done
+}
+# ports_ours fails naming the holder unless the run's daemon listens on both ports: a /healthz
+# answer says only that something on $host:$port_daemon answers.
+ports_ours() {
+  local port holder
+  for port in "$port_daemon" "$port_worker_stream"; do
+    holder=$(ss -Hltnp "sport = :$port")
+    [[ $holder == *"pid=$daemon_pid,"* ]] ||
+      fail "port $port is held by another process, not the run's daemon (pid $daemon_pid): ${holder:-nothing listens}"
+  done
+}
 start_daemon() {
+  # Prerequisites found both ports free, minutes before this boot; a process that took one since
+  # would answer /healthz in the run's daemon's place.
+  ports_free
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
     -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
@@ -501,6 +522,7 @@ start_daemon() {
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
   timeout_hook=
   kill -0 "$daemon_pid" 2>/dev/null || fail "the Go daemon exited before it answered /healthz: $(tail -3 "$daemon_log" | cut -c1-300 | tr '\n' ' ')"
+  ports_ours
 }
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300)"; }
@@ -1260,9 +1282,7 @@ mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
 refuse_leftovers legion-e2e4b
-for port in "$port_daemon" "$port_worker_stream"; do
-  [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
-done
+ports_free
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the daemon binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) || fail "instance metadata has no local-ipv4"

@@ -67,16 +67,20 @@ Every path it cites is in sjawhar/legion.
   a refused resolution to the architect, which opens an ask for a human to resolve the thread by
   hand — never skip it silently. The merger runs the command once more before publishing READY
   and does not publish while any `left open` line remains. That run is where every accepted
-  thread's resolution is guaranteed: the reviewer's `Accepted:` replies to the last round come
-  after the implementer's last run, and the merge queue's gate counts the unresolved threads at
-  the head.
+  thread's resolution is guaranteed, since the merge queue's gate counts the unresolved threads at
+  the head. Where no `.legion/` deletion push follows the last review round (the Go daemon, before
+  Stage 7), the reviewer's `Accepted:` replies to that round come after the implementer's last
+  run, and this run is the only one that resolves them.
 
 - **The reviewer, on a re-review.** When you re-review after a corrective push, answer every
   thread you opened, and every thread a bot opened that is none of Legion's role Apps, in one of
   the three forms above — `Accepted:` is the only reply `legion threads resolve` acts on. A bot's
   finding you cannot accept becomes your own: leave it `Still open:` and request changes.
   Approve once each of those threads has your own `Accepted:` as its newest submitted comment,
-  and every other thread its opener's (read the newest comments with `gh api graphql`, never from
-  the PR body), whether or not GitHub shows the thread resolved yet. Resolution is the pull
-  request author's App's, so it waits for the implementer's next run or the merger's before
-  READY; an approval that waited for it would wait on a phase that starts only after the approval.
+  whether or not GitHub shows the thread resolved yet, and every other unresolved thread its
+  opener's (read the newest comments with `gh api graphql`, never from the PR body). Another
+  opener's thread that a person resolved with GitHub's button, with no `Accepted:`, gates nothing:
+  neither `legion threads resolve` nor the merge queue's gate counts a resolved thread. Resolution
+  is the pull request author's App's, so your approval never waits on it. Where no `.legion/`
+  deletion push follows your last round (the Go daemon, before Stage 7), the next run is the
+  merger's before READY, a phase that starts only after your approval.

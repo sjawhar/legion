@@ -41,15 +41,18 @@
 ### Changed
 
 - The reviewer approves once each thread it opened, and each bot's thread, has its own `Accepted:`
-  as the newest submitted comment, whether or not GitHub shows the thread resolved yet
-  (LEGION-316). Only the pull request's author's App resolves a thread, and the reviewer's
-  acceptances of the last round come after the implementer's last run, so an approval that waited
-  on `isResolved` waited on the merger, which starts only after the approval: two trees
-  deadlocked there. A bot's finding the reviewer cannot accept becomes its own, and it requests
-  changes, so no bot thread reaches the merger unanswered. The implementer runs
+  as the newest submitted comment, whether or not GitHub shows the thread resolved yet, and every
+  other unresolved thread its opener's (LEGION-316). Only the pull request's author's App resolves
+  a thread, and under the Go daemon, which pushes no `.legion/` deletion before Stage 7, the
+  reviewer's acceptances of the last round come after the implementer's last run, so an approval
+  that waited on `isResolved` waited on the merger, which starts only after the approval: two trees
+  deadlocked there. A thread someone else opened and a person resolved with GitHub's button, with
+  no `Accepted:`, blocks nothing, since neither `legion threads resolve` nor the merge queue's gate
+  counts a resolved thread. A bot's finding the reviewer cannot accept becomes its own, and it
+  requests changes, so no bot thread reaches the merger unanswered. The implementer runs
   `legion threads resolve` after the push that answers a review and before its completion, so the
   output it pastes into the PR body describes the head it pushed; the merger's run before READY
-  resolves the last round's threads (LEGION-386).
+  resolves any accepted thread still open (LEGION-386).
 - The `legion-worker` skill arrives whole (LEGION-386). At 55,020 bytes it was over Oh My Pi's
   51,200-byte spill threshold, so a phase worker read it with its middle cut out. Its body is now
   under 500 lines, and the PR-body template and proofs, review threads, conflicts and fingerprints,

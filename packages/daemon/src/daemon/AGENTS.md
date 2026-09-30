@@ -173,8 +173,9 @@ same for unresolve). On `sjawhar/legion-smoke#228`, which the review App opened,
 token read `viewerCanResolve: true` on its own thread, and its `resolveReviewThread` returned
 `isResolved: true` (2026-09-25; the PR is closed and its branch deleted). The implementer opens
 every Legion pull request, so the implementer — after every push that answers a review, before
-its completion — and the merger — once more before READY, the run that resolves the threads the
-reviewer accepted in the last round, since it approves on its own `Accepted:` — resolve every
+its completion — and the merger — once more before READY, which under the Go daemon (no `.legion/`
+deletion push before Stage 7) is the only run after the reviewer's last-round `Accepted:` replies,
+since the reviewer approves on its own `Accepted:` — resolve every
 thread the reviewer has accepted with `legion threads resolve --pr <number> --repo
 <owner>/<repo>` (`cli/review-threads.ts`, `cmdThreadsResolve` in `cli/index.ts`). The
 implementer also pushes the `.legion/` deletion at

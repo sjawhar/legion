@@ -59,9 +59,10 @@ Plan the probe into the review round, not into the tester's E2E:
 4. **The reviewer verifies on GitHub, not in the body** (`gh api graphql … reviewThreads { id
    isResolved }`, `PRRT_kwDORFy7ds6h3A8X` → `true`) and quotes that fragment in the approval. The
    quote is the acceptance's recorded check. (2026-09-30, LEGION-316: approval no longer waits on
-   resolution. The reviewer approves once its own `Accepted:` is each thread's newest comment, and
-   the merger's run before READY resolves the last round's; the #1003 quote records how that
-   probe was checked then.)
+   resolution. The reviewer approves once its own `Accepted:` is each thread's newest comment; the
+   implementer's run after the `.legion/` deletion push resolves the last round's, or, under the Go
+   daemon, which pushes no deletion, the merger's run before READY. The #1003 quote records how
+   that probe was checked then.)
 
 The probe costs one inline comment and one reply; it turns "the review round" into the only
 production-like surface that exists for the cross-App case, and it produces the same `Threads`
