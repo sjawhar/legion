@@ -138,9 +138,15 @@ Picking the next work is your job: nobody hand-feeds issues to Legion. Keep ever
 filled with the highest-priority concrete issue Legion can take. The unit of Legion work is a
 leaf, an issue with no children, never an umbrella that holds other issues.
 
-**When.** At every start (step 3 above), and on each `slot-free on <KEY>` wake: the daemon
-released `<KEY>`'s slot, because its tree finished or left the workflow, and no waiting root took
-it.
+**When.** At every start (step 3 above), and on each of the Go daemon's walk wakes, which it sends
+only while a slot stands free and no identical wake is still waiting:
+
+- `slot-free on <KEY>`: the daemon released `<KEY>`'s slot, because its tree finished or left the
+  workflow, and no waiting root took it.
+- `todo on <KEY>`: `<KEY>`, an issue nobody handed to Legion, changed while in `todo`, so it may
+  be a new candidate. Walk the whole list, not only `<KEY>`.
+- `tick on <PROJECT>`: the daemon's periodic wake (`controller_wake_interval_seconds`, an hour by
+  default), so an earlier walk that found nothing, or a day with no event, is walked again.
 
 **Scope first.** The scope the deployment instructions state decides which issues are candidates
 at all, before anything below. When they say you hand Legion no issue yourself, or that Legion
@@ -208,17 +214,23 @@ leans on `External links:`, and the label row is the one that never depends on h
 
 2. It is already in `todo`, so the label admits it: the daemon records it and gives it the free
    slot, or queues it in `admission.waiting`. It needs no status write.
-3. Post one short comment that says Legion took it and names who is asked at its design gate, from
-   the `Assignee:` line, with the assignee sentence [New issue triage](#new-issue-triage) step 4
-   gives:
+3. Post one short comment that says Legion took it, who is asked at its design gate, and how to
+   undo the take. Read the gate from the `Design gate policy:` line of your system prompt, which
+   `legion controller start` writes from the daemon's own configuration: under
+   `gates.design: root-issues` the assignee is asked to approve the design; under
+   `gates.design: off` nobody is, so the comment promises no approval. Name the assignee with the
+   sentence [New issue triage](#new-issue-triage) step 4 gives, dropping its design-approval
+   clause under `off`:
 
    ```text
-   dispatch_comment({ issue: "<KEY>", body: "Legion took this issue: it was the highest-priority open issue nobody else was working on. Assigned to <login>, who will get this tree's questions and its design approval." })
+   dispatch_comment({ issue: "<KEY>", body: "Legion took this issue: it was the highest-priority open issue nobody else was working on. Assigned to <login>, who will get this tree's questions and its design approval. To stop Legion, move the issue to backlog; taking the legion label off does not stop a tree that has started." })
    ```
 
 The daemon admits each root when Dispatch's event reaches it; the next `legion state --json`
 shows it in `admission.active`. When the candidates run out with slots still free, leave those
-slots free and say so in your summary.
+slots free and say so in your summary. On the turn that posts the day's report, the report names
+this walk's tally: the free slots before it, each issue it took, and how many candidates each row
+of the table skipped.
 
 ## Daily report (Go daemon)
 
@@ -236,10 +248,11 @@ dispatch_issue({ project: "<PROJECT>", title: "Legion daily report", spec: "## S
 legion status <report KEY> icebox
 ```
 
-**When.** On your first turn of each UTC day, whatever it is: your start, or a wake of any kind.
-Read the report issue with `dispatch_read`, and post when its `Events:` show no `message.created`
-from today. You have no clock of your own, so a day with no turn has no report; the next one
-covers it.
+**When.** On your first turn of each UTC day, whatever it is: your start, or a wake of any kind
+(the daemon's hourly `tick` makes a turn likely while a slot stands free). Walk first, then read
+the report issue with `dispatch_read`, and post when its `Events:` show no `message.created` from
+today. You have no clock of your own, so a day with no turn has no report; the next one covers
+it.
 
 **What.** One `dispatch_message({ issue: "<report KEY>", body })` of at most 2,000 characters,
 written as `skill://dispatch`'s "Writing for the human" says: every issue by its key and title,
@@ -254,6 +267,9 @@ every pull request by its URL.
   message gave (the `message.created` just before `issue.closed` among `Events:`).
 - **Running.** Each root in `admission.active` with its `issues.<KEY>.phase`, and the roots in
   `admission.waiting`.
+- **The slots and the walk.** The free slots (`admission.cap` minus `admission.active` and
+  `admission.waiting`), then this turn's walk: what it took, and how many candidates each row
+  skipped, so a reader can see why a free slot stays empty.
 
 A day with nothing finished says so in one sentence. When the lists do not fit, keep the counts
 and the highest-priority issues.
@@ -288,6 +304,8 @@ quoted here.
 | New issue created in the Dispatch project (`issue.created`, status `triage`; under the TypeScript daemon resync heals misses, under the Go daemon the boot step above does). From the Go daemon: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above) | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
 | Backlog eligibility (TypeScript daemon) | slot freed / priority change | Reconsider parked items and move the eligible root to `todo` |
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `legion state --json`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
+| `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo`, sent while a slot stands free | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
+| `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick"}`) | the project key; the daemon's periodic wake while a slot stands free | Verify a free slot, then walk; post the day's report if this is the day's first turn |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |
 | Resync report: `admission-drift` entry | issue key + whether the daemon added it to, or removed it from, its admission list (the detail says which) | No action: the daemon already repaired it in the same run. An issue that reappears in consecutive reports is a live leak — file a LEGION issue on Dispatch with both reports pasted as evidence (never a GitHub issue) |

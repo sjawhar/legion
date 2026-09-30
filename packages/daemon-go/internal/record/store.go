@@ -397,6 +397,24 @@ func (s *Postgres) ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) err
 	return nil
 }
 
+func (s *Postgres) ControllerRegistered(ctx context.Context, tx pgx.Tx, project string) (bool, error) {
+	var registered bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from controllers where project = $1 and session <> '')", project).Scan(&registered); err != nil {
+		return false, fmt.Errorf("read whether %s has a registered controller: %w", project, err)
+	}
+	return registered, nil
+}
+
+func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, `select exists (select 1 from outbox
+		where kind = $1 and split_part(issue, '-', 1) = $2 and payload->>'kind' = $3)`,
+		string(OutboxKindControllerNotice), project, string(kind)).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read whether %s has a %s controller notice pending: %w", project, kind, err)
+	}
+	return pending, nil
+}
+
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
 
 func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {

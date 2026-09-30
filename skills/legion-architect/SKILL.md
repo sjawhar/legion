@@ -38,6 +38,13 @@ separate coordinator to finish necessary work.
 - Deferring necessary work is failure. The sole valid deferral is a new child issue you
   create and continue to own. Re-file a genuinely independent child through the
   controller rather than treating it as an abandoned dependency.
+- **A root architect holds its root issue.** When the tree starts, claim the root issue as the
+  session implementing it: `dispatch_claim({ issue: "<root>" })`. Other sessions then see Legion
+  on it, and one that comes back to work it is refused with `409 ISSUE_CLAIMED` naming you
+  instead of working alongside. The close releases the claim: signing off sets the issue `done`,
+  and `close_root` does too. When the claim is refused because a running session or a person
+  already holds the issue, Legion took it by mistake: close the tree with `close_root`, naming
+  the holder in the reason. A sub-architect claims nothing; its child is the tree's.
 
 ## Deployment instructions
 

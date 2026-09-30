@@ -128,6 +128,9 @@ type Config struct {
 	Linger         time.Duration
 	ReviewRoundCap int
 	MaxFixAttempts int
+	// ControllerWakeInterval is how often the daemon wakes the controller to walk for work while an
+	// admission slot stands free (`controller_wake_interval_seconds`, an hour by default).
+	ControllerWakeInterval time.Duration
 }
 
 const (
@@ -157,6 +160,7 @@ var durationKeys = []struct {
 	{"tree_stop_timeout_seconds", 60, func(c *Config) *time.Duration { return &c.TreeStopTimeout }},
 	{"slow_command_timeout_seconds", 300, func(c *Config) *time.Duration { return &c.SlowCommandTimeout }},
 	{"probe_interval_seconds", 30, func(c *Config) *time.Duration { return &c.ProbeInterval }},
+	{"controller_wake_interval_seconds", 3600, func(c *Config) *time.Duration { return &c.ControllerWakeInterval }},
 }
 
 // countKeys are the positive-integer keys with no unit, and their defaults: the registration

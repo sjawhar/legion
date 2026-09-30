@@ -84,6 +84,14 @@ func (p DispatchConsumerPosition) Reached(target int64) bool {
 	return p.AckFloorStream >= target || p.Idle
 }
 
+// ControllerTick is the daemon's periodic wake for the project's controller, applied as a
+// synthetic fact every `controller_wake_interval_seconds` and never decoded from an event.
+// Admission is the only handler that acts on it: while a slot stands free and a controller is
+// registered, it wakes the controller to walk for work and post the day's report.
+type ControllerTick struct{}
+
+func (ControllerTick) isFact() {}
+
 // PullRequestOpened registers a pull request whose branch or body identifies a Dispatch issue.
 type PullRequestOpened struct {
 	Repo      string

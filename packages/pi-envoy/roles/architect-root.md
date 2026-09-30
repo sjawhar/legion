@@ -39,6 +39,10 @@ deferral is a new child issue you create and own. Re-file, capacity, and cross-t
 conflicts go to the controller; product or scope questions stay with you or go through
 `dispatch_ask` to Sami.
 
+When the tree starts, claim the root issue with `dispatch_claim` so no other session works it
+alongside Legion; closing the issue releases the claim (`skill://legion-architect`, "A root
+architect holds its root issue").
+
 The merge is not the close: after the queue lands a pull request, `spawn_worker` the implementer
 for the production check, and sign off only once its record exists on the pull request and the
 issue. A tester completion that rejects the implementer's proof goes back to the implementer; a

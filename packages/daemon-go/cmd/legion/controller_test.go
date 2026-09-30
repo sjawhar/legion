@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -92,11 +93,16 @@ type controllerDaemon struct {
 }
 
 func newControllerDaemon(t *testing.T) *controllerDaemon {
+	return newControllerDaemonGated(t, config.DesignGateRootIssues)
+}
+
+// newControllerDaemonGated is newControllerDaemon for a project whose `gates.design` is gate.
+func newControllerDaemonGated(t *testing.T, gate config.DesignGate) *controllerDaemon {
 	t.Helper()
 	d := &controllerDaemon{t: t, controller: &memoryController{}, dispatch: &statusWrites{}}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
-		Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DesignGate: gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}).Handler
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -436,9 +442,9 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 }
 
 // Oh My Pi runs through the launch prefix, interactive (no --mode rpc, no --resume), with one
-// --append-system-prompt holding the controller prompt and the deployment instructions, under
-// the operator's own environment plus exactly the shared controller environment — the secrets as
-// file pointers, never values.
+// --append-system-prompt holding the controller prompt, the daemon's design gate policy, and the
+// deployment instructions, under the operator's own environment plus exactly the shared
+// controller environment — the secrets as file pointers, never values.
 func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -462,7 +468,8 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	}
 	// `$(cat …)` drops each file's trailing newlines, as a shell does.
 	wantArgv := []string{"--append-system-prompt",
-		strings.TrimRight(string(controllerPrompt), "\n") + "\n\n" + strings.TrimRight(string(instructions), "\n")}
+		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`.\n\n" +
+			strings.TrimRight(string(instructions), "\n")}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("Oh My Pi's argv = %q\nwant %q", got, wantArgv)
 	}
@@ -538,6 +545,36 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	wantLog := fmt.Sprintf("[legion] starting the controller for demo against %s; state in %s\n", d.url, c.defaultDir)
 	if errb != wantProbe+wantLog {
 		t.Errorf("stderr = %q, want %q", errb, wantProbe+wantLog)
+	}
+}
+
+// The controller is told the daemon's real design gate policy, so under `gates.design: off` its take
+// comment promises no design approval that cannot happen (skill://legion-controller).
+func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.T) {
+	d := newControllerDaemonGated(t, config.DesignGateOff)
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	argv := c.argv()
+	if len(argv) != 2 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
+		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry the off policy line", argv)
+	}
+}
+
+// A daemon that answers the secret without a policy it knows is refused, never guessed at: the
+// controller would otherwise promise, or withhold, a design approval on an assumption.
+func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
+	for _, body := range []string{`{"secret":"s"}`, `{"secret":"s","designGate":"sometimes"}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken)
+		server.Close()
+		if err == nil || !strings.Contains(err.Error(), "not 'root-issues' or 'off'; upgrade the daemon") {
+			t.Fatalf("fetchControllerSecret(%s) error = %v; want the policy refusal", body, err)
+		}
 	}
 }
 

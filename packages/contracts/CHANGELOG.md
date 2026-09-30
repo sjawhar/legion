@@ -4,6 +4,9 @@
 
 ### Added
 
+- `LegionGoControllerSecretResponse` carries `designGate` (`root-issues` or `off`): the Go daemon
+  tells `legion controller start` its design gate policy, which the controller's take comment
+  reads before it promises a design approval.
 - Added `claimHolds(claim, titles)` and its `ClaimHolding` answer (`holds`, `lapsed`, `unknown`):
   whether a claim still holds its issue against the live agent registry. A person's always holds;
   a session's holds while the loaded registry lists it; with no registry it is `unknown`. The

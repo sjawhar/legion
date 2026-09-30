@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -43,6 +44,8 @@ type Options struct {
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
 	Controller ControllerStore
+	// DesignGate is the project's `gates.design`, which the controller secret route answers.
+	DesignGate config.DesignGate
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
@@ -72,6 +75,7 @@ type server struct {
 	operatorSet       bool
 	operatorHash      [sha256.Size]byte
 	controller        ControllerStore
+	designGate        config.DesignGate
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
@@ -105,6 +109,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		bootTokens:        opts.BootTokens,
 		project:           opts.Project,
 		controller:        opts.Controller,
+		designGate:        opts.DesignGate,
 		tokens:            opts.Tokens,
 		githubOwner:       opts.GitHubOwner,
 		grants:            opts.Grants,

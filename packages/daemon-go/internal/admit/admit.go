@@ -86,6 +86,12 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if position, ok := fact.(intake.DispatchConsumerPosition); ok {
 		return a.release(ctx, tx, position)
 	}
+	if _, ok := fact.(intake.ControllerTick); ok {
+		if _, err := a.promote(ctx, tx); err != nil {
+			return nil, err
+		}
+		return nil, a.wakeWhileSlotFree(ctx, tx, record.TickNotice, a.project)
+	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
@@ -125,7 +131,9 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
-			return nil, nil
+			// An issue in todo that nobody handed to Legion is a candidate for the controller's
+			// walk, which otherwise runs only at its start and when a slot frees.
+			return nil, a.wakeWhileSlotFree(ctx, tx, record.TodoNotice, observation.Key)
 		}
 		a.mu.Lock()
 		summary, held := a.pending[observation.Key]
@@ -183,6 +191,38 @@ func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []s
 		return nil
 	}
 	return a.enqueue(ctx, tx, released[0], record.ControllerNotice{Kind: record.SlotFreeNotice}, a.now())
+}
+
+// wakeWhileSlotFree wakes the controller with a notice of kind on issue when it can act on one:
+// a slot stands free, a controller is registered, and no notice of the same kind is still waiting
+// in the outbox, so a burst of events or ticks queues one wake. The wake needs no record: the
+// controller reads Dispatch and the daemon's state (skill://legion-controller).
+func (a *Admission) wakeWhileSlotFree(ctx context.Context, tx pgx.Tx, kind record.NoticeKind, issue string) error {
+	if a.cap <= 0 {
+		return nil
+	}
+	issues, err := a.store.Issues(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("list admission issues: %w", err)
+	}
+	slots, err := a.store.Slots(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("list admission slots: %w", err)
+	}
+	// A waiting root takes the next free slot, so only a slot no waiting root will take is free.
+	own := ownSlots(issues, slots)
+	if len(own)+len(record.Waiting(issues, own)) >= a.cap {
+		return nil
+	}
+	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
+	if err != nil || !registered {
+		return err
+	}
+	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, kind)
+	if err != nil || pending {
+		return err
+	}
+	return a.enqueue(ctx, tx, issue, record.ControllerNotice{Kind: kind}, a.now())
 }
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available

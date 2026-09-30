@@ -65,6 +65,9 @@ type workflowRuntime struct {
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
+	// controllerWake is tickController's period (`controller_wake_interval_seconds`); zero, in a
+	// test that builds the runtime by hand, means the configuration's default hour.
+	controllerWake time.Duration
 	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
@@ -161,6 +164,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
+		controllerWake: cfg.ControllerWakeInterval,
 	}, nil
 }
 
@@ -384,6 +388,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
+		w.tickController(running)
+		return nil
+	})
+	group.Go(func() error {
 		w.releaseReadied(running)
 		return nil
 	})
@@ -522,6 +530,32 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 			continue
 		}
 		last, haveLast = position, true
+	}
+}
+
+// tickController applies a ControllerTick fact every controllerWake, so admission wakes the
+// controller while a slot stands free even when no event arrives: a walk that found nothing, the
+// last tree finishing, or a quiet day would otherwise leave the slots empty and the daily report
+// unposted until the next wake. Each tick's event id is its own (the project, this boot, and the
+// tick's time), since processed_events is shared by every project's daemon. A failed apply is
+// logged, and the next tick tries again.
+func (w *workflowRuntime) tickController(ctx context.Context) {
+	interval := w.controllerWake
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case at := <-ticker.C:
+			eventID := fmt.Sprintf("controller-tick:%s:%s:%d", w.dispatchProject, w.bootID, at.UnixNano())
+			if _, err := intake.ApplyFact(ctx, w.pool, "controller", eventID, intake.ControllerTick{}, w.handlers...); err != nil {
+				w.log.Warn("apply the controller wake tick failed", "error", err)
+			}
+		}
 	}
 }
 
