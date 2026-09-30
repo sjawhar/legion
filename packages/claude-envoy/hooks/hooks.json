@@ -1,5 +1,5 @@
 {
-  "description": "Envoy: summarise this session's open Dispatch asks when a session starts.",
+  "description": "Envoy: summarise this session's open Dispatch asks when a session starts, and load the dispatch-first skill when Dispatch is configured.",
   "hooks": {
     "SessionStart": [
       {
@@ -9,6 +9,17 @@
             "type": "command",
             "command": "bun",
             "args": ["${CLAUDE_PLUGIN_ROOT}/dist/open-asks-hook.js"],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/dispatch-first-hook.js"],
             "timeout": 10
           }
         ]

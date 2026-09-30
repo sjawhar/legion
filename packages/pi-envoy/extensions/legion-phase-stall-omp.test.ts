@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
 
 // The phase-stall follow-up on the real Oh My Pi (src/legion/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
@@ -14,6 +15,8 @@ import * as path from "node:path";
 // treats any `agent_start` after a settle as a newer run and withholds its steer, so a host that
 // counted the side turn as a run would silence the nudge with every unit test still green.
 // The WAITING self-check case below fails if that ever changes.
+// It is the only check of the dispatch-first skill's insertion, too: Oh My Pi keeps nothing a
+// `context` handler returns, so what reaches the model can only be read off the requests it sends.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
 const extensions = path.join(import.meta.dir);
@@ -50,6 +53,17 @@ interface Pane {
 function isSelfCheck(request: Request): boolean {
   const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
   return JSON.stringify(messages.at(-1) ?? null).includes("<btw>");
+}
+
+/**
+ * Whether a Messages request is one of a compaction's summary calls (the summary and its short
+ * form, two calls on the pin), which the host sends under its summarization system prompt. The
+ * stand-in answers every one with the same summary, so the conversation's turns stay scripted.
+ */
+function isSummarization(request: Request): boolean {
+  return JSON.stringify(request.body.system ?? null).includes(
+    "Summarize user–AI coding-assistant conversations"
+  );
 }
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -139,6 +153,9 @@ function userText(request: Request): string {
   );
 }
 
+/** One thing the pane is told over RPC, in order: a user prompt, or a manual compaction. */
+type PaneStep = { readonly prompt: string } | { readonly compact: true };
+
 /** How one pane differs from the implementer pane the phase-stall cases run. */
 interface PaneOptions {
   /**
@@ -158,6 +175,15 @@ interface PaneOptions {
   readonly quietMs?: number;
   /** The one word the gateway answers the run-end self-check with. */
   readonly selfCheck?: string;
+  /** Configures Dispatch against the stand-in whatever the open-ask options say. */
+  readonly dispatch?: boolean;
+  /**
+   * What the pane is told, in order; each waits for the previous to settle. The default is the
+   * daemon's assignment, `Implement STALL-2.`, alone.
+   */
+  readonly steps?: readonly PaneStep[];
+  /** What the gateway answers a compaction's summary calls with. */
+  readonly summary?: string;
 }
 
 /**
@@ -212,6 +238,12 @@ async function runPane(
             messageStream([{ type: "text", text: verdict }], `btw_${selfChecks}`),
             { headers: { "content-type": "text/event-stream" } }
           );
+        }
+        if (isSummarization({ path: url.pathname, body })) {
+          const summary = options.summary ?? "The conversation so far.";
+          return new Response(messageStream([{ type: "text", text: summary }], "summary"), {
+            headers: { "content-type": "text/event-stream" },
+          });
         }
         const reply = replies[answered];
         answered += 1;
@@ -320,6 +352,10 @@ async function runPane(
       ...["default", "smol", "slow", "plan", "task", "commit", "tiny", "vision", "advisor"].map(
         (role) => `  ${role}: standin/standin-model`
       ),
+      "compaction:",
+      // Keep only the newest turn, so a short conversation still has something to summarize.
+      "  keepRecentTokens: 1",
+      "  methodOrder: [soft]",
       "",
     ].join("\n")
   );
@@ -360,9 +396,11 @@ async function runPane(
         HOME: home,
         PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
         ENVOY_URL: base,
-        ...(options.openAsks === undefined && options.openAskQuestions === undefined
-          ? {}
-          : { DISPATCH_URL: base, DISPATCH_TOKEN: "stall-dispatch-token" }),
+        ...(options.dispatch === true ||
+        options.openAsks !== undefined ||
+        options.openAskQuestions !== undefined
+          ? { DISPATCH_URL: base, DISPATCH_TOKEN: "stall-dispatch-token" }
+          : {}),
         ...(legionPane
           ? {
               LEGION_DAEMON_URL: base,
@@ -391,13 +429,16 @@ async function runPane(
     await child.exited;
   });
 
-  // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
-  // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
-  // extension sends from `agent_end` instead starts its continuation after that frame, so
-  // `quietMs` waits for the gateway to fall silent rather than for the frame. Both streams are
-  // read to the end, so a full pipe never blocks omp.
+  // A step has settled when the RPC stream reports its outcome: a prompt's terminal agent_end (a
+  // continuation the host scheduled, the follow-up, starts its turn before that, under the same
+  // run), a compaction's response. A steer the extension sends from `agent_end` instead starts its
+  // continuation after that frame, so `quietMs` waits for the gateway to fall silent rather than
+  // for the frame. Both streams are read to the end, so a full pipe never blocks omp.
   const stderr = new Response(child.stderr).text();
-  const settled = Promise.withResolvers<void>();
+  let settle: ((frame: object) => boolean) | undefined;
+  let settled = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<never>();
+  closed.promise.catch(() => undefined);
   void (async () => {
     let buffered = "";
     for await (const chunk of child.stdout.pipeThrough(new TextDecoderStream())) {
@@ -407,26 +448,41 @@ async function runPane(
         const frame: unknown = JSON.parse(buffered.slice(0, newline));
         buffered = buffered.slice(newline + 1);
         newline = buffered.indexOf("\n");
-        if (
-          typeof frame === "object" &&
-          frame !== null &&
-          "type" in frame &&
-          frame.type === "agent_end" &&
-          !("isTerminal" in frame && frame.isTerminal === false)
-        ) {
+        if (typeof frame === "object" && frame !== null && settle?.(frame)) {
+          settle = undefined;
           settled.resolve();
         }
       }
     }
-    settled.reject(new Error(`omp closed its RPC stream before its run settled:\n${await stderr}`));
+    closed.reject(new Error(`omp closed its RPC stream before its run settled:\n${await stderr}`));
   })();
-  child.stdin.write(`${JSON.stringify({ type: "prompt", message: "Implement STALL-2." })}\n`);
-  child.stdin.flush();
-  if (options.quietMs === undefined) {
-    await settled.promise;
-  } else {
-    // Nothing must be left unhandled: in quiet mode the settle frame is not what ends the wait.
-    settled.promise.catch(() => undefined);
+  const steps = options.steps ?? [{ prompt: "Implement STALL-2." }];
+  for (const [index, step] of steps.entries()) {
+    settled = Promise.withResolvers<void>();
+    let compactError: unknown;
+    settle =
+      "compact" in step
+        ? (frame) => {
+            if (!("type" in frame && frame.type === "response")) return false;
+            if (!("command" in frame && frame.command === "compact")) return false;
+            if (!("success" in frame && frame.success === true)) {
+              compactError = "error" in frame ? frame.error : "no error given";
+            }
+            return true;
+          }
+        : (frame) =>
+            "type" in frame &&
+            frame.type === "agent_end" &&
+            !("isTerminal" in frame && frame.isTerminal === false);
+    const command = "compact" in step ? { type: "compact" } : { type: "prompt", message: step.prompt };
+    child.stdin.write(`${JSON.stringify(command)}\n`);
+    child.stdin.flush();
+    if (index < steps.length - 1 || options.quietMs === undefined) {
+      await Promise.race([settled.promise, closed.promise]);
+      if (compactError !== undefined) throw new Error(`omp refused the compaction: ${compactError}`);
+    }
+  }
+  if (options.quietMs !== undefined) {
     const quietMs = options.quietMs;
     const deadline = Date.now() + 90_000;
     await Promise.race([
@@ -452,7 +508,10 @@ async function runPane(
     requests,
     turns: () =>
       requests.filter(
-        (request) => request.path === "/anthropic/v1/messages" && !isSelfCheck(request)
+        (request) =>
+          request.path === "/anthropic/v1/messages" &&
+          !isSelfCheck(request) &&
+          !isSummarization(request)
       ),
     selfChecks: () =>
       requests.filter(
@@ -620,4 +679,65 @@ test.skipIf(omp === undefined && !onActions)(
     expect(asks).toHaveLength(2);
   },
   180_000
+);
+
+/** How many times a Messages request carries the injected dispatch-first skill. */
+function dispatchFirstCount(request: Request): number {
+  return JSON.stringify(request.body).split(DISPATCH_FIRST_MARKER).length - 1;
+}
+
+// A `context` insertion lives only in the one request it was made for, so a skill inserted once
+// would reach the first turn and be gone from the second. The compaction case is the other way
+// it could drop out: the summary replaces the history the skill sat at the head of.
+test.skipIf(omp === undefined && !onActions)(
+  "a session with Dispatch carries the dispatch-first skill once in every turn, after a compaction too",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const summary = "SUMMARY-OF-THE-FIRST-TWO-TURNS";
+    const pane = await runPane(
+      omp,
+      [
+        [{ type: "text", text: "First answer." }],
+        [{ type: "text", text: "Second answer." }],
+        [{ type: "text", text: "Third answer." }],
+      ],
+      {
+        legion: false,
+        dispatch: true,
+        summary,
+        steps: [
+          { prompt: "First question." },
+          { prompt: "Second question." },
+          { compact: true },
+          { prompt: "Third question." },
+        ],
+      }
+    );
+
+    const [first, second, third, ...rest] = pane.turns();
+    expect(rest).toEqual([]);
+    expect(pane.requests.filter(isSummarization).length).toBeGreaterThan(0);
+    for (const turn of [first, second, third]) expect(dispatchFirstCount(turn as Request)).toBe(1);
+    // The third turn is sent over the compacted history: the summary, then the skill at the head
+    // of what follows it, then the new question.
+    const third_ = JSON.stringify((third as Request).body.messages);
+    expect(third_).not.toContain("First question.");
+    expect(third_.indexOf(summary)).toBeGreaterThan(-1);
+    expect(third_.indexOf(summary)).toBeLessThan(third_.indexOf(DISPATCH_FIRST_MARKER));
+    expect(third_.indexOf(DISPATCH_FIRST_MARKER)).toBeLessThan(third_.indexOf("Third question."));
+  },
+  180_000
+);
+
+test.skipIf(omp === undefined && !onActions)(
+  "a session without Dispatch configured carries no dispatch-first skill",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const pane = await runPane(omp, [[{ type: "text", text: "Done." }]], { legion: false });
+
+    const turns = pane.turns();
+    expect(turns).toHaveLength(1);
+    expect(dispatchFirstCount(turns[0] as Request)).toBe(0);
+  },
+  120_000
 );

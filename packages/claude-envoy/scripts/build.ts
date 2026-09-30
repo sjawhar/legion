@@ -1,4 +1,4 @@
-// Bundle the plugin's two executables into self-contained files the Claude Code
+// Bundle the plugin's executables into self-contained files the Claude Code
 // plugin cache can run: the cache holds the git tree with no node_modules, so
 // every dependency (workspace packages included) is inlined here and `dist/`
 // is committed. `--check` rebuilds into a scratch directory and fails when the
@@ -14,6 +14,7 @@ const packageRoot = resolve(import.meta.dir, "..")
 /** Output name -> source entrypoint, relative to the package root. */
 export const BUNDLE_ENTRYPOINTS = {
   "envoy-channel": "bin/envoy-channel.ts",
+  "dispatch-first-hook": "hooks/dispatch-first-hook.ts",
   "open-asks-hook": "hooks/open-asks-hook.ts",
 } as const
 
