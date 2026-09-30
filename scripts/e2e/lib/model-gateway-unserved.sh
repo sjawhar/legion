@@ -160,7 +160,14 @@ case "${1:-}" in
 --fresh)
   [ $# = 2 ] || refuse "$usage"
   [ -e "$2" ] || exit 0
-  if [ -d "$2" ] && [ -z "$(ls -A -- "$2")" ]; then exit 0; fi
+  if [ -d "$2" ]; then
+    # A directory it cannot list is refused, never read as empty.
+    if ! entries=$(ls -A -- "$2" 2>&1); then
+      echo "$2 cannot be listed ($entries), so this run cannot tell whether it holds an earlier run's evidence; give this run an evidence directory of its own"
+      exit 1
+    fi
+    [ -n "$entries" ] || exit 0
+  fi
   echo "$2 is not an empty directory: it holds an earlier run's evidence, which this run must neither write into nor read as its own; give this run an evidence directory of its own"
   exit 1
   ;;

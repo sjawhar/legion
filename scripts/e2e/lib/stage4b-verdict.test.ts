@@ -36,7 +36,10 @@ work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
 tree1= tree2= tree3= tree4= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
-mkdir -p "$work"
+mkdir -p "$work" "$evidence/model-gateway"
+# The controller starved during the blocked checkpoint, so notes would list it if the verdict let
+# them print: a blocked checkpoint gets none.
+printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:05Z 4242 /x controller timeout no-key >"$evidence/model-gateway/hawk-token.calls"
 exec 7>&1
 stop_tree() { :; }; stop_pid() { :; }; collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
 teardown() { :; }; namespace_clean() { :; }; delete_consumers() { :; }; remove_run_branches() { :; }
@@ -65,6 +68,7 @@ describe("stage 4b's verdict line", () => {
     const clean = blockedRun("[]");
     expect(clean.code).toBe(1);
     expect(clean.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
+    expect(clean.stdout).not.toContain("model-gateway-unserved:");
   });
 
   test("never says BLOCKED once the teardown's production audit finds a write outside LEGSMOKE", () => {

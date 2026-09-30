@@ -1,5 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -335,6 +343,15 @@ describe("the model gateway key command", () => {
     expect(stopped.stdout).toContain(`${evidence} is not an empty directory`);
     mkdirSync(join(evidence, "model-gateway"));
     expect(unserved("--fresh", evidence).code).toBe(1);
+    // One it cannot list is refused too, never read as empty.
+    chmodSync(evidence, 0o000);
+    try {
+      const unlistable = unserved("--fresh", evidence);
+      expect(unlistable.code).toBe(1);
+      expect(unlistable.stdout).toContain(`${evidence} cannot be listed`);
+    } finally {
+      chmodSync(evidence, 0o755);
+    }
   });
 
   test("a stage proof that refuses a reused evidence directory lists none of the earlier run's agents", async () => {
