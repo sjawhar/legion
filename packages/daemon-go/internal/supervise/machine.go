@@ -309,8 +309,9 @@ type Machine struct {
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
 	// deferred is a suspension that arrived while the agent was in a turn, held until the turn ends
-	// or its stop timeout (TimerSuspend) runs out (suspendAfterTurn). It is held only while the
-	// claim is working, and in memory only: whoever asked for it asks again after a restart.
+	// or its stop timeout (TimerSuspend) runs out (suspendAfterTurn), and while a stop that failed is
+	// tried again. It is held only while the claim is working, or idle after a stop at the turn's
+	// end failed, and in memory only: whoever asked for it asks again after a restart.
 	deferred *RequestSuspend
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
@@ -795,16 +796,20 @@ func (m *Machine) suspendedFor(ctx context.Context, request RequestSuspend) erro
 	return nil
 }
 
-// suspendDeferred runs the suspension that waited for the agent's turn (suspendAfterTurn). Its
-// wait is over whether or not the process stops: one that could not be stopped is asked for
-// again by whoever holds the suspension.
+// suspendDeferred runs the suspension held for the agent's turn (suspendAfterTurn). A stop the
+// runtime refuses keeps the suspension held and tries it again at the probe interval, as the
+// registration deadline retries its own: the operator's suspend, answered 202, has no other owner
+// to retry it, and the workflow's outbox row finishes only once the claim is suspended.
 func (m *Machine) suspendDeferred(ctx context.Context) error {
 	request := m.deferred
 	if request == nil {
 		return fmt.Errorf("supervise: no suspension of %s waits for its turn", m.claim.Token)
 	}
-	m.dropDeferred()
-	return m.suspendNow(ctx, *request)
+	if err := m.suspendNow(ctx, *request); err != nil {
+		m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
+		return err
+	}
+	return nil
 }
 
 // dropDeferred ends a suspension's wait for the agent's turn without running it.

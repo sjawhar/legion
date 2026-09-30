@@ -74,6 +74,46 @@ func TestASuspensionWhoseTurnNeverEndsStopsTheProcessAtTheStopTimeout(t *testing
 	h.wantCalls("Suspend", 1)
 }
 
+// A held suspension whose stop the runtime refuses stays held and is tried again at the probe
+// interval, so it lands with nothing else retrying it — an operator's suspend has no outbox row.
+// At the turn's end the claim is left idle meanwhile, and is handed nothing while it is stopped.
+func TestAHeldSuspensionWhoseStopFailsIsTriedAgainUntilItLands(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(h *harness)
+		held ClaimState
+	}{
+		{"at the stop timeout", func(h *harness) { h.advance(testStop) }, StateWorking},
+		{"at the turn's end", func(h *harness) {
+			if err := h.handle(StreamTurnEnd{Claim: testToken}); !errors.Is(err, errBoom) {
+				h.t.Fatalf("turn end with a failing stop returned %v, want the runtime's error", err)
+			}
+		}, StateIdle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateWorking)
+			if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
+				t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+			}
+			h.rt.FailSuspend(errBoom)
+
+			tc.stop(h)
+			h.wantState(tc.held)
+			if tc.held == StateIdle {
+				h.must(RequestDeliver{Claim: testToken, Task: "an operator's task"})
+			}
+			h.observe(runtime.Alive)
+			h.wantPrompts(1)
+
+			h.rt.FailSuspend(nil)
+			h.advance(testProbe)
+			h.wantState(StateSuspended)
+			h.wantPrompts(1)
+		})
+	}
+}
+
 // A start run against the claim while its suspension waits hands it work again: the suspension it
 // supersedes neither runs at the turn's end nor at the stop timeout, as the outbox finishes a
 // suspend older than the newest start without acting (workflow.StopActs).

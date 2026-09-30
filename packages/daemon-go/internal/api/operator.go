@@ -205,8 +205,9 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 // claimRequest is one operator request on an existing claim: event builds the request the claim's
 // machine is posted, or answers the caller itself and reports false. A suspension of an agent in a
 // turn is held for the turn's end (supervise.ErrSuspendWaits), which is not a refusal: it answers
-// 202 with the claim as it waits, still working, and the claim is suspended when the turn ends or
-// at the stop timeout.
+// 202 with the claim as it waits, still working. The machine suspends the claim when the turn ends
+// or at the stop timeout, retrying a stop the runtime refuses, and `legion claims suspend` reads
+// the claims until it is suspended.
 func (s *server) claimRequest(request string, event func(http.ResponseWriter, *http.Request, supervise.Claim) (supervise.Event, bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := claim.Token(r.PathValue("token"))

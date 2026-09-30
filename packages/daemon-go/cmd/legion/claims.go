@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // claimsUsage names every subcommand of `legion claims`.
@@ -23,7 +26,7 @@ const claimsUsage = "usage: legion claims spawn|deliver|suspend|resume|stop|clos
 var claimsCommands = map[string]command{
 	"spawn":   runClaimsSpawn,
 	"deliver": runClaimsDeliver,
-	"suspend": claimRequest("suspend"),
+	"suspend": runClaimsSuspend,
 	"resume":  claimRequest("resume"),
 	"stop":    claimRequest("stop"),
 	"close":   claimRequest("close"),
@@ -170,6 +173,85 @@ func claimRequest(request string) command {
 			return 1
 		}
 		return c.send(ctx, op, http.MethodPost, "/"+url.PathEscape(*token)+"/"+request, nil, printClaim)
+	}
+}
+
+// suspendPoll is how often runClaimsSuspend reads the claims while a suspension is held.
+const suspendPoll = 250 * time.Millisecond
+
+// runClaimsSuspend suspends --claim. The daemon suspends a claim whose agent is in no turn at once
+// (200); one whose agent is in a turn it holds for the turn's end, or the stop timeout (202). The
+// command then reads the claims until --claim is suspended and prints it as it ends, or fails once
+// --wait has passed, naming the state it last saw.
+func runClaimsSuspend(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	c := newClaimsCall("suspend", stdout, stderr)
+	token := c.flags.String("claim", "", "the claim's token (required)")
+	wait := c.flags.Duration("wait", time.Minute, "how long to wait for a suspension the daemon holds for the agent's turn: "+
+		"the default covers twice the daemon's default worker_stop_timeout_seconds, the hold and the runtime's stop, and a margin")
+	if !c.parse(args, "claim") {
+		return 2
+	}
+	op, ok := c.connect()
+	if !ok {
+		return 1
+	}
+	status, answer, err := op.do(ctx, http.MethodPost, claimsRoute+"/"+url.PathEscape(*token)+"/suspend", nil)
+	if err != nil {
+		fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
+		return 1
+	}
+	if status/100 != 2 {
+		fmt.Fprintf(c.stderr, "%s: %s\n", c.name, refusal(status, answer))
+		return 1
+	}
+	if status == http.StatusAccepted {
+		if answer, err = c.awaitSuspended(ctx, op, legionclaim.Token(*token), *wait); err != nil {
+			fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
+			return 1
+		}
+	}
+	print := printClaim
+	if *c.asJSON {
+		print = writeAnswer
+	}
+	if err := print(c.stdout, answer); err != nil {
+		fmt.Fprintf(c.stderr, "%s: read the answer %s%s served: %v\n", c.name, op.base, claimsRoute, err)
+		return 1
+	}
+	return 0
+}
+
+// awaitSuspended reads the claims until token is suspended, and answers the claim as the list
+// served it; past wait it fails, naming the state the claim was last seen in.
+func (c *claimsCall) awaitSuspended(ctx context.Context, op operator, token legionclaim.Token, wait time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		status, answer, err := op.do(ctx, http.MethodGet, claimsRoute, nil)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("list the claims: %s", refusal(status, answer))
+		}
+		var list api.OperatorClaims
+		if err := decodeAnswer(answer, &list); err != nil {
+			return nil, fmt.Errorf("read the claims %s%s served: %w", op.base, claimsRoute, err)
+		}
+		i := slices.IndexFunc(list.Claims, func(claim api.OperatorClaim) bool { return claim.Token == token })
+		if i < 0 {
+			return nil, fmt.Errorf("the daemon no longer holds %s", token)
+		}
+		if held := list.Claims[i]; held.State == string(supervise.StateSuspended) {
+			return json.Marshal(held)
+		} else if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("%s is still %s after %s: the daemon holds its suspension until the agent's turn ends or its stop timeout runs out",
+				token, held.State, wait)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(suspendPoll):
+		}
 	}
 }
 
