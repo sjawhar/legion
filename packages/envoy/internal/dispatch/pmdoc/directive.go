@@ -366,50 +366,52 @@ func directiveNameByte(char byte) bool {
 	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-'
 }
 
-// paragraphDirectiveReason is the browser editor's refusal of a paragraph a line of which opens
-// with directive syntax: that parser takes the paragraph's source from where its text starts to
-// where it ends, and each line of it with the whitespace it opens with trimmed, so a line
-// continuing the paragraph refuses it however far in it stands, while a quote's marker opening the
-// line keeps it text. A line that could open a block is refused as it is read
-// (unsupportedDirectiveParser).
-func paragraphDirectiveReason(lines *gmtext.Segments, source []byte) (string, bool) {
-	if lines.Len() == 0 {
-		return "", false
-	}
-	text := source[lines.At(0).Start:lines.At(lines.Len()-1).Stop]
-	for len(text) > 0 {
-		line := text
-		if end := bytes.IndexByte(text, '\n'); end >= 0 {
-			line, text = text[:end], text[end+1:]
-		} else {
-			text = nil
-		}
-		if reason, ok := paragraphLineDirectiveReason(string(bytes.TrimLeftFunc(line, jsWhitespace))); ok {
-			return reason, true
-		}
-	}
-	return "", false
-}
-
-// typedOpeningAsText is the refusal of a paragraph a line of which, after its first, is a
-// three-colon typed block opening (`:::name{…}`) once the whitespace it opens with is trimmed.
-// Goldmark reads that line as the paragraph's text, and the browser editor's parser lets it pass
-// (paragraphLineDirectiveReason): a typed block opens only on a line of its own less than four
-// columns past its container's lines, and this one continues the paragraph instead, four or more
-// columns in, or in inline markdown, which holds no block. Its author wrote a block, and storing
-// the line as text would drop the block without a word - an ask that asks nobody (LEGION-416).
-// Each line is read after its containers' prefixes, so a quote's marker does not hide it. A line
-// that escapes the opening (`\:::`) or writes it in code is text on purpose and never matches; the
-// paragraph's first line is the typed block itself wherever a block can open, and in inline
-// markdown the text a replace writes on purpose. Only spaces and tabs, a line's indentation, are
-// trimmed, so a line opening with another space character - a no-break space a rendering can carry
-// raw - is text and never matches.
-func typedOpeningAsText(lines *gmtext.Segments, source []byte) (string, bool) {
-	for index := 1; index < lines.Len(); index++ {
+// paragraphDirectiveReason is the refusal of a paragraph a line of which opens with directive
+// syntax, naming the first such line. source is the markdown the paragraph was read from, and
+// firstLine the number its first line has in the markdown the caller wrote. Each line is read two
+// ways, and the first reading that refuses it decides:
+//
+//   - As it is written, past its containers' prefixes, with the spaces and tabs of its indentation
+//     trimmed: a three-colon typed block opening (`:::name{…}`) on a line after the paragraph's
+//     first is refused, by its number. A typed block opens only on a line of its own less than four
+//     columns past its container's lines, and this one continues the paragraph instead, four or
+//     more columns in, after a quote's marker, or in inline markdown, which holds no block, so
+//     goldmark reads it as the paragraph's text. Its author wrote a block, and storing the line as
+//     text would drop the block without a word - an ask that asks nobody (LEGION-416). A line that
+//     escapes the opening (`\:::`) or writes it in code is text on purpose and never matches; the
+//     paragraph's first line is the typed block itself wherever a block can open, and in inline
+//     markdown the text a replace writes on purpose. A line opening with another space character -
+//     a no-break space a rendering can carry raw - is text.
+//   - As the browser editor's parser reads it: that parser takes the paragraph's source from where
+//     its text starts to where it ends, and each line of it with the whitespace it opens with
+//     trimmed, so a line continuing the paragraph refuses it however far in it stands, while a
+//     quote's marker opening the line keeps it text. It reads `:::` alone and a three-colon typed
+//     block opening as text, and refuses any other line opening with three colons, a four-colon
+//     opening a block would open with included, and a leaf or text directive. A line that could
+//     open a block is refused as it is read (unsupportedDirectiveParser).
+func paragraphDirectiveReason(lines *gmtext.Segments, source []byte, firstLine int) (string, bool) {
+	for index := range lines.Len() {
 		segment := lines.At(index)
-		line := bytes.TrimRight(bytes.TrimLeft(segment.Value(source), " \t"), "\n")
-		if paragraphTypedOpening.Match(line) {
-			return fmt.Sprintf("the line %q continues a paragraph, so it is the paragraph's text rather than a typed block: a typed block opens on a line of its own, indented less than four columns past the lines around it, and inline text holds no block; put it in code to write it as text", line), true
+		written := bytes.TrimRight(bytes.TrimLeft(segment.Value(source), " \t"), "\n")
+		if index > 0 && paragraphTypedOpening.Match(written) {
+			number := firstLine + bytes.Count(source[:segment.Start], []byte("\n"))
+			return fmt.Sprintf("line %d, %q, continues a paragraph, so it is the paragraph's text rather than a typed block: a typed block opens on a line of its own, indented less than four columns past the lines around it, and inline text holds no block; put it in code to write it as text", number, written), true
+		}
+		// That parser reads a later line from its start, its containers' prefixes included.
+		start := segment.Start
+		if index > 0 {
+			start = lines.At(index - 1).Stop
+		}
+		read := string(bytes.TrimLeftFunc(bytes.TrimSuffix(source[start:segment.Stop], []byte("\n")), jsWhitespace))
+		switch {
+		case read == ":::" || paragraphTypedOpening.MatchString(read):
+			// Text to that parser.
+		case strings.HasPrefix(read, ":::"):
+			return malformedDirectiveReason, true
+		default:
+			if reason, ok := unsupportedDirectiveReason(read); ok {
+				return reason, true
+			}
 		}
 	}
 	return "", false
@@ -423,19 +425,6 @@ func jsWhitespace(char rune) bool {
 		return true
 	}
 	return unicode.Is(unicode.Zs, char)
-}
-
-// paragraphLineDirectiveReason is that parser's refusal of a line of a paragraph opening with a
-// colon: `:::` alone and a three-colon typed block opening (`:::name{…}`) pass, and any other line
-// opening with three colons is refused, a four-colon opening a block would open with included.
-func paragraphLineDirectiveReason(line string) (string, bool) {
-	if strings.HasPrefix(line, ":::") {
-		if line == ":::" || paragraphTypedOpening.MatchString(line) {
-			return "", false
-		}
-		return malformedDirectiveReason, true
-	}
-	return unsupportedDirectiveReason(line)
 }
 
 // paragraphTypedOpening is the browser editor's pattern of a typed block's opening line; `.` there

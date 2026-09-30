@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"bytes"
 	"fmt"
 	"html"
 	"reflect"
@@ -196,9 +197,11 @@ func parseUnstamped(markdown string, readFrontmatter bool, budget *TablePaddingB
 	source := []byte(markdown)
 	var front *Node
 	unclosedFrontmatter := false
+	firstLine := 1
 	if readFrontmatter {
 		var rest int
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
+		firstLine += bytes.Count(source[:rest], []byte("\n"))
 		source = source[rest:]
 	}
 	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
@@ -208,7 +211,7 @@ func parseUnstamped(markdown string, readFrontmatter bool, budget *TablePaddingB
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
-	doc, err = convert(root, source, footnoteLabels(root))
+	doc, err = convert(root, source, firstLine, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +279,7 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
 	}
-	paragraph, err := convert(first, source, footnoteLabels(root))
+	paragraph, err := convert(first, source, 1, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +322,7 @@ func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error
 	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
 		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
 	}
-	paragraph, err := convert(root.FirstChild(), source, nil)
+	paragraph, err := convert(root.FirstChild(), source, 1, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -525,10 +528,10 @@ func footnoteLabels(root ast.Node) map[int]string {
 }
 
 // convert is the one way into the tree's conversion: every block refusal first, in document order
-// (refuseBlocks), and then the conversion, which reads what they leave on the tree
-// (typedDirective.values).
-func convert(node ast.Node, source []byte, footnotes map[int]string) (*Node, error) {
-	if err := refuseBlocks(node, source); err != nil {
+// (refuseBlocks, which numbers source's lines from firstLine), and then the conversion, which reads
+// what they leave on the tree (typedDirective.values).
+func convert(node ast.Node, source []byte, firstLine int, footnotes map[int]string) (*Node, error) {
+	if err := refuseBlocks(node, source, firstLine); err != nil {
 		return nil, err
 	}
 	return parseBlock(node, source, footnotes)

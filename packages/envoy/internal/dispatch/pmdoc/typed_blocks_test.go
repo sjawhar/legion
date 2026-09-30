@@ -495,17 +495,24 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			// the paragraph's text, so its block would be lost without a word (LEGION-416).
 			name:     "a typed block opening continuing a paragraph four columns in",
 			markdown: "x\n    :::callout{#c1 kind=\"note\" title=\"\"}\nBody.\n",
-			want:     `the line ":::callout{#c1 kind=\"note\" title=\"\"}" continues a paragraph`,
+			want:     `line 2, ":::callout{#c1 kind=\"note\" title=\"\"}", continues a paragraph`,
 		},
 		{
 			name:     "an ask opening continuing a paragraph in a quote",
 			markdown: "> Context\n>     :::ask{urgency=\"med\"}\n> Ship it?\n",
-			want:     `the line ":::ask{urgency=\"med\"}" continues a paragraph`,
+			want:     `line 2, ":::ask{urgency=\"med\"}", continues a paragraph`,
 		},
 		{
 			name:     "an ask opening continuing a list item's paragraph",
 			markdown: "- Context\n        :::ask{urgency=\"med\"}\n  Ship it?\n",
-			want:     `the line ":::ask{urgency=\"med\"}" continues a paragraph`,
+			want:     `line 2, ":::ask{urgency=\"med\"}", continues a paragraph`,
+		},
+		{
+			// The refusal numbers the line as the caller wrote it, front matter included, so of two
+			// identical openings it names the one that continues a paragraph.
+			name:     "an ask opening continuing a paragraph after front matter and an ask block",
+			markdown: "---\ntitle: x\n---\n:::ask{urgency=\"med\"}\nShip it?\n:::\n\nContext\n    :::ask{urgency=\"med\"}\nShip it?\n",
+			want:     `line 9, ":::ask{urgency=\"med\"}", continues a paragraph`,
 		},
 		{
 			name:     "a leaf directive continuing a paragraph in a list item",
