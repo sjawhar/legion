@@ -375,7 +375,7 @@ func directiveNameByte(char byte) bool {
 //     trimmed: a three-colon typed block opening (`:::name{…}`) on a line after the paragraph's
 //     first is refused, by its number. A typed block opens only on a line of its own less than four
 //     columns past its container's lines, and this one continues the paragraph instead, four or
-//     more columns in, after a quote's marker, or in inline markdown, which holds no block, so
+//     more columns past its containers' prefixes, or in inline markdown, which holds no block, so
 //     goldmark reads it as the paragraph's text. Its author wrote a block, and storing the line as
 //     text would drop the block without a word - an ask that asks nobody (LEGION-416). A line that
 //     escapes the opening (`\:::`) or writes it in code is text on purpose and never matches; the

@@ -786,9 +786,9 @@ a paragraph wherever it stands. One check reads each line of a paragraph two way
 first line either refuses (`paragraphDirectiveReason`). As written, past its containers' prefixes
 with the spaces and tabs of its indentation trimmed, a three-colon opening on any line after the
 paragraph's first is refused, naming the line's number in the markdown the caller wrote, front
-matter counted, and its text: it continues the paragraph - four or more columns in, after a quote's
-marker, or in a replace's inline text - so goldmark reads it as the paragraph's text, and its author
-wrote a block. As the browser editor's parser reads it, each line of the paragraph's source with the
+matter counted, and its text: it continues the paragraph - four or more columns past its
+containers' prefixes, or in a replace's inline text - so goldmark reads it as the paragraph's text,
+and its author wrote a block. As the browser editor's parser reads it, each line of the paragraph's source with the
 whitespace it opens with trimmed, so that only a quote's marker opening the line keeps it text, a
 line opening with three colons passes only as `:::` alone or a three-colon opening, a four-colon one
 included in what it refuses. The renderer never writes the first shape (it escapes a line-start
