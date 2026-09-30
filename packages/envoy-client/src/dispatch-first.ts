@@ -25,7 +25,9 @@ export function readDispatchFirstContext(skillFile: string): string {
   try {
     skill = readFileSync(skillFile, "utf8");
   } catch (error) {
-    throw new Error(`the dispatch-first skill ${skillFile} could not be read: ${messageFor(error)}`);
+    throw new Error(
+      `the dispatch-first skill ${skillFile} could not be read: ${messageFor(error)}`
+    );
   }
   const body = skill.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
   return [
