@@ -162,3 +162,20 @@ export function toThreadMessages(state: AgentConversation): ThreadMessageLike[] 
 export function isRunning(state: AgentConversation): boolean {
   return state.messages.some((message) => message.streaming);
 }
+
+/**
+ * The Dispatch message each streamed user message delivered, by streamed message id: a person's
+ * direct message the session took as its own user turn is tagged with its Dispatch id, and the
+ * view shows Dispatch's stored copy of it no longer. The bus is open to any client, so a tag
+ * counts only as the publisher's contract puts it, a string on a user message; any other is
+ * ignored rather than taking the message with it, since a message shown twice beats one lost.
+ */
+export function dispatchTurns(state: AgentConversation): Map<string, string> {
+  const turns = new Map<string, string>();
+  for (const message of state.messages) {
+    if (message.role === "user" && typeof message.dispatchMessageId === "string") {
+      turns.set(message.id, message.dispatchMessageId);
+    }
+  }
+  return turns;
+}

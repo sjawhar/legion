@@ -49,6 +49,9 @@ interface ReplyDelivery {
     readonly retrying: boolean;
   };
   readonly targetName: string;
+  /** The session took the reply as its user's own turn (`sentAsUserTurn`); the caller then
+   *  offers no retry. */
+  readonly userTurn?: boolean;
 }
 
 /** One reply in a thread: author, time, the quoted parent, the body, and - when the reply was
@@ -104,6 +107,7 @@ export function ReplyTurn({
                 delivery.answeredBy === undefined && delivery.retry !== undefined
               )}
               targetName={delivery.targetName}
+              userTurn={delivery.userTurn}
             />
             {delivery.answeredBy === undefined && delivery.retry !== undefined ? (
               <DeliveryRetry

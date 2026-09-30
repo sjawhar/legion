@@ -901,6 +901,108 @@ test("Send normally disables when the target does not advertise steer", async ()
   }
 });
 
+/** One attempt, sent to the planner in `delivery` mode. */
+function sentAttempt(messageID: string, delivery: "aside" | "btw" | "steer") {
+  return {
+    attempt: 1,
+    created_at: recentAttemptAt,
+    delivery,
+    envelope_id: "envelope-1",
+    error: null,
+    message_id: messageID,
+    reply_id: null,
+    session_id: "planner-session",
+    state: "sent" as const,
+  };
+}
+
+// A person's direct Send or Aside reaches an Oh My Pi session as its own user turn: the session
+// answers in its conversation, never with a Dispatch reply, so the card waits on no reply and
+// offers no other way to send it. Everything else keeps its envelope, and its card.
+for (const [name, read, headline, retries] of [
+  [
+    "a person's direct Aside",
+    {
+      message: message("Where is the dashboard?", {
+        broadcast_id: null,
+        deliveries: [sentAttempt("message-1", "aside")],
+      }),
+      replies: [],
+    },
+    "Delivered to Planner's conversation (aside)",
+    false,
+  ],
+  [
+    "a person's reply inside a direct thread",
+    {
+      message: message("Where is the dashboard?", {
+        broadcast_id: null,
+        deliveries: [sentAttempt("message-1", "aside")],
+      }),
+      replies: [
+        message("And the logs?", {
+          broadcast_id: null,
+          deliveries: [sentAttempt("message-2", "steer")],
+          id: "message-2",
+          in_reply_to: "message-1",
+        }),
+      ],
+    },
+    "Delivered to Planner's conversation (steer)",
+    false,
+  ],
+  [
+    "one recipient's copy of a broadcast",
+    {
+      message: message("Status?", {
+        broadcast_id: "broadcast-1",
+        deliveries: [sentAttempt("message-1", "aside")],
+      }),
+      replies: [],
+    },
+    "Sent to Planner (aside)",
+    true,
+  ],
+  [
+    "an issue message",
+    {
+      message: message("Can this ship?", {
+        broadcast_id: null,
+        deliveries: [sentAttempt("message-1", "aside")],
+        issue_key: "CORE-1",
+      }),
+      replies: [],
+    },
+    "Sent to Planner (aside)",
+    true,
+  ],
+  [
+    "a direct message from a Dispatch that does not say whether a broadcast sent it",
+    {
+      message: message("Hello?", { deliveries: [sentAttempt("message-1", "aside")] }),
+      replies: [],
+    },
+    "Sent to Planner (aside)",
+    true,
+  ],
+] as const satisfies readonly (readonly [string, MessageRead, string, boolean])[]) {
+  test(`Agents shows ${name} as ${retries ? "sent, awaiting a reply" : "delivered to the conversation"}`, async () => {
+    const page = renderAgents({ messages: [read] });
+
+    try {
+      const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+      expand(planner, "Planner");
+      await within(planner).findByText(headline);
+      expect(
+        within(planner).queryAllByRole("button", { name: "Send as BTW instead" })
+      ).toHaveLength(retries ? 1 : 0);
+    } finally {
+      page.view.unmount();
+      page.restore();
+    }
+  });
+}
+
 /** One exchange: a root from Alice at `createdAt`, optionally answered by the planner. */
 function exchange(
   id: string,

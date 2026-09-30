@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 
 import type { AgentStreamFrame } from "@legion/contracts";
 
-import { applyFrames, EMPTY_CONVERSATION, isRunning, toThreadMessages } from "./conversation";
+import {
+  applyFrames,
+  dispatchTurns,
+  EMPTY_CONVERSATION,
+  isRunning,
+  toThreadMessages,
+} from "./conversation";
 
 function message(
   seq: number,
@@ -143,5 +149,51 @@ describe("a frame this build cannot render", () => {
     // A good frame still applies after them.
     const good = applyFrames(state, [message(9, "a90", 90, "fine", false)]);
     expect(good.messages).toHaveLength(1);
+  });
+});
+
+// A person's direct message from Dispatch becomes the session's own user turn, and the session
+// tags that user message with the Dispatch message's id, so the view can show it once. The bus is
+// open to any client, so the tag is honoured only where the publisher's contract puts it.
+describe("a user message a person's Dispatch message became", () => {
+  test("names the Dispatch message it delivered; a tag anywhere else costs the tag, not the message", () => {
+    const frame = (seq: number, message: Record<string, unknown>): AgentStreamFrame =>
+      ({ kind: "message", message, seq, v: 1 }) as unknown as AgentStreamFrame;
+    const text = (value: string) => [{ text: value, type: "text" }];
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      frame(1, {
+        at: 10,
+        dispatchMessageId: "m-1",
+        id: "u10",
+        parts: text("Where is the dashboard?"),
+        role: "user",
+        streaming: false,
+      }),
+      frame(2, { at: 20, id: "u20", parts: text("typed"), role: "user", streaming: false }),
+      frame(3, {
+        at: 30,
+        dispatchMessageId: 7,
+        id: "u30",
+        parts: text("a number"),
+        role: "user",
+        streaming: false,
+      }),
+      frame(4, {
+        at: 40,
+        dispatchMessageId: "m-2",
+        id: "a40",
+        parts: text("an answer"),
+        role: "assistant",
+        streaming: false,
+      }),
+    ]);
+
+    expect(dispatchTurns(state)).toEqual(new Map([["u10", "m-1"]]));
+    expect(toThreadMessages(state).map((message) => message.id)).toEqual([
+      "u10",
+      "u20",
+      "u30",
+      "a40",
+    ]);
   });
 });

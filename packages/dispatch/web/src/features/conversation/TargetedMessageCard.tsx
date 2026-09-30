@@ -45,10 +45,11 @@ export interface TargetedMessageAttempt {
   readonly targetName?: string;
 }
 
-/** The headline one targeted message gets: who answered it, why it failed, that it is still
- *  going out, that it is a BTW waiting on an answer, or that it was delivered. `asking` is
- *  that BTW branch, whose line ends in a separator because it carries a timestamp: the two
- *  belong to one decision, so the caller reads it here rather than restating the condition.
+/** The headline one targeted message gets: who answered it, that it reached the session's own
+ *  conversation, why it failed, that it is still going out, that it is a BTW waiting on an
+ *  answer, or that it was delivered. `asking` is that BTW branch, whose line ends in a separator
+ *  because it carries a timestamp: the two belong to one decision, so the caller reads it here
+ *  rather than restating the condition.
  *
  *  A BTW is tested before `duplicate`: an outstanding BTW is still waiting on its answer even
  *  when the send that carried it changed nothing, so the human must keep seeing that one is
@@ -57,9 +58,16 @@ function deliveryHeadline(
   answeredBy: string | undefined,
   delivery: TargetedMessageAttempt | undefined,
   targetName: string,
-  retryOffered: boolean
+  retryOffered: boolean,
+  userTurn: boolean
 ): { text: string; asking: boolean } {
   if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
+  if (userTurn) {
+    return {
+      text: `Delivered to ${targetName}'s conversation (${delivery?.delivery ?? "steer"})`,
+      asking: false,
+    };
+  }
   if (delivery?.state === "failed") {
     const cause = `Failed: ${delivery.error ?? "delivery failed"}`;
     // The promise belongs to the button: it is only true of the Retry this card is actually
@@ -97,21 +105,26 @@ export function offersSafeRetry(
   return retryAvailable && latest !== undefined && isSafeRetry(latest);
 }
 
-/** What became of a targeted message: answered, failed, asking (BTW), or sent - then the
- *  earlier attempts, oldest first. Shared by the card and by a delivered reply in its thread. */
+/** What became of a targeted message: answered, taken into the session's conversation as the
+ *  person's own turn, failed, asking (BTW), or sent - then the earlier attempts, oldest first.
+ *  Shared by the card and by a delivered reply in its thread. */
 export function DeliveryStatus({
   answeredBy,
   deliveries,
   retryOffered = false,
   targetName,
+  userTurn = false,
 }: {
   answeredBy?: string;
   deliveries: readonly TargetedMessageAttempt[];
   retryOffered?: boolean;
   targetName: string;
+  /** The session took the message as its user's own turn (`sentAsUserTurn`), so it answers in
+   *  its conversation and no Dispatch reply is awaited. */
+  userTurn?: boolean;
 }): ReactNode {
   const delivery = deliveries.at(-1);
-  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryOffered);
+  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryOffered, userTurn);
   return (
     <>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
@@ -243,6 +256,9 @@ interface TargetedMessageCardProps {
   /** The replies beneath the message - the answer and every follow-up - as a nested list. */
   readonly thread?: ReactNode;
   readonly turnID: string;
+  /** The session took the message as its user's own turn (`sentAsUserTurn`): no reply is
+   *  awaited, so there is nothing to retry. */
+  readonly userTurn?: boolean;
 }
 
 /** Shared targeted-message presentation for issue turns and agent-card conversations. */
@@ -264,9 +280,10 @@ export function TargetedMessageCard({
   targetName,
   thread,
   turnID,
+  userTurn = false,
 }: TargetedMessageCardProps): ReactNode {
   // Narrowed once, so the render below needs no second test of the same condition.
-  const retry = answeredBy === undefined && !isClosed ? onRetry : undefined;
+  const retry = answeredBy === undefined && !isClosed && !userTurn ? onRetry : undefined;
   const sameModeRetry = offersSafeRetry(deliveries, retry !== undefined);
   return (
     <li
@@ -288,6 +305,7 @@ export function TargetedMessageCard({
         deliveries={deliveries}
         retryOffered={sameModeRetry}
         targetName={targetName}
+        userTurn={userTurn}
       />
       {retry === undefined ? null : (
         <DeliveryRetry

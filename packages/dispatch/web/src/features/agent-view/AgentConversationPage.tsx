@@ -1,4 +1,4 @@
-import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
+import type { MessageDeliveryMode } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -32,11 +32,27 @@ const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
   unavailable: { dot: connectionDotFailed, label: "This session's conversation is unavailable" },
 };
 
-/** The modes a human can talk to a session in, narrowed to the ones it advertises. `aside`
- *  is the default everywhere: it reaches the agent without interrupting its turn. */
+/** Each mode as the composer names it: Send is Enter at the session's terminal. */
+const MODE_LABELS: Record<MessageDeliveryMode, string> = {
+  aside: "Aside",
+  btw: "BTW",
+  steer: "Send",
+};
+
+/** The modes a human can talk to a session in, narrowed to the ones it advertises, Send first. */
 function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
-  const advertised = DELIVERY_CAPABILITIES.filter((mode) => capabilities.includes(mode));
+  const advertised = (["steer", "aside", "btw"] as const).filter((mode) =>
+    capabilities.includes(mode)
+  );
   return advertised.length === 0 ? ["aside"] : advertised;
+}
+
+/** What the composer sends when the human has not picked: Send wherever the session takes it,
+ *  since that is what typing at its terminal does; Aside otherwise, because a session that only
+ *  takes asides (a Claude Code session) refuses a steer. */
+function defaultMode(modes: readonly MessageDeliveryMode[]): MessageDeliveryMode {
+  if (modes.includes("steer")) return "steer";
+  return modes.includes("aside") ? "aside" : (modes[0] ?? "aside");
 }
 
 /**
@@ -64,21 +80,27 @@ export function AgentConversationPage(): ReactNode {
 
   const { conversation, responding, status } = useAgentStream(sessionId);
   const modes = deliveryModes(agent?.capabilities ?? []);
-  const [mode, setMode] = useState<MessageDeliveryMode>("aside");
+  // The human's pick holds only while the session still offers it: the session list loads after
+  // the page, and a pick the session does not advertise would be refused.
+  const [picked, setPicked] = useState<MessageDeliveryMode | null>(null);
+  const mode = picked !== null && modes.includes(picked) ? picked : defaultMode(modes);
   const [sendError, setSendError] = useState<string | null>(null);
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
-  // targeted delivery reaches the session as a notice rather than one of its own user messages,
-  // so the session publishes no frame for it (measured against a live Oh My Pi session), and it
-  // answers through dispatch_message, which the stream shows only as that tool call. Without
-  // these the thread would show replies to messages the human cannot see, and no replies at all.
-  // Seeing them here is reading them.
+  // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
+  // stream carries tagged with this message's id, and the thread shows it once. A BTW, an issue
+  // message, and any message to a session that takes no user turn from Envoy (a Claude Code
+  // session) arrive as notices the stream has no frame for, and the session answers them through
+  // dispatch_message, which the stream shows only as that tool call. Without these the thread
+  // would show replies to messages the human cannot see, and no replies at all. Seeing them here
+  // is reading them.
   const queryClient = useQueryClient();
   const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
 
-  // Talking to the agent is Dispatch's existing targeted delivery, unchanged: the stream itself
-  // stays read-only and this adds no write path of its own.
+  // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
+  // read-only and this adds no write path of its own. The session confirms a Send or Aside with
+  // Dispatch before it takes one as its user's own turn.
   const onNew = useCallback(
     async (message: { content: readonly { type: string; text?: string }[] }) => {
       const body = message.content
@@ -130,12 +152,12 @@ export function AgentConversationPage(): ReactNode {
           <select
             aria-label="Delivery mode"
             className={`min-h-8 rounded-lg px-2 py-1 text-xs ${inputClasses(false)}`}
-            onChange={(event) => setMode(event.target.value as MessageDeliveryMode)}
+            onChange={(event) => setPicked(event.target.value as MessageDeliveryMode)}
             value={mode}
           >
             {modes.map((candidate) => (
               <option key={candidate} value={candidate}>
-                {candidate}
+                {MODE_LABELS[candidate]}
               </option>
             ))}
           </select>
@@ -172,7 +194,7 @@ export function AgentConversationPage(): ReactNode {
           conversation={conversation}
           empty={emptyText(responding)}
           onNew={onNew}
-          placeholder={`Message ${label} — delivered as ${mode}…`}
+          placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}…`}
           resetKey={sessionId}
           sessionId={sessionId}
           stored={stored.data ?? []}

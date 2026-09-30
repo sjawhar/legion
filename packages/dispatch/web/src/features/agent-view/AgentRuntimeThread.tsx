@@ -5,11 +5,18 @@ import {
 } from "@assistant-ui/react";
 import { type ReactNode, useMemo } from "react";
 
-import type { MessageRead } from "../../api/types";
+import type { Message, MessageRead } from "../../api/types";
 import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
-import { type AgentConversation, isRunning, toThreadMessages } from "./conversation";
+import { type AgentConversation, dispatchTurns, isRunning, toThreadMessages } from "./conversation";
 import { dispatchMetadata } from "./dispatch-marks";
+
+/** Who wrote a stored message, when it was not the viewer: its author, and its issue if any. */
+function otherAuthor(message: Message, viewer: string | undefined): string | undefined {
+  return isViewer(message.author, viewer)
+    ? undefined
+    : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
+}
 
 /**
  * Everything that reads the conversation, in one component so a boundary can be put around it.
@@ -42,12 +49,29 @@ export function AgentRuntimeThread({
   viewer: string | undefined;
 }): ReactNode {
   const messages = useMemo(() => {
-    const streamed = toThreadMessages(conversation);
+    const storedMessages = stored.flatMap((read) => [read.message, ...read.replies]);
+    // A person's direct message the session took as its own user turn is in the stream too,
+    // tagged with its Dispatch id: it shows once, where the session took it, still naming whoever
+    // wrote it. Only a person's stored message can be one, so a tag no frame should carry hides
+    // nothing else.
+    const byID = new Map(
+      storedMessages
+        .filter((message) => message.author.kind === "user")
+        .map((message) => [message.id, message])
+    );
+    const turns = dispatchTurns(conversation);
+    const taken = new Set<string>();
+    const streamed = toThreadMessages(conversation).map((message) => {
+      const source = byID.get(turns.get(message.id ?? "") ?? "");
+      if (source === undefined) return message;
+      taken.add(source.id);
+      return { ...message, metadata: dispatchMetadata({ author: otherAuthor(source, viewer) }) };
+    });
     // Dispatch's side of the conversation, interleaved with the stream by time: what the session
     // wrote is its reply, what the viewer wrote is theirs, and anything anyone else sent the
     // session (another human's direct message, an issue message, another agent) says who.
-    const dispatch: ThreadMessageLike[] = stored
-      .flatMap((read) => [read.message, ...read.replies])
+    const dispatch: ThreadMessageLike[] = storedMessages
+      .filter((message) => !taken.has(message.id))
       .map((message) => {
         const content = [{ text: message.body, type: "text" as const }];
         const createdAt = new Date(message.created_at);
@@ -62,14 +86,11 @@ export function AgentRuntimeThread({
             status: { reason: "stop", type: "complete" } as const,
           };
         }
-        const author = isViewer(message.author, viewer)
-          ? undefined
-          : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
         return {
           content,
           createdAt,
           id,
-          metadata: dispatchMetadata({ author }),
+          metadata: dispatchMetadata({ author: otherAuthor(message, viewer) }),
           role: "user" as const,
         };
       });
