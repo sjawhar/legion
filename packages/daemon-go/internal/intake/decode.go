@@ -159,7 +159,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			parent = *issue.Parent
 		}
 		actorSession := ""
-		if event.Actor.Kind == "session" {
+		if event.Actor.Kind == "session" && event.Actor.ID != dispatch.DaemonSession(event.IssueKey) {
 			actorSession = event.Actor.ID
 		}
 		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession}, nil

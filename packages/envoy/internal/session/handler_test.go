@@ -159,8 +159,8 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 
 	port := mockPort(mock.URL)
 
-	client := setupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	client := session.SetupNATS(t)
+	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -208,8 +208,8 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 
 	port := mockPort(mock.URL)
 
-	client := setupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	client := session.SetupNATS(t)
+	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}

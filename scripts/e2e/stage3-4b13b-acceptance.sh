@@ -34,10 +34,20 @@
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+# The key command's record is read with this script's own reader: an ACCEPT_ROOT from before the
+# record has no reader to run.
+unserved_reader=$(cd "$(dirname "$0")" && pwd)/lib/model-gateway-unserved.sh
 base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 # Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
 # its cleanup, which closes the proof's pull requests, never fail on a write whoever is reading. The
@@ -52,6 +62,7 @@ transcript_to /dev/fd/8
 exec 8>&-
 ok=
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="AC$(( ($$ + stamp) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -82,13 +93,19 @@ audited=
 soft_failures="$evidence/soft-failures.txt"
 : >"$soft_failures"
 
-begin() { check=$1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 # soft records a failed assertion and lets the run go on, so one run yields every observation; the
-# run ends non-zero naming each one.
-soft() { printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2; }
+# run ends non-zero naming each one. It remembers the first soft-failing check and when it began,
+# for a soft ending's notes.
+first_soft_check=
+first_soft_since=
+soft() {
+  printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2
+  [ -n "$first_soft_check" ] || { first_soft_check=$check first_soft_since=$check_started; }
+}
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source=/dev/null
@@ -107,7 +124,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -139,6 +156,17 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run, hard or soft: it never sets the status. A hard failure's notes
+  # are for its check. A run that ends on its soft failures sets ok after its last check, once every
+  # pane has stopped, so its notes are for its first soft-failing check, from that check's start. A
+  # run that sets ok with no soft failure and still exits non-zero (its PASS line could not be
+  # written) failed no check, and gets none. A hangup, an interrupt or a termination (129, 130,
+  # 143, as trapped below) stopped the run and gets none.
+  if [ "$status" != 0 ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    local since=$check_started failed=$check
+    [ -z "${ok:-}" ] || { since=$first_soft_since failed=$first_soft_check; }
+    [ -z "$failed" ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$since" "$failed" >&2 || true
+  fi
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
@@ -580,7 +608,6 @@ merger_self_posted() {
         ((.arguments.body // ((.arguments.content // "{}") | fromjson? // {} | .body) // "") | ltrimstr(" ") | startswith("READY")))
     | {name, arguments}]' "$f"
 }
-notice_line() { { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$3" || true; }
 notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }
 # phase_finished_line ISSUE PHASE: the architect's delivered phase-finished notice for PHASE.
 phase_finished_line() { notice_line "$1" architect "$(notice_needle phase-finished "$1")" | grep -F -- "phase: $2" | head -1 || true; }

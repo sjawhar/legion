@@ -914,7 +914,9 @@ func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 }
 
 // A Dispatch event names who wrote it. A session actor's id is decoded, so the workflow can tell a
-// write by an agent holding a claim from a human's move; a user actor decodes none.
+// write by an agent holding a claim, or by an outside session, from a person's move. A user actor
+// decodes none, and neither does the daemon's own session, legion-daemon:<PROJECT>: both are the
+// writes the workflow acts on.
 func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	data, err := os.ReadFile("testdata/dispatch/issue-updated.json")
 	if err != nil {
@@ -946,6 +948,18 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	}
 	if issue, ok := human.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
 		t.Fatalf("fact = %#v, want no session actor for a user", human.Fact)
+	}
+	envelope["payload"] = strings.Replace(payload, `"actor":{"kind":"user","id":"smoke"}`, `"actor":{"kind":"session","id":"legion-daemon:CAPTURE"}`, 1)
+	byDaemon, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, byDaemon)
+	if err != nil {
+		t.Fatalf("decode the daemon's own write: %v", err)
+	}
+	if issue, ok := daemon.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
+		t.Fatalf("fact = %#v, want no session actor for the daemon's own write", daemon.Fact)
 	}
 }
 

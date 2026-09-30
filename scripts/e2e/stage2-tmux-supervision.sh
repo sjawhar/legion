@@ -56,6 +56,7 @@ omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$work/daemon.log
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 timeout_hook=
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
@@ -66,6 +67,7 @@ timeout_hook=
 
 begin() {
   check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
   echo "== $check"
 }
 note() { echo "   $*"; }
@@ -117,7 +119,7 @@ run_processes() {
   done
 }
 cleanup() {
-  local p
+  local status=$? p
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
   for p in "$ptoken" "$deadline_ptoken"; do
@@ -131,6 +133,10 @@ cleanup() {
     rm -rf "$work" || true
   else
     echo "the run's workspace is $work (transcript: $work/transcript.log; daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
+    # A diagnostic: it never sets the run's status (errexit is on here). A hangup, an interrupt or
+    # a termination (129, 130, 143, as trapped below) stopped the run and gets none; a child a signal
+    # killed, which is a failure, still does.
+    [[ $status =~ ^(129|130|143)$ ]] || bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$work/model-gateway" "$check_started" "$check" >&2 || true
   fi
   return 0
 }
