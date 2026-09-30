@@ -29,7 +29,7 @@ type markdownReader struct {
 var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParser(parser.NewParser(
 		parser.WithBlockParsers(blockParsers()...),
-		parser.WithInlineParsers(inlineParsers()...),
+		parser.WithInlineParsers(inlineParsers(emphasisParser{})...),
 		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
 	)),
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
@@ -81,9 +81,20 @@ func blockParsers() []util.PrioritizedValue {
 	return parsers
 }
 
-// Parse converts markdown into the closed Proof ProseMirror tree.
+// Parse converts markdown into the closed Proof ProseMirror tree. Its tables' short rows are
+// padded only while they add at most maxTablePaddingCells cells, as a caller write's markdown.
 func Parse(markdown string) (*Node, error) {
-	doc, err := parseUnstamped(markdown, true)
+	return parseStamped(markdown, NewTablePaddingBudget())
+}
+
+// ParseRendering is Parse of markdown the renderer wrote, a read-back, whose short rows are the
+// tree's: its padding spends a budget of its own (readBackPaddingBudget), not a caller write's.
+func ParseRendering(markdown string) (*Node, error) {
+	return parseStamped(markdown, readBackPaddingBudget())
+}
+
+func parseStamped(markdown string, budget *TablePaddingBudget) (*Node, error) {
+	doc, err := parseUnstamped(markdown, true, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +110,7 @@ func Parse(markdown string) (*Node, error) {
 // whose rendering, the markdown it is stored as, reads back otherwise is refused
 // (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseForWrite(markdown, live, true)
+	doc, err := parseForWrite(markdown, live, true, NewTablePaddingBudget())
 	if err != nil {
 		return nil, err
 	}
@@ -112,13 +123,14 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 // ParseFragment parses markdown a caller writes into a document, rather than one that begins it,
 // as ParseForWrite parses a fragment: a leading `---` line is a horizontal rule, as it is anywhere
 // after a document's start. Written where the document begins (opensDocument), a closed
-// front-matter block opening the markdown is front matter, as Parse reads it.
-func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
-	return parseForWrite(markdown, nil, opensDocument)
+// front-matter block opening the markdown is front matter, as Parse reads it. Its tables' short
+// rows are padded on budget, the caller write's, which its other fragments share.
+func ParseFragment(markdown string, opensDocument bool, budget *TablePaddingBudget) (*Node, error) {
+	return parseForWrite(markdown, nil, opensDocument, budget)
 }
 
-func parseForWrite(markdown string, live *Node, readFrontmatter bool) (*Node, error) {
-	doc, err := parseUnstamped(LineFeeds(markdown), readFrontmatter)
+func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *TablePaddingBudget) (*Node, error) {
+	doc, err := parseUnstamped(LineFeeds(markdown), readFrontmatter, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +191,7 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
 // as the blocks its lines make.
-func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error) {
+func parseUnstamped(markdown string, readFrontmatter bool, budget *TablePaddingBudget) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
@@ -189,7 +201,10 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
 		source = source[rest:]
 	}
-	root := blockReader.parse(source, unclosedFrontmatter)
+	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
+	if err != nil {
+		return nil, err
+	}
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
@@ -211,11 +226,12 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 }
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
-// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's.
-func inlineParserOptions() []parser.Option {
+// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's, its
+// delimiter runs read by emphasis.
+func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
-		parser.WithInlineParsers(inlineParsers()...),
+		parser.WithInlineParsers(inlineParsers(emphasis)...),
 		parser.WithInlineParsers(
 			util.Prioritized(extension.NewStrikethroughParser(), 500),
 			util.Prioritized(extension.NewLinkifyParser(), 999),
@@ -223,19 +239,31 @@ func inlineParserOptions() []parser.Option {
 	}
 }
 
-// inlineMarkdownParser reads inline markdown (inlineParserOptions).
-var inlineMarkdownParser = parser.NewParser(inlineParserOptions()...)
+// inlineReader reads one textblock's inline markdown (inlineParserOptions): run alone, and with
+// footnote definitions after it so that the references in it read as references
+// (parseInlineWithDefinitions).
+type inlineReader struct {
+	run, withDefinitions parser.Parser
+}
 
-// footnoteRunParser reads inline markdown as inlineMarkdownParser does, with footnote definitions
-// after it so that the references in it read as references (parseInlineWithDefinitions).
-var footnoteRunParser = parser.NewParser(append(inlineParserOptions(), footnoteParserOptions()...)...)
+func newInlineReader(emphasis emphasisParser) inlineReader {
+	return inlineReader{
+		run:             parser.NewParser(inlineParserOptions(emphasis)...),
+		withDefinitions: parser.NewParser(append(inlineParserOptions(emphasis), footnoteParserOptions()...)...),
+	}
+}
 
-// parseInlineWithDefinitions reads one textblock's inline markdown as ParseInline does, after a
-// definition for each of labels, the footnote labels it refers to. It is the renderer's read-back
-// of a run it wrote, where a reference is only a reference beside its definition.
-func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, error) {
+// inlineMarkdown reads inline markdown as Parse does; flankingOnlyMarkdown reads it with its
+// delimiter runs judged by CommonMark's flanking rules alone (emphasisParser.flankingOnly).
+var inlineMarkdown, flankingOnlyMarkdown = newInlineReader(emphasisParser{}), newInlineReader(emphasisParser{flankingOnly: true})
+
+// parseInlineWithDefinitions reads one textblock's inline markdown with reader as ParseInline
+// does, after a definition for each of labels, the footnote labels it refers to. It is the
+// renderer's read-back of a run it wrote, where a reference is only a reference beside its
+// definition.
+func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) ([]*Node, error) {
 	if len(labels) == 0 {
-		return ParseInline(markdown)
+		return readInline(markdown, reader.run)
 	}
 	var full strings.Builder
 	full.WriteString(markdown)
@@ -243,7 +271,7 @@ func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, erro
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root := withLineStarts(footnoteRunParser, source, parser.NewContext())
+	root := withLineStarts(reader.withDefinitions, source, parser.NewContext())
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
@@ -274,9 +302,14 @@ func referencedLabels(nodes []*Node) []string {
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) (nodes []*Node, err error) {
+	return readInline(markdown, inlineMarkdown.run)
+}
+
+// readInline is ParseInline read with inline, one of an inlineReader's parsers.
+func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
+	root := withLineStarts(inline, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}
@@ -295,27 +328,32 @@ func ParseInline(markdown string) (nodes []*Node, err error) {
 }
 
 // BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back.
+// parser reads it back. A table in it is written spanless (renderSpanless): the cells a span adds
+// are empty, which the parser refuses nowhere, and the header still reaches every cell a row holds,
+// so the verdict is the one its markdown written with the spans gets.
 func BlockReadError(block *Node) error {
-	markdown, err := Render(readAlone(block))
+	markdown, err := renderSpanless(readAlone(block))
 	if err != nil {
 		return err
 	}
-	_, err = Parse(markdown)
+	_, err = ParseRendering(markdown)
 	return err
 }
 
 // BlockShapeError says what a document-level block's markdown reads back as when that is not
 // blocks of the same kinds nested the same way - the first block that reads back as another - or
 // is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
-// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are.
+// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are. A table in
+// it is written spanless (renderSpanless), so each of its rows reads back as wide as its widest row
+// as it holds cells, where written with its spans a row would read back wider wherever a span
+// covers a cell.
 func BlockShapeError(block *Node) error {
 	doc := readAlone(block)
-	markdown, err := Render(doc)
+	markdown, err := renderSpanless(doc)
 	if err != nil {
 		return err
 	}
-	back, err := Parse(markdown)
+	back, err := ParseRendering(markdown)
 	if err != nil {
 		return err
 	}
@@ -371,7 +409,7 @@ func textOutside(paragraph ast.Node, source []byte) string {
 	return rest
 }
 
-func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
+func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*Node, bool, error) {
 	if width == 0 {
 		return nil, false, nil
 	}
@@ -391,7 +429,7 @@ func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
 		}
 	}
 
-	parsed, err := Parse(syntheticTableHeader(width) + fragment + "\n")
+	parsed, err := parseStamped(syntheticTableHeader(width)+fragment+"\n", budget)
 	if err != nil {
 		return nil, false, err
 	}
@@ -802,7 +840,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 					soft = !hard
 				}
 			}
-			appendText(&children, value, active)
+			children = appendTextPiece(children, value, active)
 			if hard {
 				children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
 			}
@@ -811,13 +849,13 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				// white-space: break-spaces would show a literal newline as a line break. An
 				// image's alt text keeps its line feed, which that parser reads as written.
 				if insideImage(current) {
-					appendText(&children, "\n", active)
+					children = appendTextPiece(children, "\n", active)
 				} else {
-					appendText(&children, " ", active)
+					children = appendTextPiece(children, " ", active)
 				}
 			}
 		case *ast.String:
-			appendText(&children, parseTextValue(current.Value, active), active)
+			children = appendTextPiece(children, parseTextValue(current.Value, active), active)
 		case *ast.Emphasis:
 			var marks []Mark
 			if current.Level >= 2 {
@@ -830,17 +868,17 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *ast.CodeSpan:
 			if value, ok := multilineCodeSpanText(current, source); ok {
-				appendText(&children, value, append(append([]Mark(nil), active...), Mark{Type: "inlineCode"}))
+				children = appendTextPiece(children, value, append(append([]Mark(nil), active...), Mark{Type: "inlineCode"}))
 				continue
 			}
 			content, err := within(current, Mark{Type: "inlineCode"})
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *ast.Link:
 			href := string(current.Destination)
 			if tableCell {
@@ -850,18 +888,21 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *ast.AutoLink:
-			appendText(&children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
+			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *extensionast.TaskCheckBox:
 			continue
 		case *ast.Image:
+			// An image is read without the marks around it, a link among them: the browser
+			// editor's store (y-prosemirror) keeps a mark on text alone, so the editor stores a
+			// linked image without its link as well (LEGION-365).
 			image, err := parseImage(current, source, footnotes)
 			if err != nil {
 				return nil, nil, err
@@ -904,7 +945,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			return nil, nil, fmt.Errorf("%w: unsupported markdown inline %s", ErrSchema, child.Kind())
 		}
 	}
-	return children, ended, nil
+	return joinTexts(children), ended, nil
 }
 
 func unescapeMarkdownText(value []byte) string {
@@ -930,20 +971,65 @@ func appendInline(target *[]*Node, nodes []*Node) {
 	}
 }
 
+// appendText adds value under marks to target, joined to target's last node where that is text
+// under the same marks.
 func appendText(target *[]*Node, value string, marks []Mark) {
-	if value == "" {
+	node := textNode(value, marks)
+	if node == nil {
 		return
 	}
-	marks = append([]Mark(nil), marks...)
-	sortMarks(marks)
 	if len(*target) > 0 {
 		last := (*target)[len(*target)-1]
-		if last.Type == "text" && marksEqual(last.Marks, marks) {
+		if last.Type == "text" && marksEqual(last.Marks, node.Marks) {
 			last.Text += value
 			return
 		}
 	}
-	*target = append(*target, &Node{Type: "text", Text: value, Marks: marks})
+	*target = append(*target, node)
+}
+
+// appendTextPiece is nodes with value under marks as a text node after them, not yet joined to
+// the text before it (joinTexts).
+func appendTextPiece(nodes []*Node, value string, marks []Mark) []*Node {
+	if node := textNode(value, marks); node != nil {
+		return append(nodes, node)
+	}
+	return nodes
+}
+
+// textNode is value as a text node under a sorted copy of marks, or nil for no text.
+func textNode(value string, marks []Mark) *Node {
+	if value == "" {
+		return nil
+	}
+	marks = append([]Mark(nil), marks...)
+	sortMarks(marks)
+	return &Node{Type: "text", Text: value, Marks: marks}
+}
+
+// joinTexts is nodes with each run of text nodes under the same marks written as one, as
+// appendText joins them. A paragraph's lines are its pieces, so they are joined once, where adding
+// each to the text before it copied that text again for every line.
+func joinTexts(nodes []*Node) []*Node {
+	out := nodes[:0]
+	for index := 0; index < len(nodes); {
+		node, end := nodes[index], index+1
+		if node.Type == "text" {
+			for end < len(nodes) && nodes[end].Type == "text" && marksEqual(nodes[end].Marks, node.Marks) {
+				end++
+			}
+		}
+		if end > index+1 {
+			var text strings.Builder
+			for _, piece := range nodes[index:end] {
+				text.WriteString(piece.Text)
+			}
+			node = &Node{Type: "text", Text: text.String(), Marks: node.Marks}
+		}
+		out = append(out, node)
+		index = end
+	}
+	return out
 }
 
 func titleOrNil(title []byte) any {

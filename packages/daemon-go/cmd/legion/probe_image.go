@@ -41,12 +41,13 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // shim starts Oh My Pi (podsafety.Apply), its overlay written to a fresh temporary directory since
 // the probe pod mounts no state volume; with --provider-env-dir, each provider key exported after
 // it as the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
-// of the role prompts the daemon inlines into its pods (promptrefs.Encode's encoding, decoded as the
-// flags are read), resolved beside the plugin's own. Without it the image's own role prompts are
-// read and resolved the same way. When its environment names a NATS nkey seed (a probe pod's
-// NATS_NKEY_SEED_FILE, the providers Secret's key), that seed is read as the daemon reads its own
-// (natsauth.Seed) and must be a user's, and the line before the OK line names that user's public
-// key (bootprobe.NATSUserLine), never the seed, for the daemon to compare with its own.
+// of the role prompts the daemon inlines into its pods (promptrefs.Encode's encoding, decoded as
+// the flags are read). Without it, the image resolves the bundle from
+// LEGION_ROLE_PROMPTS_DIR or role-prompts beside its own legion executable before reading the
+// references. When its environment names a NATS nkey seed (a probe pod's NATS_NKEY_SEED_FILE, the
+// providers Secret's key), that seed is read as the daemon reads its own (natsauth.Seed) and must
+// be a user's, and the line before the OK line names that user's public key (bootprobe.NATSUserLine),
+// never the seed, for the daemon to compare with its own.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")

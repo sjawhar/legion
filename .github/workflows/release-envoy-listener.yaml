@@ -37,6 +37,12 @@ jobs:
 
   build:
     runs-on: ubuntu-24.04
+    # Only what the attestation step needs beyond the checkout: an OIDC token for its Sigstore
+    # signing certificate, and the attestations API to store the result.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: true
       matrix:
@@ -57,14 +63,46 @@ jobs:
           GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-listener ./cmd/listener
           tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener
         working-directory: packages/envoy
+      # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
+      # (packages/envoy/cmd/agent-secrets-helper, AGENTC-393/AGENTC-834): the same
+      # legion-envoy-v* release also ships these for a host to install with mise's
+      # github backend, in the layout its installer expects — bin/agent-secrets,
+      # bin/agent-secrets-helper. CGO_ENABLED=0 matches the existing agent-secrets
+      # builds (packages/envoy/docker/Dockerfile, packages/daemon/docker/worker.Dockerfile):
+      # without it, a same-arch build (amd64 here) links dynamically against the
+      # runner's glibc instead of producing a static binary. The archive is wrapped
+      # in one top-level "agent-secrets" directory (agent-secrets/bin/...) rather
+      # than bin/... directly: mise's github backend auto-strips exactly one leading
+      # directory from an asset shaped like that, so the installed tree still ends
+      # up bin/agent-secrets, bin/agent-secrets-helper; a bare bin/... top level
+      # would itself be the one directory mise strips, flattening the binaries to
+      # the install root instead.
+      - name: Build agent-secrets binaries
+        run: |
+          mkdir -p out/agent-secrets/bin
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/agent-secrets/bin/agent-secrets ./cmd/agent-secrets
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/agent-secrets/bin/agent-secrets-helper ./cmd/agent-secrets-helper
+          tar czf agent-secrets-${{ matrix.arch }}.tar.gz -C out agent-secrets
+        working-directory: packages/envoy
+      # Build provenance for the host binaries a mise pin installs, so `gh attestation verify
+      # agent-secrets-<arch>.tar.gz --repo sjawhar/legion` can check a downloaded asset against
+      # this workflow run. The release job uploads these exact bytes (artifact round trip).
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: packages/envoy/agent-secrets-${{ matrix.arch }}.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: legion-envoy-${{ matrix.arch }}
-          path: packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
+          path: |
+            packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
+            packages/envoy/agent-secrets-${{ matrix.arch }}.tar.gz
 
   docker:
     needs: build
     runs-on: ubuntu-24.04
+    env:
+      # The listener image the smoke test runs against, built by the step below.
+      ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -79,6 +117,31 @@ jobs:
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
+      # The image build is a step of its own: what TestSmoke asserts is the container's
+      # behaviour, so a slow build must fail nothing. Inside the test it spent 256.60–289.47 s
+      # of `go test -timeout 5m` across ten runs while the five assertions measured 0.00 s each
+      # (docs/solutions/testing/a-container-build-inside-go-test-spends-the-tests-deadline.md).
+      # The test refuses to run without ENVOY_SMOKE_IMAGE rather than building one, so dropping
+      # or renaming this step turns the lane red instead of restoring that budget silently.
+      # `load: true` is Docker's documented test-before-push shape, and the only build form
+      # .github/scripts/check-image-trigger-paths.sh can read. Same Dockerfile, context, builder
+      # and LEGION_COMMIT as the publish step below; the smoke covers amd64 only, where the
+      # publish is amd64 and arm64.
+      - name: Build the listener image the smoke test runs against
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/envoy/docker/Dockerfile
+          load: true
+          build-args: |
+            LEGION_COMMIT=${{ github.sha }}
+          tags: ${{ env.ENVOY_SMOKE_IMAGE }}
+      # 5m bounds only what the test does: start both containers behind the test's own 60 s
+      # health wait, and assert. This job sets no TESTCONTAINERS_RYUK_DISABLED and pre-pulls
+      # nothing, so unlike envoy-smoke it also pulls NATS and Ryuk from Docker Hub here,
+      # unretried. envoy-smoke has measured 1.82 s, 3.16 s and 1.88 s, and a loaded devbox
+      # 2.2–20.7 s across four runs; the bound is deliberate headroom over those plus two
+      # pulls, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
@@ -314,7 +377,9 @@ jobs:
           # Skip the *.dockerbuild attestation artifact uploaded automatically
           # by docker/build-push-action. It's not used by the release and has
           # been hanging in Azure blob download (failed both #607 and #608
-          # releases). The release only needs the two binary artifacts.
+          # releases). The release only needs the binary artifacts (envoy-listener
+          # plus agent-secrets/agent-secrets-helper, bundled into the same
+          # per-arch artifact).
           pattern: legion-envoy-*
       - name: Generate checksums
         if: steps.publish.outputs.should_release == 'true'
@@ -336,7 +401,7 @@ jobs:
           else
             gh release create "$TAG" \
               --title "$TAG" \
-              --notes "Envoy listener release — Go binary + Docker image." \
+              --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
               ./legion-envoy-amd64/* \
               ./legion-envoy-arm64/* \
               SHA256SUMS

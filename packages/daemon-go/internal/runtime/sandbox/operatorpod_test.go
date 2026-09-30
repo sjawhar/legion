@@ -51,7 +51,17 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byBaseline = "the pod baseline sets (internal/podsafety)"
 		byOperator = "runtime.kubernetes.pod.env sets"
 	)
-	fixture, err := config.ReadPodFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
+	// The operator route with its token audience filled in, as an operator and each live harness run
+	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := filepath.Join(t.TempDir(), "pod.yml")
+	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := config.ReadPodFile(filled)
 	if err != nil {
 		t.Fatal(err)
 	}

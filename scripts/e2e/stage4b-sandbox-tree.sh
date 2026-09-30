@@ -26,10 +26,16 @@
 # - LEGION_E2E_IMAGE (required) is the worker image, by digest.
 # - LEGION_E2E_MODEL_GATEWAY_URL (required) is the model gateway's Anthropic endpoint, the route the
 #   operator fixture's models.yml and the controller's profile name (lib/model-gateway-url.sh).
+# - LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) is the audience the operator's model gateway accepts
+#   on a worker's projected ServiceAccount token, substituted into the run's copy of the operator
+#   route's pod.yml and asserted on every pod.
 # - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
 #   repository carries none of them, and the run never prints them.
+# - LEGION_E2E_DISPATCH_TOKEN_SECRET_ID and LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) are the
+#   Secrets Manager ids of the production Dispatch agents' bearer and the production Envoy listener's
+#   API token. The repository carries neither.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -37,12 +43,12 @@
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
-# The production bearers (Secrets Manager's production/dispatch/agent-token and
-# production/envoy/api-token) are read with the devbox admin role into 0600 files under the run's
-# scratch directory. They are never printed, never in an argv (curl reads them from header files),
-# and never in the evidence. One run at a time: the project, the NATS durable consumer names, ports
-# 13370/13371 and the namespace label are shared, so the run takes a lock and refuses to start while
-# another holds it, or while LEGSMOKE has pods, Sandboxes or claims it did not create.
+# The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
+# into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
+# reads them from header files), and never in the evidence. One run at a time: the project, the NATS
+# durable consumer names, ports 13370/13371 and the namespace label are shared, so the run takes a
+# lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
+# it did not create.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -62,6 +68,8 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
+dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
+envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
 # The Dispatch project key (the workflow's) and its token (the pods' label, the claims' prefix).
@@ -175,6 +183,8 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
+. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
@@ -357,8 +367,8 @@ pod_endpoint_mismatch() {
 
 read_bearers() {
   (umask 077 &&
-    aws secretsmanager get-secret-value --secret-id production/dispatch/agent-token --query SecretString --output text >"$work/dispatch-token" &&
-    aws secretsmanager get-secret-value --secret-id production/envoy/api-token --query SecretString --output text >"$work/envoy-token" &&
+    aws secretsmanager get-secret-value --secret-id "$dispatch_token_secret_id" --query SecretString --output text >"$work/dispatch-token" &&
+    aws secretsmanager get-secret-value --secret-id "$envoy_token_secret_id" --query SecretString --output text >"$work/envoy-token" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
     cp "$work/dispatch-auth-header" "$work/dispatch-human-header" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
@@ -419,9 +429,20 @@ runtime:
     context: $runtime_context
     pod:
 EOF
-  # The operator route's pod, its ConfigMap reference pointed at the run's own copy.
-  sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$operator_route/pod.yml" >>"$work/legion.yaml"
+  # The operator route's pod, its token audience the operator's and its ConfigMap reference pointed
+  # at the run's own copy.
+  render_operator_pod
+  sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
   grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
+}
+# render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
+# in place of its placeholder.
+render_operator_pod() {
+  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+  local placeholder='${MODEL_TOKEN_AUDIENCE}' pod
+  pod=$(<"$operator_route/pod.yml")
+  printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
+  grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the operator route's pod.yml has no token audience $placeholder to fill with the gateway's"
 }
 # create_route_configmap is the operator's step before any pod runs: the operator route's models.yml and
 # overlay.yml in the ConfigMap the run's pods mount.
@@ -527,10 +548,11 @@ pod_end_observed() {
     jq -e '.metadata.generation as $g | .status.conditions[]? | select(.type == "Finished" and .status == "True" and .observedGeneration == $g)' >/dev/null ||
     claim_moved_or_held "$1" "$2" "$3"
 }
-# relaunch_ends CLAIM UID... prints one line for each UID, a relaunch of CLAIM the driver deleted:
-# when the driver's delete, the relaunch's registration (the first `api: claim registered` of CLAIM
-# between its `supervise: launched` and its `supervise: process died`) and its death fell, in
-# seconds after its launch, and whether the daemon charged the death as one with work outstanding
+# relaunch_ends CLAIM UID... prints one line for each UID, a relaunch of CLAIM the driver ended:
+# when the driver's end (its kill or its delete), the relaunch's registration (the first
+# `api: claim registered` of CLAIM between its `supervise: launched` and its `supervise: process
+# died`) and its death fell, in seconds after its launch, and whether the daemon charged the death
+# as one with work outstanding
 # (a `supervise: the agent died with work outstanding` of CLAIM after that death and before the
 # next launch). A deleted pod that is still starting can run on, register and take its task before
 # its containers are stopped, and a death is charged only once the agent is ready, which follows its
@@ -548,7 +570,7 @@ relaunch_ends() {
     def since($t): . - $t | . * 100 | round / 100 | tostring;
     ($log | split("\n") | map(fromjson? // empty | select(.claim == $c) | . + {t: (.time | secs)})) as $lines
     | ($lines | map(select(.msg == "supervise: launched") | .t)) as $launches
-    | ($actions | split("\n") | map(split(" ") | select(length == 3 and .[0] == "delete") | {key: .[1], value: .[2]}) | from_entries) as $deletes
+    | ($actions | split("\n") | map(split(" ") | select(length == 3 and (.[0] == "kill" or .[0] == "delete")) | {key: .[1], value: .[2]}) | from_entries) as $ends_issued
     | [$ARGS.positional[] as $u
         | ($lines | map(select(.msg == "supervise: launched" and .incarnation == $u)) | first) as $launch
         | ($lines | map(select(.msg == "supervise: process died" and .incarnation == $u)) | first) as $death
@@ -558,10 +580,10 @@ relaunch_ends() {
             | {u: $u, l: $l, d: $d,
                r: ($lines | map(select(.msg == "api: claim registered" and .t > $l and .t < $d) | .t) | first),
                charged: ($lines | any(.msg == "supervise: the agent died with work outstanding" and .t >= $d and .t < $next)),
-               del: $deletes[$u]}
+               ended: $ends_issued[$u]}
           end] as $ends
     | ($ends[] as $e | if $e.missing then "relaunch \($e.u[0:8]): the daemon log has no \($e.missing) of it"
-        else "relaunch \($e.u[0:8]): delete issued +\(if $e.del == null then "(none recorded)" else ($e.del | secs | since($e.l)) + " s" end), \(if $e.r == null then "never registered" else "registered +" + ($e.r | since($e.l)) + " s" end), died +\($e.d | since($e.l)) s, \(if $e.charged then "charged as a death with work outstanding" else "not charged (a launch failure)" end)" end),
+        else "relaunch \($e.u[0:8]): end issued +\(if $e.ended == null then "(none recorded)" else ($e.ended | secs | since($e.l)) + " s" end), \(if $e.r == null then "never registered" else "registered +" + ($e.r | since($e.l)) + " s" end), died +\($e.d | since($e.l)) s, \(if $e.charged then "charged as a death with work outstanding" else "not charged (a launch failure)" end)" end),
       ( ($ends | map(select(.missing)) | first) as $gap
         | ($ends | map(select(.missing | not) | select(.charged and .r == null)) | first) as $bad
         | if $gap then "refused: the daemon log has no \($gap.missing) of relaunch \($gap.u)"
@@ -726,14 +748,14 @@ hog_oomkilled() {
 # shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
 # judges the object alone, so a pod the watch recorded is judged after it is gone.
 shape_problems() {
-  jq -r --arg route "$route_configmap" '
+  jq -r --arg route "$route_configmap" --arg audience "$gateway_audience" '
     .spec as $s
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
       (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
       (if $s.automountServiceAccountToken != false then "automountServiceAccountToken \($s.automountServiceAccountToken)" else empty end),
       (if ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken)] | length) != 1
-        or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != ["middleman-legion"])
-        then "the projected token source of the operator pod is not the one middleman-legion token" else empty end),
+        or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != [$audience])
+        then "the projected token source of the operator pod is not the one token for LEGION_E2E_MODEL_GATEWAY_AUDIENCE" else empty end),
       ([$s.volumes[] | select(.configMap.name == $route) | .name] as $route_volumes
         | if ($route_volumes | length) != 1 then "no one volume of the route ConfigMap \($route)"
           elif ([$s.containers[] | select(.name == "worker") | .volumeMounts[]? | select(.name == $route_volumes[0] and .mountPath == "/home/legion/.omp/profiles/legion/agent/models.yml")] | length) != 1
@@ -1211,7 +1233,13 @@ fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
   fail "LEGION_E2E_NATS_URL is unset or not production NATS as nats://host:port with a fully-qualified host"
 nats_host=${nats_url#nats://} && nats_port=${nats_host##*:} && nats_host=${nats_host%:*}
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
-  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
+gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
+[[ $dispatch_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
+[[ $envoy_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
+  fail "LEGION_E2E_ENVOY_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
@@ -1254,10 +1282,11 @@ read_bearers
 pass
 
 begin preflight
-# The runtime identity is the restricted role, and nothing more.
+# The runtime identity is the restricted role, and nothing more: the assumed-role pattern Stage 4a's
+# identity check uses (packages/daemon-go/internal/runtime/sandbox/live_install_test.go:52).
 who=$(rk auth whoami -o json) || blocked "kubectl auth whoami under $runtime_context failed"
-jq -e '.status.userInfo.username | test("assumed-role/production-legion-daemon/")' <<<"$who" >/dev/null ||
-  fail "the runtime identity is $(jq -r .status.userInfo.username <<<"$who"), not the production-legion-daemon role"
+jq -e '.status.userInfo.username | test(":assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/")' <<<"$who" >/dev/null ||
+  fail "the runtime identity $(jq -r .status.userInfo.username <<<"$who") is not the assumed Legion daemon role"
 jq -e '.status.userInfo.groups | index("legion-daemon")' <<<"$who" >/dev/null || fail "the runtime identity is not in group legion-daemon"
 [ "$(rk auth can-i list secrets -n "$namespace" 2>/dev/null)" = no ] || fail "the runtime identity can list Secrets in $namespace"
 note "[runtime] $(jq -r .status.userInfo.username <<<"$who"); list secrets -n $namespace: no"
@@ -1353,11 +1382,13 @@ pass
 
 begin boot
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+stage_role_prompts "$root" "$work"
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
 [ "$(sed -n 's/^source: //p' <<<"$built")" = "$(jq -r .revision "$evidence/run.json")" ] ||
   fail "the tree changed between prerequisites ($(jq -r .revision "$evidence/run.json")) and the build ($(sed -n 's/^source: //p' <<<"$built"))"
+# The prompt bundle is deployed beside this binary, not read from the checkout it was built in.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
   -p "127.0.0.1::5432" postgres:16 >/dev/null
@@ -1370,9 +1401,17 @@ cat >"$work/instructions.md" <<'EOF'
 This is a throwaway workflow proof on the disposable LEGSMOKE project. A tree's root architect
 starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
 issue's own primary document and registers the gate, then waits. Apart from that, do not act until
-a targeted human Dispatch message gives the next exact proof operation. Follow that instruction
-precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
-smoke branch.
+a targeted human Dispatch message gives the next exact proof operation. A phase worker's first
+message is the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`): it names your
+phase and is not that message. Read what your role says to read, then reply WAITING and wait for
+the targeted message. Follow that instruction precisely, use the Go-daemon Legion tools and
+handoffs, and do not create work outside the issue's smoke branch.
+
+## Scope of this proof
+
+The controller hands Legion no issue itself: this proof admits only the issues its driver sets to
+`todo`. LEGSMOKE holds earlier runs' roots, and a slot the proof frees stays for the tree the driver
+admits next.
 EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
@@ -1734,40 +1773,47 @@ note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
 wait_for_worker "$tree3" architect
 drive_spec "$tree3"
 wait_for_worker "$tree3" planner
+# The daemon holds a phase when one of its claim's budgets reaches launch_failure_limit (3)
+# (supervise/budgets.go): launch failures, which restart at the agent's ready, or deaths after a
+# ready while the claim has its task outstanding. Tree 3's planner finishes its task turn when the
+# tree is admitted, so an end of it or of a relaunch leaves no task outstanding, and a relaunch that
+# reaches ready restarts the launch count. So the hold is driven on tree 3's implementer, whose task
+# is fresh: the planner is told to plan, and each implementer launch is killed once its agent is
+# ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
+# either budget.
+send_agent "$tree3" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+wait_for_phase "$tree3" implementing 900
+wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
-# The daemon holds a phase when its claim's launches fail launch_failure_limit (3) times in a row,
-# and a failed launch is one that never became a working agent: the count restarts at the agent's
-# ready (supervise/budgets.go). So each relaunch is deleted the moment the claim names it; an exec's
-# kill cannot reach it, since the pod's worker container has not started. The first end takes the
-# ready planner, and the ones after it take relaunches. A deleted pod that is still starting can
-# run on, register and take its task before its containers are stopped, and each such relaunch dies
-# with work outstanding once its agent is ready: then the deaths budget can run out instead, and the
-# check below accepts either.
-# new_planner_pod: tree 3's planner claim names a pod none of the ends took. It runs in this shell:
-# the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
-new_planner_pod() {
-  local inc
-  inc=$("$work/legion" state --json --config "$work/legion.yaml" | jq -r --arg i "$tree3" '.issues[$i].workers.planner.claim.locator.incarnation // empty')
-  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed"
+# held_ready_with_work: tree 3's implementer claim names a pod none of the ends took, its agent is
+# ready or in a turn, and its task is outstanding, as `legion claims` shows it. It runs in this
+# shell: the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax
+# error.
+held_ready_with_work() {
+  local claim inc
+  claim=$(claims_cli list --json | jq -ce --arg t "$(claim_token "$tree3" implementer)" '.claims[] | select(.token == $t)') || return 1
+  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed" &&
+    jq -e '(.state | IN("ready", "working", "idle")) and .pending != null' <<<"$claim" >/dev/null
 }
 until issue_phase "$tree3" held >/dev/null 2>&1; do
-  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended planner launches"
-  until_true 600 "a new planner pod on $tree3" new_planner_pod
-  state=$(claim_view "$tree3" planner | jq -r '.state // "none"')
-  end_claim_pod "$tree3" planner delete
+  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended implementer launches"
+  until_true 600 "$tree3's implementer ready with its task outstanding" held_ready_with_work
+  state=$(claim_view "$tree3" implementer | jq -r '.state // "none"')
+  end_claim_pod "$tree3" implementer kill
   uid=$ended_pod_uid
   killed="$killed$uid "
   kills=$((kills + 1))
-  note "ended planner launch $kills of $tree3 (uid $uid), its claim $state"
-  until_true 600 "$tree3 to be held or its planner relaunched" claim_moved_or_held "$tree3" planner "$uid"
+  note "ended implementer launch $kills of $tree3 (uid $uid), its claim $state with its task outstanding"
+  until_true 600 "$tree3 to be held or its implementer relaunched" claim_moved_or_held "$tree3" implementer "$uid"
 done
-note "$tree3 is held after $kills ended planner launches"
-# The hold is one of the planner claim's own supervise budgets, launches or deaths with work
+note "$tree3 is held after $kills ended implementer launches"
+# The hold is one of the implementer claim's own supervise budgets, launches or deaths with work
 # outstanding, and no other path that also holds an issue (a prompt budget, the architect's
 # escalation).
-planner_claim=$(claim_token "$tree3" planner)
-failed=$(log_lines "supervise: claim failed" | jq -c --arg c "$planner_claim" 'select(.claim == $c)' | tail -1)
+held_claim=$(claim_token "$tree3" implementer)
+failed=$(log_lines "supervise: claim failed" | jq -c --arg c "$held_claim" 'select(.claim == $c)' | tail -1)
 why=$(jq -r '.why // empty' <<<"${failed:-null}")
 # The daemon's own record judges the reason: its claim-failed line carries the claim's budget
 # counters, and the reason must name the one at launch_failure_limit, with the other below it, as
@@ -1775,23 +1821,23 @@ why=$(jq -r '.why // empty' <<<"${failed:-null}")
 case $why in
   "launch failures ran out") counter=launchFailures other=deaths ;;
   "deaths with work outstanding ran out") counter=deaths other=launchFailures ;;
-  *) fail "$tree3's planner claim $planner_claim failed with '${why:-no logged failure}', not one of its launch or death budgets" ;;
+  *) fail "$tree3's implementer claim $held_claim failed with '${why:-no logged failure}', not one of its launch or death budgets" ;;
 esac
 counts=$(jq -r '"launchFailures \(.launchFailures), deaths \(.deaths)"' <<<"$failed")
 jq -e --arg c "$counter" --arg o "$other" --argjson n "$launch_failure_limit" '.[$c] >= $n and .[$o] < $n' <<<"$failed" >/dev/null ||
-  fail "$tree3's planner claim $planner_claim failed with '$why', but the daemon's counters ($counts, bound $launch_failure_limit) do not name that budget"
-# The first end takes the ready planner; every later one is a relaunch, whose ends set the hold
-# they lead to (relaunch_ends).
+  fail "$tree3's implementer claim $held_claim failed with '$why', but the daemon's counters ($counts, bound $launch_failure_limit) do not name that budget"
+# The first end takes the implementer's first launch; every later one is a relaunch, whose ends set
+# the hold they lead to (relaunch_ends).
 read -r -a ended <<<"$killed"
-ends=$(relaunch_ends "$planner_claim" "${ended[@]:1}") || fail "the ends of $tree3's planner relaunches could not be read from the daemon log"
+ends=$(relaunch_ends "$held_claim" "${ended[@]:1}") || fail "the ends of $tree3's implementer relaunches could not be read from the daemon log"
 while IFS= read -r line; do note "$line"; done < <(sed '$d' <<<"$ends")
 last=$(tail -1 <<<"$ends")
 case $last in
   "expect: "*) expected=${last#expect: } ;;
-  *) fail "$tree3's planner relaunches: ${last#refused: }" ;;
+  *) fail "$tree3's implementer relaunches: ${last#refused: }" ;;
 esac
-[ "$why" = "$expected" ] || fail "$tree3's planner claim $planner_claim failed with '$why', but its last relaunch's death leads to '$expected'"
-note "the daemon failed $planner_claim because $why ($counts, bound $launch_failure_limit)"
+[ "$why" = "$expected" ] || fail "$tree3's implementer claim $held_claim failed with '$why', but its last relaunch's death leads to '$expected'"
+note "the daemon failed $held_claim because $why ($counts, bound $launch_failure_limit)"
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
 controller_notice() {
   local file

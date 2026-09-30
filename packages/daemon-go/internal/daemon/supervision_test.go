@@ -24,7 +24,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
-	"github.com/sjawhar/legion/daemon/internal/prompts"
 	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -248,12 +247,8 @@ func TestRunLaunchesTheComposedGoRolePromptWhenSpawnHasNoPromptFile(t *testing.T
 
 	token := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect})
 	spec := lastLaunch(t, rt, token)
-	rolesDir, err := prompts.ResolveRolePromptsDir(nil)
-	if err != nil {
-		t.Fatalf("ResolveRolePromptsDir: %v", err)
-	}
 	want := []string{
-		filepath.Join(rolesDir, "architect-root.md"),
+		filepath.Join(cfg.StateDir, "prompts", "shared", "architect-root.md"),
 		filepath.Join(cfg.StateDir, "prompts", "go", "architect-root.md"),
 		filepath.Join(cfg.StateDir, "prompts", "go", "architect-common.md"),
 	}

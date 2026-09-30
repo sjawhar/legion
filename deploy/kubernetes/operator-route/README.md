@@ -18,6 +18,9 @@ an operator supplies, in the shape the daemon loads. The Go live harnesses run o
   `/var/run/operator`.
 - **The model endpoint's base URL**, which `apply.sh` puts in place of `models.yml`'s
   `${MODEL_BASE_URL}` placeholder, so the repository holds no endpoint.
+- **The audience its model endpoint accepts on the pod's projected ServiceAccount token**, which the
+  operator puts in place of `pod.yml`'s `${MODEL_TOKEN_AUDIENCE}` placeholder when copying `pod.yml`
+  into `legion.yaml`, so the repository holds no audience either.
 
 Every mount in `pod.yml` is read-only: `read_only` defaults to true, and none of them sets it false.
 A mount added later goes beside these paths, never beneath one: the container runtime must create
@@ -31,8 +34,9 @@ deploy/kubernetes/operator-route/apply.sh --context <kubectl context> --base-url
 ```
 
 `--context` is required, and the output names the cluster it wrote to. Then put `pod.yml` under
-`runtime.kubernetes.pod` in the deployment's `legion.yaml` and run
-`legion start --config <file> --check-config`, which applies the daemon's own collision checks.
+`runtime.kubernetes.pod` in the deployment's `legion.yaml`, with the gateway's audience in place of
+`${MODEL_TOKEN_AUDIENCE}`, and run `legion start --config <file> --check-config`, which applies the
+daemon's own collision checks and refuses a token audience still holding the placeholder.
 
 `pod.yml` mounts both files by `subPath`, and the kubelet never refreshes a `subPath` mount. A
 changed ConfigMap therefore reaches only pods created after the change; a running pod keeps the

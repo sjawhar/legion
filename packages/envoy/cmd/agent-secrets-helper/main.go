@@ -81,7 +81,7 @@ func main() {
 // for its login_hint.
 func serve(cfg config) error {
 	if strings.TrimSpace(cfg.URL) == "" {
-		return errors.New("AGENT_SECRETS_URL is required (the secrets broker, e.g. https://secrets.internal.trajectorylabs.com)")
+		return errors.New("AGENT_SECRETS_URL is required (the secrets broker, e.g. https://secrets.internal.example)")
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.Socket), 0o700); err != nil {
 		return err

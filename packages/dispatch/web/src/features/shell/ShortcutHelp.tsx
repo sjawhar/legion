@@ -35,6 +35,7 @@ function keyTokens(keys: string): { key: string; token: string }[] {
 }
 
 const SCOPE_LABELS: Record<KeymapScope, string> = {
+  agents: "Agents",
   architecture: "Architecture",
   board: "Board",
   dialog: "Dialog",
@@ -56,6 +57,7 @@ const SCOPE_ORDER: readonly KeymapScope[] = [
   "board",
   "issue",
   "inbox",
+  "agents",
   "dialog",
 ];
 

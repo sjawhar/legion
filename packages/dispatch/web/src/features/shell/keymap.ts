@@ -14,10 +14,11 @@ export type KeymapScope =
   | "global"
   | "dialog"
   | "inbox"
-  | "issue"
   | "project"
   | "architecture"
-  | "board";
+  | "board"
+  | "issue"
+  | "agents";
 
 export interface KeyBinding {
   /** Stable identifier, unique within the registering component. */
@@ -31,7 +32,8 @@ export interface KeyBinding {
   run: (event: KeyboardEvent) => void;
   /** Whether the binding applies right now; `false` neither fires nor shadows lower scopes. */
   when?: () => boolean;
-  /** Fires while an `INPUT`, `TEXTAREA`, `SELECT`, or contentEditable element has focus. */
+  /** Fires while a control that takes typed text has focus: a `TEXTAREA`, a `SELECT`, a
+   *  contentEditable element, or a text-entry `INPUT`. */
   inEditable?: boolean;
   /** Whether `⌘K` offers this binding as an action; default `true`. Movement keys set `false`. */
   palette?: boolean;
@@ -172,12 +174,44 @@ function isStrictPrefix(shorter: readonly KeyCombo[], longer: readonly KeyCombo[
   );
 }
 
+/** The `<input>` types that take typed text. Everything else an input can be - checkbox, radio,
+ *  the button family, file, range, color - takes no text, so a letter or digit pressed while one
+ *  has focus is a shortcut, not typing: ticking a checkbox with the pointer must not silence the
+ *  page's keys. `HTMLInputElement.type` normalises a missing or unknown attribute to `text`. */
+const TEXT_INPUT_TYPES: Record<string, true> = {
+  date: true,
+  "datetime-local": true,
+  email: true,
+  month: true,
+  number: true,
+  password: true,
+  search: true,
+  tel: true,
+  text: true,
+  time: true,
+  url: true,
+  week: true,
+};
+
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
   }
+  if (target.isContentEditable) {
+    return true;
+  }
+  // An `<input>` takes typed text only in the text-entry types; a checkbox, radio or button
+  // takes none, so a page's single-key shortcuts keep working while one has focus. That is a
+  // permission with an obligation attached: the registry stops guarding those controls, so a
+  // page whose key writes something must say for itself where the reader may press it
+  // (`IssuePage`'s `outsideInputsAndAskCards`, the Inbox's `outsideAskCard`).
+  if (target instanceof HTMLInputElement) {
+    return TEXT_INPUT_TYPES[target.type] === true;
+  }
   const tag = target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+  // A `<select>` stays editable: its own keys type-ahead and step through the options, and the
+  // Inbox's `h` hands it focus on purpose.
+  return tag === "TEXTAREA" || tag === "SELECT";
 }
 
 export interface KeymapOptions {

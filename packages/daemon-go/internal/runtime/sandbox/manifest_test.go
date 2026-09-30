@@ -72,7 +72,7 @@ func manifestCases(t *testing.T) map[string]struct {
 		"resume":             {resume, true, nil},
 		"recovered":          {recovered, true, nil},
 		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
-			URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour,
+			URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour,
 		}},
 	}
 }
@@ -206,6 +206,18 @@ func containerNamed(t *testing.T, pod corev1.PodSpec, name string) corev1.Contai
 	return corev1.Container{}
 }
 
+// mountHolding is the deepest of c's mounts at or above path, the one path lands on, or nil when
+// none holds it.
+func mountHolding(c corev1.Container, path string) *corev1.VolumeMount {
+	var holding *corev1.VolumeMount
+	for i, m := range c.VolumeMounts {
+		if (path == m.MountPath || strings.HasPrefix(path, m.MountPath+"/")) && (holding == nil || len(m.MountPath) > len(holding.MountPath)) {
+			holding = &c.VolumeMounts[i]
+		}
+	}
+	return holding
+}
+
 // PI_SHELL_PREFIX is a shell command Oh My Pi's bash tool runs before each command, in tmux's form
 // over the pod's own directories — worker-bin on the tree volume, then the Go legion's — never a
 // path list (P3).
@@ -318,6 +330,50 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	}
 }
 
+// uv links a project's .venv, in an issue's workspace on the tree volume, to an interpreter under
+// UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the tree volume's own
+// mount (no other mount covering them) and outside the workspace, whose tree is the project's, so a
+// later pod runs the .venv as it is and reuses what an earlier pod downloaded. The cache is the
+// tree's, the same in every pod of it. The interpreter directory is the issue's: the same for two
+// pods of one issue, and another for a second issue of the tree, whose pods may install at the same
+// moment and share no lock with the first issue's across pods.
+func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := claim.NewToken("legion", "LEGION-209", claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envs []map[string]string
+	for _, spec := range []runtime.SpawnSpec{rootSpec(t), workerSpec(t), testSpec(t, child, claim.RoleImplementer, "LEGION-209")} {
+		main := containerNamed(t, podOf(t, r, spec, false), mainContainer)
+		env := envOf(main)
+		for _, name := range []string{"UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
+			dir := env[name]
+			if mount := mountHolding(main, dir); mount == nil || mount.Name != treeVolume || mount.SubPath != "" {
+				t.Errorf("%s %s: %s %q is on mount %+v, want the tree volume's own mount at %s", spec.Issue, spec.Role, name, dir, mount, TreeRoot)
+			}
+			if overlaps(dir, env["LEGION_WORKSPACE"]) {
+				t.Errorf("%s %s: %s %q overlaps the workspace %s", spec.Issue, spec.Role, name, dir, env["LEGION_WORKSPACE"])
+			}
+		}
+		envs = append(envs, env)
+	}
+	architect, tester, other := envs[0], envs[1], envs[2]
+	if architect["UV_PYTHON_INSTALL_DIR"] != tester["UV_PYTHON_INSTALL_DIR"] {
+		t.Errorf("two pods of one issue install Pythons into %q and %q; the later would not find the earlier's interpreter",
+			architect["UV_PYTHON_INSTALL_DIR"], tester["UV_PYTHON_INSTALL_DIR"])
+	}
+	if other["UV_PYTHON_INSTALL_DIR"] == architect["UV_PYTHON_INSTALL_DIR"] {
+		t.Errorf("two issues of one tree share the Python directory %q", other["UV_PYTHON_INSTALL_DIR"])
+	}
+	if architect["UV_CACHE_DIR"] != tester["UV_CACHE_DIR"] || other["UV_CACHE_DIR"] != architect["UV_CACHE_DIR"] {
+		t.Errorf("the tree's pods use the caches %q, %q and %q; want one", architect["UV_CACHE_DIR"], tester["UV_CACHE_DIR"], other["UV_CACHE_DIR"])
+	}
+}
+
 // Oh My Pi copies its own environment once for every `gh` it runs to serve a pr:// or issue://
 // read, so the worker container is told LEGION_GRANT_FILE from its start; the extension writes a
 // grant there before each such call (LEGION-262). The file is the claim's, on the state volume in
@@ -340,12 +396,9 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 			t.Errorf("init container %s is told LEGION_GRANT_FILE=%q; no init container redeems a grant", init.Name, got)
 		}
 	}
-	// The deepest mount holding the path is the volume the file lands on.
-	var volume, at string
-	for _, mount := range main.VolumeMounts {
-		if strings.HasPrefix(want, mount.MountPath+"/") && len(mount.MountPath) > len(at) {
-			volume, at = mount.Name, mount.MountPath
-		}
+	var volume string
+	if mount := mountHolding(main, want); mount != nil {
+		volume = mount.Name
 	}
 	for _, v := range pod.Volumes {
 		if v.Name == volume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
@@ -515,7 +568,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
-	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -609,7 +662,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 	}{
 		"not enrolled, the operator's account": {nil, "operator-worker"},
 		"not enrolled, no account":             {nil, ""},
-		"enrolled":                             {&AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}, "legion-worker"},
+		"enrolled":                             {&AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}, "legion-worker"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := goldenOptions()
@@ -691,7 +744,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 }
 
 // New refuses an agent-secrets configuration no pod could run: no broker URL, no token audience,
-// an expiry outside the API server's floor (10m) and agent-c's admission cap (1h), or the image's
+// an expiry outside the API server's floor (10m) and the cluster's admission cap (1h), or the image's
 // agent-secrets binary missing.
 func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -946,7 +999,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
-	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

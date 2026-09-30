@@ -40,13 +40,14 @@ var renderedMarkTypes = map[string]bool{
 }
 
 // writtenMarks is the marks a node's text is written under: its visible marks, less a bare URL's
-// link, which the parser links again on its own. A node that is not text is written under none.
+// link, which the parser links again on its own, or an autolink's, which its angle brackets write
+// (isAngleURLLink). A node that is not text is written under none.
 func writtenMarks(node *Node, escapePipes bool) []Mark {
 	if node.Type != "text" {
 		return nil
 	}
 	marks := visibleMarks(node.Marks)
-	if isBareURLLink(node, marks, escapePipes) {
+	if isBareURLLink(node, marks, escapePipes) || isAngleURLLink(node, marks, escapePipes) {
 		marks = withoutMark(marks, "link")
 	}
 	return marks

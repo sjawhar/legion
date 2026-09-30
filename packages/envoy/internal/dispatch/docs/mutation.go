@@ -238,7 +238,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, askMarkdown); err != nil {
+		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		currentMarkdown, err := renderTree(current)

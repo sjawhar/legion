@@ -401,9 +401,10 @@ merged into, and both bases are deleted at the end. The evidence is kept in `ACC
 ## stage4a-sandbox-runtime.sh
 
 ```sh
-LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production \
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
@@ -421,7 +422,7 @@ other process; only the installation token enters each claim's Secret.
 Every pod carries the operator route's pod,
 [`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
-audience `middleman-legion`, and a ConfigMap holding the route's `models.yml` (anthropic through
+the model gateway's audience, and a ConfigMap holding the route's `models.yml` (anthropic through
 the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
 `overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
 gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
@@ -429,23 +430,27 @@ none of it. Before the harness runs, the script creates the run's own copy of th
 operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
 `LEGION_E2E_MODEL_GATEWAY_URL` put in place of the route's `${MODEL_BASE_URL}`
 placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
-delete this one's route. It also creates the run's providers Secret,
+delete this one's route. The harness loads the run's own copy of the route's `pod.yml`, with
+`LEGION_E2E_MODEL_GATEWAY_AUDIENCE` put in place of its `${MODEL_TOKEN_AUDIENCE}` placeholder, so
+the audience is the operator's and `operator-token` checks the token against it. It
+also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
 harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
 with the providers Secret mounted, as a deployment with `provider_keys` does.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (`legion-daemon@production`: the IAM role `production-legion-daemon`, group `legion-daemon`) |
+| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (an IAM role mapped to group `legion-daemon`) |
 | `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
-| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker, `https://secrets.internal.trajectorylabs.com` (Plan D), never a development slot (below) |
+| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
 | `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the login this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator approves it with his own YubiKey during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
-| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into `production/agent-secrets/legion-e2e-auto` (rule `LEGION_E2E_AUTO`: pod, automatic, inject) — the harness never sees the value itself, only its hash |
+| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for rule `LEGION_E2E_AUTO` (pod, automatic, inject) — the harness never sees the value itself, only its hash |
 | `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
 
 **Why the production broker, with dummy rules, and not a development slot.** A dispatch-project
@@ -549,9 +554,10 @@ smoke repository `sjawhar/legion-smoke`. The daemon runs on the devbox as the Le
 restricted identity, and its pods dial its worker stream on the devbox's private address.
 
 ```sh
-LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
-  LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_DISPATCH_URL=https://<dispatch> \
-  LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+  LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
+  LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
+  LEGION_E2E_DISPATCH_TOKEN_SECRET_ID=<secret id> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 ```
@@ -563,6 +569,16 @@ run writes into its copy of the operator fixture's `models.yml` and the controll
 Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified names
 for them. `prerequisites` refuses a value that is unset, names a bare alias, or carries a path,
 naming the variable and never its value.
+
+`LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is the audience the model gateway accepts on a worker's projected
+ServiceAccount token. The run puts it in place of the placeholder in its copy of the operator route's
+`pod.yml`, which the daemon loads, and `pod-shape` holds every pod to exactly that one token.
+`LEGION_E2E_DISPATCH_TOKEN_SECRET_ID` and `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` are the Secrets Manager
+ids of the production Dispatch agents' bearer and the production Envoy listener's API token, which
+`prerequisites` reads with the devbox admin role into 0600 files. `prerequisites` refuses each of the
+three when it is unset or malformed (the audience through
+[`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh)), again naming the variable and never
+its value.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,
@@ -649,7 +665,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | checkpoint | what it holds |
 | :--- | :--- |
 | `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
-| `preflight` | the runtime identity is `production-legion-daemon` and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
+| `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
@@ -666,7 +682,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
-| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3 is held by one of its planner claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its planner's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's delete, registration, death and charge; a deleted pod that is still starting can register, and even take its task, before it is stopped. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
+| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
 | `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
@@ -838,11 +854,67 @@ both sides, when a binary:
 The stamp does not hash a changed tree, so an edit made after the build to a tree that was already
 changed goes unseen. Every caller runs the helper right after its build.
 
+## lib/pack-plugin.sh
+
+Packs this checkout's `@sjawhar/pi-legion-envoy` the way the release packs it, and prints the
+tarball's path: what `npm pack` ships (`package.json` `files`: `dist/` with the two bundles and
+`prepack.sh`'s `dist/skills`, `agents/`, and the packed manifest). Every script that installs a
+branch-built plugin packs through it: [`lib/install-plugin-profile.sh`](#libinstall-plugin-profilesh),
+which `controller-start-tmux.sh`, `stage2-tmux-supervision.sh`, `stage3-devbox-workflow.sh`,
+`stage3-4b13b-acceptance.sh` and `stage4b-sandbox-tree.sh` call, and the grant rig's branch mode
+(`packages/pi-envoy/scripts/grant-rig/setup.sh`). The worker image packs on its own, as the release
+does: `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN` rewrites `omp.extensions` with `jq`
+and runs `bun pm pack`, and `prepack.sh` refuses to pack any other `omp.extensions`, which holds all
+of them to the same manifest.
+
+```sh
+bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
+tarball=$(scripts/e2e/lib/pack-plugin.sh "$work/pack")
+```
+
+`<out dir>` is created when missing, and refused inside the checkout (jj would snapshot the tarball)
+or when it already holds a `.tgz`. Stdout is exactly one line, the tarball's path; every step's own
+output goes to stderr.
+
+The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
+because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
+`node_modules`:
+
+1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
+   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
+   in "Point extensions at the packed bundles");
+2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
+   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
+3. `bun pm pack --destination <out dir>`, whose `prepack` builds `dist/` (the release's "Pack
+   extension" step, `packages/pi-envoy/scripts/prepack.sh`); the bundles inline `package.json`, so
+   they are built while it names the packed bundles, as the release builds them;
+4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
+   manifest").
+
+Each step cites its source by what it runs, never by line number: the lines move with every edit
+above them. The release's version bump (its "Set release version" step) is not a step: the tarball
+carries the checkout's own version. The saved manifest is written to the run's `mktemp -d`
+directory, never beside `package.json`, so an interrupted run strands no `tmp.json` in the checkout.
+
+The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
+way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
+dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
+itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
+`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
+the checkout.
+
+Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
+itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
+has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
+rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
+jj snapshots the rewritten `package.json`. Two stage proofs in one checkout, or a stage proof and the
+grant rig, can pack at the same time, and the lock takes them in turn.
+
 ## lib/install-plugin-profile.sh
 
 Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
-release packs it, so a stage proof or a boot-gate test runs the branch-built plugin and the user's
-own profiles are never touched.
+release packs it, so a stage proof runs the branch-built plugin and the user's own profiles are never
+touched.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
@@ -864,50 +936,23 @@ the manifest both daemons' contract gates read under the same profile — the Ty
 (`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
 goes to stderr.
 
-The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
-because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
-`node_modules`:
+The plugin is packed by [`lib/pack-plugin.sh`](#libpack-pluginsh), the release's pack steps run in the
+checkout, into the run's `mktemp -d` directory (never beside `package.json`, so an interrupted run
+strands no `.tgz` in the checkout). Then:
 
-1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
-   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
-   in "Point extensions at the packed bundles");
-2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
-   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
-3. `bun pm pack`, whose `prepack` builds `dist/` (the release's "Pack extension" step,
-   `packages/pi-envoy/scripts/prepack.sh`);
-4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
-   manifest");
-5. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
+1. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
    `tar xzf ./*.tgz -C /out/pi-legion-envoy --strip-components=1`);
-6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
+2. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
    `omp plugin install /opt/legion/pi-legion-envoy`);
-7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
+3. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the tarball's version,
    enabled, and resolving to `<dir>`.
 
-Steps 6 and 7 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
+Steps 2 and 3 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
 `HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
 there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
 
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them.
-
-The release's version bump (its "Set release version" step) is not a step: the profile gets the checkout's
-own version. The packed manifest and the tarball are written to the run's `mktemp -d` directory,
-never beside `package.json`, so an interrupted run strands no `tmp.json` or `.tgz` in the checkout.
-
-The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
-way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
-dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
-itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
-`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
-the checkout.
-
-Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
-itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
-has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
-rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
-jj snapshots the rewritten `package.json`. `go test ./...` runs package test binaries in parallel,
-so two callers at once is the expected case.
 
 The script creates the profile and `<dir>` and removes neither; the caller does, with its work
 directory, which holds both (the profile holds `plugins/` — the link and `omp-plugins.lock.json` —
@@ -944,6 +989,22 @@ when the variable is unset, holds a character other than letters, digits and `:/
 colon (which YAML reads as a mapping key), or is not an `https://` URL. Its refusal names the
 variable on stderr and never prints the value, which names production infrastructure; the scripts
 that use it print that the route comes from the variable, not the URL.
+
+## lib/model-gateway-audience.sh
+
+Prints `LEGION_E2E_MODEL_GATEWAY_AUDIENCE`, the audience the model gateway accepts on a worker's
+projected ServiceAccount token, once it is one a stage proof can use. Stage 4a and Stage 4b read the
+variable through it and put it in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's
+copy of the operator route's `pod.yml`. The repository carries no default: the operator sets it to the
+audience their own gateway verifies.
+
+```sh
+gateway_audience=$(bash scripts/e2e/lib/model-gateway-audience.sh)
+```
+
+The audience is written inside a double-quoted YAML string, so the helper exits 1 when the variable
+is unset or holds a character other than letters, digits and `._:/-` (a quote or a backslash would
+break the pod the daemon loads). Its refusal names the variable on stderr and never prints the value.
 
 ## lib/install-model-gateway.sh
 

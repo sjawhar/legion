@@ -361,12 +361,12 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestLoginHoldsTheKeyInMemoryAndEnrollSignsLauncherProofs(t *testing.T) {
 	f := newFakeBroker(t) // records the login request object; issues after one poll
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "sjawhar"), HTTP: f.srv.Client()}
-	code, err := b.Login(context.Background(), "sami-agents")
+	code, err := b.Login(context.Background(), "example-host-devbox")
 	if err != nil || !regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`).MatchString(code) {
 		t.Fatalf("code %q err %v", code, err)
 	}
 	ro, err := record.VerifyRequestObject(f.lastLoginRequest, f.srv.URL, time.Minute, time.Now())
-	if err != nil || ro.LoginHint != "sjawhar" || ro.Details[0].Type != "launcher_credential" || ro.Details[0].Identifier != "sami-agents" {
+	if err != nil || ro.LoginHint != "sjawhar" || ro.Details[0].Type != "launcher_credential" || ro.Details[0].Identifier != "example-host-devbox" {
 		t.Fatalf("request object: %+v %v", ro, err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
@@ -398,7 +398,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 		t.Fatalf("no credential yet: expected the remedy in the error, got %v", err)
 	}
 
-	if _, err := b.Login(context.Background(), "sami-agents"); err != nil {
+	if _, err := b.Login(context.Background(), "example-host-devbox"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
@@ -433,6 +433,36 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	}
 	if files != 0 {
 		t.Fatalf("the machine key and credential id must never touch disk; found %d file(s) under HOME", files)
+	}
+}
+
+// TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone covers a 401 LAUNCHER_INVALID that
+// answers a call signed with a credential another login has since replaced (a session's enroll
+// retry in flight while the operator logs in again): it clears nothing, since the credential it
+// rejects is no longer the one installed, and the new login still reports "issued".
+func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "sjawhar")
+	old := b.cred.Load()
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.cred.Load() != old && b.LoginStatus().State == "issued" })
+	fresh := b.cred.Load()
+
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	if err := b.clearOnInvalid(old, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatalf("a rejected credential still reports the login command to its caller: %v", err)
+	}
+	if b.cred.Load() != fresh || b.LoginStatus().State != "issued" {
+		t.Fatalf("a late rejection of the replaced credential changed the new login: cred replaced %v, state %q", b.cred.Load() != fresh, b.LoginStatus().State)
+	}
+
+	if err := b.clearOnInvalid(fresh, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatal(err)
+	}
+	if b.cred.Load() != nil || b.LoginStatus().State == "issued" {
+		t.Fatalf("rejecting the installed credential must clear it and end its login: state %q", b.LoginStatus().State)
 	}
 }
 
@@ -478,14 +508,14 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "sjawhar")
-	sess, _ := newSession(1234, 77, "sami-agents:1234:77", nil)
+	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
 	id, lease, err := b.Enroll(context.Background(), sess)
 	if err != nil || id == "" || time.Until(lease) < 10*time.Minute {
 		t.Fatalf("enroll: %q %v %v", id, lease, err)
 	}
 	posts, _, _ := f.snapshot()
 	post := posts[0]
-	if post["kind"] != "host" || post["runtime_id"] != "sami-agents:1234:77" || post["operator"] != "sjawhar" ||
+	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "sjawhar" ||
 		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)

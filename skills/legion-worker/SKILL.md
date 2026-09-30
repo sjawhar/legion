@@ -14,6 +14,20 @@ copy the next phase can trust.
 Every path this skill cites (`packages/...`, `docs/...`, `AGENTS.md`) is in sjawhar/legion, the
 Legion repository, which need not be the repository you are working in.
 
+## References
+
+Each file below is part of this skill. Read it at the step beside it, through its `skill://` link
+with the `read` tool: a read by filesystem path stops at 300 lines.
+
+| When | Read |
+| --- | --- |
+| You write or edit the PR body, record a proof (an `E2E` line or a handoff `proof` array), verify another phase's proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
+| You reply to, accept, or resolve a review thread, or run `legion threads resolve` | `skill://legion-worker/references/review-threads.md` |
+| GitHub reports a conflict, the pull request is retargeted, you compare heads after a conflict merge, or you would rewrite a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
+| You review or approve, push the `.legion/` deletion, publish READY, or check the merge in production | `skill://legion-worker/references/merge-gate.md` |
+| The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
+| The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
+
 ## Identity, scope, and role
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
@@ -25,8 +39,8 @@ completes the boot handshake for you at session start — it registers with the 
 your role, and signals readiness. You never call `envoy_role_set` yourself.
 
 Your role token is not the issue key spelled out literally. The daemon encodes it as
-`legion-<project>-<KEY>-<role>`. For example, project `acme`, issue `LEGION-41`, role `architect`
-encodes to `legion-acme-LEGION-41-architect`. Never hand-format one for another role: your own role
+`legion-<project>-<key>-<role>` with the issue key lower-cased. For example, project `acme`, issue
+`LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`. Never hand-format one for another role: your own role
 topic and the topic of the architect that owns your issue are stated at the end of your system
 prompt (a "Legion addressing" line the daemon appends: on a child issue that is the child's
 sub-architect when one is claimed, else the root's), a sibling role's topic is yours with the
@@ -145,22 +159,6 @@ Anything else, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE"
 evidence; the architect decides, and an operator performs any operation-log restore with every
 other tree paused.
 
-**Filesystem and process safety:** Your pane runs as the operator's own user, so one mistaken
-path can destroy the machine every agent shares (on 2026-09-13 a probe script's leftover
-`rm -rf "$work" "$HOME"` deleted the operator's SSH and signing keys and stopped every worker).
-The extension refuses, before it runs, a `bash` command, `eval` code, or `hub` process start
-(yours or a `task` subagent's) that would delete, move, truncate, overwrite an existing file by
-redirection or `tee`, or `chmod -R`/`chown -R` anything outside `$LEGION_WORKSPACE` and any
-directory below `/tmp` except `/tmp` itself, a glob over it, and its tmux and ssh socket
-directories. It cannot tell which allowed `/tmp` directory belongs to your pane. It follows
-`$HOME`, `~`, variables, `cd`, and the scripts a command runs. A target with no proven path prefix
-is refused; an unknown trailing component under a prefix already proven inside your workspace or
-permitted `/tmp` remains allowed. `pkill` and `killall` are refused, and `kill` only reaches a
-process you started (a descendant of your Oh My Pi process): stop your own long-running processes
-through the hub tool. The refusal names the target and the rule; do not rewrite a script just to
-silence it. This is a mistake-guard rather than a sandbox. What it cannot read, a compiled program
-or code whose paths are only known at run time, is still yours to keep inside the workspace.
-
 ## Phase work
 
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
@@ -169,6 +167,9 @@ Follow the repository's normal engineering workflow and the assigned issue's acc
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
 artifact and its completion evidence. Do not replace architect-owned decomposition, gate
 discipline, scheduling, or human communication with labels or a local status model.
+An issue that renames a repository, package, or URL across the codebase also follows
+`skill://legion-worker/references/systematic-rename.md`; one that deletes code, a command, or
+documentation follows `skill://legion-worker/references/cleanup-deletion.md`.
 
 Commit attribution is automatic: the extension exports a `JJ_CONFIG` overlay when your
 session starts, so every jj commit you make carries an `Omp-Session: <this-session-id>`
@@ -189,10 +190,11 @@ check
 `jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
 shows your role's App in both columns **on every commit you made** — not on the whole list:
 earlier phases' commits are legitimately authored by their own role's App. Their *committer* is
-a different matter, and no longer noise to accept. Resolving a conflict rewrites nothing now —
-it is the forward merge above — so it changes no committer at all, and the one rewrite still
-open to you (*Rewriting pushed commits*, below) resets the committer only of commits on your own
-chain that descend from the commit you named, after its guard cleared. Another role's commit
+a different matter, and no longer noise to accept. Resolving a conflict rewrites nothing — it is a
+forward merge (`skill://legion-worker/references/conflicts-and-rewrites.md`) — so it changes no
+committer at all, and the one rewrite still open to you (*Rewriting pushed commits*, in the same
+reference) resets the committer only of commits on your own chain that descend from the commit
+you named, after its guard cleared. Another role's commit
 carrying you as committer, which you did not rewrite that way, is evidence that something
 rewrote commits it should not have — the observable symptom of LEGION-118. Stop and send the
 architect that log; do not accept it as a side effect. A wrong identity on your own commit, the
@@ -277,324 +279,41 @@ branch name alone is ambiguous. The credential helper and `legion gh` provide th
 identity; never export, fetch, or replace a token. Other phases advance the existing branch
 rather than creating a replacement bookmark or PR.
 
-## PR body and READY discipline
+## PR body, review, and the merge gate
 
-The implementer writes the PR body in the READY format from the moment the PR opens, and every
-later phase keeps it current rather than replacing it:
+The implementer writes the pull request body in the READY format when it opens the pull request,
+and every later phase edits its own lines of the live body rather than replacing it. Each proof
+(the implementer's `E2E (implementer)` line and `proof` array, the tester's `E2E (tester)` line
+and `proof` array) is the changed behaviour exercised on a production-like surface, recorded as
+its command or run id, what was observed, the head SHA, and one negative control; a unit test is
+never one. **Before you write or edit any line of the PR body or any `proof` array, read
+`skill://legion-worker/references/pr-body.md`**: the template (the sole definition of the CI
+line), the full definition of a proof, what the tester verifies, and the simplify pass.
 
-```
-## Verification
-
-**CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
-
-**Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:
-- Thread <id>: fixed in <commit-sha> — <one line>.
-- Thread <id>: not a defect — <reason>.
-`legion threads resolve --pr <n> --repo <owner>/<repo>` at <head-sha>:
-resolved <thread URL> — its opener's acceptance
-resolved <thread URL> — the Legion reviewer's acceptance of a bot's thread
-left open <thread URL> — newest reply by <login> is not an acceptance
-left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
-left open <thread URL> — newest reply by <login> is not its opener's or the Legion reviewer's acceptance
-
-**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
-<verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
-
-**E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
-
-**E2E (tester):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
-Verified the implementer's proof by <re-running its command | driving the same surface independently>.
-
-**Production:** <what was checked in production, how, what was observed> — merge commit <sha>.
-(written by the implementer after the merge lands; `pending <what is missing>` until then)
-
-**Fast-follow:** <one named cleanup item and where it will land>, or "none".
-
-**Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
-**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, merge the bookmark onto the new base (`jj new legion/<KEY> <new base> -m "<message>"`) and push with `legion-worker`'s ordinary push procedure — a genuine fast-forward, never the procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
-```
-
-**A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
-as the exact command or run id, what was observed, the head SHA, and one negative control —
-a deliberately broken input and the refusal or failure observed. The surface is
-**production-like** — the repository's real-process test harness and fixtures, a sandbox
-repository, a real browser, a devN stack, staging, or a local stack with real migrations, one that
-has the resource the change touches — and each `E2E` line carries a **link** to that run,
-screenshot, or e2e; human review does not replace user-facing verification, and a green unit suite
-is not it. A unit or integration test is a regression lock, never proof of a criterion. Sami,
-2026-09-13, verbatim: "They need to test everything in a production-like
-environment before merging, and it is the agent that develops the feature that is responsible
-for doing that. If there's anything blocking that, we need to fix it: if it's infrastructure, we
-need to fix it; if it's tooling, we need to develop it; if it's skills, we need to fix the skills
-... it should not require deploying to production to realize your feature doesn't work."
-Evidence for the rule: in the week of 2026-09-08 three surfaces merged green and were wrong on
-inspection (the Astrolabe IPI stack, Dispatch on ECS, the candidate flow), and on 2026-09-12 six
-deploy slots died on code first executed after merge, including a production-only ECS bootstrap
-the whole staging gate never ran. The implementer's proof and the tester's proof below are both
-this proof.
-
-- **Threads are dispositioned individually, never resolved in bulk.** Every open review
-  thread gets its own line naming the fixing commit or the reason it isn't a defect. The
-  reviewer answers each thread it opened, and each thread a bot opened that is none of Legion's
-  role Apps, with exactly one of `Accepted: fixed in <commit> — <one line>`,
-  `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
-  acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
-  `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
-  considers only the newest comment). The review App can reply on a thread but cannot resolve it:
-  GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
-  When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`; when neither is set, use `gh api graphql`
-  with the session's GitHub credential and the fallback below.
-  In a Legion pane, the **implementer** runs the command before every push that answers a review
-  (the corrective push and the final `.legion/` deletion push) and pastes its output into the
-  `Threads` section. The command resolves each unresolved thread whose newest submitted comment is
-  the opener's own `Accepted:` reply. On a thread a bot account opened that is none of Legion's
-  role Apps (the daemon names them, keyed by App role), the Legion reviewer's `Accepted:` also
-  closes it. GitHub cannot tell a CI bot, which never accepts, from a person whose `gh` is routed
-  to an App, so the reviewer adjudicates such a finding, and it may accept one an App-routed person
-  raised. The subject of a finding never closes it: the implementer's `Fixed in <commit>: …` or
-  `Declined: …` answers a thread and closes none. A thread either Legion App opened, a reviewer's
-  finding included, still needs its opener's `Accepted:`. It makes one `resolveReviewThread` per
-  thread, prints `resolved <url> — <whose acceptance>` (its opener's, or the Legion reviewer's on a
-  bot's thread, so the ledger shows which) or `left open <url> — newest reply by <login> is …`
-  naming why, and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one.
-
-  Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
-  with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
-
-  ```graphql
-  reviewThreads(first: 100, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id isResolved
-      opener: comments(first: 1) { nodes { author { __typename login } } }
-      newest: comments(last: 1) { nodes { author { __typename login } body state } }
-    }
-  }
-  ```
-
-  Resolve only when the newest comment is submitted, its `author` is the opener's account (the same
-  `__typename` and `login`: a login alone is a string anyone may register), and its `body`, after
-  removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
-  grant nothing names Legion's own App logins, so this route closes a bot's thread only on its
-  opener's `Accepted:`: leave one the Legion reviewer accepted for the implementer's or merger's
-  run in a pane, or report it. For each thread to resolve:
-
-  ```graphql
-  mutation($threadId: ID!) {
-    resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
-  }
-  ```
-
-  Re-read `reviewThreads` and confirm that thread's `isResolved` is true. In either route, report
-  a refused resolution to the architect, which opens an ask for a human to resolve the thread by
-  hand — never skip it silently. The merger runs the command once more before publishing READY
-  and does not publish while any `left open` line remains.
-- **Correctness fixes land in this PR; cleanup is one named fast-follow.** A finding that
-  changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
-  Findings about naming, duplication, or wording are batched into the single `Fast-follow`
-  line instead of iterating per push.
-- **Reintegrate the base only on a real conflict, except after a base retarget — and with a
-  merge, never `jj rebase`.** Sami, 2026-09-11, verbatim:
-  "Please don't do unnecessary rebases (i.e. unless there are merge conflicts). The CI queue is too long and slow."
-  The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
-  because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
-  pick up `main` or refresh CI. A single failed CI job is re-run on its own with `legion gh -- run rerun <run-id> --failed`, never by
-  pushing a new commit. A conflict-forced rebase that leaves the branch's diff unchanged is a
-  confirmation, not a new round (see *The unchanged-diff check* below); that name is the event's,
-  kept by the rules below and the learnings that cite it, and the operation it names is always
-  the merge here. Before merging, record
-  the fingerprint at the current tip; after pushing the merged branch, record it at the new
-  tip; post one PR comment (Legion footer):
-  `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
-  Every issue workspace is a `jj workspace` of the same shared repository and operation log, and
-  jj always rebases every descendant of any commit it rewrites — a revset naming the root of your
-  own chain and rewriting it in place also rewrites whatever another tree has stacked on that root,
-  whichever selector chose it (`-s`, `-b`, and `-r` all rewrite descendants; `-r` only re-parents
-  them to fill the hole, which is worse). This is what happened in LEGION-118: one issue's own
-  conflict step moved a second issue's twelve commits and its bookmark onto a conflicted copy.
-  Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
-  bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
-  built on your prior commits, in this tree or another, ever moves:
-
-  ```bash
-  jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
-  ```
-
-  Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
-  commit above the described one the bookmark already names, and `jj git push` refuses to push
-  any commit without a description — merging from `@` drags that undescribed commit into the
-  ancestry and the push fails (`Won't push commit … since it has no description`); the bookmark
-  is always on a described, already-pushed commit. If the merge conflicts, resolve it in that
-  one commit — edit the markers directly; there is nothing to squash, since the merge is the
-  only new commit. Then `jj -R "$LEGION_WORKSPACE" new` to move off it, and push with the one
-  push procedure (*Every role pushes its own commits*, below): the merge descends from both the
-  bookmark's old position and the destination, so it is a genuine fast-forward and *Rewriting
-  pushed commits* never applies — nothing was rewritten, so there is no tip to record first.
-- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
-  field names naming, duplication, or wording cleanup only; anything that changes behaviour,
-  hides an error, or breaks a gate lands in this PR.
-- **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
-  The proof is the one defined above. It goes into `.legion/implement.json` as the required `proof`
-  array (`handoff_write` for phase `implement` refuses a payload without one, or with a blank or
-  whitespace-only field, and names the field), and into the PR body, because the reviewer and the
-  merger verify facts on GitHub and never from a handoff.
-- **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
-  the implementer's command or drives the same surface independently, and records the verdict in
-  `.legion/test.json` as `implementerProof` (`{verdict, how}`).
-  A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
-  record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
-  the architect return the issue to the implementer — the agent that developed the change owns
-  proving it (`handoff_write` for phase `test` refuses a rejected verdict, or `failed > 0`,
-  with no recorded failure). Otherwise, add your own proof before completing — a proof as defined
-  above — as the `E2E (tester)` line and the `proof` array `handoff_write` for
-  phase `test` requires whenever you report no failure. A code path whose first execution is after merge — a
-  deploy workflow's inline step, a post-merge helper, a production-only resource — is untested
-  until the implementer has executed it against a devN stack; if no surface can reach it, the
-  tester names that missing surface as the blocker instead of passing the phase. Environment or
-  secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
-  `.legion/test.json`, and only when the issue's acceptance criteria call for it — never
-  re-pasted into the PR body each round. After a conflict-forced rebase, compute the
-  fingerprint at the head your `E2E` line names and at the new head. Equal: re-run only the
-  bare gates — the repository's CI green at the new head and its smoke check — and change the
-  `E2E` line's head to the new SHA with
-  `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
-  real-surface verification is not repeated. Different: a full test round.
-- **The implementer runs `skill://ce-simplify-code` once per pull request, after the last review round
-  closes and before the reviewer's final pass, when the diff touches runtime code; a docs-only
-  diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
-  round closed: nothing applied leaves that head final; applied → the applied head is the final
-  head: CI runs on it, the pair runs once on it, and the E2E proof re-runs on it for the surface
-  the simplify diff touched (Sami, 2026-09-13: test on the real surface before merging, no
-  shortcuts — a refactor that "preserves behaviour" is a claim until it is executed). That cost is
-  why 0-applied is the expected outcome and a pass that applies is spent sparingly. At the applied
-  head the implementer re-cites the `CI` line and re-runs its own proof into `E2E (implementer)`,
-  and the tester re-runs its proof for the touched surface into `E2E (tester)`, before the
-  reviewer's final pass. Simplify is the last code change; the pair is the last review. Record it
-  in the `Thermo` line.
-- The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
-  never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
-  `task(agent="thermonuclear-code-quality")` once at that head — the head the implementer's
-  simplify pass left final — and records the verdict.
-  Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
-  Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
-  `REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head
-  still carries `.legion/`; `APPROVE` only for a head that carries no `.legion/` — the head
-  that differs from the reviewed one by the `.legion/` deletion alone, or, after a
-  conflict-forced rebase, the new head whose fingerprint equals the approved head's — always
-  named by SHA — carrying every inline comment in that single
-  call: `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
-  with `commit_id`, `event` (`REQUEST_CHANGES`, `COMMENT`, or `APPROVE`), `body` (with the
-  Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
-  finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
-  Then return the issue to the architect; when clean, have the architect send the implementer
-  back to push the `.legion/` deletion, then review **that** head and approve it by name. After a conflict-forced rebase, compute the fingerprint at the
-  `commit_id` of your last submitted review and at the new head. Equal and that review was
-  `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
-  and the fingerprint — a confirmation, not a round; no thermo pass, no thread pass. Equal and
-  that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
-  nothing restarts. Different: a new round — thermo again, one review.
-  When you re-review after a corrective push, answer every thread you opened in one of the
-  three forms above — `Accepted:` is the only reply the implementer's `legion threads resolve`
-  acts on — and approve only once every thread you opened carries your `Accepted:` reply and the
-  implementer's run has resolved it (verify `isResolved: true` with `gh api graphql`, never from
-  the PR body).
-- Once a base is frozen for others to stack on, never rewrite it — fixes land as new
-  commits on top, and the `Chain` line records what is frozen.
-- **Retro's commit does not void the reviewer's approval.** After the reviewer approves the
-  cleaned head, retro commits its learnings under `docs/solutions/` on top of it; that commit
-  stays, the approval stands, and the tree goes to the merger — never back to the tester or
-  reviewer. Anything else above the approved head does void it, and the merger tells the
-  architect the head must return to review instead of publishing. A conflict-forced rebase
-  after retro moves those documents with the branch; retro never re-runs.
-- The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
-  code-writing App as the implementer; resolving a thread changes no commit, so this run never
-  invalidates the approval), does not publish while any `left open` line remains or the command
-  exits 1 (report the thread to the architect instead), then proves that rule with two commands.
-  First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
-  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
-  in READY (an empty output is quoted as `no file changes above the approved head`); then the same
-  with `'~docs/solutions'` appended, which must print nothing. The merger always posts
-  `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
-  `packages/pi-envoy/roles/merger.md` defines), its summary, and the PR body's gate facts as a
-  `dispatch_message` on the issue. When the `Legion addressing` line names a merge queue, it also
-  publishes the same packet there with `envoy_publish`; a 404 means the Dispatch message remains
-  the durable notice and the merger stays idle. The READY packet names both the implementer's and
-  tester's `E2E` lines; a missing one is reported to the architect instead of published. Legion
-  never merges.
-- **After a human merges, the implementer verifies in production.** Sami, 2026-09-13,
-  verbatim: "the agent that developed it should be responsible for testing in production."
-  The architect sends the implementer back once the merge lands; the implementer watches the
-  deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
-  drives the changed path in production through the user's own access path, and records the
-  observation on the PR and the issue before the architect signs off. A staging pass is not
-  this: on 2026-09-12 a slot's entire staging gate passed at 00:02Z and its production-apply
-  failed at 00:12Z on a resource staging never runs. If the slot fails on the change, the
-  implementer owns the fix and the next slot.
-  The record has three places: the PR body's `Production:` line, one pull-request comment
-  carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
-  read GitHub, the architect reads the issue. When the deploy that carries the merge has not
-  happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open a `dispatch_ask` naming the exact install or
-  restart step, with options for its outcomes, keep the `Production:` line at `pending <what is
-  missing>`, and complete the check once the human answers that it is done. Never record a
-  staging pass as the production check, and never let the architect sign off on a `pending` line.
-
-## When no surface reaches the changed path
-
-No surface reaches the changed path is a report to the architect, never a reason to complete the phase.
-Say which surface is missing and what it would have to do — a rig that can spawn the role, a
-sandbox that holds the resource, a credential, a command that does not exist yet — and send it to
-the architect with `envoy_publish` to its role topic. The architect creates a child issue in this
-tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. Sami,
-2026-09-13, verbatim: "If there's anything blocking that, we need to fix it: if it's
-infrastructure, we need to fix it; if it's tooling, we need to develop it; if it's skills, we need
-to fix the skills." A code path whose first execution would be after the merge — a deploy
-workflow's inline step, a post-merge helper, a production-only resource — is untested until you
-have executed it somewhere production-like; completing with a unit-test-only handoff is the
-failure this rule exists to stop.
-
-## The unchanged-diff check
-
-The fingerprint every role compares after a conflict-forced rebase (every flag and the fileset
-verified on jj 0.45.1):
-
-```bash
-cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
-  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <head-sha>)" --to <head-sha> \
-    --git --context 0 '~(.legion | docs/solutions)' \
-  | sed -e '/^@@/d' -e '/^index /d' | sha256sum
-```
-
-- `<head-sha>` is a full commit SHA; a jj commit id is the git SHA GitHub shows.
-- `fork_point(main@origin | <head-sha>)` is the base the branch was cut from *at that head*:
-  the old base for the pre-rebase head, the new base for the rebased one, so one command
-  serves both sides. On a stacked PR substitute its base branch for `main`
-  (`legion gh -- pr view <n> --json baseRefName`).
-- A head the rebase hid is still addressable by its SHA in the shared workspace. A SHA the
-  workspace cannot resolve (`jj -R "$LEGION_WORKSPACE" log -r <sha>` errors) counts as a
-  changed diff — never as unchanged.
-- `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
-  on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
-  is left is exactly the added and removed lines per file.
-- The single fileset `'~(.legion | docs/solutions)'` leaves out the handoff ledger and retro's
-  learnings: process artifacts the rules above already exempt from re-review, which change
-  between one role's verified head and the next without changing the product. This is what lets
-  each role compare against *its own* last verified head instead of trusting another role's
-  numbers. It must be one expression: jj unions positional filesets, so two separate
-  `'~.legion' '~docs/solutions'` arguments select every file and exclude nothing. Once
-  `.legion/` is gone, jj warns `No matching entries for paths: .legion` on stderr; the hash is
-  unaffected.
-
-Where each role gets its two heads: the implementer — the tip before and after its own rebase;
-the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of
-its last submitted review (`legion gh -- api repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login}'`)
-and the new head; the merger never computes a fingerprint — it uses the `--summary` check
-above.
+- **Review threads** are disposed of one by one, never in bulk, and only an `Accepted:` from the
+  thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
+  runs `legion threads resolve` before every push that answers a review, and the merger before
+  READY: `skill://legion-worker/references/review-threads.md`.
+- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." A finding that changes
+  behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
+  or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
+- **A red CI job** that failed on its own is re-run with
+  `legion gh -- run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
+- **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
+  forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
+  afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
+- **The merge gate**, in order: the tester's evidence green → the implementer's `.legion/`
+  deletion push → the reviewer's approval of that head → retro → the merger's READY → the human
+  merge → the implementer's production check. Legion never merges. The reviewer's submissions,
+  retro's commit, the merger's READY, and the production check follow
+  `skill://legion-worker/references/merge-gate.md`.
+- **No surface reaches the changed path** is a report to the architect, never a reason to
+  complete the phase: `skill://legion-worker/references/pr-body.md`.
 
 ## Completion gate: handoff write, verification, and persistence
+
+The merger writes no handoff and pushes nothing, so this gate does not apply to it
+(`packages/pi-envoy/roles/merger.md`).
 
 Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
@@ -628,12 +347,31 @@ cd -- "$LEGION_WORKSPACE" && \
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
 which authenticates as your role's App (`appRoleForLegionRole` in
-`packages/daemon/src/daemon/github-apps.ts`). `-r @-` puts the bookmark on the commit you just
+`packages/daemon/src/daemon/github-apps.ts`).
+
+**Under the Go daemon, every push is `legion push`,** run from bash in your workspace in place of
+the commands below. It runs this same procedure on `@-`: the ancestry check, against the remote
+branch or the tip you recorded before rewriting pushed commits (below), then the bookmark and the
+push. It also decides whether the push skips CI. A push skips CI only when none of its commits
+touches anything but handoffs whose phase guarantees a later push: the planner's
+`.legion/plan.json`, the tester's `.legion/test.json`, and a reviewer's `.legion/review.json` whose
+`verdict` is `"changes_requested"`. Its head then ends with GitHub's `skip-checks: true` trailer,
+and the Go daemon carries the code head's verdict to it. Every other push runs CI in full. Never
+add or remove that trailer yourself, never write one of GitHub's bracket keywords (`[skip ci]`,
+`[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`) into a commit message, and never push
+the issue branch with the commands below under the Go daemon: a hand-run push of a handoff that
+could skip CI runs it in full, and a hand-added trailer or keyword on any other push skips CI on a
+head a human may merge. `legion push` refuses a head whose message carries a keyword and pushes
+nothing until you take it out. Under the TypeScript daemon, whose `legion` has no `push` command,
+run the commands below yourself.
+
+`-r @-` puts the bookmark on the commit you just
 split off: the working copy left above it has no description, and `jj git push` refuses a
 commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
 can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
 provisioned bookmark on its first push — a bookmark not yet tracking a remote one is tracked
-automatically. This is the one push procedure; every push of the issue branch uses it:
+automatically. This is the one push procedure, run as `legion push` under the Go daemon and by
+hand under the TypeScript daemon; every push of the issue branch uses it:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
@@ -654,38 +392,11 @@ remote branch sideways onto your commit and drops theirs (jj 0.45.1:
 `bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
 push is refused by jj itself (`unexpectedly moved on the remote`).
 
-**Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
-rewrite of a commit you already pushed — is the LEGION-118 hazard in a second shape: jj rebases
-every descendant of any commit it rewrites, and in the one shared repository a descendant can be
-another tree's branch stacked on your pushed commit, which then moves, with its bookmark, onto a
-rewritten copy. So look for a descendant outside your own chain first, and record the pushed tip
-— which the rewrite leaves outside `::@-` — after a fetch and while your chain still descends
-from it:
-
-```bash
-cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" git fetch && \
-  foreign=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
-    -r 'descendants(<the commit you are about to rewrite>) ~ ::@') && \
-  { [ -z "$foreign" ] || { echo "not mine, and descends from the commit to rewrite: $foreign" >&2; false; }; } && \
-  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
-    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
-  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
-  jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id' \
-    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin")' \
-    >"${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip"
-```
-
-`descendants(<commit>) ~ ::@` is everything built on the commit you are about to rewrite that is
-not on your own chain. Non-empty means the rewrite would move work that is not yours: do not
-rewrite it. Put the change in a new commit on top instead, and report the listed commits to the
-architect. On a two-workspace rig of this shape a `jj squash --into` a pushed commit reported
-`Rebased 13 descendant commits` and moved a second issue's twelve commits and its bookmark; the
-check above listed those thirteen and refused before anything moved.
-
-Then rewrite, resolve, and push with the procedure above. It lets the remote branch sit on the
-tip you recorded, which the rewrite replaced, and on nothing else: when another role pushed after
-you recorded it, the push is refused. The push deletes the file.
+Before any rewrite of a commit you already pushed — a `jj squash --into` one, or any other
+rewrite — read *Rewriting pushed commits* in
+`skill://legion-worker/references/conflicts-and-rewrites.md`: it checks that no other tree's work
+is built on that commit and records the pushed tip `$tip_file` above reads, the only case in which
+the push above lets the remote branch move off its current tip.
 
 Before the push, check ancestry and identity as above: the chain carries every earlier phase's
 commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
@@ -713,17 +424,9 @@ This publishes your phase's completion to the architect's role and clears the da
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
 invent a different completion protocol — this is the whole contract.
 
-A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
-takes this order: write, commit and push the handoff; submit the review of the head that push
-made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
-before you submit it, since an approval stands only on green checks and GitHub can dismiss one
-once the head moves, and a verdict that settles red there makes the round's decision a request for
-changes naming the failing checks; a request for changes does not wait, since it stands whatever CI says and the
-issue leaves reviewing with it. A review of a head the handoff push then replaces names a head
-the pull request no longer has. A round that writes none (the final approval of the `.legion/`
-deletion head) reviews the head as it is. The daemon moves the issue once both are in —
-the decision GitHub reports and your completion, in either order — so a review posted without a
-completion leaves the issue in reviewing until you finish.
+A reviewer's phase ends with its completion, not with its review; the order of a review round
+(the handoff push; for an approval, CI settled green at that head; the review of that head; then
+the completion) is in `skill://legion-worker/references/merge-gate.md`.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to
 the run whose task you took, and answers with what it found. What each answer carries, and what to

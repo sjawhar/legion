@@ -36,6 +36,7 @@ import {
   ASK_QUESTION_MAX,
   ASK_URGENCIES,
   actorLabel,
+  claimHolds,
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
@@ -1166,38 +1167,45 @@ function componentsLine(components: IssueComponents): string {
 }
 
 /**
- * How every agent surface names a claim's holder: `actorLabel` from `@legion/contracts`, the
- * same function the dashboard's header, List rows and Board cards call, so a session reading
- * `dispatch_read` and a human reading the issue page see one name for one holder. `titles` is
- * the live agent registry (`liveSessionTitles`); without it the label falls back to the title
- * the session stamped on the claim, exactly as the dashboard does when the registry is down.
+ * How every agent surface names a claim's holder and says whether the claim still holds. The
+ * name is `actorLabel` from `@legion/contracts`, the same function the dashboard's header, List
+ * rows and Board cards call, so a session reading `dispatch_read` and a human reading the issue
+ * page see one name for one holder; without a registry it falls back to the title the session
+ * stamped on the claim, as the dashboard's does. Whether it holds is `claimHolds`, the judgement
+ * the dashboard's claim chip makes too: a session the loaded registry does not list reads
+ * "· not running", as the chip does, and its issue is free to claim; with no registry (`titles`
+ * undefined) a session's claim reads "· liveness unknown", since nothing can say whether that
+ * session runs. A person's claim, and a session the registry lists, carry no marker.
  */
-function claimText(claim: IssueClaim, titles?: ReadonlyMap<string, string>): string {
-  return `${actorLabel(claim.actor, titles)} since ${claim.at}`;
+function claimText(claim: IssueClaim, titles: ReadonlyMap<string, string> | undefined): string {
+  const holding = claimHolds(claim, titles);
+  const marker =
+    holding === "unknown" ? " · liveness unknown" : holding === "lapsed" ? " · not running" : "";
+  return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
 }
 
 /**
- * The live session titles behind one piece of output: at most one `GET /api/v1/agents` per tool
- * call, never per row, and none at all unless a session holds something being rendered — the
- * same gate the dashboard applies with `useAgents(holdsSession)`.
+ * The live agent registry behind one piece of output, as session titles by id: at most one
+ * `GET /api/v1/agents` per tool call, never per row, and none at all unless a session holds
+ * something being rendered — the same gate the dashboard applies with `useAgents(holdsSession)`.
  *
- * An empty map is not an error path. A holder the listener does not list is the ordinary case
- * (a session that has ended, whose claim the next agent may take), and a failed agents request
- * is the rare one; both fall back to the title the session stamped on its claim, silently and
- * identically, because the label is decided by one shared function either way.
+ * `undefined` is no registry: none was needed, or the agents request failed. Names then fall back
+ * to the title each session stamped on its write, and a session's claim reads "liveness unknown"
+ * (`claimText`) rather than running or not running. A holder the registry does not list is the
+ * ordinary case, a session that has ended, whose claim the next agent may take.
  */
 async function liveSessionTitles(
   client: DispatchClient,
   needed: boolean
-): Promise<ReadonlyMap<string, string>> {
+): Promise<ReadonlyMap<string, string> | undefined> {
   if (!needed) {
-    return new Map();
+    return undefined;
   }
   try {
     const agents = await client.listAgents();
     return new Map(agents.map((agent) => [agent.session_id, agent.title]));
   } catch {
-    return new Map();
+    return undefined;
   }
 }
 
@@ -1249,6 +1257,9 @@ function issueSummary(
   if (issue.assignee === undefined) throw new Error("Dispatch issue is missing assignee");
   if (issue.components === undefined) throw new Error("Dispatch issue is missing components");
   if (issue.claim === undefined) throw new Error("Dispatch issue is missing claim");
+  if (issue.external_links === undefined) {
+    throw new Error("Dispatch issue is missing external_links");
+  }
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
@@ -1262,6 +1273,15 @@ function issueSummary(
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
+    // The links a person or an agent put on the issue — the pull request that delivers it among
+    // them — which the issue page renders with their state; the reference graph below carries
+    // only links between Dispatch nodes.
+    "External links:",
+    ...(issue.external_links.length === 0
+      ? ["- none"]
+      : issue.external_links.map(
+          (link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`
+        )),
     "Open asks:",
     ...(asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`)),
     "References:",
@@ -1960,6 +1980,7 @@ export async function executeDispatchTool(
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
+      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
       const issues = await client.listIssues({
         project,
         ...(status === undefined ? {} : { status }),
@@ -1969,7 +1990,8 @@ export async function executeDispatchTool(
         ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
         ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
       });
-      const rows = issues.slice(0, limit).map((row) => ({
+      const total = issues.length;
+      const rows = issues.slice(offset, offset + limit).map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -1987,15 +2009,19 @@ export async function executeDispatchTool(
         client,
         rows.some((row) => holdsSession(row.claim))
       );
+      const isPartial = offset !== 0 || rows.length !== total;
+      const showing = !isPartial
+        ? ""
+        : rows.length === 0
+          ? `showing 0-0 of ${total}`
+          : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
       return {
         text:
           rows.length === 0
-            ? `No issues in ${project}.`
+            ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}`
             : [
                 `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` +
-                  (issues.length > rows.length
-                    ? ` (showing ${rows.length} of ${issues.length})`
-                    : ""),
+                  (isPartial ? ` (${showing})` : ""),
                 ...rows.map(
                   (row) =>
                     `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
@@ -2010,7 +2036,7 @@ export async function executeDispatchTool(
                       : ` · route ${routeText(row)}`)
                 ),
               ].join("\n"),
-        details: { issues: rows },
+        details: { issues: rows, total, offset, limit },
       };
     }
     case "dispatch_architecture_sync": {

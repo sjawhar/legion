@@ -60,6 +60,9 @@ type escapeContext struct {
 	// opener and closer are the delimiter character (`*` or `~`) of the mark written right
 	// before the text and of the one written right after it, or 0 when that is no delimiter.
 	opener, closer byte
+	// flankFirst and flankLast report whether the text's first and last character are written as
+	// character references, for the delimiter run beside each to open or close (runSpelling).
+	flankFirst, flankLast bool
 }
 
 // endsBareURL reports whether the character is ASCII punctuation opening text written right after
@@ -414,7 +417,10 @@ func quotedBy(line, quote string) bool {
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
 	source := []byte(markdown)
-	root := blockReader.parse(source, false)
+	root, err := blockReader.parse(source, false, readBackPaddingBudget())
+	if err != nil {
+		return nil
+	}
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		// A task checkbox is inline, but it is the list item's syntax, not its text.

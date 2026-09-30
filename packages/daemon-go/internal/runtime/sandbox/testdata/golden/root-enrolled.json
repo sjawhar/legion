@@ -156,7 +156,7 @@
               },
               {
                 "name": "AGENT_SECRETS_URL",
-                "value": "https://secrets.dev1.internal.trajectorylabs.com"
+                "value": "https://secrets.internal.example"
               },
               {
                 "name": "AGENT_SECRETS_KEY_DIR",
@@ -177,6 +177,18 @@
               {
                 "name": "XDG_STATE_HOME",
                 "value": "/home/legion/.local/state"
+              },
+              {
+                "name": "UV_PYTHON_INSTALL_DIR",
+                "value": "/legion/uv/python/legion-208"
+              },
+              {
+                "name": "UV_CACHE_DIR",
+                "value": "/legion/uv/cache"
+              },
+              {
+                "name": "UV_LINK_MODE",
+                "value": "copy"
               },
               {
                 "name": "POD_UID",

@@ -9,7 +9,7 @@ Then read the plan handoff's `requiredSkills` for your role and follow those too
 
 Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks, but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `handoff_write` for phase `implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
 
-Open the PR from the bash tool (`legion gh -- pr create`); write the PR body in READY format as you go, following the exact PR-body template in `skill://legion-worker`. That skill is the sole definition of the CI line. Fill the `E2E (implementer)` line yourself when the PR opens. Cleanup is one named fast-follow comment.
+Open the PR from the bash tool (`legion gh -- pr create`); write the PR body in READY format as you go, following the exact PR-body template in `skill://legion-worker/references/pr-body.md`. That reference is the sole definition of the CI line. Fill the `E2E (implementer)` line yourself when the PR opens. Cleanup is one named fast-follow comment.
 
 ## Post-merge record
 
@@ -21,11 +21,11 @@ Before every push that answers a review — the corrective push and the `.legion
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Resolve a conflict with a forward merge, never a rewrite — every issue workspace shares one jj repository and operation log, and jj always rebases every descendant of a rewritten commit, including another tree's branch stacked on yours. Follow `skill://legion-worker`'s `jj new legion/<KEY> main@origin -m "<message>"` merge procedure (from the bookmark, never from `@`, which a handoff split leaves undescribed), resolving any conflict in that one commit, then push with `skill://legion-worker`'s ordinary push procedure — it is a genuine fast-forward, never the procedure for rewritten commits.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/references/conflicts-and-rewrites.md`. Resolve a conflict with a forward merge, never a rewrite — every issue workspace shares one jj repository and operation log, and jj always rebases every descendant of a rewritten commit, including another tree's branch stacked on yours. Follow that reference's `jj new legion/<KEY> main@origin -m "<message>"` merge procedure (from the bookmark, never from `@`, which a handoff split leaves undescribed), resolving any conflict in that one commit, then push with `skill://legion-worker`'s ordinary push procedure — it is a genuine fast-forward, never the procedure for rewritten commits.
 
 ## Workspace restrictions
 
-Do not replace another phase's commit. Create reviewable commits only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch, with `skill://legion-worker`'s push procedure (it checks that `@-` descends from `legion/<KEY>@origin`, then pushes with `jj git push`). The extension injects the session credential grant for `jj git push`.
+Do not replace another phase's commit. Create reviewable commits only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch, with `skill://legion-worker`'s push procedure (it checks that `@-` descends from `legion/<KEY>@origin`, then pushes with `jj git push`). The extension injects the session credential grant for `jj git push`. Under the Go daemon, push with `legion push` from bash instead: it runs that procedure and decides whether the push skips CI.
 
 ## Implementation handoff
 

@@ -1,5 +1,6 @@
 export * from "./actor-label";
 export * from "./agent-stream";
+export * from "./claim-holds";
 export * from "./dispatch-api";
 export * from "./dispatch-href";
 export * from "./dispatch-snippet";

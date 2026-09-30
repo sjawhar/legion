@@ -239,7 +239,7 @@ func parsedBlockBody(nodes []*pmdoc.Node) (parsed []*pmdoc.Node, refusal string,
 	if err != nil {
 		return nil, "the text cannot be written as document markdown: " + err.Error(), nil
 	}
-	doc, err := pmdoc.Parse(markdown)
+	doc, err := pmdoc.ParseRendering(markdown)
 	if err != nil && !errors.Is(err, pmdoc.ErrSchema) {
 		return nil, "", err
 	}
@@ -272,7 +272,7 @@ func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: "the text cannot be written as document markdown"}
 	}
-	rendered, err := pmdoc.Parse(markdown)
+	rendered, err := pmdoc.ParseRendering(markdown)
 	if err != nil && !errors.Is(err, pmdoc.ErrSchema) {
 		return err
 	}

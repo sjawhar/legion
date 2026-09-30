@@ -257,147 +257,6 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
 (`LEGION_TEST_OMP`).
 
-## The pane guard: filesystem and signals (LEGION-121)
-
-`src/legion/pane-guard.ts` holds a phase worker's and a root architect's pane (and its `task`
-subagents: the check runs in the `tool_call` hook ahead of the subagent exemption, beside
-`PANE_RULES`) to the boundary `docs/deployment.md` "The pane guard" describes: no deletion, move,
-truncation, overwrite of an existing file, or recursive mode or owner change outside
-`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, the tmux
-and ssh socket directories (by prefix), and the `/tmp` directory holding the pane's `HOME` or
-`TMUX_TMPDIR` (by exact name; a rig's run directory). The guard cannot tell which other allowed
-`/tmp` directory belongs to the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and
-whose bash is one `legion` command, gets the `/tmp` root alone. No signal reaches a process that is
-not a descendant of the pane's Oh My Pi process (`/proc` read at check time). It reads the variables
-both daemons set on every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify,
-`LEGION_WORKSPACE`, `HOME`), so it adds nothing to either daemon contract.
-
-Commands are parsed with `unbash` (a bash parser, bundled into `dist/legion.js`) and walked as bash
-would run them: word expansion with quoting, tilde, variables assigned earlier (`$(mktemp -d)` is a
-fresh `/tmp` path, and `printf -v` assigns), `cd`, brace expansion, the paths `realpath`,
-`dirname`, `basename` and `readlink -f` print, pattern replacement and removal of a known ASCII
-value (`${v//a/b}`, `${v#*:}`), command substitutions, subshells and branches, functions,
-wrappers (`sudo`, `env`, `timeout`, ...), and the scripts a command runs or writes first, whose
-refusal names the script and line. A script or function run with arguments the guard knows has
-them as its positional parameters (`$#` their count, one past the last unset, a `shift` past the
-last a no-op as in bash, `"$@"` of none no argument); a word that may be several arguments or none
-(an unquoted expansion it cannot read or that holds whitespace, a glob) leaves them unknown, as
-does a shell that did not say what its arguments are, to `${1-…}` and `${1+…}` too. `unset` leaves
-a name unset, apart from empty and from the pane's environment. So an argument loop
-(`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`) is walked pass by pass, each
-`case` taking the one item its known word selects. A loop or `case` it cannot decide, a `case`
-whose word matches no item included, is walked as one that may take any branch, and a `shift`
-inside one leaves the arguments unknown after it. A variable every branch leaves empty or a pid the
-shell started (a retry loop's `pid=$!`) stays a pid it may signal. Unknown on purpose:
-`$(git rev-parse --show-toplevel)`, whose answer the repository's config decides and an earlier
-command in the same line can rewrite; an operand `unbash` splits differently from bash (a pattern
-starting with `/` after `/` or `//`); text outside ASCII, which bash counts by the locale; and a
-replacement holding `&`. A pattern is matched by stepping the positions it can reach along the
-value, never by a backtracking regular expression, and its work (the value's length times the
-pattern's) is charged to the walk budget, a `case` item's included. No value the guard builds is
-longer than 65,536 characters or 4,096 pieces (`MAX_VALUE_LENGTH`, `MAX_VALUE_PIECES`, each pinned
-by a test): a replacement of a replacement or `x="$x$x"`
-repeated reached tens of millions of characters and held the pane on each read, so past the bound
-a value is unknown, and a refusal names the cause. A script a command writes (a rendered brace
-group, `printf` or `echo` into a file, appends, a here-document through `cat` or `tee`) is read
-whole up to the 1 MiB the guard reads of a script on disk, and past it is one the guard cannot
-read. So is one holding a value the guard cannot know through `printf %s`, `printf %q` or `echo`:
-bash parses the value as code, where a `;`, a quote or a newline it holds reaches out of any
-position, a comment included, and `%q`'s output form is not fixed (a value containing a newline
-selects `$'…'`, which carries the value's own quote characters raw and closes a single- or
-double-quoted position). `printf %d` writes digits and a sign, so there a value it cannot know
-stays one unknown word. `echo` with an option first, and a here-document whose unquoted text
-bash expands, are scripts it cannot read too; a shell or interpreter reading such a
-here-document as its program is refused.
-
-A word the guard cannot read whole is never read as harmless. Where a word selects a dangerous
-option or subcommand — `tar`'s extract mode and `-C`, `unzip`'s `-d`, `fuser -k`, `tmux`'s kill
-and respawn subcommands, `chmod`/`chown`/`chgrp`'s `-R`, a `find` predicate, `declare -n`,
-`printf -v`, an interpreter's code option, a wrapper's own options (`sudo`, `env`, `nice`,
-`nohup`, …), and a `busybox` or `toybox` applet — it is taken as that option (`mayBeOption`) and
-the command's other arguments decide what that means, so `tar "$mode" -C .` runs while
-`tar "$mode" -C "$HOME"` does not. Both spellings count where a long form exists — `--recursive`,
-`--directory`, `--destination`, `--extract`, `--kill` — since reading only the short one left
-`tar --"$m"`, `chmod --"$r"` and `fuser --kill` a way through; `declare -n` has no long form.
-
-Three things hold the cost of that at zero of the 61 tracked shell scripts. The guard reads a
-word's leading literal prefix (`readableWord`), so `local root="$1"` is an assignment and never
-an option, and `--socket="$s"` is never `-k`; a word whose first character it cannot see may be
-any option at all. The readings are judged together, not worst-of-each: read as `-R` a word is no
-path, so `chmod +x "$out"` has no path left to change recursively, and read as a predicate a word
-is no search root, so `find "$dir" -type f` searches the working directory while `find ~ "$word"`
-does not. And those counts are of the fields bash will make, not the words written: an unquoted
-word it may split (`fields`) supplies the option *and* leaves every other operand standing, and
-may carry paths of its own, so `fuser $a` and `chmod $a` are judged where their quoted forms are
-not.
-
-Four site-specific rules follow from the same principle. An option may carry its value inside its
-own word wherever the option stands, in a cluster included (`-C"$dir"`, `-xC"$dir"`,
-`--directory="$d"`), and that carried value is the one judged: taking the next word instead both
-passed the command and named a path it never touched. `tmux` takes one subcommand per segment, and
-a `;` starts another whether it is a word of its own or sits at the END of one — real tmux takes
-`'kill-server;'` as a kill, verified on a private socket — so the trailing `;` is stripped and the
-word it leaves is that segment's subcommand; every segment is scanned, a word the guard cannot
-read may itself be that `;`, and its server options are matched on the prefix it can read, so
-`-S"$sock"` is an option rather than the segment's subcommand. `timeout` has one reading
-dispatched per word standing where its duration could (`unwrap`'s `alts`), since each such word
-may be one of its options instead, putting the program after the duration: with two of them
-neither the stopped scan nor the fully read one names the real program. A `busybox` or `toybox`
-applet
-word it cannot read is refused outright: no reading of it is harmless, because the binary carries
-`halt`, `poweroff` and `reboot` as well as `rm`, `sh` and `killall`, and those three need no
-operand. `unwrap` promotes only an applet word it can read, and promoting restarts its loop, so
-`busybox busybox ls` promotes twice and an unreadable applet never becomes a command name.
-
-Two members of the family stay open on purpose, because the program they name is an open set the
-documented residual already covers: a command whose own name the guard cannot read (`"$cmd" -rf ~`)
-and the program word of `xargs`. A wrapper's unreadable option word is *not* one of them — the
-program is written plainly right after it — so `sudo "$flag" rm -rf ~` and `env "$flag" rm -rf ~`
-are refused. Two narrower residuals are measured and recorded: a tmux segment that exists only
-because a word may have been the `;` and whose subcommand is also unreadable, two unknowns deep
-and so the same shape as an unreadable command name; and one over-refusal, an unquoted
-`chmod $mode <path>`, where that one word may be both the option and a path. A `python3 "$flag"
-<script>` over-refusal was recorded here and is withdrawn: it does not exist — a harmless script
-outside the roots is allowed, and the one shape that refuses is a script whose own contents are
-dangerous, which its readable ablation `python3 -E <script>` refuses too.
-
-A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
-value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,
-`read`, `mapfile`, `getopts`, `declare` and its kin, `unset`, `wait -p`), arithmetic, `${v:=x}`,
-a loop variable, a plain assignment to an array's name (its element 0), and an array's literal,
-which holds the words bash gives it (none for `"$@"` of none, and every element unknown when a
-word may be several), assign as bash does; `"$@"` of none assigned is the empty string, one
-argument when quoted; a function's `local` is the caller's variable again when it returns, unknown
-when only some paths made it local; `readonly`, `-i`, `-l` and `-u` make a later write unknown; and
-a write under a name the guard cannot read, or `eval` of text it cannot read, makes every variable
-unknown and possibly unset (`ANY_NAME`), the pane's environment included. A nameref (`declare -n`),
-and an option word of `declare` and its kin the guard cannot read, which may be one, are
-refused. Two writes it does not follow: a `source` of a path it cannot read at check time (a
-process substitution, `/dev/fd/N`, `/dev/stdin`, a file a command before it creates) is taken as
-sourcing nothing, though bash may read assignments from it (LEGION-332); and an assignment to
-`IFS` leaves its splitting model as it was, which splits an unquoted value on whitespace alone,
-so a value bash splits on another character is taken as one word.
-
-`src/legion/pane-guard-bash.ts` holds bash's pattern matching, removal and replacement, `test`'s
-string and integer forms, and `printf %q` quoting as pure functions;
-`src/legion/pane-guard-bash.test.ts` holds every pattern operator over operands and values, every
-set-ness operator over set, empty, unset and environment names, a function's arguments over words
-that give one, none, several or an unknown number, and every writer above over variables, arrays,
-elements and attributed names, to one real bash, through the guard. Each differential also asserts
-that more than a tenth of its cases reach outside the roots, so a harness that stopped
-discriminating fails rather than passing on an empty comparison.
-`src/legion/pane-guard-code.ts` tokenizes Python and JavaScript for known deletion, move,
-overwrite, signal, and shell-out calls whose arguments it can evaluate; an argument it cannot
-evaluate is let through, where a shell target it cannot resolve, and a command `unbash` reports as
-malformed, are refused. Command tables are `Set`/`Map`, never object literals, since their keys come
-from the command (`constructor` would otherwise match). `src/legion/pane-guard.test.ts` holds the
-family matrix, the incident's script, the signal cases, the eval tool, and the sweep of every
-tracked shell script against `EXPECTED_SCRIPT_REFUSALS` (each refused script with its first
-refusal's site, filed under why it is refused); `src/legion/pane-guard-walk.ts` prints every
-refusal a script meets, not only the first, and never writes that set, so a change to it is a
-person's decision to fix the guard, the script, or the set. `extensions/legion.test.ts` proves the
-hook refuses the incident's script through a booted worker.
-
 ## Native Dispatch tools
 
 The twenty-one native Dispatch tools — `dispatch_issue`, `dispatch_issue_update`, `dispatch_claim`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,
@@ -460,6 +319,21 @@ returns `INVALID_PRECONDITION`. The server refuses a deletion that would remove 
 comment anchor. A question about a document is written as an `ask` block through that tool or a `:::ask`
 directive, not as an issue-level `dispatch_ask`. The extension passes the host tool AbortSignal to every
 Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
+
+With Dispatch configured, a `context` handler (`src/dispatch-first.ts`) puts the `dispatch-first`
+skill into every provider request as a user message after any leading `compactionSummary`
+messages: top-level sessions, Legion panes and `task` subagents alike. Oh My Pi keeps nothing a
+`context` handler returns, so the insert runs on each request rather than once; its text is read
+once at module load (a package without `dist/skills/dispatch-first/SKILL.md` fails to load naming
+it) and it carries no id, so its bytes repeat on every request. Only the insertion position is
+checked for a copy already there (a second copy of the extension inserts at the same place): a
+tool result, delivered message or reply that quotes `DISPATCH_FIRST_MARKER` is conversation and
+never switches the skill off. Oh My Pi marks the inserted message per-call, so on Anthropic its
+15-turn decimation cache anchors are not placed behind it; an 18-turn session measured against
+the model gateway read the same cache on every request as a session without it, plus the skill's
+own tokens (LEGION-386 PR #1584). `src/dispatch-first.test.ts` holds the insertion rules, and
+`extensions/dispatch-first-omp.test.ts` checks turn 1, turn 2, after a compaction, and without
+Dispatch on the real binary.
 
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
 nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first
@@ -555,4 +429,4 @@ state never nudges.
 - `spawnWorker` in `src/legion/daemon-client.ts` carries the caller's `requestId` (minted once per `legion` `spawn_worker` call in `src/legion/tools.ts`) and retries only a `fetch` that rejected — never a `LegionDaemonApiError`, whatever its status, and never a response-shape error — up to `SPAWN_WORKER_ATTEMPTS` (3) with `SPAWN_WORKER_RETRY_DELAYS_MS` between attempts, the same id every time so the daemon's ledger dedupes it; the last rejected fetch is a `LegionDaemonTransportError` naming the cause, attempts, and id. A response whose headers arrived but body cannot be read is not retried because `fetch` fulfilled; it is a `LegionDaemonResponseReadError` with the same request id and `legion state` guidance. The 403 recovery above composes with both paths unchanged (LEGION-102).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
-- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. Each runs its session on its own tmux server, on a socket in its temp directory (`tmux() { command tmux -S "$tmux_socket" "$@"; }`), and prints the `tmux -S <socket> attach -t <session>` line that watches it, so its cleanup's `tmux kill-session` can end only the session it started: on the shared default server that kill could end anyone's session, and the pane guard refuses it there. Keep new tmux calls on that wrapper rather than the default server.
+- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. Each runs its session on its own tmux server, on a socket in its temp directory (`tmux() { command tmux -S "$tmux_socket" "$@"; }`), and prints the `tmux -S <socket> attach -t <session>` line that watches it, so its cleanup's `tmux kill-session` can end only the session it started: on the shared default server that kill could end anyone's session. Keep new tmux calls on that wrapper rather than the default server.

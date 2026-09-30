@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +90,31 @@ func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T)
 		_, err := Parse(test.markdown)
 		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), test.reason) {
 			t.Errorf("Parse(%q) error = %v, want a schema refusal naming %s", test.markdown, err, test.reason)
+		}
+	}
+}
+
+// A linked image is read as the browser editor stores it: the image without the link, which the
+// editor's store keeps on text alone (LEGION-365). A refusal would leave a document the editor
+// holds unsavable, so the link's text around the image keeps its link and the write is taken.
+func TestParseReadsALinkedImageAsTheEditorStoresIt(t *testing.T) {
+	for _, test := range []struct{ linked, stored string }{
+		{"[![x](i.png)](https://u.com)\n", "![x](i.png)\n"},
+		{"see [a ![x](i.png) b](https://u.com \"t\") now\n", "see [a ](https://u.com \"t\")![x](i.png)[ b](https://u.com \"t\") now\n"},
+		{"- **[![x](i.png)](https://u.com)**\n", "- ![x](i.png)\n"},
+	} {
+		got, err := ParseForWrite(test.linked, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", test.linked, err)
+			continue
+		}
+		want, err := Parse(test.stored)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.stored, err)
+		}
+		if !got.Equal(want) {
+			markdown, _ := Render(got)
+			t.Errorf("ParseForWrite(%q) reads as %q, want what %q reads as", test.linked, markdown, test.stored)
 		}
 	}
 }
@@ -332,4 +358,84 @@ func TestParsePairsARunByTheLengthsItHasLeft(t *testing.T) {
 			t.Errorf("ParseInline still reads %s, goldmark's pairing of the closer's last delimiter", line)
 		}
 	}
+}
+
+func TestParseRejectsExcessiveTablePaddingBeforeAllocation(t *testing.T) {
+	const maximumAllocation = 8 << 20
+	for _, width := range []int{500, 1000, 1500} {
+		markdown := tablePaddingBomb(width)
+		for _, parser := range []struct {
+			name string
+			read func(string) (*Node, error)
+		}{
+			{name: "Parse", read: Parse},
+			{name: "ParseForWrite", read: func(markdown string) (*Node, error) {
+				return ParseForWrite(markdown, nil)
+			}},
+		} {
+			t.Run(fmt.Sprintf("%s/n=%d", parser.name, width), func(t *testing.T) {
+				runtime.GC()
+				var before, after runtime.MemStats
+				runtime.ReadMemStats(&before)
+				started := time.Now()
+				_, err := parser.read(markdown)
+				elapsed := time.Since(started)
+				runtime.ReadMemStats(&after)
+				allocated := after.TotalAlloc - before.TotalAlloc
+				t.Logf("n=%d elapsed=%s allocated=%d", width, elapsed, allocated)
+				if !errors.Is(err, ErrSchema) {
+					t.Errorf("parse error = %v, want ErrSchema", err)
+				} else {
+					for _, want := range []string{"table 1", "writes", "the table's width", "limit 10000"} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("parse error = %q, want it to name %q", err, want)
+						}
+					}
+				}
+				if allocated > maximumAllocation {
+					t.Errorf("allocated %d bytes, want at most %d", allocated, maximumAllocation)
+				}
+			})
+		}
+	}
+}
+
+func TestParseRejectsTablePaddingBudgetAcrossTables(t *testing.T) {
+	markdown := tablePaddingBomb(70) + "\n" + tablePaddingBomb(70) + "\n" + tablePaddingBomb(70)
+	_, err := Parse(markdown)
+	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 3") {
+		t.Fatalf("Parse() error = %v, want ErrSchema naming table 3", err)
+	}
+}
+
+// A paragraph's text is its lines and the soft breaks between them, and each run under one set of
+// marks is joined once: a 40,000-byte paragraph of 20,000 lines reads as one text node of its
+// lines joined by spaces, at about a kibibyte a line, where joining each line to the text before
+// it copied that text again for every line.
+func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
+	const lines = 20_000
+	markdown := strings.Repeat("x\n", lines)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	doc, err := Parse(markdown)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("allocated=%d", allocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paragraph := doc.Children[0]
+	if want := strings.Repeat("x ", lines-1) + "x"; len(paragraph.Children) != 1 || paragraph.Children[0].Text != want {
+		t.Errorf("paragraph children = %d, first text %d bytes, want one text node of %d bytes", len(paragraph.Children), len(paragraph.Children[0].Text), len(want))
+	}
+	if allocated > 64<<20 {
+		t.Errorf("allocated %d bytes, want at most %d", allocated, 64<<20)
+	}
+}
+
+func tablePaddingBomb(width int) string {
+	return strings.Repeat("| header ", width) + "|\n" +
+		strings.Repeat("| --- ", width) + "|\n" +
+		strings.Repeat("| body |\n", width)
 }

@@ -149,8 +149,10 @@ func (s *server) logAdviceError(route, issueKey, query string, err error) {
 	slog.Warn("dispatch: write advice omitted", "route", route, "issue", issueKey, "query", query, "error", err)
 }
 
+// countAskBlocks counts the ask blocks in markdown, a document's canonical markdown: the rendering a
+// write stored, read back (pmdoc.ParseRendering).
 func countAskBlocks(markdown string) *int {
-	tree, err := pmdoc.Parse(markdown)
+	tree, err := pmdoc.ParseRendering(markdown)
 	if err != nil {
 		slog.Warn("dispatch: decision block count failed", "error", err)
 		return nil

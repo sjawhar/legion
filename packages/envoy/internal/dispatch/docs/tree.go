@@ -25,9 +25,10 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 // parseFragmentInput parses text written into a document - an insert's, or an accepted
 // suggestion's - where a leading `---` is a rule rather than front matter, except that a closed
 // front-matter block is front matter where the text lands at the document's start
-// (pmdoc.ParseFragment). A block id the text repeats is refused, as parseInput refuses it.
-func parseFragmentInput(markdown string, opensDocument bool) (*pmdoc.Node, error) {
-	return uploadedInput(pmdoc.ParseFragment(markdown, opensDocument))
+// (pmdoc.ParseFragment). A block id the text repeats is refused, as parseInput refuses it. Its
+// tables' short rows are padded on budget, which the write's other markdown shares.
+func parseFragmentInput(markdown string, opensDocument bool, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+	return uploadedInput(pmdoc.ParseFragment(markdown, opensDocument, budget))
 }
 
 // opensDocument reports whether text written at position lands where the document begins: before

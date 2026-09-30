@@ -32,12 +32,17 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 // parse parses source. unclosedFrontmatter says source opens a document with a front-matter opener
 // no later line closes, after which no container opens at the document's level
 // (frontmatterAttempt).
-func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool) ast.Node {
+func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget) (ast.Node, error) {
 	pc := parser.NewContext()
 	if unclosedFrontmatter {
 		pc.Set(unclosedFrontmatterKey, true)
 	}
-	return withLineStarts(reader.md.Parser(), source, pc)
+	pc.Set(tablePaddingBudgetKey, budget)
+	root := withLineStarts(reader.md.Parser(), source, pc)
+	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
+		return nil, err
+	}
+	return root, nil
 }
 
 // unclosedFrontmatterKey marks the parse of a document that opens with a front-matter opener no
@@ -373,20 +378,24 @@ func expandTabIndentation(reader gmtext.Reader, opens *regexp.Regexp) {
 // as if the row began its line, so `> \t| a |` read as paragraph text.
 func tabExpandedLines(lines *gmtext.Segments, source []byte) *gmtext.Segments {
 	expanded := gmtext.NewSegments()
-	for index := 0; index < lines.Len(); index++ {
-		line := lines.At(index)
-		end := line.Start
-		for end < line.Stop && (source[end] == ' ' || source[end] == '\t') {
-			end++
-		}
-		if line.Padding == 0 && bytes.IndexByte(source[line.Start:end], '\t') >= 0 {
-			from := lineStart(source, line.Start)
-			width, _ := util.IndentWidth(source[line.Start:end], columnOf(source[from:line.Start]))
-			line = gmtext.Segment{Start: end, Stop: line.Stop, Padding: width, ForceNewline: line.ForceNewline}
-		}
-		expanded.Append(line)
+	for index := range lines.Len() {
+		expanded.Append(tabExpandedLine(lines.At(index), source))
 	}
 	return expanded
+}
+
+// tabExpandedLine is one line of tabExpandedLines.
+func tabExpandedLine(line gmtext.Segment, source []byte) gmtext.Segment {
+	end := line.Start
+	for end < line.Stop && (source[end] == ' ' || source[end] == '\t') {
+		end++
+	}
+	if line.Padding == 0 && bytes.IndexByte(source[line.Start:end], '\t') >= 0 {
+		from := lineStart(source, line.Start)
+		width, _ := util.IndentWidth(source[line.Start:end], columnOf(source[from:line.Start]))
+		line = gmtext.Segment{Start: end, Stop: line.Stop, Padding: width, ForceNewline: line.ForceNewline}
+	}
+	return line
 }
 
 // columnOf is the column text, the start of a line, ends at, a tab advancing to the next multiple

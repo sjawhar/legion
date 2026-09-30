@@ -23,13 +23,27 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
-- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon inlines the prompts it composes from its own copy into each pod it runs, and `legion probe-image` resolves the task agents and skills this copy names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). They are not part of the packed plugin (its `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any prompt part is absent there;
+- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon resolves and validates its bundle at boot from that override or `role-prompts` beside its own executable, then snapshots it into its state directory before a pane can read it. It inlines that snapshot into each pod it runs, and `legion probe-image` resolves the task agents and skills the configured bundle names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). The role prompts are not part of the packed plugin (its `files` is `dist`), so the image supplies this explicit copy;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
   (bookworm's 2.39.5 made every `jj git clone` in the init container fail), so the build also proves the
   image's jj accepts its git with a network-free `jj git clone` of a scratch bare repository before the
-  probes run, and its last step refuses a git anywhere but `/usr/bin/git`.
+  probes run, and its last step refuses a git anywhere but `/usr/bin/git`;
+- a generic toolchain for the repositories the workers work, specific to none of them: `uv` and `uvx`;
+  `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
+  to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); and the AWS CLI
+  v2's `aws` — all at `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned
+  release whose linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the
+  `ARG`s at the top of `worker.Dockerfile`). A corepack shim runs the version a project's
+  `packageManager` names, or else the default that corepack ships (the image sets
+  `COREPACK_DEFAULT_TO_LATEST=0`, so never npm's newest release), fetched on first use into the user's
+  corepack cache.
+  The image bakes no Python: `uv` installs each project's own, from its `.python-version` or
+  `requires-python`, the first time the project runs (`uv sync`, `uv run`). In a Sandbox pod that is on
+  the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
+  `~/.local/share/uv/python`. Node and the AWS CLI keep their trees at `/opt/node` and `/opt/aws-cli`,
+  outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -63,6 +77,12 @@ tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.g
 `docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
 (`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
+A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
+the image `PATH`, the corepack shims fetching their shipped default pnpm and yarn into a scratch
+directory the step removes. It reruns only when the toolchain or an earlier layer changes, so a commit
+that only rebuilds the Go `legion` needs no package registry.
+To check a published image's toolchain end to end, Python install included:
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -112,7 +132,7 @@ unguarded. The workflow's `packages`/`contents` permissions apply to same-repo p
 repository takes no fork PRs, whose token would be read-only).
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
-— no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the sami-agents
+— no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
 host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is not a workstation). Iterate by
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
@@ -126,17 +146,21 @@ set to public — a package-settings action on GitHub with no API.
 
 ### Per-deployment toolchains layer on top
 
-The base image carries Legion's own tools only. A deployment whose repositories need more (`uv`, Python,
-Node) builds its own image in **its** repo:
+The base image carries Legion's own tools and the generic toolchain listed above, and nothing in it is
+specific to one repository, so a Python or Node repository runs on the published image as it is. A
+deployment whose repositories need more than that (a system library, another language, a different Node
+line) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
 # deployment toolchain here
 ```
 
-and pins `runtime.kubernetes.image` to *that* image's digest. The toolchain churns on the deployment's
-schedule, not Legion's release schedule, and the deployment's repo owns its own reproducibility — one Legion
-release therefore never has to know about anyone's Python version.
+and pins `runtime.kubernetes.image` to *that* image's digest. The runtime sets every container's `PATH`
+itself (the image's `PATH` with its own directories in front), so an `ENV PATH` in the derived image never
+reaches a pod: put the added commands in `/usr/local/bin` or `/usr/bin`, and outside `HOME`, where a
+pod's volumes would shadow them. What the deployment adds churns on its own schedule, not Legion's
+release schedule, and the deployment's repo owns its reproducibility.
 
 ### Entrypoint
 
@@ -318,7 +342,7 @@ runtime:
     storage_class: gp2          # required: the tree volume's class (the cluster has no default)
     tree_volume: 20Gi           # default 20Gi
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production   # relative to legion.yaml's directory
-    context: legion-daemon@production   # required when the kubeconfig sets no current context
+    context: legion-daemon@example   # required when the kubeconfig sets no current context
     scheduling:                 # optional, beyond the Legion pool the runtime always selects
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
@@ -479,6 +503,21 @@ projected twice: its boot half into the worker, read-only, and its provisioning 
 Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon has a
 NATS nkey seed. State, `/tmp` and the XDG config home are in-memory.
 
+The worker is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a DNS label),
+`UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs and its cache
+on the tree volume beside the workspaces, so a project's `.venv`, which links to its interpreter there,
+runs as it is in every later pod of the issue, and every pod of the tree reuses the packages an earlier
+pod downloaded. uv's own file locks stop at the pod (a gVisor pod's lock reaches no other pod), so two
+pods that first install one Python into a shared directory at the same moment can each delete the
+other's interpreter. Each issue therefore gets its own Python directory, which only that issue's pods
+share, at the cost of one download per issue. uv copies each package from the shared cache into a
+`.venv`. With the cache and the `.venv` on one filesystem it would otherwise hardlink them, and an edit
+made in place inside one workspace's `.venv` would change the cache and every other `.venv` of the tree
+that installed the package, including ones installed later. So each `.venv` is a full copy of its
+packages on the tree volume, beside the cache, and a deployment sizes `tree_volume` for one copy per
+workspace of a tree. `uv cache clean` and `uv cache prune` remove cache entries under a lock that also
+stops at the pod, so neither may run while another pod of the tree is using uv.
+
 Every pod runs:
 - with `runtimeClassName: gvisor`;
 - with `serviceAccountName` set to the operator's `pod.service_account` (the namespace's default
@@ -584,7 +623,7 @@ first pod placed decides the node, and a request on a later pod would strand it.
 
 **The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
 trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
-raises the pool's `limits.cpu` in agent-c's Legion component to at least `4 × admission_cap`; until
+raises the `legion` NodePool's `limits.cpu` to at least `4 × admission_cap`; until
 then an `admission_cap` above 16 admits trees whose pods cannot schedule.
 
 ### Trust model: the provisioning token
@@ -625,8 +664,8 @@ on its way to github.com.
 
 ### RBAC the Go daemon needs
 
-The daemon runs as a restricted identity (production: the `legion-daemon` group, as the
-`production-legion-daemon` role). It needs:
+The daemon runs as a restricted identity (in production, an IAM role mapped to the `legion-daemon`
+group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
@@ -777,7 +816,8 @@ claim's pod and the image probe's.
 
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
-  `service_account_token` must last at least 600 s, the least the API server issues. `volume_mounts`
+  `service_account_token` must last at least 600 s, the least the API server issues, and its
+  `audience` may not still hold a `${…}` placeholder, which nothing expands. `volume_mounts`
   are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
   ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
@@ -801,7 +841,7 @@ claim's pod and the image probe's.
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a human
   approves the code there. On expiry or revocation the daemon starts a fresh login and logs a new
   code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
-  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, agent-c's admission cap)
+  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
   operator's middleman token. With the block, the worker container mounts that token read-only at
   `/var/run/legion/agent-secrets-token/token`, a memory-backed key directory at
@@ -1180,8 +1220,8 @@ keeping nothing until the daemon has answered, the command:
 1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
    file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
    holds no nkey user seed, a
-   role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or the checkout's
-   `packages/pi-envoy/roles`), a missing or blank instructions file, and an Oh My Pi invocation that
+   role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or `role-prompts` beside the
+   running `legion` executable), a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
    refuses a pi-legion-envoy it does not load, or one speaking another Go daemon API contract;

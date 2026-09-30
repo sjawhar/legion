@@ -322,13 +322,35 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
-// askMarkdown is what an uploaded version can say of an ask: its rendering alone, taken as an
-// upload is (asUploaded) - without anchor marks, and with its server-owned attributes (`state`,
-// the answer, `invalid`) at their defaults, since an upload's are discarded for the ask row's. The
-// attributes a reader's browser derives are never rendered. A new version is markdown, so this is
-// how a version says it carries an ask unchanged.
-func askMarkdown(ask *pmdoc.Node) (string, error) {
-	return pmdoc.Render(asUploaded(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}}))
+// newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its
+// rendering alone, taken as an upload is (asUploaded) - without anchor marks, and with its
+// server-owned attributes (`state`, the answer, `invalid`) at their defaults, since an upload's are
+// discarded for the ask row's. The attributes a reader's browser derives are never rendered. A new
+// version is markdown, so this is how a version says it carries an ask unchanged.
+//
+// An ask can hold a table. A document's render writes its tables' spans out under one budget for
+// the whole document (pmdoc.Render), and a version uploaded from that markdown holds them as the
+// cells they were written as. So the asks one call renders share one budget (pmdoc.SpanBudget),
+// spent in document order, and each ask is written as the stored markdown holds it wherever the
+// document's render still had the budget for its table. A budget for each ask would write every
+// ask past the first budget's end with cells the document never wrote, and spend a budget for
+// every ask the document holds. Past the point a budget runs out, a table is written with fewer
+// span cells than its spans cover. Where only the asks' tables have spent the budget before an
+// ask, the fingerprint and the stored markdown write its table alike, and the ask reads as changed,
+// refusing an upload of the document's own markdown, when its table as written holds a body row
+// shorter than its widest, which the parser pads when it reads the upload: a body cell spanning
+// columns under a wider header, a rowspan, or rows the budget ran out partway through. The header
+// is written as wide as the widest row, so it never counts, and a table whose rows each hold as
+// many cells as written is kept. Where a table outside the asks spent some of it first, the
+// document can have written an ask's table with fewer span cells than the fingerprint writes, and
+// the ask reads as changed unless padding its stored rows gives the fingerprint's cells; one the
+// document still had the budget for is written alike and judged as above. An ask over a
+// span-free table with a short body row reads as changed the same way.
+func newAskMarkdown() func(ask *pmdoc.Node) (string, error) {
+	budget := pmdoc.NewSpanBudget()
+	return func(ask *pmdoc.Node) (string, error) {
+		return budget.Render(asUploaded(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}}))
+	}
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {

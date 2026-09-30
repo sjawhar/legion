@@ -1514,8 +1514,9 @@ describe("executeDispatchTool", () => {
     );
   });
 
-  test("a claim reads by the holder's live title, and the registry is asked only when one holds it", async () => {
+  test("a claim reads by the holder's live title and says when its session is not running, or when nobody can tell", async () => {
     const agentCalls: string[] = [];
+    let registryAnswers = true;
     const claimOf = (id: string, stamped: string) => ({
       actor: { kind: "session", id, origin: { session_title: stamped } },
       at: "2026-09-24T06:00:00Z",
@@ -1526,6 +1527,12 @@ describe("executeDispatchTool", () => {
         const target = new URL(String(url));
         if (target.pathname === "/api/v1/agents") {
           agentCalls.push(target.pathname);
+          if (!registryAnswers) {
+            return new Response(JSON.stringify({ code: "INTERNAL", error: "listener down" }), {
+              status: 502,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
           return response([{ session_id: "session-one", title: "Live registry title" }]);
         }
         if (target.pathname === "/api/v1/issues/DSP-1") {
@@ -1544,6 +1551,7 @@ describe("executeDispatchTool", () => {
               inherited_from: null,
             },
             route: null,
+            external_links: [],
             open_asks: [],
             last_seq: 0,
             labels: [],
@@ -1570,23 +1578,36 @@ describe("executeDispatchTool", () => {
         fetchImpl: serve(claim) as typeof fetch,
       });
 
-    // A session holds it: the live title wins over the one stamped on the claim.
+    // A session holds it: the live title wins over the one stamped on the claim, and a session
+    // the registry lists carries no marker.
     const claimed = await read(claimOf("session-one", "Stamped title"));
-    expect(claimed.text).toContain("Claimed by: Live registry title since 2026-09-24T06:00:00Z");
+    expect(claimed.text).toContain("Claimed by: Live registry title since 2026-09-24T06:00:00Z\n");
     expect(claimed.text).not.toContain("Stamped title");
     expect(agentCalls).toEqual(["/api/v1/agents"]);
 
-    // A holder the registry does not list falls back to the stamped title, silently.
+    // A holder the loaded registry does not list is named by its stamped title and reads as not
+    // running, as the dashboard's claim chip does: that claim is free to take.
     const unlisted = await read(claimOf("session-gone", "Stamped title"));
-    expect(unlisted.text).toContain("Claimed by: Stamped title since 2026-09-24T06:00:00Z");
+    expect(unlisted.text).toContain(
+      "Claimed by: Stamped title since 2026-09-24T06:00:00Z · not running\n"
+    );
     expect(agentCalls).toHaveLength(2);
 
-    // Nothing a session holds: no registry request at all.
+    // A registry that cannot be read says nothing about any session: neither running nor not.
+    registryAnswers = false;
+    const blind = await read(claimOf("session-one", "Stamped title"));
+    expect(blind.text).toContain(
+      "Claimed by: Stamped title since 2026-09-24T06:00:00Z · liveness unknown\n"
+    );
+    expect(blind.text).not.toContain("not running");
+    expect(agentCalls).toHaveLength(3);
+
+    // Nothing a session holds: no registry request at all, and a person's claim never lapses.
     const unclaimed = await read(null);
     expect(unclaimed.text).toContain("Claimed by: nobody");
     const human = await read({ actor: { kind: "user", id: "alice" }, at: "2026-09-24T06:00:00Z" });
-    expect(human.text).toContain("Claimed by: alice since 2026-09-24T06:00:00Z");
-    expect(agentCalls).toHaveLength(2);
+    expect(human.text).toContain("Claimed by: alice since 2026-09-24T06:00:00Z\n");
+    expect(agentCalls).toHaveLength(3);
   });
 
   test("dispatch_issues passes each optional filter through, omits absent ones, and returns the documented row shape", async () => {
@@ -1680,6 +1701,9 @@ describe("executeDispatchTool", () => {
           updated_at: "2026-09-13T00:00:00Z",
         },
       ],
+      total: 1,
+      offset: 0,
+      limit: 50,
     });
   });
 
@@ -1705,6 +1729,7 @@ describe("executeDispatchTool", () => {
             },
             open_asks: [],
             last_seq: 0,
+            external_links: [],
             labels: [],
             ...reach,
           });
@@ -1789,6 +1814,90 @@ describe("executeDispatchTool", () => {
 
     expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({ project: "AGENTC" });
     expect(result.details.issues).toHaveLength(2);
+    expect(result.text).toContain("2 issues in AGENTC (showing 1-2 of 5)");
+    expect(result.details).toMatchObject({ total: 5, offset: 0, limit: 2 });
+  });
+
+  test("dispatch_issues returns the last 50 after offset 250 and renders the total", async () => {
+    const issues = Array.from({ length: 300 }, (_, index) => ({
+      key: `AGENTC-${index}`,
+      title: `Issue ${index}`,
+      status: "todo",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+    }));
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> => response(issues);
+
+    const defaultPage = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "AGENTC" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(defaultPage.text).toContain("50 issues in AGENTC (showing 1-50 of 300)");
+    expect(defaultPage.details).toMatchObject({ total: 300, offset: 0, limit: 50 });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "AGENTC", offset: 250 },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain("50 issues in AGENTC (showing 251-300 of 300)");
+    expect(result.text).toContain("AGENTC-250 [todo] Issue 250");
+    expect(result.text).toContain("AGENTC-299 [todo] Issue 299");
+    expect(result.details).toMatchObject({ total: 300, offset: 250, limit: 50 });
+    expect(result.details.issues).toHaveLength(50);
+  });
+
+  test("dispatch_issues names an empty page beyond the response", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      response([
+        {
+          key: "AGENTC-1",
+          title: "Only issue",
+          status: "todo",
+          priority: null,
+          rank: "a",
+          labels: [],
+          parent: null,
+          assignee: null,
+          updated_at: "2026-09-13T00:00:00Z",
+          last_seq: 1,
+          open_asks: 0,
+        },
+      ]);
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "AGENTC", offset: 1 },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("No issues in AGENTC. (showing 0-0 of 1)");
+    expect(result.details).toMatchObject({ total: 1, offset: 1, limit: 50 });
+    expect(result.details.issues).toEqual([]);
   });
 
   test("dispatch_issue returns duplicate candidates instead of throwing", async () => {
@@ -5186,6 +5295,10 @@ describe("executeDispatchTool", () => {
           title: "Dispatch issue",
           status: "open",
           route: null,
+          external_links: [
+            { url: "https://github.com/owner/repo/pull/7", kind: "github_pr" },
+            { url: "https://example.com/runs/3" },
+          ],
           open_asks: [],
           last_seq: 0,
           labels: ["frontend", "urgent"],
@@ -5285,7 +5398,12 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("Status: open\nAssignee: alice\n");
     expect(result.text).toContain("Claimed by: Implementer since 2026-09-13T01:00:00Z");
     expect(result.text).toContain(
-      "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none"
+      "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none\n"
+    );
+    // The pull request a person linked is on the read, as on the issue page; the reference graph
+    // at the end carries none of it.
+    expect(result.text).toContain(
+      "Route: none\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
     );
     expect(
       result.text.endsWith(
@@ -5315,6 +5433,7 @@ describe("executeDispatchTool", () => {
           route: null,
           open_asks: [],
           last_seq: 0,
+          external_links: [],
           labels: [],
         });
       }

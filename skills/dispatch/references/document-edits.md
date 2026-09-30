@@ -1,7 +1,7 @@
 # Editing a document
 
 Every document a Dispatch tool writes — an issue's spec, a project document — is edited in place
-with `dispatch_doc_edit`, never re-uploaded. [The Spec](../SKILL.md#the-spec) sends you here for
+with `dispatch_doc_edit`, never re-uploaded. "The Spec" in `skill://dispatch` sends you here for
 the tool's shape, how to target the text you mean, what each operation costs a block, and how to
 reject a stale edit.
 

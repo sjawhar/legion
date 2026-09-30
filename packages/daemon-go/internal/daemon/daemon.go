@@ -92,6 +92,9 @@ type overrides struct {
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
+	// roleReferences reads the task agents and skills the current prompt bundle names; nil is
+	// promptrefs.Roles.
+	roleReferences func(string) (promptrefs.Names, error)
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
 }
@@ -124,6 +127,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err
+	}
+	if cfg.DispatchURL != "" {
+		log.Info("legion workflow boot stage", "stage", "prompts")
 	}
 	if plan.gate != nil {
 		if err := plan.gate(ctx); err != nil {
@@ -170,15 +176,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
 		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
-	}
-	plan.prompts, err = prompts.New(plan.rolesDir, cfg.StateDir)
-	if err != nil {
-		workflow.stop()
-		st.Close()
-		return fmt.Errorf("construct role prompts: %w", err)
-	}
-	if workflow != nil {
-		log.Info("legion workflow boot stage", "stage", "prompts")
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -329,11 +326,9 @@ type plan struct {
 	instructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
-	prompts       *prompts.Composer
-	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir), resolved before the
-	// gate, and roleReferences the task agents and skills its prompts name (promptrefs.Roles), which
-	// the gate on either runtime resolves beside the plugin's own.
-	rolesDir       string
+	prompts *prompts.Composer
+	// roleReferences are the task agents and skills the state-local role prompt snapshot names
+	// (promptrefs.Roles), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
@@ -377,6 +372,23 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
 	}
+	composer, err := prompts.New(reads.rolesDir, cfg.StateDir)
+	if err != nil {
+		return plan{}, fmt.Errorf("construct role prompts: %w", err)
+	}
+	roleReferences := o.roleReferences
+	if roleReferences == nil {
+		roleReferences = prompts.RoleReferences
+	}
+	sharedRolesDir, err := composer.SharedRolePromptsDir()
+	if err != nil {
+		return plan{}, err
+	}
+	references, err := roleReferences(sharedRolesDir)
+	if err != nil {
+		return plan{}, err
+	}
+
 	instructions := ""
 	if reads.instructions != nil {
 		if instructions, err = config.WriteDeploymentInstructions(reads.instructions, cfg.StateDir, cfg.Project); err != nil {
@@ -395,7 +407,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
-		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
+		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: references,
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
 	}

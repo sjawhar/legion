@@ -67,7 +67,7 @@ func cmdSign(args []string, stdout, stderr io.Writer) int {
 	}
 	compact, err := signer.Sign(*method, *url)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets sign: %v\n", err)
+		reportError(stderr, "agent-secrets sign", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, compact)

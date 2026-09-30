@@ -4,7 +4,7 @@
 
 - No more AWS changes from envoy work without explicit approval
 - All envoy services run in Docker containers
-- Do not install anything on hosts except Docker on `ghost-wispr`
+- Do not install anything on hosts except Docker on `example-host-gw`
 - Do not disturb the Ghost Whisper app on the Raspberry Pi
 - Do not commit, print, or push secrets
 - Use `secrets ... -- command` for runtime secret injection
