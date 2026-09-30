@@ -172,25 +172,24 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 
 // registerReply answers a register, first waiting up to wait for the session to enroll. Without a
 // launcher credential the enroll loop cannot succeed until a human logs the helper in, so it does
-// not wait at all, and the reply names that as the reason: a launcher's `register --wait N`
-// then costs nothing on a helper that was never logged in, or whose credential the broker has
-// refused once. An expired credential stays held until a call is refused, so the first register
-// after it expires still waits the full N.
+// not wait at all: a launcher's `register --wait N` then costs nothing on a helper that was never
+// logged in, or whose credential the broker has refused once. An expired credential stays held
+// until a call is refused, so the first register after it expires still waits the full N. A
+// session the helper cannot enroll for want of a credential, read after any wait, gets Code
+// NO_CREDENTIAL and that reason in Error, so a launcher can say what the session will do.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
-	credential := s.Broker.HasCredential()
-	if wait > 0 && credential {
+	if wait > 0 && s.Broker.HasCredential() {
 		select {
 		case <-sess.ready:
 		case <-time.After(wait):
 		case <-sess.stop:
 		}
 	}
-	lastErr := sess.LastError()
-	if !credential && sess.EnrollmentID() == "" {
-		lastErr = noCredentialMsg
+	resp := Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: sess.State(), Error: sess.LastError()}
+	if resp.EnrollmentID == "" && !s.Broker.HasCredential() {
+		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
-	operator := s.Broker.Operator()
-	return Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: operator, State: sess.State(), Error: lastErr}
+	return resp
 }
 
 // notEnrolled answers sign or sign-request for a registered session with no enrollment yet: it is

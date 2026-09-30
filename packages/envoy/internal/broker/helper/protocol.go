@@ -37,8 +37,9 @@ type Request struct {
 }
 
 // Response is the helper's one line. Code and Error are set only when OK is false, except that
-// a register reply carries the last broker error in Error while State is still "enrolling", and
-// a login/login-status reply carries the confirmation code in Code while OK is true.
+// a register reply carries the last broker error in Error while State is still "enrolling" (and
+// Code NO_CREDENTIAL while the helper holds no launcher credential to enroll it with), and a
+// login/login-status reply carries the confirmation code in Code while OK is true.
 type Response struct {
 	OK            bool          `json:"ok"`
 	Code          string        `json:"code,omitempty"`
@@ -70,7 +71,7 @@ const (
 	CodeNotEnrolled = "NOT_ENROLLED"
 	// CodeNoCredential answers them instead while the helper holds no launcher credential, from
 	// every restart until the operator logs the machine in: it enrolls no one, so the session has
-	// no broker identity.
+	// no broker identity. A register reply for such a session carries it too, beside OK.
 	CodeNoCredential   = "NO_CREDENTIAL"
 	CodeBadRequest     = "BAD_REQUEST"
 	CodeUnidentified   = "PEER_UNIDENTIFIED"

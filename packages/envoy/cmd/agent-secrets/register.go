@@ -63,12 +63,15 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	// --exec never blocks a launch on the broker, but never launches silently either: the agent
-	// starts with no secrets access (helper unreachable), or with broker calls that fail
-	// NOT_ENROLLED, or NO_CREDENTIAL while the helper holds no launcher credential, until the
-	// helper's enroll loop succeeds.
+	// starts with no secrets access (helper unreachable), with broker calls that fail NOT_ENROLLED
+	// until the helper's enroll loop succeeds, or, while the helper holds no launcher credential,
+	// with no broker identity at all: its agent-secrets calls fail NO_CREDENTIAL and secret-run
+	// (dotfiles), which asks identity, uses secretsd until the machine is logged in.
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
+	case *wait > 0 && resp.State != "enrolled" && resp.Code == helper.CodeNoCredential:
+		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets-login <login>) this session's agent-secrets calls fail and secret-run uses secretsd")
 	case *wait > 0 && resp.State != "enrolled":
 		fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", resp.Error)
 	}

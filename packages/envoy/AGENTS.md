@@ -1401,9 +1401,13 @@ with the same not-logged-in notice. `agent-secrets launcher login-status`, which
 answers, exits 0 only for an issued login whose credential the helper still holds; once the broker
 refuses it (401 `LAUNCHER_INVALID`, expired or revoked) the login reads `expired`.
 `register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles
-launchers drop the login-status probe they run before `--wait 10` once their pinned release
-carries that answer and the helper has restarted on it; against an older helper an unconditional
-`--wait 10` stalls every launch 10 s while no credential exists.
+launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that
+login-status says `issued`, once the pinned release carries that answer and the helper has
+restarted on it; its login-status probe stays, since it also finds a helper that does not answer.
+Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
+exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
+with a warning that its `agent-secrets` calls fail, and secret-run uses secretsd, until the machine
+is logged in.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal

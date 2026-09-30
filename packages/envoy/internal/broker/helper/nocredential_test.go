@@ -8,8 +8,9 @@ import "testing"
 // TestSignAnswersNoCredentialWhileTheHelperHoldsNone: sign and sign-request for a registered
 // session with no enrollment answer NO_CREDENTIAL while the helper holds no launcher credential
 // (never logged in, or its credential refused), and NOT_ENROLLED only while it holds one and the
-// session is still enrolling. Every enrollment this fake broker sees fails, so the session never
-// enrolls and the credential alone decides the answer.
+// session is still enrolling; a register reply for that session is OK either way and carries
+// NO_CREDENTIAL in the same case. Every enrollment this fake broker sees fails, so the session
+// never enrolls and the credential alone decides the answer.
 func TestSignAnswersNoCredentialWhileTheHelperHoldsNone(t *testing.T) {
 	r := newRig(t, "")
 	r.fake.mu.Lock()
@@ -32,6 +33,14 @@ func TestSignAnswersNoCredentialWhileTheHelperHoldsNone(t *testing.T) {
 			if code == CodeNoCredential && resp.Error != noCredentialMsg {
 				t.Fatalf("%s, %s: error %q; want %q", when, req.Op, resp.Error, noCredentialMsg)
 			}
+		}
+		regCode := ""
+		if code == CodeNoCredential {
+			regCode = CodeNoCredential
+		}
+		reg := r.call(t, Request{Op: "register"})
+		if !reg.OK || reg.State != "enrolling" || reg.Code != regCode || (regCode != "" && reg.Error != noCredentialMsg) {
+			t.Fatalf("%s, register: %+v; want OK, enrolling, code %q", when, reg, regCode)
 		}
 	}
 
