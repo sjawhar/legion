@@ -297,6 +297,14 @@ func TestMigrationSetIsNumberedOneToN(t *testing.T) {
 	}
 }
 
+// Every file in Dispatch's migrations directory reaches the runner; pgmigratetest.CheckEmbedsEveryFile
+// says why that needs a test.
+func TestEveryMigrationFileIsEmbedded(t *testing.T) {
+	if err := pgmigratetest.CheckEmbedsEveryFile(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)

@@ -95,7 +95,7 @@ func Load(fsys fs.FS, dir string) ([]Migration, error) {
 		}
 		if end-start > 1 {
 			problems = append(problems, fmt.Errorf(
-				"migrations %s share version %d: a runner records a migration by its version, so it would apply the first and skip the rest as already applied; renumber all but one",
+				"migrations %s share version %d: a runner records a migration by its version, so it would apply the first and skip the rest as already applied; keep the number on the file that merged to main first, since a database may already have applied it, and renumber the rest to the next free numbers on main",
 				joinNames(migrations[start:end]), migrations[start].Version))
 		}
 		start = end
