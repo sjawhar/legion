@@ -205,7 +205,7 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 // (NO_CREDENTIAL). NOT_ENROLLED names the last attempt's failure when there is one: an enroll
 // error, or a lapse's refused renew (markLapsed). st is the snapshot the caller found unenrolled,
 // so the failure named is the one that goes with that answer.
-func (s *Server) notEnrolled(st sessionState) Response {
+func (s *Server) notEnrolled(st enrollmentState) Response {
 	if !s.Broker.HasCredential() {
 		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
 	}

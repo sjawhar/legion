@@ -285,9 +285,9 @@ func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
 		t.Helper()
 		posts, deletes, _ := r.fake.snapshot()
 		enrolls := len(posts)
-		if sess.State() != "enrolled" || sess.EnrollmentID() != id || sess.lapsed() != "" || len(deletes) != 0 || enrolls != 1 {
+		if st := sess.snapshot(); st.State != "enrolled" || st.EnrollmentID != id || sess.lapsed() != "" || len(deletes) != 0 || enrolls != 1 {
 			t.Fatalf("%s: session %s under %q (lapsed id %q), revokes %q, %d enrolls; want enrolled under %q, no revoke, one enroll",
-				when, sess.State(), sess.EnrollmentID(), sess.lapsed(), deletes, enrolls, id)
+				when, st.State, st.EnrollmentID, sess.lapsed(), deletes, enrolls, id)
 		}
 	}
 	deadline := time.Now().Add(10 * time.Second)

@@ -318,10 +318,10 @@ func TestEnrollRetriesUntilTheBrokerAnswers(t *testing.T) {
 		t.Fatalf("before enrollment: %+v", signed)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && r.srv.Registry.Get(os.Getpid()).State() != "enrolled" {
+	for time.Now().Before(deadline) && r.srv.Registry.Get(os.Getpid()).snapshot().State != "enrolled" {
 		time.Sleep(100 * time.Millisecond)
 	}
-	if r.srv.Registry.Get(os.Getpid()).State() != "enrolled" {
+	if r.srv.Registry.Get(os.Getpid()).snapshot().State != "enrolled" {
 		t.Fatal("two 503s then a 201 must end enrolled within 10 s (1 s + 2 s backoff)")
 	}
 }
@@ -428,12 +428,12 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var sess *Session
 	for time.Now().Before(deadline) {
-		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.State() == "enrolled" {
+		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.snapshot().State == "enrolled" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if sess == nil || sess.State() != "enrolled" {
+	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled")
 	}
 	if sess.Thumbprint == oldTP || sess.EnrollmentID() == first.EnrollmentID || sess.RuntimeID != first.RuntimeID {
@@ -549,12 +549,12 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var sess *Session
 	for time.Now().Before(deadline) {
-		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.State() == "enrolled" {
+		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.snapshot().State == "enrolled" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if sess == nil || sess.State() != "enrolled" {
+	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled despite the delayed revoke")
 	}
 	r.fake.mu.Lock()
