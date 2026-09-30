@@ -208,7 +208,10 @@ func readDocumentBlocks(markdown string) *documentBlocks {
 		case "ask":
 			blocks.DecisionBlocks++
 		case "code_block":
-			return false
+			// Code is text on purpose, and its children are text nodes, whose own visits read
+			// nothing, so the walk moves on past it: pmdoc.Walk's false stops the whole
+			// traversal, which would leave every block after the code uncounted.
+			return true
 		}
 		blocks.readOpenersAsText(node)
 		return true

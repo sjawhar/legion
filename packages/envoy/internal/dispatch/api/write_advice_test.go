@@ -186,6 +186,15 @@ func TestWriteAdviceOmitsDecisionBlocksWhenMarkdownCannotBeParsed(t *testing.T) 
 	}
 }
 
+// A code block before an ask - a spec that shows a snippet, then asks about it - neither hides the
+// ask from the count nor adds the opening quoted in the code to the openings stored as text.
+func TestReadDocumentBlocksReadsPastCode(t *testing.T) {
+	blocks := readDocumentBlocks("Context\n\n```md\n:::ask{urgency=\"med\"}\n```\n\n:::ask{urgency=\"med\"}\nShip it?\n:::\n\nThen write :::callout{kind=\"note\"} as text.\n")
+	if blocks == nil || blocks.DecisionBlocks != 1 || blocks.UnparsedOpeners == nil || blocks.UnparsedOpeners.Count != 1 {
+		t.Fatalf("blocks = %#v (unparsed %#v), want one ask block and the one opening after it", blocks, blocks.UnparsedOpeners)
+	}
+}
+
 // A typed block opening a document stores as text - inside a line, where the parser cannot make
 // it a block - is reported beside the decision-block count, so a writer who meant a block hears
 // that it is text rather than only that the document holds no decisions (LEGION-416). A mention
