@@ -1414,6 +1414,18 @@ The controller hands Legion no issue itself: this proof admits only the issues i
 `todo`. LEGSMOKE holds earlier runs' roots, and a slot the proof frees stays for the tree the driver
 admits next.
 EOF
+# The daily report is the one controller action that waits for no targeted message (daily-report).
+report_title="Legion daily report ($work)"
+cat >>"$work/instructions.md" <<EOF
+
+## The controller's daily report
+
+The controller's daily report is the one controller action that waits for no targeted message.
+Post it as \`skill://legion-controller\`'s "Daily report" says, on the first turn a \`tick on $project\`
+wake starts: never on your start turn, and once in this run. Its issue is titled
+\`$report_title\`: find it with \`dispatch_search\`, and when there is none, create it once with
+that title and park it in icebox, as the skill says for the default report issue.
+EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
 note "$out"
@@ -1931,6 +1943,48 @@ dispatch_events "$tree3" | jq -e --argjson claim "$root_claim" 'any(.[]; .type =
 note "$tree3's root issue is claimed by its architect session $(jq -r .actor.id <<<"$root_claim")"
 pass
 fi # the controller checks
+
+begin daily-report
+# The controller's daily report runs by rule, not on a human's word, so the proof's instructions
+# exempt it from their wait for a targeted message and fit its day to this run: a report issue of
+# this run's own (so the skill's "no report message from today" guard starts fresh), posted on the
+# first turn a tick starts. With every slot taken, the tick is the quiet day's only wake.
+if [ -n "$skip_controller" ]; then
+  skipped "STAGE4B_SKIP_CONTROLLER: no controller ran"
+else
+# report_key STATUS prints the key of this run's report issue in STATUS, or nothing.
+report_key() {
+  dispatch_get "issues?project=$project&status=$1&limit=250" | jq -r --arg t "$report_title" '[.[] | select(.title == $t)][0].key // empty'
+}
+report_in_icebox() { [ -n "$(report_key icebox)" ]; }
+until_true 600 "the controller's report issue '$report_title' in $project, parked in icebox" report_in_icebox
+report=$(report_key icebox)
+dispatch_get "issues/$report" | jq -e '(.labels | map(ascii_downcase) | index("legion")) == null' >/dev/null ||
+  fail "$report, the report issue, carries the legion label"
+# The message is the controller's, names tree 1, which runs throughout, and the free slots, and
+# fits the skill's 2,000 characters.
+report_posted() {
+  dispatch_events "$report" | jq -e --arg s "$controller_session" --arg tree "$tree1" \
+    'any(.[]; .type == "message.created" and .actor.id == $s and (.payload.body | contains($tree)) and (.payload.body | test("slot"; "i")) and (.payload.body | length) <= 2000)' >/dev/null
+}
+until_true 300 "the controller's report message on $report" report_posted
+# It was posted on a turn a tick started: in the controller's session, the first report message
+# comes after the first `tick on LEGSMOKE` delivery, never in its start turn.
+report_after_tick() {
+  local file tick call
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    call=$(grep -n -m1 'xd://dispatch_message' "$file" | cut -d: -f1)
+    [ -n "$call" ] || continue
+    tick=$(grep -n -m1 "summary: tick on $project" "$file" | cut -d: -f1)
+    [ -n "$tick" ] && [ "$tick" -lt "$call" ] && return 0
+  done
+  return 1
+}
+report_after_tick || fail "the controller's first report message was not posted on a turn a tick started"
+note "the controller parked $report ('$report_title') in icebox and posted its daily report there on a tick's turn"
+pass
+fi # the daily report
 
 begin deaths-with-work
 # A worker whose process dies after its agent is ready, while it has its task outstanding, gets the
