@@ -63,19 +63,26 @@ osv-scanner and govulncheck over the dependencies, on every pull request, merge 
 commit (`.github/scripts/zizmor-findings.sh` fingerprints both sides), and those show as
 annotations on the changed files.
 
-`.github/security-window.json` holds one flag, `report_only`. While it is `true`, each scanner
-job's single Gate step runs under `continue-on-error`, so every job concludes `success` and
-nothing blocks a merge; a tool that fails to install or run records a tool error rather than
-failing its job. The `security` job gathers each run's counts into the `security-report`
-artifact and the step summary.
+`.github/security-window.json` holds one flag per check:
+`{"report_only": {"zizmor": true, "dependencies": true}}`. While a check's flag is `true`, its
+job's single Gate step (`workflows` for zizmor, `dependencies` for osv-scanner and govulncheck) runs
+under `continue-on-error`, so the job concludes `success` and blocks no merge; a tool that fails to
+install or run records a tool error rather than failing its job. A check is blocking only where
+the file sets its flag to `false`. A missing file, a document that is not an object with a
+`report_only` key, a missing key and a value that is not `true` or `false` each read as
+report-only, and the `window` job's step summary and an annotation name the problem. A bare
+boolean (`{"report_only": true}`, the file's first form) applies to both checks. The `security` job
+gathers each run's counts and both flags into the `security-report` artifact and the step summary.
 
 The window is 14 days from the workflow's first push run on `main`. `scripts/security-report.sh`
 prints the window's numbers: `main`'s daily runs, the merged pull requests' new zizmor findings
 and whether each was fixed or ignored, tool errors, CodeQL alert counts, secret-scanning alert
 counts, and the `Security[<tag>]:` review threads per rubric row. Once the window has closed it
-ends in a `DECISION:` block; its header carries the rules. The daily scheduled run runs it, and
-while `report_only` is still `true` the block makes that run fail, which is the signal to open
-the promotion pull request that applies the decision and sets `report_only` to `false`.
+ends in a `DECISION:` block with a line per check, decided on its own; its header carries the
+rules. The daily scheduled run runs it, and while any check is still report-only the block makes
+that run fail, which is the signal to open the promotion pull request that applies the decision
+and sets each promoted check's flag to `false`. A check already set to `false` reads as `already
+blocking` and is not decided again.
 
 ```bash
 scripts/security-report.sh                        # sjawhar/legion, 14-day window

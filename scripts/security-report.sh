@@ -4,13 +4,24 @@
 # `Report and decide`); anyone can run it from a checkout:
 #
 #   scripts/security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]
+#   scripts/security-report.sh --window-flags .github/security-window.json
+#
+# .github/security-window.json holds one report-only flag per check,
+# {"report_only": {"zizmor": true, "dependencies": true}}: while a check's flag is true its Gate
+# step runs under continue-on-error. A check is blocking only where the file sets its flag to
+# false: a missing or unreadable file, a document that is not an object with a report_only key,
+# a missing key and a value that is not true or false each read as report-only, and each is named
+# in a note. A bare boolean ({"report_only": true}, the file's first form) is that value for every
+# check. --window-flags prints the file's flags as `zizmor=<bool>` and `dependencies=<bool>` lines
+# (the window job appends them to $GITHUB_OUTPUT) and its notes on stderr, and exits 0.
 #
 # The window opens at the first `push` run of the Security workflow on main (the merge that added
 # it) and lasts --window-days. Once it has closed, or with --decision force, the report ends in a
-# DECISION block; while .github/security-window.json on main still says report_only: true, that
-# block makes the exit code 1, which fails the scheduled run so its status badge turns red and the
-# window watcher wakes the owner of the decision. With report_only: false it prints the numbers
-# and no decision (unless forced), and exits 0.
+# DECISION block with a line per check: the rule's PROMOTE or HOLD while that check is still
+# report-only on main, `already blocking` once its flag is false. While any check is still
+# report-only the block makes the exit code 1, which fails the scheduled run so its status badge
+# turns red and the window watcher wakes the owner of the decision. With every check blocking it
+# prints the numbers and no decision (unless forced), and exits 0.
 #
 # Decision rules (Task 6), each enforced by the DECISION block:
 # 1. **zizmor → blocking** iff (a) the newest `main` run's `head_count` is 0 with the checked-in
@@ -67,8 +78,9 @@
 # Nothing published here carries a CodeQL location or a secret: alerts are counted by rule,
 # severity and state.
 #
-# Exit codes: 0 the report; 1 a DECISION block while report_only is true; 2 no Security workflow,
-# a usage error, a read that failed for a reason other than 403, or an artifact read as above.
+# Exit codes: 0 the report; 1 a DECISION block while a check is still report-only; 2 no Security
+# workflow, a usage error, a read that failed for a reason other than 403, or an artifact read as
+# above.
 # CI runs its tests (security-report.test.sh) in the test job of pr-and-main.yaml.
 set -euo pipefail
 
@@ -87,7 +99,9 @@ from datetime import datetime, timedelta, timezone
 from itertools import takewhile
 from urllib.parse import quote
 
-USAGE = "usage: security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]"
+USAGE = """usage: security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]
+       security-report.sh --window-flags .github/security-window.json"""
+CHECKS = ("zizmor", "dependencies")
 PRECISION_BAR = 0.7
 MIN_DISPOSITIONS = 5
 KILL_AT = 3
@@ -102,6 +116,58 @@ REPORT_HALVES = {"zizmor": ("head_count",), "osv": ("total", "with_fix"), "govul
 def fail(message, code=2):
     print(f"security-report.sh: {message}", file=sys.stderr)
     sys.exit(code)
+
+
+def window_flags(text, where):
+    """({check: report_only}, notes) from the text of .github/security-window.json, None when there is
+    no file. A check is blocking only where the file says false; every other form reads as report-only
+    and is named in a note. Values the file holds are quoted with json.dumps, so a note is one line."""
+    every = dict.fromkeys(CHECKS, True)
+    if text is None:
+        return every, [f"{where}: missing; every check reads as report-only"]
+    try:
+        document = json.loads(text)
+    except ValueError as error:
+        return every, [f"{where}: not JSON ({error}); every check reads as report-only"]
+    if not isinstance(document, dict) or "report_only" not in document:
+        return every, [f"{where}: not an object with a report_only key; every check reads as report-only"]
+    value = document["report_only"]
+    if isinstance(value, bool):
+        return dict.fromkeys(CHECKS, value), [
+            f"{where}: report_only is one boolean ({json.dumps(value)}) for every check; the per-check form is "
+            '{"report_only": {"zizmor": …, "dependencies": …}}']
+    if not isinstance(value, dict):
+        return every, [f"{where}: report_only is {json.dumps(value)}, not an object of checks; "
+                       "every check reads as report-only"]
+    flags, notes = dict(every), []
+    for check in CHECKS:
+        if check not in value:
+            notes.append(f"{where}: report_only has no {check} key; {check} reads as report-only")
+        elif not isinstance(value[check], bool):
+            notes.append(f"{where}: report_only.{check} is {json.dumps(value[check])}, not true or false; "
+                         f"{check} reads as report-only")
+        else:
+            flags[check] = value[check]
+    for key in sorted(set(value) - set(CHECKS)):
+        notes.append(f"{where}: report_only.{json.dumps(key)} names no check ({', '.join(CHECKS)}); ignored")
+    return flags, notes
+
+
+def print_window_flags(args):
+    """--window-flags FILE: the window job's reading of the flags, as $GITHUB_OUTPUT lines."""
+    if len(args) != 1:
+        fail(f"--window-flags takes one file\n{USAGE}")
+    try:
+        with open(args[0], encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        text = None
+    flags, notes = window_flags(text, args[0])
+    for check in CHECKS:
+        print(f"{check}={json.dumps(flags[check])}")
+    for note in notes:
+        print(note, file=sys.stderr)
+    sys.exit(0)
 
 
 def parse_args(args):
@@ -130,6 +196,8 @@ def parse_args(args):
     return repo, window_days, decision
 
 
+if sys.argv[1:2] == ["--window-flags"]:
+    print_window_flags(sys.argv[2:])
 repo, window_days, decision = parse_args(sys.argv[1:])
 
 
@@ -259,22 +327,20 @@ def zizmor_findings(artifact):
     return document
 
 
-# --- the workflow, the flag, the window ---------------------------------------------------------
+# --- the workflow, the flags, the window --------------------------------------------------------
 def security_workflow():
     return next((w for w in paged(f"repos/{repo}/actions/workflows", "workflows")
                  if w.get("path") == ".github/workflows/security.yaml" or w.get("name") == "Security"), None)
 
 
-def report_only_flag():
-    """report_only from .github/security-window.json on main."""
+def report_only_flags():
+    """({check: report_only}, notes) from .github/security-window.json on main (window_flags)."""
     try:
-        flag = gh(f"repos/{repo}/contents/.github/security-window.json?ref=main")
+        document = gh(f"repos/{repo}/contents/.github/security-window.json?ref=main")
+        text = base64.b64decode(document["content"]).decode("utf-8", "replace")
     except NotFound:
-        fail(f"{repo} has a Security workflow but no .github/security-window.json on main")
-    report_only = json.loads(base64.b64decode(flag["content"]))["report_only"]
-    if not isinstance(report_only, bool):
-        fail(f".github/security-window.json on main says report_only: {report_only!r}, not true or false")
-    return report_only
+        text = None
+    return window_flags(text, ".github/security-window.json on main")
 
 
 class Window:
@@ -558,14 +624,26 @@ def zizmor_decision(main_count, dispositions):
                    f"over {dispositions.count} dispositions")
 
 
-def decide(main_count, dispositions, tool_error_runs, codeql_fixed, threads):
-    """The DECISION lines from each rule's value, with rule 5's NEXT when rule 1 promotes zizmor."""
-    promote_zizmor, zizmor_line = zizmor_decision(main_count, dispositions)
-    lines = [f"DECISION: {zizmor_line}"]
-    if promote_zizmor:
-        lines.append("NEXT: ask a repository admin to require the check `security` (rule 5)")
-    lines.append(f"DECISION: HOLD dependencies — {tool_error_runs} tool errors in the window" if tool_error_runs
-                 else "DECISION: PROMOTE dependencies")
+def dependencies_decision(tool_error_runs):
+    """Rule 2: the dependency scanners' DECISION line."""
+    if tool_error_runs:
+        return f"HOLD dependencies — {tool_error_runs} tool errors in the window"
+    return "PROMOTE dependencies"
+
+
+def decide(flags, main_count, dispositions, tool_error_runs, codeql_fixed, threads):
+    """The DECISION lines from each rule's value, with rule 5's NEXT when rule 1 promotes zizmor. A check
+    whose flag on main is already false is blocking, and is not decided again."""
+    lines = []
+    if flags["zizmor"]:
+        promote_zizmor, zizmor_line = zizmor_decision(main_count, dispositions)
+        lines.append(f"DECISION: {zizmor_line}")
+        if promote_zizmor:
+            lines.append("NEXT: ask a repository admin to require the check `security` (rule 5)")
+    else:
+        lines.append("DECISION: zizmor already blocking (report_only.zizmor is false)")
+    lines.append(f"DECISION: {dependencies_decision(tool_error_runs)}" if flags["dependencies"]
+                 else "DECISION: dependencies already blocking (report_only.dependencies is false)")
     if codeql_fixed is None:
         lines.append(f"DECISION: codeql: {CODEQL_BLOCKED}")
     elif codeql_fixed:
@@ -584,10 +662,12 @@ def main():
     if security is None:
         print(f"no Security workflow on {repo}")
         sys.exit(2)
-    report_only = report_only_flag()
+    flags, notes = report_only_flags()
     print(f"# Security report for {repo}")
     print()
-    print(f"report_only: {str(report_only).lower()}")
+    print("report_only: " + ", ".join(f"{check} {json.dumps(flags[check])}" for check in CHECKS))
+    for note in notes:
+        print(f"note: {note}")
 
     runs_path = f"repos/{repo}/actions/workflows/{security['id']}/runs"
     runs = [run for run in paged(f"{runs_path}?branch=main", "workflow_runs")
@@ -609,8 +689,9 @@ def main():
     print_secret_scanning()
     threads = review_threads(window)
 
+    still_report_only = [check for check in CHECKS if flags[check]]
     forced = decision == "force"
-    if not (forced or (window.closed and report_only)):
+    if not (forced or (window.closed and still_report_only)):
         sys.exit(0)
     print()
     print("## Decision" + (" (FORCED)" if forced else ""))
@@ -618,9 +699,9 @@ def main():
     if forced:
         print("FORCED: --decision force" if window.closed
               else "FORCED: --decision force printed this block before the window closed")
-    for line in decide(main_count, dispositions, tool_error_runs, codeql_fixed, threads):
+    for line in decide(flags, main_count, dispositions, tool_error_runs, codeql_fixed, threads):
         print(line)
-    sys.exit(1 if report_only else 0)
+    sys.exit(1 if still_report_only else 0)
 
 
 main()

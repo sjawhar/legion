@@ -4,8 +4,9 @@
 # Usage:
 #   deps-summary.sh summarize [--osv osv.json] [--govulncheck govulncheck.json]… --out deps-summary.json
 #   deps-summary.sh report --zizmor zizmor-findings.json --deps deps-summary.json --run-id ID
-#       --event EVENT --head SHA --base SHA --report-only true|false --workflows RESULT
-#       --dependencies RESULT --out security-report.json
+#       --event EVENT --head SHA --base SHA --report-only-zizmor true|false
+#       --report-only-dependencies true|false --workflows RESULT --dependencies RESULT
+#       --out security-report.json
 #
 # summarize — the dependencies job's numbers. --osv is osv-scanner's `--format json` output, given
 # only when osv-scanner ran to completion; each --govulncheck is one module's `govulncheck -format
@@ -24,12 +25,14 @@
 #     a config record, and every finding naming its OSV id and a non-empty trace.
 #
 # report — the security job's security-report.json, which scripts/security-report.sh reads, from
-# the run's two artifacts: {run_id, event, head_sha, base_sha, report_only, zizmor: {head_count,
-# new_count, by_audit, tool_error}, osv, govulncheck, tool_error, gate: {workflows, dependencies}}.
-# An empty --base or --report-only is null. A missing or malformed artifact records a tool error
-# for its half, never a clean run, and says why on stderr: zizmor-findings.json is either
-# zizmor-findings.sh's output or the workflow's {"tool_error": true} form; deps-summary.json is
-# summarize's output. The step summary's markdown table goes to stdout.
+# the run's two artifacts: {run_id, event, head_sha, base_sha, report_only: {zizmor, dependencies},
+# zizmor: {head_count, new_count, by_audit, tool_error}, osv, govulncheck, tool_error, gate:
+# {workflows, dependencies}}. Each --report-only-* is that check's flag as the window job read it
+# from .github/security-window.json; an empty one (the window job did not run) and an empty --base
+# are null. A missing or malformed artifact records a tool error for its half, never a clean run,
+# and says why on stderr: zizmor-findings.json is either zizmor-findings.sh's output or the
+# workflow's {"tool_error": true} form; deps-summary.json is summarize's output. The step summary's
+# markdown table goes to stdout.
 #
 # Exit codes: 0 written; 2 a usage error.
 # CI runs its tests (deps-summary.test.sh) in the test job of pr-and-main.yaml.
@@ -42,8 +45,11 @@ from collections import Counter
 
 USAGE = """usage: deps-summary.sh summarize [--osv osv.json] [--govulncheck govulncheck.json]... --out deps-summary.json
        deps-summary.sh report --zizmor zizmor-findings.json --deps deps-summary.json --run-id ID --event EVENT
-                              --head SHA --base SHA --report-only true|false --workflows RESULT
+                              --head SHA --base SHA --report-only-zizmor true|false
+                              --report-only-dependencies true|false --workflows RESULT
                               --dependencies RESULT --out security-report.json"""
+CHECKS = ("zizmor", "dependencies")
+FLAG_TEXT = {True: "true", False: "false", None: "unknown"}
 TOOL_ERROR = {
     "osv": {"total": None, "with_fix": None, "tool_error": True},
     "govulncheck": {"reachable": None, "informational": None, "tool_error": True},
@@ -251,9 +257,9 @@ def markdown(report):
     else:
         zizmor_row = f"{zizmor['head_count']} findings on this tree, " + (
             "no base to compare" if zizmor["new_count"] is None else f"{zizmor['new_count']} new against the base")
-    flag = {True: "true", False: "false", None: "unknown"}[report["report_only"]]
+    flags = ", ".join(f"{check} {FLAG_TEXT[report['report_only'][check]]}" for check in CHECKS)
     return "\n".join([
-        f"## Security (report_only: {flag})",
+        f"## Security (report_only: {flags})",
         "",
         "| check | result |",
         "| --- | --- |",
@@ -268,16 +274,17 @@ def markdown(report):
 
 
 def report(args):
-    flags = ("--zizmor", "--deps", "--run-id", "--event", "--head", "--base", "--report-only", "--workflows",
-             "--dependencies", "--out")
+    flags = ("--zizmor", "--deps", "--run-id", "--event", "--head", "--base", "--report-only-zizmor",
+             "--report-only-dependencies", "--workflows", "--dependencies", "--out")
     opts = options(args, flags)
     missing = [flag for flag in flags if flag not in opts]
     if missing:
         usage(f"report needs {', '.join(missing)}")
     if not opts["--run-id"].isdigit():
         usage(f"--run-id takes a run id, not {opts['--run-id']!r}")
-    if opts["--report-only"] not in ("true", "false", ""):
-        usage(f"--report-only takes true, false or nothing, not {opts['--report-only']!r}")
+    for check in CHECKS:
+        if opts[f"--report-only-{check}"] not in ("true", "false", ""):
+            usage(f"--report-only-{check} takes true, false or nothing, not {opts[f'--report-only-{check}']!r}")
     zizmor = recorded("zizmor", opts["--zizmor"], zizmor_half, opts["--zizmor"])
     deps = deps_halves(opts["--deps"])
     result = {
@@ -285,7 +292,7 @@ def report(args):
         "event": opts["--event"],
         "head_sha": opts["--head"],
         "base_sha": opts["--base"] or None,
-        "report_only": {"true": True, "false": False}.get(opts["--report-only"]),
+        "report_only": {check: {"true": True, "false": False}.get(opts[f"--report-only-{check}"]) for check in CHECKS},
         "zizmor": zizmor,
         "osv": deps["osv"],
         "govulncheck": deps["govulncheck"],

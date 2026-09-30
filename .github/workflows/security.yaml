@@ -4,11 +4,12 @@ name: Security
 # a pull request or a merge group only the findings new against the base are judged
 # (.github/scripts/zizmor-findings.sh). osv-scanner and govulncheck audit the dependencies. Each
 # scanner job ends in one Gate step, the only step that can fail on findings or tool errors, and
-# while .github/security-window.json says report_only: true that step runs under
-# continue-on-error, so every job concludes success and nothing here blocks a merge. Installs and
-# tool runs record a tool error instead of failing. The daily scheduled run also runs
+# while .github/security-window.json keeps that check report-only (report_only.zizmor for the
+# workflows job, report_only.dependencies for the dependencies job) the step runs under
+# continue-on-error, so the job concludes success and blocks no merge. Installs and tool runs
+# record a tool error instead of failing. The daily scheduled run also runs
 # scripts/security-report.sh, whose exit is that run's conclusion: it fails once the report-only
-# window has closed while report_only is still true, and the window watcher reads that off this
+# window has closed while a check is still report-only, and the window watcher reads that off this
 # workflow's status badge.
 on:
   pull_request:
@@ -22,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       decision:
-        description: force prints the day-14 decision before the window closes, and fails the run while report_only is true
+        description: force prints the day-14 decision before the window closes, and fails the run while a check is still report-only
         type: choice
         options: [none, force]
         default: none
@@ -40,18 +41,29 @@ jobs:
   window:
     runs-on: ubuntu-24.04
     outputs:
-      report_only: ${{ steps.flag.outputs.report_only }}
+      zizmor: ${{ steps.flags.outputs.zizmor }}
+      dependencies: ${{ steps.flags.outputs.dependencies }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
-      - name: Read the report-only flag
-        id: flag
+      # One flag per check. A check is blocking only where the file sets it false; any other form
+      # reads as report-only, and the step summary and an annotation name it
+      # (scripts/security-report.sh --window-flags).
+      - name: Read the report-only flags
+        id: flags
         run: |
-          report_only=$(jq -r 'if (.report_only | type) == "boolean" then .report_only
-            else error("report_only must be true or false") end' .github/security-window.json)
-          printf 'report_only=%s\n' "$report_only" >> "$GITHUB_OUTPUT"
+          scripts/security-report.sh --window-flags .github/security-window.json > flags.txt 2> notes.txt ||
+            { cat notes.txt >&2; exit 1; }
+          cat flags.txt >> "$GITHUB_OUTPUT"
+          {
+            echo "## Report-only flags (.github/security-window.json)"
+            echo
+            sed 's/^/- /' flags.txt notes.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat flags.txt
+          sed 's/^/::warning::/' notes.txt
 
   workflows:
     needs: window
@@ -161,7 +173,7 @@ jobs:
 
       - name: Gate
         if: always()
-        continue-on-error: ${{ needs.window.outputs.report_only == 'true' }}
+        continue-on-error: ${{ needs.window.outputs.zizmor != 'false' }}
         env:
           EVENT: ${{ github.event_name }}
         run: |
@@ -261,7 +273,7 @@ jobs:
 
       - name: Gate
         if: always()
-        continue-on-error: ${{ needs.window.outputs.report_only == 'true' }}
+        continue-on-error: ${{ needs.window.outputs.dependencies != 'false' }}
         run: |
           if ! jq -e '(.osv.tool_error or .govulncheck.tool_error) | not' deps-summary.json > /dev/null; then
             echo "::error::a dependency scanner recorded a tool error; see the steps above"
@@ -312,13 +324,15 @@ jobs:
           EVENT: ${{ github.event_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          REPORT_ONLY: ${{ needs.window.outputs.report_only }}
+          ZIZMOR_REPORT_ONLY: ${{ needs.window.outputs.zizmor }}
+          DEPENDENCIES_REPORT_ONLY: ${{ needs.window.outputs.dependencies }}
           WORKFLOWS_RESULT: ${{ needs.workflows.result }}
           DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
         run: |
           .github/scripts/deps-summary.sh report --zizmor artifacts/zizmor-findings.json \
             --deps artifacts/deps-summary.json --run-id "$RUN_ID" --event "$EVENT" --head "$HEAD_SHA" \
-            --base "$BASE_SHA" --report-only "$REPORT_ONLY" --workflows "$WORKFLOWS_RESULT" \
+            --base "$BASE_SHA" --report-only-zizmor "$ZIZMOR_REPORT_ONLY" \
+            --report-only-dependencies "$DEPENDENCIES_REPORT_ONLY" --workflows "$WORKFLOWS_RESULT" \
             --dependencies "$DEPENDENCIES_RESULT" --out security-report.json >> "$GITHUB_STEP_SUMMARY"
           cat security-report.json
           {

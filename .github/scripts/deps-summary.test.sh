@@ -119,29 +119,31 @@ check "no subcommand exits 2" "$(is "$rc" 2)"
 summarize deps --osv "$testdata/osv.json" --govulncheck "$testdata/govulncheck.json" \
   --govulncheck "$testdata/govulncheck-clean.json"
 
-# report NAME ZIZMOR DEPS [ARG…]: runs `deps-summary.sh report` for run 42, a pull request, into
-# $work/NAME.json; its stdout (the step summary) in $work/NAME.md, stderr in $work/NAME.stderr.
+# report NAME ZIZMOR DEPS [ARG…]: runs `deps-summary.sh report` for run 42, a pull request with
+# both checks report-only, into $work/NAME.json; its stdout (the step summary) in $work/NAME.md,
+# stderr in $work/NAME.stderr.
 report() {
   local name="$1" zizmor="$2" deps="$3"
   shift 3
   rc=0
   "$summary_script" report --zizmor "$zizmor" --deps "$deps" --run-id 42 --event pull_request \
-    --head abc123 --base def456 --report-only true --workflows success --dependencies success \
-    --out "$work/$name.json" "$@" > "$work/$name.md" 2> "$work/$name.stderr" || rc=$?
+    --head abc123 --base def456 --report-only-zizmor true --report-only-dependencies true \
+    --workflows success --dependencies success --out "$work/$name.json" "$@" \
+    > "$work/$name.md" 2> "$work/$name.stderr" || rc=$?
 }
 
 echo "=== 6. report: the run's security report from its two artifacts ==="
 report full "$work/zizmor-findings.json" "$work/deps.json"
 check "exits 0" "$(is "$rc" 0)"
-check "the run's identity and the flag" \
-  "$(is "$(out full '[.run_id, .event, .head_sha, .base_sha, .report_only]')" '[42,"pull_request","abc123","def456",true]')"
+check "the run's identity and each check's flag" \
+  "$(is "$(out full '[.run_id, .event, .head_sha, .base_sha, .report_only]')" '[42,"pull_request","abc123","def456",{"zizmor":true,"dependencies":true}]')"
 check "zizmor: head count, new count and the count per audit" \
   "$(is "$(out full .zizmor)" '{"head_count":6,"new_count":0,"by_audit":{"artipacked":1,"excessive-permissions":1,"template-injection":2,"unpinned-uses":2},"tool_error":false}')"
 check "osv and govulncheck as summarized" \
   "$(is "$(out full '[.osv, .govulncheck]')" '[{"total":5,"with_fix":3,"tool_error":false},{"reachable":1,"informational":1,"tool_error":false}]')"
 check "no tool error" "$(is "$(out full .tool_error)" false)"
 check "the scanner jobs' results" "$(is "$(out full .gate)" '{"workflows":"success","dependencies":"success"}')"
-check "the step summary's rows" "$(is "$(cat "$work/full.md")" "## Security (report_only: true)
+check "the step summary's rows" "$(is "$(cat "$work/full.md")" "## Security (report_only: zizmor true, dependencies true)
 
 | check | result |
 | --- | --- |
@@ -150,14 +152,21 @@ check "the step summary's rows" "$(is "$(cat "$work/full.md")" "## Security (rep
 | osv-scanner | 5 vulnerabilities, 3 with a fixed version |
 | govulncheck | 1 reachable, 1 informational |")"
 
-echo "=== 7. report: no base, no flag, and a run with no base to compare ==="
+echo "=== 7. report: no base, no flags, and a run with no base to compare ==="
 "$script_dir/zizmor-findings.sh" --head "$testdata/zizmor.json" --out "$work/zizmor-push.json"
-report push "$work/zizmor-push.json" "$work/deps.json" --event push --base "" --report-only ""
-check "base_sha and report_only are null" "$(is "$(out push '[.base_sha, .report_only]')" '[null,null]')"
+report push "$work/zizmor-push.json" "$work/deps.json" --event push --base "" --report-only-zizmor "" \
+  --report-only-dependencies ""
+check "base_sha and both flags are null" \
+  "$(is "$(out push '[.base_sha, .report_only]')" '[null,{"zizmor":null,"dependencies":null}]')"
 check "new_count is null" "$(is "$(out push .zizmor.new_count)" null)"
-check "the summary says there is no base and the flag is unknown" \
+check "the summary says there is no base and the flags are unknown" \
   "$( [ "$(contains "$(cat "$work/push.md")" '^| zizmor | 8 findings on this tree, no base to compare |$')" = true ] &&
-    [ "$(contains "$(cat "$work/push.md")" '^## Security (report_only: unknown)$')" = true ] && echo true || echo false)"
+    [ "$(contains "$(cat "$work/push.md")" '^## Security (report_only: zizmor unknown, dependencies unknown)$')" = true ] && echo true || echo false)"
+report mixed "$work/zizmor-findings.json" "$work/deps.json" --report-only-zizmor false
+check "one check promoted: each flag is recorded on its own" \
+  "$(is "$(out mixed .report_only)" '{"zizmor":false,"dependencies":true}')"
+check "and the summary names both" \
+  "$(contains "$(cat "$work/mixed.md")" '^## Security (report_only: zizmor false, dependencies true)$')"
 
 echo "=== 8. report: a tool error or a missing or malformed artifact is that half's tool error ==="
 echo '{"tool_error": true, "head_count": null, "new_count": null}' > "$work/in-zizmor-error.json"
@@ -189,7 +198,7 @@ check "a recorded osv tool error reads 'tool error' in the summary" \
 echo "=== 9. report: usage errors exit 2 ==="
 report bad-run "$work/zizmor-findings.json" "$work/deps.json" --run-id x
 check "a run id that is not a number exits 2" "$(is "$rc" 2)"
-report bad-flag "$work/zizmor-findings.json" "$work/deps.json" --report-only maybe
-check "a report-only value other than true, false or empty exits 2" "$(is "$rc" 2)"
+report bad-flag "$work/zizmor-findings.json" "$work/deps.json" --report-only-dependencies maybe
+check "a flag other than true, false or empty exits 2" "$(is "$rc" 2)"
 
 summary "deps-summary.sh summarizes the dependency scanners and assembles the security report"

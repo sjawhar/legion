@@ -82,9 +82,9 @@ sha() { printf '%s' "$1" | sha1sum | cut -c1-40; }
 # append FILE JQ-PATH OBJECT: appends OBJECT to the array at JQ-PATH in FILE.
 append() { jq --argjson x "$3" "$2 += [\$x]" "$1" > "$1.next" && mv "$1.next" "$1"; }
 
-# setup NAME START: a case directory with the Security and CodeQL workflows, report_only true,
-# the window's first push run on main (run 1000) at START with a clean report, and two CodeQL
-# analyses on main. Sets $d.
+# setup NAME START: a case directory with the Security and CodeQL workflows, both checks
+# report-only, the window's first push run on main (run 1000) at START with a clean report, and
+# two CodeQL analyses on main. Sets $d.
 setup() {
   d="$work/$1"
   mkdir -p "$d"
@@ -94,7 +94,7 @@ setup() {
   {"id": 101, "name": "Security", "path": ".github/workflows/security.yaml"},
   {"id": 102, "name": "CodeQL", "path": ".github/workflows/codeql.yaml"}]}
 JSON
-  echo '{"report_only": true}' > "$d/window.json"
+  echo '{"report_only": {"zizmor": true, "dependencies": true}}' > "$d/window.json"
   echo '{"total_count": 0, "workflow_runs": []}' > "$d/runs.json"
   cat > "$d/codeql-analyses.json" <<'JSON'
 [{"id": 1, "ref": "refs/heads/main", "category": "/language:go", "tool": {"name": "CodeQL"}},
@@ -166,8 +166,8 @@ security_report() {
   dir=$(mktemp -d "$work/report.XXXXXX")
   printf '%s' "$1" > "$dir/zizmor-findings.json"
   "$producers/deps-summary.sh" report --zizmor "$dir/zizmor-findings.json" --deps "$work/deps/$2.json" \
-    --run-id 1 --event push --head 0 --base "" --report-only true --workflows success --dependencies success \
-    --out "$dir/security-report.json" > /dev/null
+    --run-id 1 --event push --head 0 --base "" --report-only-zizmor true --report-only-dependencies true \
+    --workflows success --dependencies success --out "$dir/security-report.json" > /dev/null
   cat "$dir/security-report.json"
 }
 clean_report=$(security_report "$(zizmor_findings '[]')" clean)
@@ -273,6 +273,8 @@ add_report 1003 "$(security_report "$(zizmor_findings "$(audit "$a_title")" '[]'
 echo '[{"number": 1, "state": "open", "secret_type": "example", "secret": "not-a-real-value-123"}]' > "$d/secret-alerts.json"
 run_report --repo sjawhar/legion
 check "exits 0" "$(is "$rc" 0)"
+check "prints each check's flag" "$(has "report_only: zizmor true, dependencies true")"
+check "and no note on a window file in its shape" "$(lacks "note:")"
 check "the push run on main has a row" "$(has "| 1000 | push | $(sha 1000 | cut -c1-7) | 0/- | 0/0 | 0/0 | no |")"
 check "the first scheduled run's row carries its counts" \
   "$(has "| 1001 | schedule | $(sha 1001 | cut -c1-7) | 3/- | 5/3 | 1/1 | no |")"
@@ -548,13 +550,101 @@ run_report
 check "narrows the prompt row" "$(has "NARROW: prompt row (3 not a defect, 0 fixed)")"
 check "keeps the supply-chain row" "$(has "keep: supply-chain row (1 not a defect, 2 fixed)")"
 
-echo "=== R11. report_only false: the report prints, with no decision ==="
+echo "=== R11. every check promoted: the report prints, with no decision ==="
 setup r11 "15 days ago"
-echo '{"report_only": false}' > "$d/window.json"
+echo '{"report_only": {"zizmor": false, "dependencies": false}}' > "$d/window.json"
 run_report
 check "exits 0" "$(is "$rc" 0)"
 check "prints the run table" "$(has "| 1000 | push |")"
 check "prints no decision" "$(lacks "DECISION:")"
+check "prints each check's flag" "$(has "report_only: zizmor false, dependencies false")"
+setup r11-bare "15 days ago"
+echo '{"report_only": false}' > "$d/window.json"
+run_report
+check "a bare false (the file's first form) promotes both checks: exits 0" "$(is "$rc" 0)"
+check "and reads false for each" "$(has "report_only: zizmor false, dependencies false")"
+check "and names the bare boolean" "$(has "note: .github/security-window.json on main: report_only is one boolean")"
+
+echo "=== per-check flags: each check's promotion is decided on its own ==="
+setup promoted-zizmor "15 days ago"
+echo '{"report_only": {"zizmor": false, "dependencies": true}}' > "$d/window.json"
+run_report
+check "zizmor promoted, dependencies still report-only after the window: exits 1" "$(is "$rc" 1)"
+check "zizmor reads as already blocking" "$(has "DECISION: zizmor already blocking (report_only.zizmor is false)")"
+check "zizmor is not decided again" "$(lacks "DECISION: PROMOTE zizmor")"
+check "no rule 5 request for a check already promoted" "$(lacks "NEXT:")"
+check "dependencies is still decided" "$(has "DECISION: PROMOTE dependencies")"
+setup promoted-dependencies "15 days ago"
+echo '{"report_only": {"zizmor": true, "dependencies": false}}' > "$d/window.json"
+run_report
+check "dependencies promoted, zizmor still report-only after the window: exits 1" "$(is "$rc" 1)"
+check "zizmor is decided" "$(has "DECISION: PROMOTE zizmor")"
+check "dependencies reads as already blocking" \
+  "$(has "DECISION: dependencies already blocking (report_only.dependencies is false)")"
+check "dependencies is not decided again" "$(lacks "DECISION: PROMOTE dependencies")"
+setup promoted-open "3 days ago"
+echo '{"report_only": {"zizmor": false, "dependencies": true}}' > "$d/window.json"
+run_report
+check "one check still report-only inside the window: exits 0, no decision" \
+  "$( [ "$rc" = 0 ] && [ "$(lacks "DECISION:")" = true ] && echo true || echo false)"
+
+echo "=== a window file not in its shape: each check it does not set false reads as report-only, named ==="
+# window_case NAME CONTENT|- ZIZMOR DEPENDENCIES NOTE: main's window file holds CONTENT (- for no
+# file); the report reads the flags ZIZMOR and DEPENDENCIES and prints NOTE.
+window_case() {
+  setup "window-$1" "15 days ago"
+  if [ "$2" = - ]; then rm "$d/window.json"; else printf '%s\n' "$2" > "$d/window.json"; fi
+  run_report
+  check "$1: reads zizmor $3, dependencies $4" "$(has "report_only: zizmor $3, dependencies $4")"
+  check "$1: names it" "$(has "note: .github/security-window.json on main: $5")"
+  check "$1: exits 1 (a check is still report-only after the window)" "$(is "$rc" 1)"
+}
+window_case missing - true true "missing; every check reads as report-only"
+window_case not-json '{"report_only":' true true "not JSON"
+window_case not-an-object '[false]' true true "not an object with a report_only key; every check reads as report-only"
+window_case no-report-only '{"report-only": false}' true true "not an object with a report_only key"
+window_case string '{"report_only": "false"}' true true \
+  'report_only is "false", not an object of checks; every check reads as report-only'
+window_case missing-key '{"report_only": {"zizmor": false}}' false true \
+  "report_only has no dependencies key; dependencies reads as report-only"
+window_case non-boolean '{"report_only": {"zizmor": "false", "dependencies": false}}' true false \
+  'report_only.zizmor is "false", not true or false; zizmor reads as report-only'
+window_case unknown-key '{"report_only": {"zizmor": true, "dependencies": true, "codeql": false}}' true true \
+  'report_only."codeql" names no check (zizmor, dependencies); ignored'
+
+echo "=== --window-flags: the window job's reading of the file, one output line per check ==="
+# run_flags FILE: runs the script's --window-flags mode; stdout in $flags_out, stderr in
+# $flags_err, exit code in $rc.
+run_flags() {
+  rc=0
+  flags_out=$("$report" --window-flags "$1" 2> "$work/flags.err") || rc=$?
+  flags_err=$(< "$work/flags.err")
+}
+mkdir -p "$work/flags"
+echo '{"report_only": {"zizmor": true, "dependencies": false}}' > "$work/flags/split.json"
+run_flags "$work/flags/split.json"
+check "exits 0" "$(is "$rc" 0)"
+check "prints one GITHUB_OUTPUT line per check" "$(is "$flags_out" "zizmor=true
+dependencies=false")"
+check "and no note" "$(is "$flags_err" "")"
+echo '{"report_only": true}' > "$work/flags/bare.json"
+run_flags "$work/flags/bare.json"
+check "a bare boolean is that value for each check" "$(is "$flags_out" "zizmor=true
+dependencies=true")"
+check "and is named on stderr" "$(contains "$flags_err" "report_only is one boolean")"
+run_flags "$work/flags/nowhere.json"
+check "no file: exits 0, every check report-only" "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=true
+dependencies=true" ] && echo true || echo false)"
+check "and names the file" "$(contains "$flags_err" "nowhere.json: missing")"
+echo '{"report_only": {"zizmor": 0, "dependencies": false}}' > "$work/flags/number.json"
+run_flags "$work/flags/number.json"
+check "a number is not false: that check stays report-only" "$(is "$flags_out" "zizmor=true
+dependencies=false")"
+run_flags "$script_dir/../.github/security-window.json"
+check "the checked-in window file is in the per-check shape: no note" "$(is "$flags_err" "")"
+rc=0
+"$report" --window-flags > /dev/null 2>&1 || rc=$?
+check "--window-flags without a file exits 2" "$(is "$rc" 2)"
 
 echo "=== R12. --decision force with the window open ==="
 setup r12 "3 days ago"
