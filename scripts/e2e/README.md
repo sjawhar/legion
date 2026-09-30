@@ -617,7 +617,10 @@ namespace label `legion.dev/project=legsmoke` are shared.
 **What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
 the run that owns it. A signal to the whole process group does not stop the removal:
 - a closed pane, a Ctrl-C, or `timeout`'s TERM;
-- the transcript's `tee` ignores those signals;
+- the transcript's `tee` ignores those signals and SIGPIPE. Run as `tee -p`, it keeps writing the
+  transcript after the driver's own reader is gone (a supervised launcher's `tee`, stopped with the
+  run), so the teardown's commands, `kubectl delete` among them, never fail on a write to a closed
+  pipe;
 - the teardown ignores a second signal and SIGPIPE;
 - the teardown writes to the transcript even when the signal interrupted a command whose output
   went to `/dev/null`;
