@@ -134,7 +134,7 @@ drops it from the waiting line; taking it off an admitted tree does not stop it.
 
 Picking the next work is your job: nobody hand-feeds issues to Legion. Keep every admission slot
 filled with the highest-priority concrete issue Legion can take. The unit of Legion work is a
-leaf, an issue with no open children, never an umbrella that holds other issues.
+leaf, an issue with no children, never an umbrella that holds other issues.
 
 **When.** At every start (step 3 above), and on each `slot-free on <KEY>` wake: the daemon
 released `<KEY>`'s slot, because its tree finished or left the workflow, and no waiting root took
@@ -152,7 +152,7 @@ issue of the project is in scope.
 you add). With none free, stop.
 
 **Candidates.** The project's open issues in `todo`, `backlog`, or `triage`, roots and children
-alike, that have no open children and do not carry the `legion` label. The Go daemon runs only
+alike, that have no children at all and do not carry the `legion` label. The Go daemon runs only
 labelled roots, so every root it ran since the daemon required the label carries it: a labelled
 root in `todo` is the daemon's to admit or queue, one in `triage` is yours to triage (step 2
 above), and one anywhere else was parked by Legion or by a person, and the walk leaves it. A child
@@ -184,8 +184,8 @@ leans on `External links:`, and the label row is the one that never depends on h
 | Skip when | How you check it |
 |---|---|
 | It carries the `legion` label | `Labels:` lists `legion`, in any case. Legion has the issue or had it, as **Candidates** above says. |
-| It has an open child | `dispatch_read({ ref: "dispatch://<KEY>/children" })` lists a child whose status is not `done`. It is an umbrella: its children are the candidates, each in its own place in the order. |
-| An ancestor is a live Legion tree | Follow `Links:` up through each `child_of` parent, reading each one. Skip when any ancestor is in `admission.active` or `admission.waiting`: that tree's architect owns the issue. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
+| It has any child | `dispatch_read({ ref: "dispatch://<KEY>/children" })` lists any child, open or `done`. It is an umbrella, and a finished umbrella is still no leaf. That also skips an issue whose only child is done, which is accepted. Its open children are candidates themselves, each in its own place in the order. |
+| An ancestor is Legion's or claimed | Follow `Links:` up through each `child_of` parent, reading each one, and skip when any ancestor carries the `legion` label, is recorded under `issues` in `legion state --json`, or holds a claim (its `Claimed by:` names anyone and does not end `· not running`; `· liveness unknown` counts as holding), whatever its status. A Legion ancestor, running or parked, owns its children, and a claimed one means a session intends to implement that area. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
 | Someone is designing it | `Open asks:` lists any ask, a `Spec approval: awaiting …` line shows the spec waits on a human, or `Events:` show an `artifact.version` or an `ask.opened` from the last seven days: a session or a person is shaping it even when nobody claims or routes it. |
 | Legion ran it without the label now on it | `legion state --json` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every `legion status` (yours included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`, closed-tree activity). |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
