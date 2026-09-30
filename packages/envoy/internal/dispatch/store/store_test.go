@@ -752,7 +752,8 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 // 0053 pairs an ask's kind with its approval: an approval ask carries an approval whose known keys
 // hold the types model.AskApproval decodes and name a document version, and no other kind carries
 // one, not even the JSON null. A hand-written row that breaks the pairing either way is refused at
-// insert. The rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are
+// insert, and an approval the route writes is stored at every version a document can have. The
+// rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are
 // skipped, which go test reports only under -v, and dispatch://LEGION-429 deletes their entries
 // when it adds the check that refuses them.
 func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
@@ -828,6 +829,11 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// = 'object'), would store this, and ScanAsk would then put an approval on the question.
 		{"a question carrying the JSON null", "question", new("null"), true},
 		{"an approval ask naming its document", "approval", new(approval), false},
+		// The route writes every version a document has, and a check that admitted too few would
+		// refuse its own insert. artifact_versions.number is an integer: 10 is the first version
+		// with two digits, and 2147483647 the highest it holds.
+		{"an approval ask at version 10", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10}`), false},
+		{"an approval ask at the highest version a document can have", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":2147483647}`), false},
 		{"a question naming none", "question", nil, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
