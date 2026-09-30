@@ -181,6 +181,9 @@ EOF
 margin=300
 window=300
 deadline_ms=9500
+# A mint (hawk-token's Python start and one refresh grant) took 2 to 4.5 s on the devbox, so a call
+# left with less than this after its wait starts none: it could not finish, and would hold the lock.
+min_mint_ms=1000
 set -o pipefail
 umask 077
 # The call's clock starts with its process, which is when Oh My Pi started the command (/bin/sh
@@ -228,7 +231,7 @@ fi
 # The call that held the lock may have kept a key while this one waited.
 serve_kept
 left_ms
-[ "$left" -gt 0 ] || unserved timeout "waited $((deadline_ms - left)) ms for another call's mint and took the lock with none of the call's $deadline_ms ms left"
+[ "$left" -ge "$min_mint_ms" ] || unserved timeout "waited $((deadline_ms - left)) ms for another call's mint and took the lock with $left ms of the call's $deadline_ms ms left, under the $min_mint_ms ms a mint needs"
 printf -v mint_s '%d.%03d' $((left / 1000)) $((left % 1000))
 # Only the call holding the lock writes err. The lock is this call's alone: hawk-token starts a
 # detached refresh that would hold it for minutes.

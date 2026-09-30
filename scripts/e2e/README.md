@@ -1126,9 +1126,11 @@ detached refresh that would otherwise hold the lock for minutes.
 
 Oh My Pi kills a `!command` 10 s after it starts it, and a killed call records nothing, so each
 call gives up at 9500 ms of a clock that starts with its own process (on a loaded devbox bash took
-580 ms to reach its first line), whether it is waiting on the lock or minting under `timeout`. A
-waiter's wait is bounded by one mint, since it started no earlier than the call it waits on, so a
-wave served by a mint that succeeds is served inside every caller's ten seconds. Each call that
+580 ms to reach its first line), whether it is waiting on the lock or minting under `timeout`, and a
+waiter that takes the lock with under 1000 ms left starts no mint (one took 2 to 4.5 s on the
+devbox), so a doomed mint never holds the lock from a caller with more time. A waiter's wait is
+bounded by one mint, since it started no earlier than the call it waits on, so a wave served by a
+mint that succeeds is served inside every caller's ten seconds. Each call that
 gets no key appends one tab-separated line to `<dir>/hawk-token.unserved`: the time, the caller's
 pid, the directory Oh My Pi ran it in (the agent's own), the reason, and a detail. The reason is
 `timeout` when the call ran out of time — its own deadline, its wait behind another call's mint, or

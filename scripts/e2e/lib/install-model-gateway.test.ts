@@ -183,9 +183,14 @@ describe("the model gateway key command", () => {
 
   test("gives up on a mint that outlasts the caller, and on the wait behind it, before Oh My Pi's ten seconds", async () => {
     const { run, dest, mints, keyCommand } = install();
-    const calls = await Promise.all(
-      [1, 2].map((n) => call(keyCommand, join(run, `pane-${n}`), mints, { sleep: 12 }))
-    );
+    // Real time throughout: the deadline under test is the key command's own wall clock, in another
+    // process, which no fake timer reaches. The second caller starts 300 ms after the first, so it
+    // can take the lock the first releases when its mint is stopped with only a few hundred
+    // milliseconds left: too little to mint.
+    const calls = await Promise.all([
+      call(keyCommand, join(run, "pane-1"), mints, { sleep: 12 }),
+      Bun.sleep(300).then(() => call(keyCommand, join(run, "pane-2"), mints, { sleep: 12 })),
+    ]);
 
     expect(mintCount(mints)).toBe(1);
     for (const c of calls) {
