@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -297,6 +299,13 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// The set is numbered 1 to N with no gap, and the runner records every one of them. Load does not
+// require contiguity, since the runner does not depend on it; this test does, because a gap is how
+// a migration comes to run in two orders. A branch that takes a number ahead of one not yet on
+// main (0054 while another pull request holds 0053) is green without this test; if it merges
+// first, production applies 0054, and the 0053 that merges after it runs after 0054 there while
+// every fresh database runs it before. The strictness costs such a branch a red run until the
+// lower number lands; that is the price of every database applying one order.
 func TestMigrateRecordsEveryVersionContiguously(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -360,7 +369,7 @@ func assertContiguousVersions(t *testing.T, ctx context.Context, store *Store) {
 		want[i] = i + 1
 	}
 	if !reflect.DeepEqual(versions, want) {
-		t.Errorf("recorded versions = %v, want %v", versions, want)
+		t.Errorf("recorded versions = %v, want 1 to %d with none missing: a gap lets a lower number merge after a higher one and run after it in production, before it everywhere else; take the next free number on main", versions, len(files))
 	}
 }
 
@@ -425,24 +434,21 @@ func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	`); err != nil {
 		t.Fatalf("create schema migrations table: %v", err)
 	}
-	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {
-		t.Fatalf("list migrations: %v", err)
+		t.Fatalf("load migrations: %v", err)
 	}
-	for _, filename := range files {
-		version, err := migrationVersion(filename)
-		if err != nil {
-			t.Fatalf("parse %s: %v", filename, err)
+	watchPool, err := pgmigrate.OpenWatchPool(ctx, store.Pool.Config())
+	if err != nil {
+		t.Fatalf("open lock watch pool: %v", err)
+	}
+	defer watchPool.Close()
+	for _, migration := range migrations {
+		if migration.Version > maxVersion {
+			break
 		}
-		if version > maxVersion {
-			continue
-		}
-		contents, err := migrationFiles.ReadFile(filename)
-		if err != nil {
-			t.Fatalf("read %s: %v", filename, err)
-		}
-		if err := store.applyMigration(ctx, version, string(contents)); err != nil {
-			t.Fatalf("apply %s: %v", filename, err)
+		if err := store.applyMigration(ctx, watchPool, migration); err != nil {
+			t.Fatalf("apply %s: %v", migration.Name, err)
 		}
 	}
 }
@@ -621,25 +627,6 @@ func TestMigrate0009DropsMalformedArtifactReferences(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("0009 migration record count = %d, want 1", count)
-	}
-}
-
-func TestMigrationVersionParsesNumericFilenamePrefix(t *testing.T) {
-	for _, tc := range []struct {
-		filename string
-		want     int
-	}{
-		{filename: "migrations/0001_init.up.sql", want: 1},
-		{filename: "migrations/0012_add_events.up.sql", want: 12},
-	} {
-		got, err := migrationVersion(tc.filename)
-		if err != nil {
-			t.Errorf("%s: %v", tc.filename, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("%s: got %d, want %d", tc.filename, got, tc.want)
-		}
 	}
 }
 
