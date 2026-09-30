@@ -378,9 +378,9 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 // TestSendHandlerRefusesAModeThatIsNotADeliveryMode proves the listener decides what a delivery
 // mode is, rather than deferring to what the target session advertises. `capabilities` is an
 // open string list the session itself writes at registration, so "no session advertises a bogus
-// capability" was an assumption about every present and future client, not a property of this
-// boundary. A session that advertises "agentstream" and a frame claiming that mode used to pass
-// both checks and reach the receiver; now the mode itself is refused, as the Dispatch server's
+// capability" is an assumption about every present and future client, not a property of this
+// boundary. A session that advertises "agentstream" and a frame claiming that mode would pass
+// both checks and reach the receiver, so the mode itself is refused, as the Dispatch server's
 // own `validDelivery` refuses it.
 func TestSendHandlerRefusesAModeThatIsNotADeliveryMode(t *testing.T) {
 	client := setupPublishTestClient(t)

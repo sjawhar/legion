@@ -1424,9 +1424,9 @@ func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.
 	}
 }
 
-// A `with` whose text the inline parser cannot hold must be refused, not cut short: an indented
-// code block after the first paragraph used to vanish - and every paragraph after it with it -
-// while the batch reported itself changed.
+// A `with` whose text the inline parser cannot hold must be refused, not cut short: cut short, an
+// indented code block after the first paragraph would vanish - and every paragraph after it with
+// it - while the batch reported itself changed.
 func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
 	for _, test := range []struct {
 		with    string

@@ -1158,10 +1158,10 @@ func TestGithubEnvelopesWorkflowRunCompleted(t *testing.T) {
 }
 
 func TestGithubEnvelopesWorkflowRunLargeRunIDNotScientific(t *testing.T) {
-	// Regression: real GitHub run_ids are 11+ digit integers. JSON unmarshals
-	// them as float64, and fmt.Sprintf("%v", ...) used to render them in
-	// scientific notation (e.g. "2.5964358269e+10"). The payload must carry
-	// the integer form so downstream consumers can parse it as an ID.
+	// Real GitHub run_ids are 11+ digit integers. JSON unmarshals them as
+	// float64, and fmt.Sprintf("%v", ...) renders those in scientific notation
+	// (e.g. "2.5964358269e+10"). The payload must carry the integer form so
+	// downstream consumers can parse it as an ID.
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "workflow_run",
 		Delivery: "d-wf-bigid",

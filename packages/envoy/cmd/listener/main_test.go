@@ -2383,9 +2383,8 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 // hasCapability, api.go) before forwarding to the holder: a role-lane envelope whose payload
 // carries a targeted Dispatch frame naming a mode the current holder does not advertise is
 // refused with delivery_failed, exactly like a stale or unreachable holder, rather than
-// reaching a holder that cannot execute it. This closes the consistency gap the send-boundary
-// fix left open: role forwarding never goes through /v1/messages/send, so it previously
-// bypassed the guard entirely.
+// reaching a holder that cannot execute it. Role forwarding never goes through
+// /v1/messages/send, so without its own guard it would bypass the send boundary's entirely.
 func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "refuse-unadvertised-mode"

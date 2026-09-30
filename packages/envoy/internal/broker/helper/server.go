@@ -517,8 +517,8 @@ func (s *Server) save() {
 // mirroring renewLoop's own revoke-before-re-enroll on a refused renew: the real broker's
 // idempotent-enroll conflict is keyed on (launcher_credential_id, runtime_id), so a fresh enroll
 // racing ahead of the old row's revoke can be refused outright (409 ALREADY_ENROLLED) even though
-// it carries a fresh key, which adopting first and revoking independently in a separate goroutine
-// used to allow. That revoke runs inside the one goroutine adopt starts for the re-pinned
+// it carries a fresh key, as adopting first and revoking independently in a separate goroutine
+// would allow. That revoke runs inside the one goroutine adopt starts for the re-pinned
 // session, never on this loop's own goroutine, so one session waiting on its own revoke never
 // blocks Recover from moving on to the next recorded session. Should that re-pinned session end
 // (its process exits, or it is unregistered) while its prior enrollment's revoke is still

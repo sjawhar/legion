@@ -375,12 +375,12 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 // the sender learns immediately whether the holder received it. After the
 // dedupe/attempt-cache skip -- a duplicate of an envelope already forwarded
 // (or already being forwarded) is disposed of first, with no forward and no
-// exception, exactly as before this guard existed -- and before forwarding,
+// exception -- and before forwarding,
 // it applies the same capability guard as sendHandler (frameDeliveryMode +
 // hasCapability, api.go): a holder that does not advertise the envelope's
-// own targeted delivery mode is refused like a stale holder, closing the
-// same consistency gap on this lane -- role forwarding previously bypassed
-// the guard entirely, since it never goes through /v1/messages/send. The
+// own targeted delivery mode is refused like a stale holder. Role forwarding
+// needs its own copy of the guard because it never goes through
+// /v1/messages/send. The
 // ordering matters: guarding before the dedupe check would re-evaluate an
 // already-delivered duplicate against the holder's *current* capabilities,
 // which can have changed since the original successful forward, and

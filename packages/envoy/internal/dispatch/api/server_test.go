@@ -1899,8 +1899,8 @@ func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
 	scanner := bufio.NewScanner(stream.Body)
 	// The 1005 seeded events plus the issue creation exceed one capped page
 	// (maxSSEReplay=1000); a single connection pages through all of them without
-	// ever disconnecting — a capped page used to end the stream and force a client
-	// reconnect, which left a gap where a low id committing between "read this page"
+	// ever disconnecting: a capped page that ended the stream and forced a client
+	// reconnect would leave a gap where a low id committing between "read this page"
 	// and "a new connection subscribes" could be lost forever.
 	for wantID := 2; wantID <= 1007; wantID++ {
 		frame := readSSEFrame(t, scanner)
@@ -2263,11 +2263,11 @@ func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
 	}
 }
 
-// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging proves the fix for
-// the recurrence: a capped catch-up page used to end the stream (forcing a client
-// reconnect with a higher Last-Event-ID), which meant a still-uncommitted low id —
-// invisible to every catch-up page, since each page's cursor only moves forward —
-// could never be recovered once it finally committed. Keeping one subscription
+// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging: a capped catch-up
+// page that ended the stream (forcing a client reconnect with a higher
+// Last-Event-ID) would mean a still-uncommitted low id — invisible to every
+// catch-up page, since each page's cursor only moves forward — could never be
+// recovered once it finally committed. Keeping one subscription
 // attached across every page closes that gap.
 func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T) {
 	handler, database, broker := newTestHandlerWithBroker(t)
@@ -2353,10 +2353,9 @@ func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T)
 	}
 }
 
-// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost proves the fix
-// for the cold-start event-loss recurrence: the client used to make two separate
-// requests (GET /events/head, then GET /events?since=<head>), so a transaction
-// that grabbed a lower id before the head was read could commit in the gap
+// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost: a client making
+// two separate requests (GET /events/head, then GET /events?since=<head>) would let a
+// transaction that grabbed a lower id before the head was read commit in the gap
 // between those two requests and never be delivered — invisible to a catch-up
 // query (its id is <= since) and to the subscription (registered only by the
 // second request, after the gap). A cold request (no since=, no Last-Event-ID)

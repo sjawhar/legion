@@ -1485,7 +1485,7 @@ test("an agent's reply on a snoozed row leaves it in Later and off Waiting on yo
     expect(rowIds()).toEqual([]);
 
     // The agent answers: the turn is the reader's again and the row carries the agent's reply -
-    // exactly the change that used to pull a deferred ask back onto the list.
+    // exactly the change that could pull a deferred ask back onto the list.
     act(() => {
       queryClient.setQueryData<InboxRow[]>(
         ["inbox"],
