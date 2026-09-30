@@ -12,9 +12,9 @@
 # agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), the
 # route every devbox agent session uses, and no Anthropic key reaches a pane. The proof human's
 # reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent
-# App), never a Legion App. The shim routes to that App only inside an agent session, so run the
-# script from an Oh My Pi session's bash tool: `prerequisites` refuses to start, naming the account,
-# when gh acts as anyone else (require_proof_human, lib/workflow.sh).
+# App), never a Legion App, so run the script from the operator's own Oh My Pi session, not a Legion
+# pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses to start otherwise
+# (require_proof_human, lib/workflow.sh).
 # The App private keys are resolved by the daemon through private_key_command; they never enter
 # this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail

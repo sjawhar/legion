@@ -19,18 +19,18 @@
 # It never merges into sjawhar/legion-smoke's main: each proof PR is retargeted to a scratch base
 # branch before any merge, and the scratch base is deleted at the end.
 #
-# Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from an Oh My Pi session's bash tool, with
-# the Stage 3 proof's two required inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS
+# Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from the operator's own Oh My Pi session,
+# with the Stage 3 proof's two required inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS
 # (scripts/e2e/README.md), and three of its own, since it creates no Docker container:
 # ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running Postgres container (user postgres, password
 # ci) in which the daemon and Dispatch take their own databases, and ACCEPT_NATS_BIN a nats-server
 # binary it runs natively. Its GitHub writes are the Stage 3 proof human's, the devbox gh acting as
-# the sjawhar-agent App, which the gh shim routes to only inside an agent session: `prerequisites`
-# refuses to start, naming the account, when gh acts as anyone else (require_proof_human,
-# lib/workflow.sh). The binary under test is stamped (vcs.revision and main.revision) and the run's
-# scratch workspace is always kept; phase workers, which act on the daemon's assignment alone when no
-# instruction reaches them, are instructed by a background watcher the moment each assignment
-# arrives, and the script asserts what the daemon did rather than the order it expected.
+# the sjawhar-agent App, so the session is not a Legion pane and carries no personal GH_TOKEN:
+# `prerequisites` refuses to start otherwise (require_proof_human, lib/workflow.sh). The binary
+# under test is stamped (vcs.revision and main.revision) and the run's scratch workspace is always
+# kept; phase workers, which act on the daemon's assignment alone when no instruction reaches them,
+# are instructed by a background watcher the moment each assignment arrives, and the script asserts
+# what the daemon did rather than the order it expected.
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}

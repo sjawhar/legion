@@ -20,10 +20,10 @@
 # `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
 # The proof human's GitHub writes (the merge, the teardown's closes and branch deletes, and the
-# fixture push) are the devbox gh's and its git credential helper's, which act as the sjawhar-agent
-# App only inside an agent session: run the driver from an Oh My Pi session's bash tool.
-# `prerequisites` refuses to start, naming the account, when gh acts as anyone else
-# (require_proof_human, lib/workflow.sh).
+# fixture push) are the devbox gh's and its git credential helper's, acting as the sjawhar-agent
+# App: run the driver from the operator's own Oh My Pi session, not a Legion pane, with no personal
+# GH_TOKEN in its environment. `prerequisites` refuses to start otherwise (require_proof_human,
+# lib/workflow.sh).
 #
 # Inputs:
 # - LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
