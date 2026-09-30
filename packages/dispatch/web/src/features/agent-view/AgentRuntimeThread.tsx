@@ -52,8 +52,8 @@ export function AgentRuntimeThread({
     const storedMessages = stored.flatMap((read) => [read.message, ...read.replies]);
     // A person's direct message the session took as its own user turn is in the stream too,
     // tagged with its Dispatch id: it shows once, where the session took it, still naming whoever
-    // wrote it. Only a person's stored message can be one, so a tag no frame should carry hides
-    // nothing else.
+    // wrote it. Any bus client can publish a tag, so only a person's stored message can be one,
+    // and only a streamed message saying exactly what that person sent replaces its stored copy.
     const byID = new Map(
       storedMessages
         .filter((message) => message.author.kind === "user")
@@ -63,7 +63,12 @@ export function AgentRuntimeThread({
     const taken = new Set<string>();
     const streamed = toThreadMessages(conversation).map((message) => {
       const source = byID.get(turns.get(message.id ?? "") ?? "");
-      if (source === undefined) return message;
+      const text = Array.isArray(message.content)
+        ? message.content
+            .flatMap((part) => (part.type === "text" && "text" in part ? [part.text] : []))
+            .join("\n")
+        : message.content;
+      if (source === undefined || text !== source.body) return message;
       taken.add(source.id);
       return { ...message, metadata: dispatchMetadata({ author: otherAuthor(source, viewer) }) };
     });

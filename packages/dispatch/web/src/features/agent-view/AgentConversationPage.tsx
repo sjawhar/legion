@@ -1,4 +1,4 @@
-import type { MessageDeliveryMode } from "@legion/contracts";
+import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -39,20 +39,19 @@ const MODE_LABELS: Record<MessageDeliveryMode, string> = {
   steer: "Send",
 };
 
-/** The modes a human can talk to a session in, narrowed to the ones it advertises, Send first. */
+/** Where each mode stands in the composer. Send comes first wherever the session takes it, since
+ *  that is Enter at its terminal, and Aside next, so a session that takes only asides (a Claude
+ *  Code session, which refuses a steer) opens on Aside. A mode the contracts add must be placed
+ *  here before it compiles. */
+const MODE_ORDER: Record<MessageDeliveryMode, number> = { aside: 1, btw: 2, steer: 0 };
+
+/** The modes a human can talk to a session in, narrowed to the ones it advertises, in
+ *  `MODE_ORDER`; the first is what the composer sends until the human picks. */
 function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
-  const advertised = (["steer", "aside", "btw"] as const).filter((mode) =>
-    capabilities.includes(mode)
+  const advertised = DELIVERY_CAPABILITIES.filter((mode) => capabilities.includes(mode)).sort(
+    (left, right) => MODE_ORDER[left] - MODE_ORDER[right]
   );
   return advertised.length === 0 ? ["aside"] : advertised;
-}
-
-/** What the composer sends when the human has not picked: Send wherever the session takes it,
- *  since that is what typing at its terminal does; Aside otherwise, because a session that only
- *  takes asides (a Claude Code session) refuses a steer. */
-function defaultMode(modes: readonly MessageDeliveryMode[]): MessageDeliveryMode {
-  if (modes.includes("steer")) return "steer";
-  return modes.includes("aside") ? "aside" : (modes[0] ?? "aside");
 }
 
 /**
@@ -83,7 +82,7 @@ export function AgentConversationPage(): ReactNode {
   // The human's pick holds only while the session still offers it: the session list loads after
   // the page, and a pick the session does not advertise would be refused.
   const [picked, setPicked] = useState<MessageDeliveryMode | null>(null);
-  const mode = picked !== null && modes.includes(picked) ? picked : defaultMode(modes);
+  const mode = picked !== null && modes.includes(picked) ? picked : (modes[0] ?? "aside");
   const [sendError, setSendError] = useState<string | null>(null);
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
   // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the

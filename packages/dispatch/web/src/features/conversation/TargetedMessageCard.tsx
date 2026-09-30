@@ -35,6 +35,9 @@ export function capabilitiesForTarget(
 }
 
 export interface TargetedMessageAttempt {
+  /** The session took this attempt's message as its user's own turn and told Dispatch so: it
+   *  answers in its own conversation, so no Dispatch reply is awaited. */
+  readonly acceptedAs?: "user_turn" | null;
   readonly attempt: number;
   readonly createdAt: string;
   readonly delivery: MessageDeliveryMode;
@@ -43,6 +46,13 @@ export interface TargetedMessageAttempt {
   readonly error?: string | null;
   readonly state: "pending" | "sent" | "failed";
   readonly targetName?: string;
+}
+
+/** Whether the session took a targeted message as its user's own turn: its latest attempt says
+ *  so, as the session recorded it with Dispatch. Such a message has nothing to retry, and that
+ *  outranks a `failed` the send recorded afterwards, since the session already said it took it. */
+export function takenAsUserTurn(deliveries: readonly TargetedMessageAttempt[]): boolean {
+  return deliveries.at(-1)?.acceptedAs === "user_turn";
 }
 
 /** The headline one targeted message gets: who answered it, that it reached the session's own
@@ -58,13 +68,12 @@ function deliveryHeadline(
   answeredBy: string | undefined,
   delivery: TargetedMessageAttempt | undefined,
   targetName: string,
-  retryOffered: boolean,
-  userTurn: boolean
+  retryOffered: boolean
 ): { text: string; asking: boolean } {
   if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
-  if (userTurn) {
+  if (delivery?.acceptedAs === "user_turn") {
     return {
-      text: `Delivered to ${targetName}'s conversation (${delivery?.delivery ?? "steer"})`,
+      text: `Delivered to ${targetName}'s conversation (${delivery.delivery})`,
       asking: false,
     };
   }
@@ -113,18 +122,14 @@ export function DeliveryStatus({
   deliveries,
   retryOffered = false,
   targetName,
-  userTurn = false,
 }: {
   answeredBy?: string;
   deliveries: readonly TargetedMessageAttempt[];
   retryOffered?: boolean;
   targetName: string;
-  /** The session took the message as its user's own turn (`sentAsUserTurn`), so it answers in
-   *  its conversation and no Dispatch reply is awaited. */
-  userTurn?: boolean;
 }): ReactNode {
   const delivery = deliveries.at(-1);
-  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryOffered, userTurn);
+  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryOffered);
   return (
     <>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
@@ -256,9 +261,6 @@ interface TargetedMessageCardProps {
   /** The replies beneath the message - the answer and every follow-up - as a nested list. */
   readonly thread?: ReactNode;
   readonly turnID: string;
-  /** The session took the message as its user's own turn (`sentAsUserTurn`): no reply is
-   *  awaited, so there is nothing to retry. */
-  readonly userTurn?: boolean;
 }
 
 /** Shared targeted-message presentation for issue turns and agent-card conversations. */
@@ -280,10 +282,10 @@ export function TargetedMessageCard({
   targetName,
   thread,
   turnID,
-  userTurn = false,
 }: TargetedMessageCardProps): ReactNode {
   // Narrowed once, so the render below needs no second test of the same condition.
-  const retry = answeredBy === undefined && !isClosed && !userTurn ? onRetry : undefined;
+  const retry =
+    answeredBy === undefined && !isClosed && !takenAsUserTurn(deliveries) ? onRetry : undefined;
   const sameModeRetry = offersSafeRetry(deliveries, retry !== undefined);
   return (
     <li
@@ -305,7 +307,6 @@ export function TargetedMessageCard({
         deliveries={deliveries}
         retryOffered={sameModeRetry}
         targetName={targetName}
-        userTurn={userTurn}
       />
       {retry === undefined ? null : (
         <DeliveryRetry

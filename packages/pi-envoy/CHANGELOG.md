@@ -42,14 +42,17 @@
 
 - A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
   turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
-  (LEGION-394). The extension reads the message back from Dispatch with its own bearer and takes
-  it only when Dispatch records a person's message on no issue, in a conversation aimed at this
-  session, sent by no broadcast, with an attempt for this session; that attempt's mode decides
-  Send (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`). Anything else keeps its
-  card and posts nothing. The message id goes into the transcript (`envoy-dispatch-user-turn`),
-  so a replayed frame never becomes a second turn, even after a restart, and the live stream tags
-  that user message with `dispatchMessageId`, so Dispatch's conversation view shows it once. In a
-  Legion phase worker it counts as an inbound event, as its card did, and never opens a phase.
+  (LEGION-394). The extension reads the message back from Dispatch with its own bearer, checks
+  that Dispatch records a person's message on no issue, in a conversation aimed at this session,
+  sent by no broadcast, with an attempt for this session, and then accepts that attempt with
+  Dispatch (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), which Dispatch allows once
+  per message for a person's attempt of the last minute. Only then is the stored body sent: Send
+  (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`), as the stored attempt says.
+  Anything else, a refused accept, an error, a timeout or a Dispatch configuration that no longer
+  resolves, keeps its card and posts nothing, so a replayed or forged frame is a card even after
+  a restart. A frame naming a broadcast is a card with no read-back. The live stream tags that user
+  message with `dispatchMessageId`, so Dispatch's conversation view shows it once. In a Legion
+  phase worker it counts as an inbound event, as its card did, and never opens a phase.
 - The `legion-worker` skill arrives whole (LEGION-386). At 55,020 bytes it was over Oh My Pi's
   51,200-byte spill threshold, so a phase worker read it with its middle cut out. Its body is now
   under 500 lines, and the PR-body template and proofs, review threads, conflicts and fingerprints,

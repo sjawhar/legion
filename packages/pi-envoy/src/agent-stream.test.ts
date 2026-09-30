@@ -300,46 +300,26 @@ function dispatchIds(frames: readonly AgentStreamFrame[]): (string | undefined)[
 
 /**
  * A person's direct message from Dispatch becomes the session's own user turn, and the viewer
- * also shows Dispatch's stored copy of it. The host links neither to the other, so the user
- * message whose text is the message's body is tagged with its Dispatch id until the run ends.
+ * also shows Dispatch's stored copy of it. Which user message that is, only the caller knows
+ * (`matchInjectedUserTurn`), so it passes the id with the record, and every frame of that message
+ * carries it.
  */
 describe("a user turn a Dispatch message became", () => {
-  test("carries the Dispatch message's id on every frame and in the replay", () => {
+  test("carries the id it was recorded with on every later frame of that message and in the replay", () => {
     const { published, publisher } = harness();
     publisher.noteViewer();
-    publisher.expectDispatchTurn("Where is the dashboard?", "m-1");
-    publisher.record(SUBJECT, user(10, "Where is the dashboard?"), true);
+    publisher.record(SUBJECT, user(10, "Where is the dashboard?"), true, "m-1");
     publisher.record(SUBJECT, user(10, "Where is the dashboard?"), false);
+    publisher.record(SUBJECT, user(30, "typed at the terminal"), false);
     publisher.record(SUBJECT, assistant(20, [{ text: "At /dash.", type: "text" }]), false);
 
-    expect(dispatchIds(published)).toEqual(["m-1", "m-1", undefined]);
-    expect(dispatchIds(publisher.replay("s1").frames)).toEqual(["m-1", undefined]);
-  });
-
-  test("is the first user message with that text; other text and a later repeat stay untagged", () => {
-    const { published, publisher } = harness();
-    publisher.noteViewer();
-    publisher.expectDispatchTurn("ship it", "m-1");
-    publisher.record(SUBJECT, user(10, "something typed at the terminal"), false);
-    publisher.record(SUBJECT, user(20, "ship it"), false);
-    publisher.record(SUBJECT, user(30, "ship it"), false);
-
-    expect(dispatchIds(published)).toEqual([undefined, "m-1", undefined]);
-  });
-
-  test("is not looked for once the run it was sent into has ended", () => {
-    const { published, publisher } = harness();
-    publisher.noteViewer();
-    publisher.expectDispatchTurn("ship it", "m-1");
-    publisher.endRun();
-    publisher.record(SUBJECT, user(10, "ship it"), false);
-
-    expect(dispatchIds(published)).toEqual([undefined]);
+    expect(dispatchIds(published)).toEqual(["m-1", "m-1", undefined, undefined]);
+    expect(dispatchIds(publisher.replay("s1").frames)).toEqual(["m-1", undefined, undefined]);
   });
 
   test("goes with the conversation when the session is replaced", () => {
     const { published, publisher } = harness();
-    publisher.expectDispatchTurn("ship it", "m-1");
+    publisher.record(SUBJECT, user(10, "ship it"), false, "m-1");
     publisher.reset();
     publisher.noteViewer();
     publisher.record(SUBJECT, user(10, "ship it"), false);

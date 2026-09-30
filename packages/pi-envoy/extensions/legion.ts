@@ -10,7 +10,7 @@ import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import pkg from "../package.json";
-import { takeInjectedUserTurn } from "../src/dispatch-user-turn";
+import { matchInjectedUserTurn } from "../src/dispatch-user-turn";
 import {
   classifySession,
   generation,
@@ -1052,12 +1052,13 @@ export default function legionExtension(pi: PiApi): void {
   // The daemon's assignment (a user message) opens the phase; an Envoy delivery re-arms a stall
   // that already had its follow-up or a WAITING reply. A person's direct message that envoy.ts
   // sent in as the user's own turn is a user message too, but it is an inbound event, as its Envoy
-  // card was. It is taken whatever the session, so a turn no phase worker starts leaves nothing
-  // behind. The `legion` tool's successful `handoff_complete` closes the phase
-  // (`onPhaseCompleted`, below).
+  // card was: the record envoy.ts keeps of the turns it sent in says which user message that is,
+  // whichever of the two extensions asks first. The `legion` tool's successful `handoff_complete`
+  // closes the phase (`onPhaseCompleted`, below).
   pi.on("message_start", async (event, context) => {
-    const injected = takeInjectedUserTurn(context.sessionManager.getSessionId(), event.message);
     if (!phaseWorkerSession(context)) return;
+    const injected =
+      matchInjectedUserTurn(context.sessionManager.getSessionId(), event.message) !== undefined;
     const kind = injected ? "inbound-event" : inboundKind(event.message);
     if (kind !== undefined) advancePhaseStall({ kind });
   });

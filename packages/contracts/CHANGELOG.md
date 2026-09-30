@@ -17,7 +17,10 @@
 - Added optional `Message.broadcast_id`, the broadcast a message is one recipient's copy of: null
   for every other message, absent from a Dispatch older than the field. Added optional
   `AgentStreamMessage.dispatchMessageId`, the Dispatch message a streamed user message delivered
-  when a person's direct message became the session's own turn (LEGION-394).
+  when a person's direct message became the session's own turn (LEGION-394). Added optional
+  `MessageDelivery.requested_by`, `accepted_as` and `accepted_at`, the `message.accepted` event
+  (`MessageAcceptedEventPayload`), and `broadcast_id` on `DispatchTargetedMessagePayloadSchema`
+  (LEGION-394).
 
 ### Removed
 

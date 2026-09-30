@@ -78,7 +78,7 @@ export function stepPhaseStall(state: PhaseStall, input: PhaseStallInput): Phase
  * `prompt`, which Oh My Pi records as a user message; an Envoy delivery arrives as an
  * `envoy-message` custom message. A person's direct message from Dispatch that the Envoy extension
  * sent in as the user's own turn is a user message as well, which `extensions/legion.ts` tells
- * apart before asking this (`takeInjectedUserTurn`). Anything else (the host's own continuations,
+ * apart before asking this (`matchInjectedUserTurn`). Anything else (the host's own continuations,
  * this check's follow-up among them, the Envoy extension's own notices, tool results, the model's
  * replies) is neither. */
 export function inboundKind(message: unknown): "assignment" | "inbound-event" | undefined {

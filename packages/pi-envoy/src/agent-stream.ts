@@ -7,7 +7,6 @@ import {
   type AgentStreamReplay,
   capAgentStreamText,
 } from "@legion/contracts";
-import { userMessageText } from "./dispatch-user-turn";
 
 /**
  * Turns this Oh My Pi session's own messages into the frames a Dispatch viewer renders
@@ -80,6 +79,9 @@ interface RingEntry {
   /** False once the host has settled this message; a settled entry is never replaced. */
   readonly streaming: boolean;
   readonly message: ReadableMessage;
+  /** The Dispatch message a user message delivered, when the caller says it is one: a person's
+   *  direct message the session took as its own user turn. */
+  readonly dispatchMessageId: string | undefined;
 }
 
 export interface AgentStreamPublisherDeps {
@@ -178,10 +180,9 @@ function conversationParts(content: unknown): AgentStreamPart[] {
   return parts;
 }
 
-/** The frame a ring entry becomes. This is the only place a message's content is read, apart
- *  from a user message's text while a Dispatch turn is awaited (`expectDispatchTurn`). */
-function frameFor(entry: RingEntry, dispatchMessageId: string | undefined): AgentStreamFrame {
-  const { message } = entry;
+/** The frame a ring entry becomes. This is the only place a message's content is read. */
+function frameFor(entry: RingEntry): AgentStreamFrame {
+  const { dispatchMessageId, message } = entry;
   if (message.role === "toolResult" && message.toolCallId !== undefined) {
     return {
       kind: "tool-result",
@@ -223,10 +224,6 @@ export class AgentStreamPublisher {
   /** When each message was last put on the wire, so a token storm costs one frame per
    *  `snapshotIntervalMs` rather than one per delta. */
   readonly #publishedAt = new Map<string, number>();
-  /** The Dispatch message each user message delivered, by ring key (`expectDispatchTurn`). */
-  readonly #dispatchIds = new Map<string, string>();
-  /** Dispatch messages sent into the session whose user message has not been seen yet. */
-  #expectedTurns: { readonly body: string; readonly messageId: string }[] = [];
   #seq = 0;
   #watchedUntil = 0;
 
@@ -252,35 +249,18 @@ export class AgentStreamPublisher {
     this.#history.clear();
     this.#settled.clear();
     this.#publishedAt.clear();
-    this.#dispatchIds.clear();
-    this.#expectedTurns = [];
     this.#watchedUntil = 0;
-  }
-
-  /**
-   * A person's Dispatch message `messageId` was just sent into the session as its own user turn:
-   * the next user message whose text is `body` is that turn, and its frames carry the id. The host
-   * links the message it records to nothing the caller sent, so the text is the only match, and
-   * it is looked for until the run ends (`endRun`): a message sent while a tool runs is taken
-   * only between tool steps, so no fixed window would do.
-   */
-  expectDispatchTurn(body: string, messageId: string): void {
-    this.#expectedTurns.push({ body, messageId });
-  }
-
-  /** The session's run ended: a Dispatch message whose turn has not been seen is not looked for. */
-  endRun(): void {
-    this.#expectedTurns = [];
   }
 
   /**
    * Records one of the session's messages and, while a viewer is attached, publishes it.
    * `streaming` is false for a settled message (`message_end`, and every user or tool-result
-   * message) and true for an assistant message still being produced. Returns whether the
-   * message was recorded: false for one this build does not carry, and for a late streaming
-   * update of a message the host has already settled.
+   * message) and true for an assistant message still being produced. `dispatchMessageId` is the
+   * Dispatch message a user message delivered, which the caller alone can know; a later record of
+   * the same message keeps it. Returns whether the message was recorded: false for one this build
+   * does not carry, and for a late streaming update of a message the host has already settled.
    */
-  record(subject: string, raw: unknown, streaming: boolean): boolean {
+  record(subject: string, raw: unknown, streaming: boolean, dispatchMessageId?: string): boolean {
     const message = readMessage(raw);
     if (message === null) return false;
     const key = keyFor(message);
@@ -291,13 +271,13 @@ export class AgentStreamPublisher {
     this.#seq += 1;
     const entry: RingEntry = {
       at: message.timestamp,
+      dispatchMessageId: dispatchMessageId ?? this.#history.get(key)?.dispatchMessageId,
       key,
       message,
       seq: this.#seq,
       streaming: stillStreaming,
     };
     this.#history.set(key, entry);
-    if (message.role === "user") this.#tagDispatchTurn(key, message);
     if (!stillStreaming) this.#settled.add(key);
     while (this.#history.size > AGENT_STREAM_LIMITS.historyMessages) {
       const oldest = this.#history.keys().next();
@@ -305,7 +285,6 @@ export class AgentStreamPublisher {
       this.#history.delete(oldest.value);
       this.#settled.delete(oldest.value);
       this.#publishedAt.delete(oldest.value);
-      this.#dispatchIds.delete(oldest.value);
     }
     if (!this.watched) return true;
     const now = this.#deps.now();
@@ -314,7 +293,7 @@ export class AgentStreamPublisher {
       published !== undefined && now - published < AGENT_STREAM_LIMITS.snapshotIntervalMs;
     if (stillStreaming && tooSoon) return true;
     this.#publishedAt.set(key, now);
-    this.#deps.publish(subject, JSON.stringify(frameFor(entry, this.#dispatchIds.get(key))));
+    this.#deps.publish(subject, JSON.stringify(frameFor(entry)));
     return true;
   }
 
@@ -342,21 +321,11 @@ export class AgentStreamPublisher {
     for (let index = ordered.length - 1; index >= 0; index -= 1) {
       const entry = ordered[index];
       if (entry === undefined) continue;
-      const frame = frameFor(entry, this.#dispatchIds.get(entry.key));
+      const frame = frameFor(entry);
       budget -= encoder.encode(JSON.stringify(frame)).length;
       if (budget < 0) break;
       kept.unshift(frame);
     }
     return { frames: kept, session_id: sessionID, v: AGENT_STREAM_PROTOCOL };
-  }
-
-  #tagDispatchTurn(key: string, message: ReadableMessage): void {
-    if (this.#expectedTurns.length === 0 || this.#dispatchIds.has(key)) return;
-    const text = userMessageText(message.host.content);
-    const index = this.#expectedTurns.findIndex((expected) => expected.body === text);
-    const expected = this.#expectedTurns[index];
-    if (expected === undefined) return;
-    this.#expectedTurns.splice(index, 1);
-    this.#dispatchIds.set(key, expected.messageId);
   }
 }

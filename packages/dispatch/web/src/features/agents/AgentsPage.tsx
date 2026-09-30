@@ -64,7 +64,7 @@ import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
-import { deliveryAttempts, sentAsUserTurn } from "./attempts";
+import { deliveryAttempts } from "./attempts";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
@@ -242,7 +242,6 @@ function AgentExchangeReply({
   const answer = read.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
-  const userTurn = sentAsUserTurn(reply, read.message, agent.session_id);
   const capabilities = capabilitiesForTarget(read.message.target, liveAgents);
   return (
     <ReplyTurn
@@ -260,17 +259,14 @@ function AgentExchangeReply({
               answeredBy:
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
               attempts: deliveryAttempts(reply.deliveries, label),
-              retry: userTurn
-                ? undefined
-                : {
-                    canAside: capabilities?.includes("aside") !== false,
-                    canBtw: capabilities?.includes("btw") !== false,
-                    canSteer: capabilities?.includes("steer") !== false,
-                    onRetry: retry.mutate,
-                    retrying: retry.isPending,
-                  },
+              retry: {
+                canAside: capabilities?.includes("aside") !== false,
+                canBtw: capabilities?.includes("btw") !== false,
+                canSteer: capabilities?.includes("steer") !== false,
+                onRetry: retry.mutate,
+                retrying: retry.isPending,
+              },
               targetName: label,
-              userTurn,
             }
       }
       onReply={() => onReply(agentReplyTo(agent, read, reply, author.label))}
@@ -363,7 +359,6 @@ function AgentTargetedMessage({
         )
       }
       turnID={`message:${read.message.id}`}
-      userTurn={sentAsUserTurn(read.message, read.message, agent.session_id)}
     />
   );
 }

@@ -14,15 +14,22 @@
   recipient's copy of, or null: the thread read (`GET /api/v1/messages/{id}`), the Agents page's
   conversation list, each reply, and every message event. A session confirming a person's direct
   message reads it, since a broadcast keeps its envelope (LEGION-394).
+- `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: the attempt's session records, once
+  per message, that it took a person's fresh, latest attempt as its user's own turn, or is refused
+  with a 409 naming the check (`ACCEPT_SUPERSEDED`, `ACCEPT_ALREADY_ACCEPTED`,
+  `ACCEPT_NOT_REQUESTED_BY_PERSON`, `ACCEPT_STALE`) or 403 `ACCEPT_FORBIDDEN`. It appends
+  `message.accepted`. Every delivery attempt now reads `requested_by` (who asked for it, kept on a
+  resume, null before migration 0053), `accepted_at` and `accepted_as` (LEGION-394).
 
 ### Changed
 
 - Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the
-  session took it, still naming its author. The Agents page shows a person's direct Send or
-  Aside, once sent, as delivered to the session's conversation, with no retry, since the session
-  answers there rather than with a Dispatch reply (LEGION-394).
+  session took it, still naming its author, and only when the streamed text is the stored one.
+  The Agents page shows an attempt the session accepted as delivered to the session's
+  conversation, with no retry, even after a later `failed`; every other attempt keeps its states
+  (LEGION-394).
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it

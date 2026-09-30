@@ -36378,6 +36378,7 @@ var DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
   body: exports_external.string(),
   target: exports_external.string(),
   in_reply_to: exports_external.string().nullable(),
+  broadcast_id: exports_external.string().nullish(),
   deliveries: exports_external.array(exports_external.unknown()),
   created_at: exports_external.string()
 });
@@ -38490,7 +38491,8 @@ function renderInbound(raw, sessionID, subject2) {
               replyPath: dispatchReplyPath("message", message2.data.id),
               replyFields: {},
               issueKey: frame.event.issue_key,
-              body: message2.data.body
+              body: message2.data.body,
+              ...typeof message2.data.broadcast_id === "string" ? { broadcastId: message2.data.broadcast_id } : {}
             };
             dispatchReply = {
               tool: "dispatch_message",
@@ -39010,6 +39012,9 @@ class DispatchClient {
   }
   async getMessageThread(id, session) {
     return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+  async acceptMessageDelivery(id, attempt, input) {
+    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
   }
   async artifact(issue2, input) {
     const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"];

@@ -35,6 +35,7 @@ import type {
   IssueRouteStatus,
   IssueSummary,
   Message,
+  MessageDelivery,
   MessageRead,
   MessageReplyInput,
   MessageReplyResult,
@@ -404,6 +405,22 @@ export class DispatchClient {
    *  threads a session may read is the route's rule (`GET /api/v1` describes it). */
   async getMessageThread(id: string, session: string): Promise<MessageRead> {
     return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+
+  /** `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: this session records that it took
+   *  that attempt of the message as its user's own turn. Dispatch allows one acceptance per
+   *  message, of its latest attempt, which a person asked for within the last minute; any
+   *  refusal throws a `DispatchServiceError` naming the check. */
+  async acceptMessageDelivery(
+    id: string,
+    attempt: number,
+    input: { readonly actor: Actor }
+  ): Promise<MessageDelivery> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"],
+      input
+    );
   }
 
   async artifact(

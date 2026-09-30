@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -49,6 +50,143 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, http.StatusCreated, attempt)
+}
+
+// acceptedAsUserTurn is what an accepted attempt records it became: the session's own user turn.
+const acceptedAsUserTurn = "user_turn"
+
+// acceptFresh is the accept's last check, judged by Postgres against the created_at Postgres
+// wrote, as claimLapsed is: the attempt was opened within the last minute. created_at, not
+// claimed_at, because a resume moves claimed_at. So only an attempt a person has just asked for
+// can be taken, and one that reached its session as a card - a failed read-back, an older plugin,
+// a Claude Code session - can never be taken as a turn later.
+const acceptFresh = `created_at >= now() - interval '1 minute'`
+
+// acceptDelivery is POST /api/v1/messages/{id}/deliveries/{attempt}/accept: the session an
+// attempt went to records that it took the message as its user's own turn, the one write
+// pi-envoy makes before it injects anything. It is one compare-and-set under the message's row
+// lock, and it succeeds only for the latest attempt of a message none of whose attempts was
+// accepted before, which a person asked for within the last minute; a refusal names the check.
+//
+// It may land while the attempt is still pending, since pi-envoy answers the frame before
+// Dispatch settles the send, so it writes neither state nor claimed_at, which the settle is
+// scoped to, and appends its own message.accepted rather than a second message.delivery receipt.
+// The event's owners are locked before the message and attempt rows, the order
+// settleDeliveryAttempt takes them in.
+//
+// The actor is a bearer's own claim of its session, as on every session write, so a bearer
+// naming another session can spend that session's one acceptance of a fresh attempt: the real
+// session is then refused and shows a card, and nothing is injected.
+func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+		writeError(w, "ACCEPT_FORBIDDEN", http.StatusForbidden, "accept requires an agent bearer token")
+		return
+	}
+	var input struct {
+		Actor *model.Actor `json:"actor"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
+		return
+	}
+	number, err := strconv.Atoi(r.PathValue("attempt"))
+	if err != nil || number < 1 {
+		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message delivery not found")
+		return
+	}
+	ctx := r.Context()
+	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", r.PathValue("id"))
+	if err != nil {
+		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message not found")
+		return
+	}
+	event := messageEvent(message, "message.accepted", actor, model.MessageAcceptedEventPayload{
+		MessageID: message.ID, Attempt: number, SessionID: actor.ID,
+		AcceptedAs: acceptedAsUserTurn, Target: messageTarget(message.Target),
+	})
+	tx, err := s.begin(ctx)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	if err := s.deps.Events.LockOwners(ctx, tx, event); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// Every attempt is opened, resumed and accepted under this lock, so what the checks below
+	// read cannot move before the update.
+	if _, err := tx.Exec(ctx, `select 1 from messages where id = $1 for update`, message.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var sessionID string
+	var latest, fresh bool
+	var taken *int
+	var requester *string
+	err = tx.QueryRow(ctx, `
+		select session_id,
+		       attempt = (select max(attempt) from message_deliveries where message_id = $1),
+		       (select attempt from message_deliveries where message_id = $1 and accepted_at is not null),
+		       requested_by ->> 'kind',
+		       `+acceptFresh+`
+		from message_deliveries
+		where message_id = $1 and attempt = $2
+	`, message.ID, number).Scan(&sessionID, &latest, &taken, &requester, &fresh)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message delivery not found")
+		return
+	}
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	switch {
+	case sessionID != actor.ID:
+		writeError(w, "ACCEPT_FORBIDDEN", http.StatusForbidden, "session may accept only its own delivery")
+		return
+	case taken != nil:
+		writeError(w, "ACCEPT_ALREADY_ACCEPTED", http.StatusConflict,
+			fmt.Sprintf("attempt %d of this message was already accepted", *taken))
+		return
+	case !latest:
+		writeError(w, "ACCEPT_SUPERSEDED", http.StatusConflict,
+			fmt.Sprintf("attempt %d is not this message's latest attempt", number))
+		return
+	case requester == nil || *requester != "user":
+		writeError(w, "ACCEPT_NOT_REQUESTED_BY_PERSON", http.StatusConflict,
+			fmt.Sprintf("no person requested attempt %d", number))
+		return
+	case !fresh:
+		writeError(w, "ACCEPT_STALE", http.StatusConflict,
+			fmt.Sprintf("attempt %d was requested more than a minute ago", number))
+		return
+	}
+	accepted, err := scanMessageDelivery(tx.QueryRow(ctx, `
+		update message_deliveries set accepted_at = now(), accepted_as = $3
+		where message_id = $1 and attempt = $2
+		returning `+messageDeliveryColumns,
+		message.ID, number, acceptedAsUserTurn,
+	))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	appended, err := s.appendEvent(ctx, tx, event)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(appended)
+	WriteJSON(w, http.StatusOK, accepted)
 }
 
 // pendingMessageDelivery is the attempt one targeted send owns: committed as pending under
@@ -210,7 +348,7 @@ func (s *server) recordPendingMessageDelivery(
 				return pendingMessageDelivery{}, err
 			}
 			superseded = &receipt
-			if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, resolved, &pending); err != nil {
+			if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, actor, resolved, &pending); err != nil {
 				return pendingMessageDelivery{}, err
 			}
 			break
@@ -237,7 +375,7 @@ func (s *server) recordPendingMessageDelivery(
 		if target != resolved.Target {
 			return pendingMessageDelivery{}, errStaleResolution
 		}
-		if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, resolved, &pending); err != nil {
+		if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, actor, resolved, &pending); err != nil {
 			return pendingMessageDelivery{}, err
 		}
 	}
@@ -293,20 +431,26 @@ func finishPendingMessageDelivery(
 const supersededByModeChangeText = "superseded by a retry in another mode; it may already have been delivered"
 
 // insertMessageDeliveryAttempt opens an attempt of this send's own, under the recipient the
-// resolution was taken for. The message row is locked by the caller, so the highest attempt
-// cannot move between reading it and inserting beside it.
+// resolution was taken for, recording requestedBy - the actor this send carries - as who asked
+// for it. The message row is locked by the caller, so the highest attempt cannot move between
+// reading it and inserting beside it.
 func (s *server) insertMessageDeliveryAttempt(
-	ctx context.Context, tx pgx.Tx, messageID string, resolved ResolvedMention, pending *pendingMessageDelivery,
+	ctx context.Context, tx pgx.Tx, messageID string, requestedBy model.Actor, resolved ResolvedMention,
+	pending *pendingMessageDelivery,
 ) error {
+	requester, err := json.Marshal(requestedBy)
+	if err != nil {
+		return err
+	}
 	return tx.QueryRow(ctx, `
-		insert into message_deliveries (message_id, attempt, delivery, session_id, state, claimed_at)
+		insert into message_deliveries (message_id, attempt, delivery, session_id, state, claimed_at, requested_by)
 		values (
 			$1,
 			(select coalesce(max(attempt), 0) + 1 from message_deliveries where message_id = $1),
-			$2, $3, 'pending', now()
+			$2, $3, 'pending', now(), $4
 		)
 		returning attempt, claimed_at
-	`, messageID, resolved.Delivery, resolved.attemptSessionID,
+	`, messageID, resolved.Delivery, resolved.attemptSessionID, requester,
 	).Scan(&pending.attempt, &pending.claimedAt)
 }
 
@@ -666,18 +810,26 @@ func (s *server) insertSessionReply(
 
 // messageDeliveryColumns is the message_deliveries select list scanMessageDelivery reads, in
 // scan order.
-const messageDeliveryColumns = `message_id::text, attempt, delivery, session_id, envelope_id, duplicate, state, error, reply_id::text, created_at`
+const messageDeliveryColumns = `message_id::text, attempt, delivery, session_id, envelope_id, duplicate, state, error, reply_id::text, created_at, requested_by, accepted_at, accepted_as`
 
 // scanMessageDelivery decodes one messageDeliveryColumns row; extra receives any columns
 // selected after them.
 func scanMessageDelivery(row pgx.Row, extra ...any) (model.MessageDelivery, error) {
 	var delivery model.MessageDelivery
+	var requestedBy []byte
 	fields := []any{
 		&delivery.MessageID, &delivery.Attempt, &delivery.Delivery, &delivery.SessionID, &delivery.EnvelopeID,
 		&delivery.Duplicate, &delivery.State, &delivery.Error, &delivery.ReplyID, &delivery.CreatedAt,
+		&requestedBy, &delivery.AcceptedAt, &delivery.AcceptedAs,
 	}
 	if err := row.Scan(append(fields, extra...)...); err != nil {
 		return model.MessageDelivery{}, err
+	}
+	if requestedBy != nil {
+		delivery.RequestedBy = &model.Actor{}
+		if err := json.Unmarshal(requestedBy, delivery.RequestedBy); err != nil {
+			return model.MessageDelivery{}, fmt.Errorf("decode delivery requester: %w", err)
+		}
 	}
 	return delivery, nil
 }

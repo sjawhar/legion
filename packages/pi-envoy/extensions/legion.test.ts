@@ -2677,7 +2677,9 @@ describe("Legion OMP extension", () => {
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       bash("legion gh -- pr view 7"),
       bash(`legion handoff write --phase implement --data '{"proof":["ran it"]}'`),
-      bash("jq '.rounds += [$r]' --argjson r '{}' .legion/test.json | legion handoff write --phase test"),
+      bash(
+        "jq '.rounds += [$r]' --argjson r '{}' .legion/test.json | legion handoff write --phase test"
+      ),
       bash("legion handoff read"),
       bash('"$LEGION_STATE_DIR/bin/legion" handoff read --phase plan'),
       bash("legion handoff write --help"),
@@ -4700,7 +4702,7 @@ describe("Legion OMP extension", () => {
 
     test("a person's direct message the session took as its own turn opens no phase; the daemon's assignment still does", async () => {
       const worker = await bootStalling({});
-      noteInjectedUserTurn("ses_stall", "Where is the dashboard?");
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?", "m-1");
       await worker.arrives(personsMessage);
       expect(await worker.settles("It is at /dash.")).toBeUndefined();
 
@@ -4713,14 +4715,14 @@ describe("Legion OMP extension", () => {
       await worker.arrives(assignment);
       expect(await worker.settles("WAITING: CI on the pull request")).toBeUndefined();
 
-      noteInjectedUserTurn("ses_stall", "Where is the dashboard?");
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?", "m-1");
       await worker.arrives(personsMessage);
       expect(await worker.settles("It is at /dash.")).toEqual(followUp("handoff_complete"));
     });
 
     test("the same words arriving again as a user message are the daemon's, not the person's", async () => {
       const worker = await bootStalling({});
-      noteInjectedUserTurn("ses_stall", "Where is the dashboard?");
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?", "m-1");
       await worker.arrives(personsMessage);
       expect(await worker.settles("It is at /dash.")).toBeUndefined();
 
@@ -4815,7 +4817,10 @@ describe("Legion OMP extension", () => {
         )
       ).toEqual({
         content: [
-          { type: "text", text: "handoff_complete takes no phase for a merger, which writes no handoff" },
+          {
+            type: "text",
+            text: "handoff_complete takes no phase for a merger, which writes no handoff",
+          },
         ],
         details: {},
         isError: true,
@@ -5330,14 +5335,26 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
 
     await expect(
-      toolCall({ toolName: "bash", toolCallId: "go-grant-one", input: { command: "legion gh -- pr view 7" } }, pane.context)
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "go-grant-one",
+          input: { command: "legion gh -- pr view 7" },
+        },
+        pane.context
+      )
     ).resolves.toBeUndefined();
     await expect(
-      toolCall({ toolName: "bash", toolCallId: "go-grant-two", input: { command: "legion state" } }, pane.context)
+      toolCall(
+        { toolName: "bash", toolCallId: "go-grant-two", input: { command: "legion state" } },
+        pane.context
+      )
     ).resolves.toBeUndefined();
 
     expect(await grantFileContents(pane.grantFile)).toEqual({ grant: "go-grant-2", mode: 0o600 });
-    expect(daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")).toEqual([
+    expect(
+      daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")
+    ).toEqual([
       {
         path: "/legion/v1/grants",
         body: {

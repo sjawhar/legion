@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -9,6 +10,7 @@ import type {
   InboxRow,
   IssueSummary,
   Message,
+  MessageDelivery,
   MessageRead,
   UserAgentStates,
 } from "../../api/types";
@@ -901,8 +903,12 @@ test("Send normally disables when the target does not advertise steer", async ()
   }
 });
 
-/** One attempt, sent to the planner in `delivery` mode. */
-function sentAttempt(messageID: string, delivery: "aside" | "btw" | "steer") {
+/** One attempt of `messageID` to `sessionID` in `delivery` mode, sent. */
+function sentAttempt(
+  messageID: string,
+  delivery: "aside" | "btw" | "steer",
+  overrides: Partial<MessageDelivery> = {}
+): MessageDelivery {
   return {
     attempt: 1,
     created_at: recentAttemptAt,
@@ -912,90 +918,112 @@ function sentAttempt(messageID: string, delivery: "aside" | "btw" | "steer") {
     message_id: messageID,
     reply_id: null,
     session_id: "planner-session",
-    state: "sent" as const,
+    state: "sent",
+    ...overrides,
   };
 }
 
-// A person's direct Send or Aside reaches an Oh My Pi session as its own user turn: the session
-// answers in its conversation, never with a Dispatch reply, so the card waits on no reply and
-// offers no other way to send it. Everything else keeps its envelope, and its card.
-for (const [name, read, headline, retries] of [
+const accepted = { accepted_as: "user_turn", accepted_at: recentAttemptAt } as const;
+
+// A person's direct Send or Aside that an Oh My Pi session took as its own user turn is answered
+// in the session's conversation, never with a Dispatch reply, so its card waits on no reply and
+// offers no other way to send it. The session records that with Dispatch; nothing else says it,
+// so every attempt the session did not accept - a Claude Code session's, an older plugin's, a
+// read-back that failed - keeps today's card and its mode-change row.
+for (const [name, session, read, headline, retries] of [
   [
-    "a person's direct Aside",
+    "a person's direct Aside the session took as its own turn",
+    "Planner",
     {
       message: message("Where is the dashboard?", {
-        broadcast_id: null,
-        deliveries: [sentAttempt("message-1", "aside")],
+        deliveries: [sentAttempt("message-1", "aside", accepted)],
       }),
       replies: [],
     },
     "Delivered to Planner's conversation (aside)",
-    false,
+    0,
   ],
   [
-    "a person's reply inside a direct thread",
+    "a person's reply the session took as its own turn",
+    "Planner",
     {
       message: message("Where is the dashboard?", {
-        broadcast_id: null,
-        deliveries: [sentAttempt("message-1", "aside")],
+        deliveries: [sentAttempt("message-1", "aside", accepted)],
       }),
       replies: [
         message("And the logs?", {
-          broadcast_id: null,
-          deliveries: [sentAttempt("message-2", "steer")],
+          deliveries: [sentAttempt("message-2", "steer", accepted)],
           id: "message-2",
           in_reply_to: "message-1",
         }),
       ],
     },
     "Delivered to Planner's conversation (steer)",
-    false,
+    0,
   ],
   [
-    "one recipient's copy of a broadcast",
+    "a turn the session took whose send the listener later recorded as failed",
+    "Planner",
     {
-      message: message("Status?", {
-        broadcast_id: "broadcast-1",
+      message: message("Where is the dashboard?", {
+        deliveries: [
+          sentAttempt("message-1", "aside", {
+            ...accepted,
+            envelope_id: null,
+            error: RECEIPT_TIMEOUT_CAUSE,
+            state: "failed",
+          }),
+        ],
+      }),
+      replies: [],
+    },
+    "Delivered to Planner's conversation (aside)",
+    0,
+  ],
+  [
+    "a person's direct Aside the session did not accept",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
         deliveries: [sentAttempt("message-1", "aside")],
       }),
       replies: [],
     },
     "Sent to Planner (aside)",
-    true,
+    1,
   ],
   [
-    "an issue message",
+    "an Aside an aside-only session got as a card",
+    "Reviewer",
     {
-      message: message("Can this ship?", {
-        broadcast_id: null,
-        deliveries: [sentAttempt("message-1", "aside")],
-        issue_key: "CORE-1",
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside", { session_id: "reviewer-session" })],
+        target: "session:reviewer-session",
       }),
       replies: [],
     },
-    "Sent to Planner (aside)",
-    true,
+    "Sent to Reviewer (aside)",
+    1,
   ],
-  [
-    "a direct message from a Dispatch that does not say whether a broadcast sent it",
-    {
-      message: message("Hello?", { deliveries: [sentAttempt("message-1", "aside")] }),
-      replies: [],
-    },
-    "Sent to Planner (aside)",
-    true,
-  ],
-] as const satisfies readonly (readonly [string, MessageRead, string, boolean])[]) {
-  test(`Agents shows ${name} as ${retries ? "sent, awaiting a reply" : "delivered to the conversation"}`, async () => {
-    const page = renderAgents({ messages: [read] });
+] as const satisfies readonly (readonly [string, string, MessageRead, string, number])[]) {
+  test(`Agents shows ${name} as ${retries === 0 ? "delivered to the conversation" : "sent, awaiting a reply"}`, async () => {
+    // As a current Dispatch answers: a direct message no broadcast sent reads broadcast_id null.
+    const page = renderAgents({
+      messages: [
+        {
+          message: { ...read.message, broadcast_id: null },
+          replies: read.replies.map((reply) => ({ ...reply, broadcast_id: null })),
+        },
+      ],
+    });
 
     try {
-      const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-      expand(planner, "Planner");
-      await within(planner).findByText(headline);
-      expect(
-        within(planner).queryAllByRole("button", { name: "Send as BTW instead" })
-      ).toHaveLength(retries ? 1 : 0);
+      const target = card(await screen.findByRole("region", { name: "Agents" }), session);
+      expand(target, session);
+      await within(target).findByText(headline);
+      expect(within(target).queryAllByRole("button", { name: "Send as BTW instead" })).toHaveLength(
+        retries
+      );
     } finally {
       page.view.unmount();
       page.restore();

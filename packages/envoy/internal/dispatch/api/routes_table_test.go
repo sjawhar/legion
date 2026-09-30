@@ -61,7 +61,7 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 113
+	const registeredRoutes = 114
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -106,6 +106,7 @@ func routeProbePath(pattern string) string {
 		{"{login}", "sjawhar"},
 		{"{kind}", "register"},
 		{"{step}", "begin"},
+		{"{attempt}", "1"},
 	}
 	path := pattern
 	for _, replacement := range replacements {
@@ -141,7 +142,7 @@ func authRefusal(response *httptest.ResponseRecorder) (bool, string) {
 			Code string `json:"code"`
 		}
 		_ = json.Unmarshal(response.Body.Bytes(), &body)
-		if body.Code == "HUMAN_ONLY" || body.Code == "REPLY_FORBIDDEN" {
+		if body.Code == "HUMAN_ONLY" || body.Code == "REPLY_FORBIDDEN" || body.Code == "ACCEPT_FORBIDDEN" {
 			return true, "403 " + body.Code
 		}
 	}

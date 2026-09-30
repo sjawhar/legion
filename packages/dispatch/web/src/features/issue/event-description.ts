@@ -40,6 +40,8 @@ export function eventDescription(event: Event): string {
       return event.payload.duplicate === true
         ? `Message already delivered: ${event.payload.delivery}`
         : `Message ${event.payload.state}: ${event.payload.delivery}`;
+    case "message.accepted":
+      return "Message taken as the session's own turn";
     case "ask.opened":
       return `Ask opened: ${event.payload.question}`;
     case "ask.anchor_refreshed":

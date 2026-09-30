@@ -12,6 +12,7 @@ import {
   DeliveryStatus,
   offersSafeRetry,
   type TargetedMessageAttempt,
+  takenAsUserTurn,
 } from "./TargetedMessageCard";
 
 /** A turn's action icons - copy-reference, Reply, Pin - beside its body: a row on desktop, a
@@ -49,9 +50,6 @@ interface ReplyDelivery {
     readonly retrying: boolean;
   };
   readonly targetName: string;
-  /** The session took the reply as its user's own turn (`sentAsUserTurn`); the caller then
-   *  offers no retry. */
-  readonly userTurn?: boolean;
 }
 
 /** One reply in a thread: author, time, the quoted parent, the body, and - when the reply was
@@ -78,6 +76,13 @@ export function ReplyTurn({
   quote?: { readonly text: string; readonly to?: string };
   turnID: string;
 }): ReactNode {
+  // The retry row a delivered reply keeps until the session answers it or took it as its turn.
+  const retry =
+    delivery !== undefined &&
+    delivery.answeredBy === undefined &&
+    !takenAsUserTurn(delivery.attempts)
+      ? delivery.retry
+      : undefined;
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -102,25 +107,21 @@ export function ReplyTurn({
             <DeliveryStatus
               answeredBy={delivery.answeredBy}
               deliveries={delivery.attempts}
-              retryOffered={offersSafeRetry(
-                delivery.attempts,
-                delivery.answeredBy === undefined && delivery.retry !== undefined
-              )}
+              retryOffered={offersSafeRetry(delivery.attempts, retry !== undefined)}
               targetName={delivery.targetName}
-              userTurn={delivery.userTurn}
             />
-            {delivery.answeredBy === undefined && delivery.retry !== undefined ? (
+            {retry === undefined ? null : (
               <DeliveryRetry
-                canAside={delivery.retry.canAside}
-                canBtw={delivery.retry.canBtw}
-                canSteer={delivery.retry.canSteer}
+                canAside={retry.canAside}
+                canBtw={retry.canBtw}
+                canSteer={retry.canSteer}
                 mode={delivery.attempts.at(-1)?.delivery ?? "steer"}
-                onRetry={delivery.retry.onRetry}
-                retrying={delivery.retry.retrying}
+                onRetry={retry.onRetry}
+                retrying={retry.retrying}
                 sameModeRetry={offersSafeRetry(delivery.attempts, true)}
                 targetName={delivery.targetName}
               />
-            ) : null}
+            )}
           </>
         )}
       </div>

@@ -61,10 +61,10 @@ import { AgentStreamPublisher } from "../src/agent-stream";
 import {
   type ConfirmedUserTurn,
   confirmUserTurn,
-  DISPATCH_USER_TURN_ENTRY,
+  endInjectedUserTurns,
   isUserTurnCandidate,
+  matchInjectedUserTurn,
   noteInjectedUserTurn,
-  userTurnEntryMessageID,
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
@@ -114,11 +114,11 @@ const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 const OPEN_ASKS_TIMEOUT_MS = 3_000;
 
 /**
- * How long a person's direct message waits on Dispatch's read-back before it arrives as a card
- * instead: the frames on the agent subject are delivered one at a time, so a hung Dispatch must
- * not hold every message behind this one for the client's own minute.
+ * How long a person's direct message waits on Dispatch's read-back and acceptance before it
+ * arrives as a card instead: the frames on the agent subject are delivered one at a time, so a
+ * hung Dispatch must not hold every message behind this one for the client's own minute.
  */
-const USER_TURN_READ_TIMEOUT_MS = 10_000;
+const USER_TURN_CONFIRM_TIMEOUT_MS = 10_000;
 
 /**
  * Transcript entry marking a session Legion drives. The process-wide bridge knows the same
@@ -343,9 +343,6 @@ export default function envoyExtension(pi: PiApi): void {
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
   const dedupeKeys = new Set<string>();
-  // Dispatch messages this session has taken as its user's own turn (DISPATCH_USER_TURN_ENTRY),
-  // rebuilt from the transcript by `restoreLocalSessionState`.
-  const userTurnMessageIDs = new Set<string>();
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
@@ -481,7 +478,6 @@ export default function envoyExtension(pi: PiApi): void {
 
   const restoreLocalSessionState = (context: SessionContext): void => {
     sessionDirectory = context.cwd;
-    const previousSessionID = sessionID;
     sessionID = context.sessionManager.getSessionId();
     // Only a top-level instance reaches here — a subagent's session_start and switch events
     // return early — so this publishes the session this process registered, whatever moved the
@@ -512,14 +508,6 @@ export default function envoyExtension(pi: PiApi): void {
       awarenessGeneration++;
     }
     legionManagedTranscript = branch.some(isLegionManagedEntry);
-    // Another session's user turns are not this one's. The same session keeps what it took in
-    // memory as well, so a re-establish that reads a branch which does not reach its newest
-    // entries (a tree navigation) still never takes one of them twice.
-    if (previousSessionID !== sessionID) userTurnMessageIDs.clear();
-    for (const entry of branch) {
-      const messageID = userTurnEntryMessageID(entry);
-      if (messageID !== undefined) userTurnMessageIDs.add(messageID);
-    }
   };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -547,50 +535,48 @@ export default function envoyExtension(pi: PiApi): void {
     await postDeliveryReply(currentDispatchConfig(), sessionID, delivery, result);
   };
 
-  // A person's direct Send or Aside becomes the user's own turn once Dispatch confirms it
-  // (`src/dispatch-user-turn.ts`), sent exactly as Enter or an aside at the terminal sends one.
-  // False, having done nothing, for every frame that is not one or that Dispatch does not
-  // confirm; the caller then delivers today's card, which is the delivery, and posts nothing.
-  const deliveredAsUserTurn = async (rendered: RenderInboundResult): Promise<boolean> => {
-    if (!isUserTurnCandidate(rendered) || userTurnMessageIDs.has(rendered.delivery.id)) {
-      return false;
-    }
+  // The user turn a person's direct Send or Aside becomes (`src/dispatch-user-turn.ts`): only one
+  // Dispatch confirms as a person's message to this session and whose acceptance by this session
+  // it then records. Undefined for every frame that is not one, that Dispatch does not confirm or
+  // whose acceptance it refuses, and whenever Dispatch cannot be reached, its configuration
+  // included; the caller then delivers today's card, which is the delivery, and posts nothing.
+  const acceptedUserTurn = async (
+    rendered: RenderInboundResult
+  ): Promise<ConfirmedUserTurn | undefined> => {
+    if (!isUserTurnCandidate(rendered)) return undefined;
     const { delivery } = rendered;
-    const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
-    if (config === null) return false;
-    let turn: ConfirmedUserTurn | undefined;
     try {
-      const thread = await new DispatchClient(
+      const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+      if (config === null) return undefined;
+      const dispatch = new DispatchClient(
         config.url,
         config.token,
         fetch,
-        AbortSignal.timeout(USER_TURN_READ_TIMEOUT_MS)
-      ).getMessageThread(delivery.id, sessionID);
-      turn = confirmUserTurn(thread, delivery, sessionID);
-    } catch (error) {
-      logger.warn("envoy: a direct Dispatch message could not be read back; it arrives as a card", {
-        messageID: delivery.id,
-        error: messageFor(error),
-      });
-      return false;
-    }
-    if (turn === undefined) {
-      logger.warn(
-        "envoy: Dispatch does not confirm a direct message as a person's to this session; it arrives as a card",
-        {
-          messageID: delivery.id,
-        }
+        AbortSignal.timeout(USER_TURN_CONFIRM_TIMEOUT_MS)
       );
-      return false;
+      const turn = confirmUserTurn(
+        await dispatch.getMessageThread(delivery.id, sessionID),
+        delivery,
+        sessionID
+      );
+      if (turn === undefined) {
+        logger.warn(
+          "envoy: Dispatch does not confirm a direct message as a person's to this session; it arrives as a card",
+          { messageID: delivery.id }
+        );
+        return undefined;
+      }
+      await dispatch.acceptMessageDelivery(turn.messageId, turn.attempt, {
+        actor: { id: sessionID, kind: "session" },
+      });
+      return turn;
+    } catch (error) {
+      logger.warn(
+        "envoy: Dispatch did not accept a direct message as this session's turn; it arrives as a card",
+        { messageID: delivery.id, error: messageFor(error) }
+      );
+      return undefined;
     }
-    // Another frame for the same message may have been taken while the read was out.
-    if (userTurnMessageIDs.has(delivery.id)) return false;
-    userTurnMessageIDs.add(delivery.id);
-    pi.appendEntry(DISPATCH_USER_TURN_ENTRY, { message_id: delivery.id });
-    agentStream.expectDispatchTurn(turn.body, delivery.id);
-    noteInjectedUserTurn(sessionID, turn.body);
-    pi.sendUserMessage(turn.body, turn.mode === "aside" ? { deliverAs: "aside" } : undefined);
-    return true;
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
@@ -674,14 +660,24 @@ export default function envoyExtension(pi: PiApi): void {
               await postDispatchReply(rendered.delivery, { error: messageFor(error) });
             }
           }
-        } else if (!(await deliveredAsUserTurn(rendered))) {
-          pi.sendMessage(
-            { customType: "envoy-message", content: rendered.content, display: true },
-            {
-              deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
-              triggerTurn: true,
-            }
-          );
+        } else {
+          const turn = await acceptedUserTurn(rendered);
+          if (turn === undefined) {
+            pi.sendMessage(
+              { customType: "envoy-message", content: rendered.content, display: true },
+              {
+                deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
+                triggerTurn: true,
+              }
+            );
+          } else {
+            // Sent exactly as Enter, or an aside, at the terminal sends it.
+            noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
+            pi.sendUserMessage(
+              turn.body,
+              turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+            );
+          }
         }
       } catch (error) {
         console.warn(
@@ -858,12 +854,18 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpAgentStreamControl(subscription, session);
   };
 
-  /** One of this session's messages, on its way to whoever has the session open. Only the
-   *  top-level instance publishes: a `task` subagent's instance never learns a session id, and
-   *  its work reaches the viewer as the parent's tool call anyway. */
+  /** One of this session's messages, on its way to whoever has the session open, tagged with the
+   *  Dispatch message a user message delivered when it is a person's turn this extension sent in.
+   *  Only the top-level instance publishes: a `task` subagent's instance never learns a session
+   *  id, and its work reaches the viewer as the parent's tool call anyway. */
   const recordAgentStreamMessage = (message: unknown, streaming: boolean): void => {
     if (sessionID === "") return;
-    agentStream.record(agentStreamFramesSubject(sessionID), message, streaming);
+    agentStream.record(
+      agentStreamFramesSubject(sessionID),
+      message,
+      streaming,
+      matchInjectedUserTurn(sessionID, message)
+    );
   };
 
   pi.on("message_start", async (event) => {
@@ -1606,10 +1608,10 @@ export default function envoyExtension(pi: PiApi): void {
   // ACP host, but a client that defers agent-initiated turns gets the steer queued as hidden
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
-    // A person's direct message not yet seen as a user message by the end of the run is not
-    // looked for again (`AgentStreamPublisher.expectDispatchTurn`).
-    agentStream.endRun();
     const id = context.sessionManager.getSessionId();
+    // A person's direct message not yet seen as a user message by the end of the run is not
+    // looked for again (`src/dispatch-user-turn.ts`).
+    endInjectedUserTurns(id);
     // Only a run that settled normally is nudged: steering an interrupt (`aborted`), a provider
     // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
     // or a failure, with a turn nobody asked for.
