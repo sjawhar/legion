@@ -559,17 +559,11 @@ export default function envoyExtension(pi: PiApi): void {
   // accept's minute for a Send that arrived as a card. Undefined for every frame that is not a
   // turn; the caller then delivers today's card, which is the delivery, and posts nothing.
   //
-  // The record keys on the attempt a frame names, and a forged frame names one as well as
-  // Dispatch's does, so a forger who reads `message.created` and names the attempt first spends
-  // it (reproduced on #1592: the forged frame won in all 8 runs that raced it). Accepted, the
-  // person's stored body is the turn and Dispatch's frame then a duplicate card; refused with a
-  // 404 because the attempt row was not committed yet, the person's Send is a card and never a
-  // turn, or nothing at all when the forger used Dispatch's own idempotency key and the session's
-  // dedupe drops the real frame. Naming attempts not written yet spends each later retry the same
-  // way. A forged frame never injects its own text. Do not skip the record on a 404: the route
-  // answers 404 for a transient database error too, and a frame another subscription's pump
-  // carded meanwhile would be forgotten, so a carded Send would become a turn on a later forged
-  // frame, round 2's defect.
+  // A forged frame can name an attempt before Dispatch's frame does and so spend it; what that
+  // costs is `packages/pi-envoy/AGENTS.md`'s (the record's limit). Do not skip the record when
+  // the accept answers 404: the route answers 404 for a transient database error too, and a frame
+  // another subscription's pump carded while that accept was in flight would be forgotten, so a
+  // Send that arrived as a card could become a turn on a later forged frame.
   const acceptedUserTurn = async (
     rendered: RenderInboundResult
   ): Promise<AcceptedUserTurn | undefined> => {

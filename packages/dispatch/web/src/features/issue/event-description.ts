@@ -36,8 +36,8 @@ export function eventDescription(event: Event): string {
     case "message.answered":
       return event.payload.body;
     case "message.delivery":
-      // A duplicate attempt reached the listener and put nothing on the recipient's subject;
-      // its state is still `sent`, so reporting the state alone would read as a delivery.
+      // A duplicate attempt reached the listener and the stream stored nothing new; its state is
+      // still `sent`, so reporting the state alone would read as a fresh delivery.
       return event.payload.duplicate === true
         ? `Message already delivered: ${capabilityLabel(event.payload.delivery)}`
         : `Message ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;

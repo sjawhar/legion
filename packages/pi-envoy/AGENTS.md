@@ -41,27 +41,24 @@ entry of the session file (`sessionManager.getEntries()`) on each restore, and a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
 retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
-configuration that no longer resolves included, keeps the card and posts nothing.
-
-That record has a limit, reproduced on #1592. It keys on the attempt a frame names, so a forger who
-reads `message.created` (every authenticated caller's event stream carries it, and Dispatch
-publishes it before its own frame goes out) and names the attempt first spends it: the forged frame
-beat Dispatch's in all 8 runs that raced it. If the accept answers 200, the person's stored body is
-the turn and Dispatch's frame then a duplicate card. If it answers 404 because the attempt row is
-not committed yet, the person's Send is a card and never a turn, or is not shown at all when the
-forger used Dispatch's own idempotency key (`<message>:<mode>`), since the session's dedupe then
-drops Dispatch's frame. Naming attempts not written yet spends each later retry of the message the
-same way. A forged frame's own text is never a turn, so this is the class of the accept route's
-self-claimed actor, which already lets any bearer spend a session's acceptance. Skipping the record
-on a 404 is not a fix: the route answers 404 for a transient database error too, and a frame
-another subscription's pump carded while that accept was in flight would be forgotten, so a carded
-Send could become a turn on a later forged frame, round 2's defect.
-
-The stream tags that user message with the message id (`dispatchMessageId`, passed to
+configuration that no longer resolves included, keeps the card and posts nothing. The stream tags
+the injected user message with the message id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
 message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the
 first user message with the sent text, remembered under its host timestamp, forgotten at the run's
 `agent_end`).
+
+The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
+(every authenticated caller's event stream carries it, and Dispatch publishes it before its own
+frame goes out) and names the attempt first spends it. If the accept answers 200, the person's
+stored body is the turn, and Dispatch's frame then arrives as a duplicate card when the forger used
+a key of its own, or is dropped by the session's dedupe when it used Dispatch's own idempotency key
+(`<message>:<mode>`). If it answers 404 because the attempt row is not committed yet, the person's
+Send is a card and never a turn, and under Dispatch's key it is not shown at all. Naming attempts
+not written yet spends each later retry of the message the same way. A forged frame's own text is
+never a turn, so this is the class of the accept route's self-claimed actor, which already lets
+any bearer spend a session's acceptance. Why the record is kept even when the accept answers 404
+is `acceptedUserTurn`'s comment (`extensions/envoy.ts`).
 
 Role claims are routed by the listener: this extension receives a receipt-backed request on its
 direct agent subject instead of subscribing to a role subject itself. The agent pump replies the

@@ -868,7 +868,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
   }
 });
 
-test("Send normally disables when the target does not advertise steer", async () => {
+test("Use Send instead is disabled when the target does not advertise steer", async () => {
   const root = message("Can this ship?", {
     deliveries: [
       {

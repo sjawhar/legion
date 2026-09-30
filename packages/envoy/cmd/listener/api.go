@@ -81,10 +81,10 @@ type messageBody struct {
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
 // this message, so the stream stored nothing new; the publish still reached the agent's subject,
-// where the receiving session drops the repeat by its dedupe key. It can only be true for a send
-// whose dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and
-// Dispatch is the one sender that uses it. Absent means false, which is what an older listener's
-// answer reads as.
+// and whether the receiver shows it again is the receiver's (packages/envoy/AGENTS.md, on the
+// idempotency key). It can only be true for a send whose dedupe key names the upstream event
+// (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch is the one sender that uses it. Absent
+// means false, which is what an older listener's answer reads as.
 type sendResponse struct {
 	contracts.Envelope
 	Recipient string `json:"recipient"`
