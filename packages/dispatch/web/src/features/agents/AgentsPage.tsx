@@ -530,7 +530,7 @@ function AgentMessageComposer({
   // is set on the way past `onSent` and consumed by the `onClose` that follows it.
   const sentJustNow = useRef(false);
   const box = useRef<HTMLDivElement>(null);
-  // `MentionComposer` disables its textarea while a send is in flight (`MentionComposer.tsx:937`),
+  // `MentionComposer` disables its textarea while a send is in flight (`disabled={save.isPending}`),
   // and a disabled field hands focus back to the document. The reader is still writing to this
   // agent, so focus returns the moment React re-enables the field - watched, rather than guessed
   // at with a frame or a timer, because the write's latency is the server's.
@@ -568,8 +568,8 @@ function AgentMessageComposer({
     carried.current = draft;
   }, []);
   /** What the picker's selection reads while it is open, which is the reader's until they commit
-   *  it: the select's own keys move it, and `Enter`, or a pick made with the pointer or in the
-   *  native popup, takes it. */
+   *  it: the select's own keys move it, `Enter`, or a pick made with the pointer or in the native
+   *  popup, takes it, and leaving the select without committing puts it back on `issueKey`. */
   const [pendingIssue, setPendingIssue] = useState(issueKey);
   /** Whether the change arriving now is a key on the select stepping its selection, which only
    *  moves it: `Enter` is the pick. The test is the task the change arrives in, not the key.
@@ -684,6 +684,12 @@ function AgentMessageComposer({
               <select
                 aria-label="Issue"
                 className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
+                onBlur={() => {
+                  // A step is not a pick until `Enter`, so leaving the select any other way -
+                  // Tab, Shift+Tab, a click elsewhere - drops it, as Escape does: the open select
+                  // never shows an issue the message is not addressed to.
+                  setPendingIssue(issueKey);
+                }}
                 onChange={(event) => {
                   setPendingIssue(event.target.value);
                   // A step from the select's own keys only moves the selection, so a keyboard

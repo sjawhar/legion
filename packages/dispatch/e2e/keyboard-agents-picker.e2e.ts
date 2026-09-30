@@ -1,6 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { openAgents, seedAgents, setLiveSessions } from "./agents";
+import { openAgents, plannerSession, seedAgents, setLiveSessions } from "./agents";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -9,6 +9,8 @@ import { asUser } from "./users";
 // queues it as a task of its own. These rows notice an engine that moves to the spec's queued task:
 // its first arrow or letter would commit at once. So the `webkit` and `firefox` projects run this
 // spec as well as Chromium, and its rows drive keys through `page.keyboard`, which every engine has.
+// The rows that step and then leave the select without Enter run in the same engines, since each
+// engine takes focus out of a select its own way.
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -56,6 +58,99 @@ test.describe("agents page", () => {
       await expect(toggle).toHaveAttribute("aria-expanded", "false");
       await expect(toggle).toContainText("CORE-2");
       await expect(row).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A step is not a pick until Enter, so a reader who steps and then leaves the select any other
+  // way has picked nothing: the open select goes back to the issue the message is addressed to,
+  // and the toggle, the select and the send all name that one issue.
+  for (const [way, leave] of [
+    ["Tab", (page: Page) => page.keyboard.press("Tab")],
+    ["Shift+Tab", (page: Page) => page.keyboard.press("Shift+Tab")],
+    ["a click into the message", (_page: Page, field: Locator) => field.click()],
+  ] as const) {
+    test(`a step left by ${way} is dropped, so the select, the toggle and the send name one issue`, async ({
+      browser,
+    }) => {
+      const issueKey = await seedAgents();
+      const context = await asUser(browser, "alice");
+      try {
+        const page = await context.newPage();
+        await openAgents(page);
+        const row = page.locator("[data-agent-row]").nth(0);
+        const toggle = row.getByRole("button", { name: "Choose issue" });
+        const picker = row.getByRole("combobox", { name: "Issue" });
+        const field = row.getByRole("textbox", { name: "Comment" });
+
+        await page.keyboard.press("j");
+        await page.keyboard.press("i");
+        await expect(picker).toBeFocused();
+        await page.keyboard.press("ArrowDown");
+        await page.keyboard.press("Enter");
+        await expect(toggle).toContainText(issueKey);
+        await field.fill("");
+        await page.keyboard.press("Escape");
+        await expect(row).toBeFocused();
+
+        await page.keyboard.press("i");
+        await expect(picker).toBeFocused();
+        await page.keyboard.press("ArrowDown");
+        await expect(picker).not.toHaveValue(issueKey);
+        await leave(page, field);
+        await expect(picker).not.toBeFocused();
+        await expect(picker).toHaveValue(issueKey);
+        await expect(toggle).toContainText(issueKey);
+
+        const sent = page.waitForRequest(
+          (request) =>
+            request.method() === "POST" &&
+            /\/(comments|messages)$/.test(new URL(request.url()).pathname)
+        );
+        await field.fill("Status please");
+        await field.press("Control+Enter");
+        expect(new URL((await sent).url()).pathname).toBe(`/api/v1/issues/${issueKey}/comments`);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+
+  // From `No issue` the message is a direct one, so a step left by Tab must not show an issue.
+  test("a step from No issue left by Tab is dropped, and the message goes to the agent directly", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await page.keyboard.press("ArrowDown");
+      await expect(picker).not.toHaveValue("");
+      await page.keyboard.press("Tab");
+      await expect(picker).not.toBeFocused();
+      await expect(picker).toHaveValue("");
+      await expect(toggle).toContainText("No issue");
+
+      const sent = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          /\/(comments|messages)$/.test(new URL(request.url()).pathname)
+      );
+      await field.fill("Status please");
+      await field.press("Control+Enter");
+      expect(new URL((await sent).url()).pathname).toBe(
+        `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
     } finally {
       await context.close();
     }

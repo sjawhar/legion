@@ -27,7 +27,7 @@ function focusedAgentRow(): HTMLElement | null {
  * a move rather than a way back.
  *
  * Two callers run this, and they are the same act. `MentionComposer` owns Escape on its own form
- * and stops it before the window dispatcher sees it (`MentionComposer.tsx:551`), so the composer
+ * and stops it before the window dispatcher sees it (its `handleEscape`), so the composer
  * calls this through its `onClose`; the `agents` scope registers the same key over the same
  * function so `?` describes what Escape does there - and so the binding takes over if the
  * composer ever stops swallowing it.
