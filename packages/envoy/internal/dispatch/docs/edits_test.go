@@ -2197,6 +2197,11 @@ func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
 		{"wide row", two, "| A11 | x |\n| A12 | y | z |", "TABLE_WIDTH"},
 		{"wide row in a list's own table", two, "- | h |\n  | - |\n  | a | b |", "INVALID_OP"},
 		{"wide row in a table after a heading", two, "# h | x\n| a |\n| - |\n| b | c |", "INVALID_OP"},
+		// U+00A0 is a cell's text to goldmark's row trim, so `|` before one is no lone `|`: the line
+		// is a row, and a dash cell beside one is no delimiter row.
+		{"lone pipe and U+00A0 after a wide row", two, "| A11 | x | y |\n|\u00a0", "TABLE_WIDTH"},
+		{"lone pipe and U+00A0", two, "| A11 | x |\n|\u00a0", ""},
+		{"dash cell and U+00A0", two, "| A11 | x |\n| --- |\u00a0", ""},
 		// The rows parse refuses before it asks whether it read one table, so a heading after a wide
 		// row is answered for the row, where the block path alone would store a paragraph and a heading.
 		{"wide row then a heading", two, "| a | b | c |\n# h | x", "TABLE_WIDTH"},

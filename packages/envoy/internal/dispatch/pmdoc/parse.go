@@ -473,8 +473,11 @@ func syntheticTableHeader(width int) string {
 	return "| " + strings.Join(headers, " | ") + " |\n| " + strings.Join(delimiters, " | ") + " |\n"
 }
 
+// tableRowCells splits a fragment line into cells, trimming only what goldmark's table transformer
+// trims from a row (space, tab and carriage return), so a space outside ASCII, a vertical tab or a
+// form feed is a cell's text here as it is to the parse.
 func tableRowCells(line string) ([]string, bool) {
-	line = strings.TrimSpace(line)
+	line = strings.Trim(line, " \t\r")
 	if line == "" {
 		return nil, false
 	}
@@ -512,7 +515,7 @@ func tableRowCells(line string) ([]string, bool) {
 
 func tableDelimiterRow(cells []string) bool {
 	for _, cell := range cells {
-		value := strings.TrimSpace(cell)
+		value := strings.Trim(cell, " \t\r")
 		value = strings.TrimPrefix(value, ":")
 		value = strings.TrimSuffix(value, ":")
 		if len(value) < 3 || strings.Trim(value, "-") != "" {

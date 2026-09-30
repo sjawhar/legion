@@ -56,10 +56,12 @@
   after an even run of backslashes is text to it, as it always was to uploads, so
   `| A11 | new \\| extra |` under two columns is stored as one cell reading `new \| extra` where it
   was refused as `TABLE_WIDTH`; the browser editor's reading of such a pipe is LEGION-412. A space
-  outside ASCII, a vertical tab or a form feed at the fragment's edge is a cell's text, so
-  `| A11 | new |` then U+00A0 is refused as three cells where it was stored as two. A line the
-  parser refuses as another block (indented code, `2. | a | b |`) is refused as an upload refuses
-  it, `INVALID_OP` on `markdown`, however many cells it holds and wherever it stands. A fragment
+  outside ASCII, a vertical tab or a form feed is a cell's text wherever it stands, so
+  `| A11 | new |` then U+00A0 is refused as three cells where it was stored as two, and a line of
+  `|` then U+00A0 is a row holding it, as an upload reads it, where it was a lone `|` that sent the
+  fragment to blocks. A line the parser refuses as another block (indented code, `2. | a | b |`)
+  is refused as an upload refuses it, `INVALID_OP` on `markdown`, however many cells it holds and
+  wherever it stands. A fragment
   that goes to the block path was refused as `TABLE_WIDTH` wherever the old count met a line too
   wide before whatever sends the fragment there, as with `- | a | b |` (counted as three cells) or
   `| A11 | x | y |` then a lone `|` under two columns; it is now written as the blocks it reads as.
