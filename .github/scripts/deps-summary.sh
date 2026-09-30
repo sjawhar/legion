@@ -100,10 +100,10 @@ def read_json(path):
         raise Malformed(f"is not JSON ({error})") from None
 
 
-def recorded(half, path, read):
-    """read(path), or the half's tool error when the file is not in its producer's shape."""
+def recorded(half, path, read, *args):
+    """read(*args), or the half's tool error when PATH is not in its producer's shape."""
     try:
-        return read(path)
+        return read(*args)
     except Malformed as error:
         print(f"deps-summary.sh: {half}: {path} {error}; recording a tool error", file=sys.stderr)
         return dict(TOOL_ERROR[half])
@@ -184,7 +184,7 @@ def summarize(args):
     if "--out" not in opts:
         usage("summarize needs --out")
     if "--osv" in opts:
-        osv = recorded("osv", opts["--osv"], osv_counts)
+        osv = recorded("osv", opts["--osv"], osv_counts, opts["--osv"])
     else:
         print("deps-summary.sh: osv: no --osv (osv-scanner did not run to completion); recording a tool error",
               file=sys.stderr)
@@ -240,8 +240,7 @@ def deps_halves(path):
         return {half: dict(TOOL_ERROR[half]) for half in COUNTS}
     halves = {}
     for half in COUNTS:
-        section = document.get(half)
-        halves[half] = recorded(half, path, lambda _: counts_half(half, section))
+        halves[half] = recorded(half, path, counts_half, half, document.get(half))
     return halves
 
 
@@ -279,7 +278,7 @@ def report(args):
         usage(f"--run-id takes a run id, not {opts['--run-id']!r}")
     if opts["--report-only"] not in ("true", "false", ""):
         usage(f"--report-only takes true, false or nothing, not {opts['--report-only']!r}")
-    zizmor = recorded("zizmor", opts["--zizmor"], zizmor_half)
+    zizmor = recorded("zizmor", opts["--zizmor"], zizmor_half, opts["--zizmor"])
     deps = deps_halves(opts["--deps"])
     result = {
         "run_id": int(opts["--run-id"]),
