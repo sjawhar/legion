@@ -1969,26 +1969,29 @@ report_posted() {
     'any(.[]; .type == "message.created" and .actor.id == $s and (.payload.body | test("(^|[^0-9A-Za-z-])" + $tree + "($|[^0-9])")) and (.payload.body | test("slot"; "i")) and (.payload.body | length) <= 2000)' >/dev/null
 }
 until_true 300 "the controller's report message on $report" report_posted
-# It was posted on a turn a tick started after the start turn ended, the quiet day's wake of an
-# idle controller. A tick delivered while the start turn still runs is steered into that turn
-# (pi-envoy delivers every Envoy message as a steer), so the anchor is the start turn's end: the
-# first assistant message with a terminal stopReason. Both a tick delivery and the first report
-# call come after it, the tick first, and no report call comes before it.
+# It was posted on a turn a tick started while the controller was idle, the quiet day's wake. A
+# tick delivered while a turn still runs is steered into that turn (pi-envoy delivers every Envoy
+# message as a steer), and Oh My Pi keeps an errored or aborted attempt in the transcript and
+# retries in the same turn, so neither a turn's first terminal-looking message nor line order
+# marks idleness. The anchor is the tick itself: some tick delivery before the first report call
+# whose last preceding message entry is an assistant message with stopReason `stop`, a turn that
+# had genuinely finished. A start turn that ends in an unretried error fails the check.
 report_after_tick() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
     jq -R -s -e --arg tick "summary: tick on $project" '
       [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
-      | ([$lines[] | select(.m.type? == "message" and .m.message.role? == "assistant" and (.m.message.stopReason? as $r | $r == "stop" or $r == "error" or $r == "aborted")) | .i] | first) as $end
-      | ([$lines[] | select(.raw | test("xd://dispatch_message|\"name\":\"dispatch_message\"")) | .i]) as $calls
-      | ([$lines[] | select($end != null and .i > $end and (.raw | contains($tick))) | .i] | first) as $after
-      | $end != null and ($calls | length) > 0 and ($calls | all(. > $end)) and $after != null and $after < ($calls | first)
+      | [$lines[] | select(.m.type? == "message" and .m.message.role? != "custom")] as $msgs
+      | ([$lines[] | select(.raw | test("xd://dispatch_message|\"name\":\"dispatch_message\"")) | .i] | first) as $call
+      | $call != null and any($lines[]; .i < $call and (.raw | contains($tick))
+          and (.i as $t | ([$msgs[] | select(.i < $t)] | last) as $before
+            | $before != null and $before.m.message.role == "assistant" and $before.m.message.stopReason == "stop"))
     ' "$file" >/dev/null && return 0
   done
   return 1
 }
-report_after_tick || fail "the controller's first report message was not posted on a turn a tick started after its start turn ended"
+report_after_tick || fail "the controller's first report message was not posted on a turn a tick started while it was idle"
 note "the controller parked $report ('$report_title') in icebox and posted its daily report there on a tick's turn"
 pass
 fi # the daily report
