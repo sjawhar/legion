@@ -17,8 +17,9 @@ import (
 )
 
 // The runtime's tick is what wakes a controller when no event does: on its period it applies a
-// ControllerTick, and with a slot free and a controller registered, admission queues one `tick`
-// controller notice named by the project, however many ticks pass before it is published.
+// ControllerTick, and with a controller registered admission queues one `tick` controller notice
+// named by the project, however many ticks pass before it is published. Here a slot is free; the
+// tick's indifference to the slots is admission's to prove (controller_wake_test.go).
 func TestTheControllerTickQueuesOneWakeWhileASlotIsFree(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))

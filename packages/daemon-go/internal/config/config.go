@@ -128,8 +128,8 @@ type Config struct {
 	Linger         time.Duration
 	ReviewRoundCap int
 	MaxFixAttempts int
-	// ControllerWakeInterval is how often the daemon wakes the controller to walk for work while an
-	// admission slot stands free (`controller_wake_interval_seconds`, an hour by default).
+	// ControllerWakeInterval is how often the daemon wakes a registered controller, whatever the
+	// slots (`controller_wake_interval_seconds`, an hour by default).
 	ControllerWakeInterval time.Duration
 }
 
