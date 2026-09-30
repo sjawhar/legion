@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 # Tests for `zizmor-findings.sh`: a finding is new only when the head carries more copies of its
 # fingerprint than the base does, and the fingerprint survives the edits a pull request makes
-# around a finding without touching it (rows, step indices, the text of an enclosing job, the
-# directory zizmor was run from).
+# around a finding without touching it (rows, step indices, the text of an enclosing job, an
+# inline ignore comment, the directory zizmor was run from).
 #
 # Fixtures are zizmor 1.30.1 json-v1 findings in the shape it writes (measured 2026-09-30): a
 # Hidden location for the enclosing step first, then the Primary location that carries the route.
+# testdata/zizmor*.json are zizmor 1.30.1's own output (`--format=json-v1 .`, offline) over a
+# scratch tree whose files their `feature` texts quote: workflow a.yaml (an unpinned checkout and
+# two steps echoing the pull request's title and body), workflow b.yaml (an unpinned checkout),
+# composite action z (echoes the issue title) and a zizmor.yml with the `"*": hash-pin` policy.
+# zizmor.json is that tree; zizmor-ignores.json adds `# zizmor: ignore[template-injection]` to
+# a.yaml's body step and `rules.artipacked.ignore: [b.yaml]`, and zizmor-ignores-no-ignores.json
+# audits that tree with --no-ignores.
 #
 # Run from anywhere: .github/scripts/zizmor-findings.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
@@ -178,6 +185,16 @@ check "the new entry is the repeated template-injection" "$(is "$(out repeated '
 doubled=$(array "$injection" "$injection" "$unpinned" "$permissions" "$workflow_level" "$action_env")
 run one-removed "$(array "$injection" "$unpinned" "$permissions" "$workflow_level" "$action_env")" "$doubled"
 check "removing one of two copies adds nothing" "$(is "$(out one-removed '.new | tojson')" '[]')"
+
+echo "=== 8. an inline ignore added to a step leaves its finding's fingerprint unchanged ==="
+# zizmor 1.30.1's own output (testdata/): the tree, and the same tree with an inline
+# `# zizmor: ignore[template-injection]` on one step audited with --no-ignores, where that
+# finding's feature text carries the comment.
+testdata="$script_dir/testdata"
+run inline-comment "$(< "$testdata/zizmor-ignores-no-ignores.json")" "$(< "$testdata/zizmor.json")"
+check "the commented finding is in the head" \
+  "$(is "$(out inline-comment '[.head[] | select(.ident == "template-injection")] | length')" 3)"
+check "nothing is new against the tree without the comment" "$(is "$(out inline-comment '.new | tojson')" '[]')"
 
 echo "=== usage errors exit 2 ==="
 rc=0

@@ -14,7 +14,9 @@
 #   - text: the first 120 characters of the whitespace-collapsed feature, only when the route runs
 #     through `steps` — two identical steps differ only in their text, while a job- or
 #     workflow-level finding is unique by its route and its span covers the whole job, whose text
-#     changes whenever anything inside the job is edited.
+#     changes whenever anything inside the job is edited. The location's comments
+#     (concrete.comments) are cut from the feature first, so adding an inline
+#     `# zizmor: ignore[<audit>]` to a step leaves its findings' fingerprints as they were.
 # Rows never enter the fingerprint; `line` in the output is the Primary location's row + 1.
 #
 # The difference is a multiset: `new` lists each head occurrence of a fingerprint beyond the
@@ -85,7 +87,10 @@ def entry(finding):
     path = repository_path(symbolic["key"]["Local"]["verbatim_path"])
     keys = [str(part["Key"]) for part in symbolic["route"]["route"] if "Key" in part]
     route = "/".join(keys)
-    text = " ".join(concrete.get("feature", "").split())[:120] if "steps" in keys else ""
+    feature = concrete.get("feature", "")
+    for comment in concrete.get("comments", []):
+        feature = feature.replace(comment, "")
+    text = " ".join(feature.split())[:120] if "steps" in keys else ""
     ident = finding["ident"]
     digest = hashlib.sha256("\0".join((ident, path, route, text)).encode("utf-8")).hexdigest()
     determinations = finding.get("determinations", {})
