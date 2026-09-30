@@ -237,6 +237,33 @@ test("a highlighted hit that drops out hands the highlight to the head, which ke
   }
 });
 
+test("a background refresh that fails keeps the hits the query has, and the highlight on its hit", async () => {
+  const [first, second] = [issueHit("LEGION-3"), issueHit("LEGION-4")];
+  const search = spyOn(api, "search").mockResolvedValue({ results: [first, second], took_ms: 1 });
+  const view = renderPalette();
+
+  try {
+    const input = await searchFor("astrolabe");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const arrowed = input.getAttribute("aria-activedescendant");
+    expect(arrowed).toBe(screen.getAllByRole("option")[1]?.id ?? "");
+
+    // The tab-return refresh fails; TanStack keeps the answer it already has.
+    search.mockRejectedValue(new Error("503"));
+    await view.queryClient.refetchQueries();
+    await waitFor(() =>
+      expect(view.queryClient.getQueryState(["search", "astrolabe"])?.status).toBe("error")
+    );
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.queryByText("Search failed.")).toBeNull();
+    expect(input.getAttribute("aria-activedescendant")).toBe(arrowed);
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
 test("Escape calls onClose", () => {
   let closed = 0;
   const view = renderPalette(() => {

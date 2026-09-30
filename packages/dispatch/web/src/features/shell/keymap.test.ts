@@ -337,6 +337,26 @@ test("actions() omits palette:false, multi-key, inEditable and unavailable bindi
   expect(keymap.actions().map((action) => action.id)).toEqual(["open"]);
 });
 
+test("a binding with several keys is a row only when it says so, and the row presses its first key", () => {
+  const { keymap } = harness();
+  let pressed = "";
+  const ascend = binding("ascend", ["h", "ArrowLeft"], {
+    label: "Up one level",
+    palette: true,
+    run: (event) => {
+      pressed = event.key;
+    },
+  });
+  const arrows = binding("arrows", ["ArrowDown", "ArrowUp"]);
+  keymap.register("architecture", [ascend.definition, arrows.definition]);
+  keymap.pushScope("architecture");
+
+  const rows = keymap.actions();
+  expect(rows.map((action) => action.id)).toEqual(["ascend"]);
+  rows[0]?.run();
+  expect(pressed).toBe("h");
+});
+
 test("a keyless binding never fires on a key press yet is offered as an action", () => {
   const { keymap, press } = harness();
   const close = binding("close", [], { label: "Close issue" });

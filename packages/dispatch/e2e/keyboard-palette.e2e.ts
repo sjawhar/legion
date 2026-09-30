@@ -32,10 +32,7 @@ test.beforeEach(async () => {
 test("the palette lists the issue page's actions, guarded like their buttons, and runs one", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Palette actions" });
   const context = await asUser(browser, "alice");
@@ -110,7 +107,11 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     await expect(dialog).toHaveCount(0);
     await expect.poll(() => getIssue(issue.key).then((read) => read.status)).toBe("backlog");
 
-    // A filtered action runs the same write its control does.
+    // A filtered action runs the same write its control does. The rows are taken when the palette
+    // opens, and the Set priority rows, like the priority select, are withheld until the page has
+    // taken in the Reopen answer, which under load can come after the server already reads
+    // `backlog`: so open once the select takes a pick again.
+    await expect(page.getByLabel(`Priority of ${issue.key}`)).toBeEnabled();
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");
     await input.fill("priority p2");
@@ -127,10 +128,7 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
 test("/ searches only, and a query lists matching actions above the hits", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Astrolabe issue calibration" });
   const context = await asUser(browser, "alice");
@@ -152,8 +150,22 @@ test("/ searches only, and a query lists matching actions above the hits", async
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
 
+    // `/` reopens on its last search, selected so that typing replaces it; the hits come back
+    // with it. `⌘K` still opens empty, since a query left there would filter this page's actions.
+    await page.keyboard.press("/");
+    await expect(input).toHaveValue("astrolabe");
+    await expect
+      .poll(() =>
+        input.evaluate((field: HTMLInputElement) => [field.selectionStart, field.selectionEnd])
+      )
+      .toEqual([0, "astrolabe".length]);
+    await expect(dialog.getByRole("option")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
     // The same query under `$mod+k` puts what this page can do above what the query found.
     await page.keyboard.press("Control+k");
+    await expect(input).toHaveValue("");
     await input.fill("issue");
     await expect(actions.getByRole("option", { name: "Close issue" })).toBeVisible();
     const options = dialog.getByRole("option");
@@ -167,10 +179,7 @@ test("/ searches only, and a query lists matching actions above the hits", async
 test("g d opens the route's project Documents, from an issue key or a project path, and g p picks a project", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   await createProject({ key: "OPS", name: "Operations" });
   const issue = await createIssue({ project: "CORE", title: "Documents from an issue" });
@@ -267,10 +276,7 @@ test("the rail's Search control shows the same actions as the keyboard palette",
 test("a focus-dependent row is offered, survives filtering, and runs on the row that opened the palette", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Inbox palette" });
   await createAsk(
@@ -361,10 +367,7 @@ test("a board card's row runs on the card that opened the palette", async ({
 test("a fresh open starts on an empty query, so it lists the new page's actions", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Astrolabe calibration" });
   const context = await asUser(browser, "alice");
@@ -405,10 +408,7 @@ test("a fresh open starts on an empty query, so it lists the new page's actions"
 test("a header write in flight withdraws the rows whose buttons it disables", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "In-flight guard" });
   const context = await asUser(browser, "alice");
@@ -447,10 +447,7 @@ test("a header write in flight withdraws the rows whose buttons it disables", as
 test("a Set priority row the server refuses is reported by the header, in the digit key's one failure", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Refused palette priority" });
   const context = await asUser(browser, "alice");
@@ -507,10 +504,7 @@ test("a Set priority row the server refuses is reported by the header, in the di
 test("a List row's own row runs on the row that opened the palette, and its movement keys are no rows", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "List palette" });
   const context = await asUser(browser, "alice");
@@ -544,10 +538,7 @@ test("a List row's own row runs on the row that opened the palette, and its move
 test("the Inbox offers the selection's snooze but not the keys that mark and clear it", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Inbox selection palette" });
   await createAsk(
@@ -605,10 +596,7 @@ test("the Inbox offers the selection's snooze but not the keys that mark and cle
 test("the Agents page offers a row's picker, which then commits a keyboard pick on Enter", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await seedAgents();
   const context = await asUser(browser, "alice");
 
@@ -660,10 +648,7 @@ test("the Agents page offers a row's picker, which then commits a keyboard pick 
 test("hits that arrive after the reader has arrowed keep the highlight on the row they chose", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Held issue search" });
   const context = await asUser(browser, "alice");
@@ -711,10 +696,7 @@ test("hits that arrive after the reader has arrowed keep the highlight on the ro
 test("a row whose control has gone since the palette opened does nothing", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Stale row" });
   await patchIssue(issue.key, { status: "done" });
@@ -758,10 +740,7 @@ test("a row whose control has gone since the palette opened does nothing", async
 test("below xl the margin is the route's own sheet, so Shift+M and its row change nothing", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Compact margin" });
   const context = await asUser(browser, "alice");
@@ -796,10 +775,7 @@ test("below xl the margin is the route's own sheet, so Shift+M and its row chang
 test("the Architecture tab offers its focused component's Open row, and not its movement keys", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   await seedFakeGithub({
     "legion/arch": {
@@ -829,13 +805,8 @@ test("the Architecture tab offers its focused component's Open row, and not its 
       name: "Open the focused component: its children, else its details",
     });
     await expect(open).toHaveCount(1);
-    // `Enter` on the row opens it too, and `o`'s row is already that action's. Soft, so one run
-    // names every row that should not be there.
-    for (const absent of [
-      "Next component",
-      "Previous component",
-      "Open the focused component from its row",
-    ]) {
+    // Soft, so one run names every row that should not be there.
+    for (const absent of ["Next component", "Previous component"]) {
       await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
     }
     await open.click();
@@ -848,10 +819,7 @@ test("the Architecture tab offers its focused component's Open row, and not its 
 test("Go to project… and Keyboard shortcuts are rows, and each opens its own dialog", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   await createProject({ key: "OPS", name: "Operations" });
   const issue = await createIssue({ project: "CORE", title: "Openers" });
@@ -887,10 +855,7 @@ test("Go to project… and Keyboard shortcuts are rows, and each opens its own d
 test("the arrows keep the highlighted row in view when the list is longer than the palette", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long list" });
   const context = await asUser(browser, "alice");
@@ -925,10 +890,7 @@ test("the arrows keep the highlighted row in view when the list is longer than t
 test("a nested Architecture level offers Up one level, and not the keys that move into children", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   await seedFakeGithub({
     "legion/arch": {
@@ -957,13 +919,13 @@ test("a nested Architecture level offers Up one level, and not the keys that mov
     const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
       name: "Actions",
     });
-    const up = actions.getByRole("option", { exact: true, name: "Up one level h" });
+    const up = actions.getByRole("option", { name: "Up one level" });
     await expect(up).toHaveCount(1);
-    // `l` into children is `o`'s Open row where there are children and nothing on a leaf, and
-    // the arrows are the letters' twins. Soft, so one run names every row that should not be there.
-    for (const absent of ["Into the focused component's children", "(arrow key)"]) {
-      await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
-    }
+    // `l` into children is `o`'s Open row where there are children and nothing on a leaf, so
+    // `descend` stays out of the palette.
+    await expect(
+      actions.getByRole("option", { name: "Into the focused component's children" })
+    ).toHaveCount(0);
     await up.click();
     await expect(page).toHaveURL(/\/projects\/CORE\/architecture$/);
   } finally {
@@ -974,29 +936,71 @@ test("a nested Architecture level offers Up one level, and not the keys that mov
 test("on a short window the palette fits the screen and each highlighted row shows whole", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "desktop keyboard navigation is covered by chromium"
-  );
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Short window" });
   const context = await asUser(browser, "alice");
 
   try {
     const page = await context.newPage();
-    await page.setViewportSize({ height: 300, width: 1440 });
     await openIssue(page, issue.key, "Short window");
-    await page.keyboard.press("Control+k");
     const dialog = page.getByRole("dialog", { name: "Search" });
     const input = page.getByRole("combobox", { name: "Search" });
-    await expect(dialog.getByRole("group", { name: "Actions" })).toBeVisible();
-    await expect.soft(dialog).toBeInViewport({ ratio: 1 });
+    // The list keeps one row's height, so the shortest windows here cut the key hints and the
+    // message, never the row: 240 px is the least that holds the input and one row from `xl`,
+    // 200 px close to it below.
+    for (const [width, height] of [
+      [1440, 300],
+      [1440, 240],
+      [1279, 200],
+    ] as const) {
+      await page.setViewportSize({ height, width });
+      await page.locator("body").focus();
+      await page.keyboard.press("Control+k");
+      await expect(dialog.getByRole("group", { name: "Actions" })).toBeVisible();
+      await expect.soft(dialog, `${width}x${height}`).toBeInViewport({ ratio: 1 });
+      for (let step = 0; step < 6; step += 1) {
+        const active = await input.getAttribute("aria-activedescendant");
+        await expect(page.locator(`[id="${active}"]`), `${width}x${height}`).toBeInViewport({
+          ratio: 1,
+        });
+        await input.press("ArrowDown");
+      }
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+    }
+  } finally {
+    await context.close();
+  }
+});
 
-    for (let step = 0; step < 6; step += 1) {
-      const active = await input.getAttribute("aria-activedescendant");
-      await expect(page.locator(`[id="${active}"]`)).toBeInViewport({ ratio: 1 });
+test("a window that shrinks under an open palette keeps the highlighted row in view", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Shrinking window" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await openIssue(page, issue.key, "Shrinking window");
+    await page.keyboard.press("Control+k");
+    const input = page.getByRole("combobox", { name: "Search" });
+    await expect(
+      page.getByRole("dialog", { name: "Search" }).getByRole("group", { name: "Actions" })
+    ).toBeVisible();
+    // Down to the eleventh row, near the foot of the list at this height.
+    for (let step = 0; step < 10; step += 1) {
       await input.press("ArrowDown");
     }
+    const active = page.locator(`[id="${await input.getAttribute("aria-activedescendant")}"]`);
+    await expect(active).toBeInViewport({ ratio: 1 });
+
+    // No key is pressed after the resize: the list itself brings the row back into view.
+    await page.setViewportSize({ height: 420, width: 1440 });
+    await expect(active).toBeInViewport({ ratio: 1 });
   } finally {
     await context.close();
   }
