@@ -48,25 +48,11 @@ const machineLoginPendingTTL = 15 * time.Minute
 const agentSecretPendingTTL = 12 * time.Hour
 
 func main() {
-	migrateOnly := flag.Bool("migrate-only", false,
-		"development only: open BROKER_DATABASE_URL, apply pending schema migrations, and exit "+
-			"without starting the HTTP server or loading rules")
+	// The broker takes no flags; parsing refuses any flag given rather than ignoring it.
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	if *migrateOnly {
-		databaseURL := os.Getenv("BROKER_DATABASE_URL")
-		if databaseURL == "" {
-			fatal(errors.New("-migrate-only requires BROKER_DATABASE_URL"))
-		}
-		st, err := store.Open(ctx, databaseURL)
-		fatal(err)
-		fatal(st.Migrate(ctx))
-		fmt.Println("broker: migrations applied")
-		return
-	}
 
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
