@@ -717,8 +717,7 @@ the command runs in real tmux panes, as an operator would. The pinned Oh My Pi i
 mise. The run needs no model route: the controller's one model turn, the start message
 `legion controller start` opens it with, fails against the profile's default, a static-key
 provider that listens nowhere, and no check reads its answer. The profile names the roles the
-task agents use (`review`, `oracle`, `deep`) and that default, which is all the boot gate's
-agent-model check resolves.
+task agents use and that default, which is all the boot gate's agent-model check resolves.
 
 ```bash
 bash scripts/e2e/controller-start-tmux.sh
@@ -1053,9 +1052,8 @@ is unset for it), for that one command. It appends one line per invocation, one 
 call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout
 carries the key alone. The profile's
 `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
-and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
-(`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review`,
-`oracle` and `deep`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
+and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role, the
+roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
 `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
 `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 

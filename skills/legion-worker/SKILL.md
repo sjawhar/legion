@@ -59,7 +59,7 @@ only on this phase's artifact.
 
 You never spawn another Legion role: spawning a worker
 (`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
-subagents for your own phase work, the ones your role text names; none of them is a Legion role.
+subagents for your own phase work; none of them is a Legion role.
 Escalate a product, scope, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
