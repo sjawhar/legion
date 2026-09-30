@@ -79,7 +79,7 @@ gh run view <pr-title-run-id> --json workflowName,headSha,conclusion,jobs \
 
 The template's named jobs must equal their workflows; a worker fills the line verbatim from the two runs.
 The skill and the implementer role prompt are two copies of this rule
-(`skills/legion-worker/SKILL.md` and `packages/pi-envoy/roles/implementer.md`), so the acceptance
+(`skills/legion-worker/references/pr-body.md` and `packages/pi-envoy/roles/implementer.md`), so the acceptance
 grep covers both: `grep -rn pr-checks-result skills/ packages/pi-envoy/roles/` must exit 1
 ([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md) §5).
 

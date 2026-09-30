@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -78,23 +78,6 @@ func (s *server) loadReviews(ctx context.Context, q queryer, artifactID string) 
 		reviews = []model.ArtifactReview{}
 	}
 	return reviews, nil
-}
-
-// openApprovalAsk is the open approval ask about an artifact, if any.
-func (s *server) openApprovalAsk(ctx context.Context, q queryer, artifactID string) (*model.Ask, error) {
-	ask, err := scanAskRow(q.QueryRow(ctx, `
-		select `+askRowColumns+`
-		`+askRowFrom+`
-		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = $1
-		order by a.created_at desc limit 1
-	`, artifactID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &ask, nil
 }
 
 // attachApprovals fills Approval for every document in place: one query for the
@@ -261,6 +244,27 @@ func reviewFromAnswer(selected []string, text *string) (string, *string, error) 
 	}
 }
 
+// refuseStaleApprovalAsk refuses an answer to an approval ask that names an older version than
+// the document's latest settled one, since its question never named what the review would pin.
+// Every version this server writes retracts such an ask (docs.RetractStaleApprovalAsks), so this
+// guards one an older server left open. The caller holds the document owner's row, which every
+// version write takes first, so the version cannot move between this read and the review.
+func refuseStaleApprovalAsk(ctx context.Context, q queryer, ask model.Ask) error {
+	version, err := settledVersionNumber(ctx, q, ask.Approval.ArtifactID)
+	if err != nil {
+		return err
+	}
+	if version == ask.Approval.Version {
+		return nil
+	}
+	return errorf(
+		http.StatusConflict,
+		"APPROVAL_ASK_STALE",
+		"this approval ask names %s version %d, and the document is at version %d; review version %d from the document header, or wait for a new approval request",
+		ask.Approval.Name, ask.Approval.Version, version, version,
+	)
+}
+
 // GET /api/v1/artifacts/{id}/reviews
 func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -335,31 +339,26 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NO_VERSION", http.StatusConflict, "the document has no settled version to review yet")
 		return
 	}
-	events := []model.Event{}
-	var askID *string
-	if open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID); err != nil {
+	// An open ask naming an older version is retracted, so the review cites no ask about another
+	// version; one at this version is answered by it.
+	open, events, err := docs.ApprovalAskAt(r.Context(), tx, s.deps.Events, artifact.ID, version, actor, "that version was reviewed from the document header instead")
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	} else if open != nil {
+	}
+	var askID *string
+	if open != nil {
 		selected := approvalOptionApprove
 		if state == "changes_requested" {
 			selected = approvalOptionRequestChanges
 		}
-		answered, err := s.answerAskTx(r.Context(), tx, open.ID, actor, []string{selected}, reason)
+		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, nil, nil))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		event, err := s.appendEvent(r.Context(), tx, ownerOf(answered.IssueKey, answered.ArtifactID).event(
-			"ask.answered", actor, model.NewAskEventPayload(answered, model.ReferenceChanges{}),
-		))
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		events = append(events, event)
-		id := answered.ID
-		askID = &id
+		events = append(events, answeredEvents...)
+		askID = &answered.ID
 	}
 	review, event, err := s.writeReview(r.Context(), tx, artifact, version, state, actor, reason, askID)
 	if err != nil {
@@ -375,14 +374,23 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, review)
 }
 
-// POST /api/v1/artifacts/{id}/approval-requests  (any authenticated actor)
+// POST /api/v1/artifacts/{id}/approval-requests  {summary?}  (any authenticated actor)
 func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Actor *model.Actor `json:"actor"`
+		Actor   *model.Actor `json:"actor"`
+		Summary *string      `json:"summary"`
 	}
 	if r.ContentLength != 0 {
 		if err := decodeJSON(r, &input); err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	var summary string
+	if input.Summary != nil {
+		summary = strings.TrimSpace(*input.Summary)
+		if summary == "" {
+			writeError(w, "SUMMARY_INPUT", http.StatusBadRequest, "summary is blank; say what this version proposes that the human hasn't already agreed to, or omit it")
 			return
 		}
 	}
@@ -419,6 +427,12 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		writeError(w, "NO_VERSION", http.StatusConflict, "the document has no settled version to approve yet")
 		return
 	}
+	// The summary is checked on every path a request takes, including those that open nothing.
+	question, err := approvalQuestion(artifact.Name, version, summary)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	type response struct {
 		Ask        *model.Ask             `json:"ask"`
 		ArtifactID string                 `json:"artifact_id"`
@@ -434,15 +448,24 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
-	if open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID); err != nil {
+	// An open ask naming a version the document has moved past, which no answer can approve any
+	// more (APPROVAL_ASK_STALE), is replaced by this request; one at this version is returned.
+	open, events, err := docs.ApprovalAskAt(r.Context(), tx, s.deps.Events, artifact.ID, version, actor, "approval is requested for that version instead")
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	} else if open != nil {
+	}
+	if open != nil {
 		if err := s.attachOpenedEventIDs(r.Context(), tx, []*model.Ask{open}); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: open.Approval.Version, Approval: *artifact.Approval})
+		if err := tx.Commit(r.Context()); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		s.publish(events...)
+		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
 	var rowID string
@@ -456,7 +479,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		ArtifactID: owner.ArtifactID,
 		Author:     actor,
 		Kind:       "approval",
-		Question:   fmt.Sprintf("Approve %s (version %d)?", artifact.Name, version),
+		Question:   question,
 		Options:    approvalAskOptions,
 		Multiple:   false,
 		Urgency:    "high",
@@ -508,14 +531,31 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ask.OpenedEventID = &event.ID
+	events = append(events, event)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(events...)
 	awaiting := *artifact.Approval
 	awaiting.State = "awaiting"
 	awaiting.RequestedBy = &actor
 	awaiting.AskID = &ask.ID
 	WriteJSON(w, http.StatusCreated, response{Ask: &ask, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
+}
+
+// approvalQuestion is an approval ask's question: the document and version it names, then the
+// requester's summary of what that version proposes when one was given. A summary that would
+// take the question past the ask cap is refused naming the characters left for it.
+func approvalQuestion(name string, version int, summary string) (string, error) {
+	question := fmt.Sprintf("Approve %s (version %d)?", name, version)
+	if summary == "" {
+		return question, nil
+	}
+	// The summary follows the question after one space.
+	left := max(0, maxAskQuestion16-len16(question)-1)
+	if length := len16(summary); length > left {
+		return "", capExceededError("summary", length, left)
+	}
+	return question + " " + summary, nil
 }

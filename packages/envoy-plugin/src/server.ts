@@ -5,6 +5,7 @@ import { agentSubject, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
+import { dispatchFirstSkillFile } from "@legion/envoy-client/dispatch-first";
 import { machineID } from "@legion/envoy-client/machine";
 import {
   envoyToolSpecs,
@@ -52,6 +53,20 @@ export default async (input: { serverUrl: URL }) => {
     logger.warn(
       `envoy: dispatch tools disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}`
     );
+  }
+  // With Dispatch configured, every session carries the dispatch-first skill as an instruction
+  // file: OpenCode reads instruction files into the main loop's system prompt on every request
+  // and leaves them out of title and compaction requests. A package without the skill fails
+  // here, naming the file, rather than serving sessions that silently lack it.
+  let dispatchFirst: string | undefined;
+  if (dispatchConfig.enabled) {
+    if (skillsDirectory === undefined) {
+      throw new Error(`envoy: no skills directory beside ${moduleDirectory}`);
+    }
+    dispatchFirst = dispatchFirstSkillFile(skillsDirectory);
+    if (!existsSync(dispatchFirst)) {
+      throw new Error(`envoy: the dispatch-first skill ${dispatchFirst} is missing`);
+    }
   }
   const envoyDefaults = envoyDefaultsFromEnvironment(process.env);
   const envoy = createEnvoyClient({ baseUrl: envoyDefaults.envoyUrl, fetch: globalThis.fetch });
@@ -195,7 +210,9 @@ export default async (input: { serverUrl: URL }) => {
   }
 
   return {
-    config: (cfg: { skills?: { paths?: string[] } } & Record<string, unknown>) => {
+    config: (
+      cfg: { skills?: { paths?: string[] }; instructions?: string[] } & Record<string, unknown>
+    ) => {
       // Serve the bundled legion skills to every session on this serve.
       if (skillsDirectory) {
         cfg.skills ??= {};
@@ -203,6 +220,10 @@ export default async (input: { serverUrl: URL }) => {
         if (!cfg.skills.paths.includes(skillsDirectory)) {
           cfg.skills.paths.push(skillsDirectory);
         }
+      }
+      if (dispatchFirst !== undefined) {
+        cfg.instructions ??= [];
+        if (!cfg.instructions.includes(dispatchFirst)) cfg.instructions.push(dispatchFirst);
       }
     },
     event: async ({

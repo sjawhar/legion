@@ -111,11 +111,21 @@ interface TextEditRange {
   readonly start: number;
 }
 
-interface AcceptedMention {
+/** One accepted mention: the target, and the span of the body that names it. */
+export interface AcceptedMention {
   readonly end: number;
   readonly start: number;
   readonly target: string;
   readonly text: string;
+}
+
+/**
+ * A draft in flight between two mounts of this composer. Opaque to the caller: hand back what
+ * `onCarry` gave you and nothing else, since the records are offsets into that exact body.
+ */
+export interface CarriedDraft {
+  readonly body: string;
+  readonly mentions: readonly AcceptedMention[];
 }
 
 interface MentionOption {
@@ -338,6 +348,79 @@ function mentionDisplay(title: string, target: string): string {
   return target.replace(":", " ");
 }
 
+/** The target a message in this channel already reaches: mentioning it says nothing. */
+function ownTarget(owner: ComposerOwner): string | null {
+  return owner.kind === "session" ? `session:${owner.sessionId}` : null;
+}
+
+/**
+ * What a mount starts from: the reader's prose with the records still in step with it, and this
+ * channel's own mentions seeded in front of whatever is not already there.
+ *
+ * A carry crosses a remount the host made to change the message's owner. Three rules keep the
+ * text and the accepted records saying the same thing, because only the records reach the wire
+ * (`survivingMentions` at send) while only the text reaches the reader:
+ *
+ * - A carried record counts only while its span is untouched (`survivingMentions`). A span the
+ *   reader edited is their prose: the record goes, the text stays.
+ * - The channel's own mention belongs to the channel. Entering one that seeds none - a direct
+ *   message, which already reaches its session - takes the untouched record for that session out
+ *   of the text with its separating space. Every other surviving record travels, so a trip back
+ *   restores it.
+ * - Seeding is by target, not by position: a mention this channel owes is added only when no
+ *   surviving record already names it, wherever in the body that record sits.
+ */
+function initialDraft(
+  initialMentions: readonly { readonly target: string; readonly title: string }[],
+  carried: CarriedDraft | undefined,
+  owner: ComposerOwner
+): { body: string; mentions: AcceptedMention[] } {
+  let body = carried?.body ?? "";
+  let records = survivingMentions(body, carried?.mentions ?? []);
+  const own = ownTarget(owner);
+  const addressed = own === null ? undefined : records.find((record) => record.target === own);
+  if (addressed !== undefined) {
+    const cut =
+      body.slice(addressed.end, addressed.end + 1) === " " ? addressed.end + 1 : addressed.end;
+    const width = cut - addressed.start;
+    body = body.slice(0, addressed.start) + body.slice(cut);
+    records = records
+      .filter((record) => record !== addressed)
+      .map((record) =>
+        record.start >= cut
+          ? { ...record, end: record.end - width, start: record.start - width }
+          : record
+      );
+  }
+  const owed = initialMentions.filter(
+    (mention) => !records.some((record) => record.target === mention.target)
+  );
+  let offset = 0;
+  const seeded = owed.map((mention) => {
+    const text = mentionDisplay(mention.title, mention.target);
+    const start = offset;
+    offset += mentionText(text).length;
+    const end = offset;
+    offset += 1;
+    return { end, start, target: mention.target, text };
+  });
+  const prefix = owed
+    .map((mention) => mentionText(mentionDisplay(mention.title, mention.target)))
+    .join(" ");
+  const shift = prefix === "" ? 0 : prefix.length + 1;
+  return {
+    body: [prefix, body].filter((part) => part !== "").join(" "),
+    mentions: [
+      ...seeded,
+      ...records.map((record) => ({
+        ...record,
+        end: record.end + shift,
+        start: record.start + shift,
+      })),
+    ],
+  };
+}
+
 function survivingMentions(body: string, mentions: readonly AcceptedMention[]): AcceptedMention[] {
   const seen = new Set<string>();
   const surviving: AcceptedMention[] = [];
@@ -386,12 +469,21 @@ interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
   readonly autoFocus?: boolean;
+  /** The draft a previous instance of this composer held, when the caller has remounted it to
+   *  change the message's owner (`AgentsPage`'s issue pick, where the owner decides which
+   *  mention the message needs). Body and accepted records travel together, so what the reader
+   *  sees and what reaches the wire cannot disagree: see `initialDraft` for the three rules,
+   *  including the one mention that does not travel - the session a direct message is already
+   *  addressed to. Omitted, the composer starts exactly as it always has. */
+  readonly carried?: CarriedDraft;
   readonly docked?: boolean;
   readonly edit?: { readonly body: string; readonly id: string };
   readonly initialMentions?: readonly { readonly target: string; readonly title: string }[];
   readonly inline?: boolean;
   readonly kind?: ComposerKind;
   readonly onCancelReply?: () => void;
+  /** Every change to the draft, for a caller that will hand it back after a remount of its own. */
+  readonly onCarry?: (draft: CarriedDraft) => void;
   readonly onClose: () => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
@@ -405,12 +497,14 @@ export function MentionComposer({
   agents: suppliedAgents,
   anchor,
   autoFocus = false,
+  carried,
   docked = false,
   edit,
   initialMentions = [],
   inline = false,
   kind: initialKind = "comment",
   onCancelReply,
+  onCarry,
   onClose,
   onSent,
   owner,
@@ -418,33 +512,22 @@ export function MentionComposer({
   saveEdit,
   showKindSwitch = false,
 }: MentionComposerProps): ReactNode {
-  const initialBody = initialMentions
-    .map((mention) => mentionText(mentionDisplay(mention.title, mention.target)))
-    .join(" ");
+  // Only the mount reads it, so it is computed once rather than on every keystroke.
+  const [initial] = useState(() => initialDraft(initialMentions, carried, owner));
   const textarea = useRef<HTMLTextAreaElement>(null);
   const replacementTextarea = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const lastFocusedField = useRef<HTMLElement | null>(null);
   const optionLabelRefs = useRef<Array<HTMLInputElement | null>>([]);
   const focusAddedOption = useRef(false);
-  const previousBody = useRef(edit?.body ?? initialBody);
+  const previousBody = useRef(edit?.body ?? initial.body);
   const pendingTextEdit = useRef<{ before: string; range: TextEditRange } | undefined>(undefined);
   const previousReply = useRef<string | undefined>(undefined);
   const queryClient = useQueryClient();
-  const [body, setBody] = useState(edit?.body ?? initialBody);
+  const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
   const [kind, setKind] = useState<ComposerKind>(initialKind);
-  const [mentions, setMentions] = useState<AcceptedMention[]>(() => {
-    let offset = 0;
-    return initialMentions.map((mention) => {
-      const text = mentionDisplay(mention.title, mention.target);
-      const start = offset;
-      offset += mentionText(text).length;
-      const end = offset;
-      offset += 1;
-      return { end, start, target: mention.target, text };
-    });
-  });
+  const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
   const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() => [emptyAskOption()]);
   const [multiple, setMultiple] = useState(false);
   const [urgency, setUrgency] = useState<AskUrgency>("med");
@@ -471,11 +554,27 @@ export function MentionComposer({
     );
   }, [autocomplete, options]);
   const compact = inline || edit !== undefined;
+  /** The whole draft, gone - the body, its accepted mentions, a suggestion's replacement and an
+   *  ask's options - on a successful send and on Discard alike, in every host: one whose `onClose`
+   *  only moves focus (`AgentsPage`'s rows) keeps the composer mounted and shows it empty, as one
+   *  that unmounts it would. The kind, the urgency and `Allow multiple` are the reader's settings,
+   *  not the draft, and stay. The carry is reported empty with it, so no later remount can bring a
+   *  sent or discarded draft back. */
+  const clearDraft = () => {
+    setBody("");
+    previousBody.current = "";
+    setMentions([]);
+    setReplacement("");
+    setAskOptions([emptyAskOption()]);
+  };
   const references = useMemo(() => composerReferences(body), [body]);
   const submitGuard = useSubmitGuard();
   const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 
+  useEffect(() => {
+    onCarry?.({ body, mentions });
+  }, [body, mentions, onCarry]);
   useEffect(() => {
     if (editBody === undefined) return;
     setBody(editBody);
@@ -650,9 +749,7 @@ export function MentionComposer({
     },
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
-      setBody("");
-      previousBody.current = "";
-      setMentions([]);
+      clearDraft();
       onSent();
       if (commentQueryKey !== undefined)
         void queryClient.invalidateQueries({ queryKey: commentQueryKey });
@@ -898,7 +995,15 @@ export function MentionComposer({
           role="alert"
         >
           <span>Discard draft?</span>
-          <button className="font-semibold underline" onClick={onClose} type="button">
+          <button
+            className="font-semibold underline"
+            onClick={() => {
+              clearDraft();
+              setConfirmingDiscard(false);
+              onClose();
+            }}
+            type="button"
+          >
             Discard
           </button>
           <button

@@ -448,7 +448,7 @@ func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
 
 // The implementer's production check writes no handoff: skills/legion-worker/SKILL.md's completion
 // gate says the post-merge production check "writes no .legion/<phase>.json, commits no handoff,
-// and reports with `legion handoff complete` alone", and the daemon's workflow does not treat
+// and reports with `handoff_complete` alone", and the daemon's workflow does not treat
 // production_check as file-backed (internal/workflow/effects.go fileBacked). The phase starts only
 // after the ordinary human squash merge deleted the issue branch, so the implementer's
 // `jj git fetch` abandons the branch and leaves `@` on main, which now carries the merged
@@ -553,12 +553,12 @@ func TestHandoffTakesPhaseWordsForPhasesAndRolesForRoles(t *testing.T) {
 	}
 }
 
-// The end game every clean review round ends in (skills/legion-worker/SKILL.md: the reviewer
+// The end game every clean review round ends in (skills/legion-worker/references/merge-gate.md: the reviewer
 // approves only a head that carries no .legion/, and the implementer pushes the .legion/
 // deletion): once the branch head has deleted .legion/, the implementer and the tester report
-// completion without recreating it (the same skill's completion gate: once .legion/ is gone, "a
+// completion without recreating it (skills/legion-worker/SKILL.md's completion gate: once .legion/ is gone, "a
 // later rebase, bare-gate re-check, confirmation, retro, or the post-merge production check writes
-// no .legion/<phase>.json, commits no handoff, and reports with `legion handoff complete` alone";
+// no .legion/<phase>.json, commits no handoff, and reports with `handoff_complete` alone";
 // packages/pi-envoy/roles/implementer.md and tester.md say the same). The commit that deleted the
 // handoff is the last commit on the branch that changed it, and the completion reports it.
 func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {

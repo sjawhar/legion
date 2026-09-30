@@ -111,14 +111,14 @@ Which transport?
 		t.Fatalf("two-block issue advice = %#v", with.Advice)
 	}
 
-	defaulted := createAdviceIssue(t, handler, "ADVICE", "Default template", nil)
-	if defaulted.Advice == nil {
-		t.Fatal("default-template issue omitted advice")
+	withoutSpec := createAdviceIssue(t, handler, "ADVICE", "No spec", nil)
+	if withoutSpec.Advice == nil {
+		t.Fatal("issue created without a spec omitted advice")
 	}
-	if defaulted.Advice.DecisionBlocks != nil {
-		t.Fatalf("default-template decision_blocks = %d, want absent", *defaulted.Advice.DecisionBlocks)
+	if withoutSpec.Advice.DecisionBlocks != nil {
+		t.Fatalf("decision_blocks of an issue created without a spec = %d, want absent", *withoutSpec.Advice.DecisionBlocks)
 	}
-	if defaulted.Advice.YourOpenAsks == nil {
+	if withoutSpec.Advice.YourOpenAsks == nil {
 		t.Fatal("human issue-create your_open_asks decoded as nil, want []")
 	}
 

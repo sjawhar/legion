@@ -12,6 +12,7 @@
 //	agent-secrets launcher login
 //	agent-secrets launcher login-status
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
+//	agent-secrets identity
 //	agent-secrets renew
 //	agent-secrets request NAME... [--reason TEXT] [--json]
 //	agent-secrets status <request_id> [--json]
@@ -25,12 +26,16 @@
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
 // subcommand, either AGENT_SECRETS_KEY_DIR (an agent box or pod's key.pem and enrollment, the
 // two files keygen and enroll write) or AGENT_SECRETS_HELPER_SOCK (a host session's
-// agent-secrets-helper socket, joined by `agent-secrets register`). A host session enrolls
-// (kind host) automatically through the helper's own enroll loop, and a pod's own enrollment is
-// its launcher's job — this CLI has no direct enrollment path for either; only a box enrolls
-// through it, and only via --helper (contract v9 dropped launcher bearer tokens: nothing on a
-// devbox can enroll except through a helper or the Legion daemon, the two processes that hold a
-// launcher's proof-signing key).
+// agent-secrets-helper socket, joined by `agent-secrets register`). When unset, each falls back
+// to its launcher's default path, $XDG_RUNTIME_DIR/agent-secrets and the helper socket inside it,
+// and a default counts only when its file is there (identity.go). AGENT_SECRETS_ENROLL_WAIT (a
+// duration, default 20s) bounds how long a call waits while a box's launcher is still enrolling
+// it. The exec form's child keeps all three variables, since it is the same session
+// (buildChildEnv). A host session enrolls (kind host) automatically through the helper's own
+// enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
+// enrollment path for either; only a box enrolls through it, and only via --helper (contract v9
+// dropped launcher bearer tokens: nothing on a devbox can enroll except through a helper or the
+// Legion daemon, the two processes that hold a launcher's proof-signing key).
 package main
 
 import (
@@ -52,6 +57,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
 // Exit codes for the "request" and NAME...-- <command> forms: 75 (EX_TEMPFAIL) and 77
@@ -75,6 +81,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage())
+		return 0
+	case "--version":
+		fmt.Fprintf(stdout, "agent-secrets %s\n", buildversion.String())
 		return 0
 	case "keygen":
 		return cmdKeygen(args[1:], stdout, stderr)
@@ -106,6 +115,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSelf(append([]string{"--json"}, args[1:]...), stdout, stderr)
 	case "sign":
 		return cmdSign(args[1:], stdout, stderr)
+	case "identity":
+		return cmdIdentity(args[1:], stdout, stderr)
 	default:
 		return cmdExec(args, stdout, stderr)
 	}
@@ -119,6 +130,8 @@ func usage() string {
   agent-secrets launcher login
   agent-secrets launcher login-status
   agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
+  agent-secrets identity
+  agent-secrets --version
   agent-secrets renew
   agent-secrets request NAME... [--reason TEXT] [--json]
   agent-secrets status <request_id> [--json]
@@ -136,6 +149,16 @@ func exitUsage(err error) int {
 		return 0
 	}
 	return exitUsageError
+}
+
+// reportError prints a command's failure as "<prefix>: <err>", except that a helper holding no
+// launcher credential is reported with the one line identity prints for it, whatever the command.
+func reportError(stderr io.Writer, prefix string, err error) {
+	if errors.Is(err, errNoCredential) {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", errNoCredential)
+		return
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", prefix, err)
 }
 
 // splitArgs partitions args into recognized "--flag"/"--flag value" tokens (as declared by
@@ -169,6 +192,29 @@ func readTrimmed(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
+// writeFileAtomic writes data to path by renaming a finished temporary file into place, so no
+// reader ever sees path half-written: a call waiting out a box's enrollment (awaitEnrollment)
+// reads key.pem and enrollment the moment each appears.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // a no-op once the rename has taken it
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -190,36 +236,52 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 }
 
 // buildSigner selects and builds this process's Signer: an agent box or pod signs with the key
-// and enrollment id it keeps under AGENT_SECRETS_KEY_DIR (file mode); a host session has no key
-// of its own and asks agent-secrets-helper over AGENT_SECRETS_HELPER_SOCK, which signs only for
-// processes descending from a session `agent-secrets register` registered (helper mode). The
-// enrollment id it returns is file mode's own; helper mode returns "" because nothing needs it
-// as a literal except RenewEnrollment's URL path, and a host session's lease is renewed by the
+// and enrollment id it keeps in its key dir (file mode); a host session has no key of its own and
+// asks agent-secrets-helper over its socket, which signs only for processes descending from a
+// session `agent-secrets register` registered (helper mode). The key dir and socket are
+// AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, or their defaults where those are unset
+// (identity.go). While a box's launcher is still enrolling it (a fresh enrollment.pending in the
+// key dir), this first waits for key.pem and enrollment, for AGENT_SECRETS_ENROLL_WAIT at most.
+// The enrollment id it returns is file mode's own; helper mode returns "" because nothing needs
+// it as a literal except RenewEnrollment's URL path, and a host session's lease is renewed by the
 // helper itself — cmdRenew refuses outright once it sees an empty id from a successful build.
 func buildSigner() (enrollmentID string, signer Signer, err error) {
-	if dir := os.Getenv("AGENT_SECRETS_KEY_DIR"); dir != "" {
-		if _, statErr := os.Stat(filepath.Join(dir, "key.pem")); statErr == nil {
-			key, keyErr := loadKey(filepath.Join(dir, "key.pem"))
-			if keyErr != nil {
-				return "", nil, keyErr
-			}
-			id, idErr := readTrimmed(filepath.Join(dir, "enrollment"))
-			if idErr != nil {
-				if reason, rerr := readTrimmed(filepath.Join(dir, "enrollment.error")); rerr == nil {
-					return "", nil, fmt.Errorf("%w (enrollment.error: %s)", idErr, reason)
-				}
-				return "", nil, idErr
-			}
-			if id == "" {
-				return "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, "enrollment"))
-			}
-			return id, &fileSigner{key: key, enrollmentID: id}, nil
-		}
+	wait, err := enrollWait()
+	if err != nil {
+		return "", nil, err
 	}
-	if sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK"); sock != "" {
+	dir := keyDir()
+	gaveUp := awaitEnrollment(dir, wait)
+	enrollmentID, signer, err = selectSigner(dir)
+	if err != nil && gaveUp {
+		err = fmt.Errorf("%w (waited %s while %s was there)", err, wait, filepath.Join(dir, pendingMarker))
+	}
+	return enrollmentID, signer, err
+}
+
+func selectSigner(dir string) (string, Signer, error) {
+	if keyPath := filepath.Join(dir, keyFile); exists(keyPath) {
+		key, keyErr := loadKey(keyPath)
+		if keyErr != nil {
+			return "", nil, keyErr
+		}
+		id, idErr := readTrimmed(filepath.Join(dir, enrollmentFile))
+		if idErr != nil {
+			if reason, rerr := readTrimmed(filepath.Join(dir, "enrollment.error")); rerr == nil {
+				return "", nil, fmt.Errorf("%w (enrollment.error: %s)", idErr, reason)
+			}
+			return "", nil, idErr
+		}
+		if id == "" {
+			return "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, enrollmentFile))
+		}
+		return id, &fileSigner{key: key, enrollmentID: id}, nil
+	}
+	sock, named := helperSocket()
+	if named || exists(sock) {
 		return "", &helperSigner{sock: sock}, nil
 	}
-	return "", nil, errors.New("no session identity: AGENT_SECRETS_KEY_DIR has no key.pem (an agent box or pod is enrolled by its launcher) and AGENT_SECRETS_HELPER_SOCK is unset (a host session is registered by `agent-secrets register`)")
+	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher) and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a host session is registered by `agent-secrets register`)", dir, sock)
 }
 
 // sessionContext resolves the broker URL and this process's Signer every session-authenticated
@@ -295,7 +357,7 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(filepath.Join(*out, "key.pem"), pemBytes, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(*out, keyFile), pemBytes, 0o600); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
 		return 1
 	}
@@ -364,10 +426,7 @@ func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stde
 		fmt.Fprintln(stderr, "agent-secrets enroll: AGENT_SECRETS_KEY_DIR is required")
 		return exitUsageError
 	}
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
+	sock, _ := helperSocket()
 	var sessionIDPtr *string
 	if sessionID != "" {
 		sessionIDPtr = &sessionID
@@ -385,7 +444,7 @@ func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stde
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
 	}
-	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
 	}
@@ -424,10 +483,7 @@ func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
 // Idempotent: the helper's UnenrollBox treats 204 and 404 as done. Prints nothing on success,
 // matching the exit-code-only unenroll contract.
 func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
+	sock, _ := helperSocket()
 	resp, err := helper.Call(sock, helper.Request{Op: "unenroll-box", EnrollmentID: enrollmentID}, 30*time.Second)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
@@ -438,115 +494,6 @@ func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-// ---------------------------------------------------------------------------
-// launcher login / login-status
-// ---------------------------------------------------------------------------
-
-// cmdLauncher dispatches this CLI's two launcher subcommands: "login" and "login-status".
-func cmdLauncher(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, `agent-secrets launcher: "login" or "login-status" is required`)
-		return exitUsageError
-	}
-	switch args[0] {
-	case "login":
-		return cmdLauncherLogin(args[1:], stdout, stderr)
-	case "login-status":
-		return cmdLauncherLoginStatus(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "agent-secrets launcher: unknown subcommand %q\n", args[0])
-		return exitUsageError
-	}
-}
-
-// cmdLauncherLogin implements "launcher login". It asks agent-secrets-helper to start a machine
-// login, prints the broker's confirmation code for the operator to type on the Dispatch
-// credential page, then polls the helper until the login reaches a terminal state.
-func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", args[0])
-		return exitUsageError
-	}
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
-	resp, err := helper.Call(sock, helper.Request{Op: "login"}, 10*time.Second)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
-		return 1
-	}
-	if !resp.OK {
-		fmt.Fprintf(stderr, "agent-secrets launcher login: %s: %s\n", resp.Code, resp.Error)
-		return 1
-	}
-	fmt.Fprintf(stdout, "machine login code: %s\n", resp.Code)
-	if approveURL := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/"); approveURL != "" {
-		fmt.Fprintf(stdout, "enter it at %s/credentials/machine — approve only if the code matches this terminal\n", approveURL)
-	} else {
-		fmt.Fprintln(stdout, "enter it on the Dispatch credential page")
-	}
-	backoff := 2 * time.Second
-	for {
-		resp, err := helper.Call(sock, helper.Request{Op: "login-status"}, 10*time.Second)
-		if err != nil {
-			fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
-			return 1
-		}
-		if !resp.OK {
-			fmt.Fprintf(stderr, "agent-secrets launcher login: %s: %s\n", resp.Code, resp.Error)
-			return 1
-		}
-		switch resp.LoginState {
-		case "issued":
-			return 0
-		case "denied", "expired":
-			fmt.Fprintf(stderr, "agent-secrets launcher login: %s\n", resp.LoginState)
-			return 1
-		}
-		time.Sleep(backoff)
-		backoff = nextBackoff(backoff)
-	}
-}
-
-// cmdLauncherLoginStatus implements "launcher login-status": a read-only, single-shot query of
-// the helper's current (or most recently settled) machine login state, with no side effect —
-// unlike re-running "login" itself, which mints a fresh key and opens a brand-new pending
-// machine-login record even while a credential is already issued (Broker.Login only
-// short-circuits a login that is still *pending*, per its own doc comment). Its exit code is a
-// liveness probe scripts can use directly: 0 only when the state is "issued", 1 for
-// "pending"/"denied"/"expired" and for "" (login never run) — the same distinction the doctor
-// and installer checks in ~/.dotfiles need and, before this verb existed, had no side-effect-free
-// way to make (AGENTC-834).
-func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
-		return exitUsageError
-	}
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
-	resp, err := helper.Call(sock, helper.Request{Op: "login-status"}, 10*time.Second)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %v\n", err)
-		return 1
-	}
-	if !resp.OK {
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %s: %s\n", resp.Code, resp.Error)
-		return 1
-	}
-	state := resp.LoginState
-	if state == "" {
-		state = "none"
-	}
-	fmt.Fprintln(stdout, state)
-	if resp.LoginState == "issued" {
-		return 0
-	}
-	return 1
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +579,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 	}
 	result, raw, err := newClient(base).CreateRequest(context.Background(), signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
+		reportError(stderr, "agent-secrets request", err)
 		return 1
 	}
 	if *asJSON {
@@ -673,7 +620,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	}
 	result, raw, err := newClient(base).GetRequest(context.Background(), signer, positional[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets status: %v\n", err)
+		reportError(stderr, "agent-secrets status", err)
 		return 1
 	}
 	if *asJSON {
@@ -706,7 +653,7 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if err := newClient(base).CancelRequest(context.Background(), signer, positional[0]); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets cancel: %v\n", err)
+		reportError(stderr, "agent-secrets cancel", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "cancelled")
@@ -729,7 +676,7 @@ func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if err := newClient(base).RevokeGrant(context.Background(), signer, positional[0]); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets revoke: %v\n", err)
+		reportError(stderr, "agent-secrets revoke", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "revoked")
@@ -759,7 +706,7 @@ func cmdSelf(args []string, stdout, stderr io.Writer) int {
 	}
 	result, raw, err := newClient(base).Self(context.Background(), signer)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets self: %v\n", err)
+		reportError(stderr, "agent-secrets self", err)
 		return 1
 	}
 	if *asJSON {
@@ -828,7 +775,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	result, _, err := c.CreateRequest(ctx, signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		reportError(stderr, "agent-secrets", err)
 		return 1
 	}
 
@@ -844,7 +791,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 			time.Sleep(minDuration(backoff, remaining))
 			status, _, err := c.GetRequest(ctx, signer, requestID)
 			if err != nil {
-				fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+				reportError(stderr, "agent-secrets", err)
 				return 1
 			}
 			state, grantID = status.State, status.GrantID
@@ -873,7 +820,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 
 	values, err := c.GrantValues(ctx, signer, *grantID)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		reportError(stderr, "agent-secrets", err)
 		return 1
 	}
 	var missing []string
@@ -899,12 +846,24 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	return 0 // unreachable: syscall.Exec replaces this process on success
 }
 
-// buildChildEnv is the exec form's child environment: the inherited environment with every
-// AGENT_SECRETS_* variable stripped (this CLI's own configuration is never the child's business)
-// and, for every released secret name, its inherited entry ALSO stripped before that name's
-// granted value is appended. Without that second strip, a duplicate key from the inherited
-// environment could shadow the broker-released value under an execve implementation that keeps
-// the first occurrence of a repeated key rather than the last.
+// sessionIdentityVars are the AGENT_SECRETS_* variables the exec form's child keeps: the broker's
+// URL and the helper socket or key dir that say which session this is. The child is the same
+// session — the helper signs for every descendant of the registered root, and a box's key never
+// leaves the box — so an `agent-secrets` call it makes (a skill that nests a request, gh's token
+// helper under `agent-secrets NAME -- omp`) must reach the broker as that session instead of
+// failing with "AGENT_SECRETS_URL is required". Every other AGENT_SECRETS_* variable (a wait
+// bound, an approve URL) configures this one invocation and is dropped.
+var sessionIdentityVars = map[string]bool{
+	"AGENT_SECRETS_URL":         true,
+	"AGENT_SECRETS_HELPER_SOCK": true,
+	"AGENT_SECRETS_KEY_DIR":     true,
+}
+
+// buildChildEnv is the exec form's child environment: the inherited environment minus every
+// AGENT_SECRETS_* variable but sessionIdentityVars and, for every released secret name, minus its
+// inherited entry too, before that name's granted value is appended. Without that second strip,
+// a duplicate key from the inherited environment could shadow the broker-released value under an
+// execve implementation that keeps the first occurrence of a repeated key rather than the last.
 func buildChildEnv(environ []string, values map[string]string) []string {
 	envp := make([]string, 0, len(environ)+len(values))
 	for _, e := range environ {
@@ -912,7 +871,7 @@ func buildChildEnv(environ []string, values map[string]string) []string {
 		if !ok {
 			continue
 		}
-		if strings.HasPrefix(key, "AGENT_SECRETS_") {
+		if strings.HasPrefix(key, "AGENT_SECRETS_") && !sessionIdentityVars[key] {
 			continue
 		}
 		if _, released := values[key]; released {
