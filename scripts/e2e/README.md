@@ -409,7 +409,8 @@ phase-finished notice's summary and verdict, the daemon posting and publishing t
 proof pull request is retargeted to a scratch base before any merge (the one merged at
 `awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
 merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
-(default the kept scratch work directory's `evidence/`).
+(default the kept scratch work directory's `evidence/`). A run that ends on its soft failures gets
+[notes](#libmodel-gateway-unservedsh) for its first soft-failing check, from that check's own start.
 
 ## stage4a-sandbox-runtime.sh
 
@@ -605,8 +606,13 @@ run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is 
 on whether the controller could have failed that check for want of a model key; or
 `stage 4b e2e: BLOCKED (check <check>)` when the checkpoint could not run and the teardown checks
 (`namespace-clean`, `production-audit`) passed, which makes the run no verdict on the change while
-the checkpoints before it stand, and gets no notes; a teardown check that fails ends the run FAIL
-whatever stopped it. Every one but the pass exits 1.
+the checkpoints before it stand, and gets no notes. A failed teardown check outranks every reason
+the run stopped: it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and
+subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is
+`stage 4b e2e: FAIL (check <teardown check>, in the teardown after check <check>)` whenever the
+checkpoint that stopped the run did not fail itself: a pass, a `STAGE4B_UNTIL` run's last
+checkpoint, a blocked checkpoint, a signal. Every verdict but the pass exits non-zero: 1, or the
+stopping signal's 129, 130 or 143 when the teardown was clean.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -1188,12 +1194,9 @@ have failed the check for want of a key: when it last got none, from where, and 
   just before the check began.
 - **An agent served again before that window** held a key through the whole check, and is left out.
 
-No time rule keeps an earlier run's calls out, since an agent still without a key is listed however
-old its starve: each stage proof passes the notes a directory it sets only once `--fresh` has
-passed, and `--fresh` refuses a directory an earlier run left. A person then sees whether
-starvation could explain the failure. A run-wide "not scored" would not be honest: in Stage
-4b the key command's one caller is the operator's controller, while every pod uses its projected
-token, so a worker's failure cannot come from a starved controller.
+A person then sees whether starvation could explain the failure. A run-wide "not scored" would not
+be honest: in Stage 4b the key command's one caller is the operator's controller, while every pod
+uses its projected token, so a worker's failure cannot come from a starved controller.
 
 `--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make first, before they write
 anything into their evidence directory or set any trap, when the operator's evidence directory

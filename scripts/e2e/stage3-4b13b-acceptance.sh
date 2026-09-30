@@ -49,9 +49,6 @@ if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
   rmdir "$work"
   exit 1
 fi
-# The key command's directory, whose record the trap's notes read: set only once --fresh has passed,
-# so the notes can never read an earlier run's calls.
-gateway_dest=$evidence/model-gateway
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
 check=setup
@@ -91,8 +88,14 @@ note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 # soft records a failed assertion and lets the run go on, so one run yields every observation; the
-# run ends non-zero naming each one.
-soft() { printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2; }
+# run ends non-zero naming each one. It remembers the first soft-failing check and when it began,
+# for a soft ending's notes.
+first_soft_check=
+first_soft_since=
+soft() {
+  printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2
+  [ -n "$first_soft_check" ] || { first_soft_check=$check first_soft_since=$check_started; }
+}
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source=/dev/null
@@ -143,12 +146,18 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
-  # A diagnostic for a failed run, hard or soft: it never sets the status. A run that ends on its
-  # soft failures sets ok after its last check and still exits 1, and an agent still without a key
-  # from any check is listed, so it gets notes too. A hangup, an interrupt or a termination (129,
-  # 130, 143, as trapped below) stopped the run and gets none.
-  [ "$status" = 0 ] || [ -z "$gateway_dest" ] || [[ $status =~ ^(129|130|143)$ ]] ||
-    bash "$unserved_reader" --notes "$gateway_dest" "$check_started" "$check" >&2 || true
+  # A diagnostic for a failed run, hard or soft: it never sets the status. A hard failure's notes
+  # are for its check. A run that ends on its soft failures sets ok after its last check, once every
+  # pane has stopped, so its notes are for its first soft-failing check, from that check's start.
+  # A hangup, an interrupt or a termination (129, 130, 143, as trapped below) stopped the run and
+  # gets none.
+  if [ "$status" != 0 ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    if [ -z "${ok:-}" ]; then
+      bash "$unserved_reader" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
+    elif [ -n "$first_soft_check" ]; then
+      bash "$unserved_reader" --notes "$evidence/model-gateway" "$first_soft_since" "$first_soft_check" >&2 || true
+    fi
+  fi
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
@@ -624,7 +633,7 @@ printf '%s\n' "$head_commit" >"$evidence/head.txt"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed"
 note "the agents' model route keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"

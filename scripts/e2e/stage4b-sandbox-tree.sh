@@ -69,9 +69,6 @@ if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$e
   rmdir "$work"
   exit 1
 fi
-# The controller's key command directory, whose record the trap's notes read: set only once --fresh
-# has passed, so the notes can never read an earlier run's calls.
-gateway_dest=$evidence/model-gateway
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
 # tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
 # TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
@@ -1010,7 +1007,10 @@ collect_transcripts() {
   fi
 }
 cleanup() {
-  local status=$? p teardown_failed=
+  local status=$? p teardown_failed="" stopped=""
+  # A hangup, an interrupt or a termination (129, 130, 143, as trapped below) stopped the run; read
+  # here, before a teardown check can set the status to 1.
+  [[ ! $status =~ ^(129|130|143)$ ]] || stopped=1
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -1037,23 +1037,37 @@ cleanup() {
     # own control pods (the memory hog, the reachability pod) go first.
     op delete pod -l "legion.dev/project=$run_label,legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     teardown
-    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || { status=1 teardown_failed=1; }; fi
+    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || { status=1 teardown_failed+=" namespace-clean"; }; fi
     delete_consumers
     remove_run_branches
-    if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || { status=1 teardown_failed=1; }; fi
+    if [ -z "$audited" ] && [ -n "$prod_baseline" ] && ! production_audit; then
+      status=1 teardown_failed+=" production-audit"
+      echo "CHECK production-audit: FAIL: $(audit_failure)"
+    fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
-  # A teardown check that fails (a namespace left dirty, a write outside LEGSMOKE) is a failure of the
-  # run whatever stopped it, so only a clean teardown lets a blocked checkpoint end BLOCKED.
-  if [ -n "$was_blocked" ] && [ -z "$teardown_failed" ]; then
+  # A failed teardown check (a namespace left dirty, a write outside LEGSMOKE) outranks every reason
+  # the run stopped, so it is tested first: it ends FAIL, naming the teardown check whenever the
+  # checkpoint that stopped the run did not fail itself (a pass, a development run's last
+  # checkpoint, a blocked checkpoint, a signal). Only a clean teardown lets a blocked checkpoint end
+  # BLOCKED. The notes are a diagnostic for a failed checkpoint and never set the status; a stopped
+  # run, which still ends FAIL, a blocked checkpoint and a pass get none.
+  if [ -n "$teardown_failed" ]; then
+    [ -n "$ok" ] || [ -n "$stopped" ] || [ -n "$was_blocked" ] ||
+      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
+    if [ -n "$ok" ] || [ -n "$stopped" ] || [ -n "$was_blocked" ]; then
+      teardown_failed=${teardown_failed# }
+      echo "stage 4b e2e: FAIL (check ${teardown_failed// /, }, in the teardown after check $check)"
+    else
+      echo "stage 4b e2e: FAIL (check $check)"
+    fi
+  elif [ -n "$was_blocked" ]; then
     echo "stage 4b e2e: BLOCKED (check $check): the checkpoint could not run, so the run is no verdict on the change; the checkpoints before it stand"
   elif [ -z "$ok" ]; then
-    # A diagnostic: it never sets the status. A hangup, an interrupt or a termination (129, 130,
-    # 143, as trapped below) stopped the run, which ends FAIL as on main but gets no notes.
-    [ -z "$gateway_dest" ] || [[ $status =~ ^(129|130|143)$ ]] ||
-      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$gateway_dest" "$check_started" "$check" || true
+    [ -n "$stopped" ] ||
+      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
     echo "stage 4b e2e: FAIL (check $check)"
   fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
@@ -1248,6 +1262,8 @@ interests_outside() {
     | select((contains($p) or contains($t) or startswith($space) or startswith($repo) or contains($op) or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
+# audit_failure is what a failed production audit says, in the checkpoint and in the teardown.
+audit_failure() { echo "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"; }
 
 # ==== checkpoints ===================================================================================
 
@@ -1784,7 +1800,7 @@ else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 make_omp_home "$omp_home"
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
-bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache" >/dev/null ||
+bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 cat >"$work/controller.yaml" <<EOF
@@ -2132,7 +2148,7 @@ namespace_clean
 begin production-audit
 audit_verdict_ok=
 if production_audit; then audit_verdict_ok=1; fi
-[ -n "$audit_verdict_ok" ] || fail "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"
+[ -n "$audit_verdict_ok" ] || fail "$(audit_failure)"
 printf '["AGENTC-1"]\n' >"$evidence/controls/audit-outside.json"
 expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-interests-outside.json"
 # The interest filter, on the run's own samples with one topic outside the run added for a session

@@ -50,10 +50,7 @@
 #     Inside that wait a request fails with no key and runs no command, so it leaves no line, and
 #     the agent's first calls in the check can fail on a starve just before it.
 #   - An agent served again before that window held a key through the whole check, and is left out.
-# No time rule keeps an earlier run's calls out, since an agent still without a key is listed
-# however old its starve: a stage proof passes a <dest> it sets only once --fresh has passed, and
-# --fresh refuses a directory an earlier run left. It says nothing when no agent is listed, or when
-# <dest> holds no record yet.
+# It says nothing when no agent is listed, or when <dest> holds no record yet.
 #
 # --fresh is the stage proofs' refusal of a reused evidence directory: it exits 0 when
 # <evidence-dir>/model-gateway does not exist, and otherwise prints why the run cannot use it and
