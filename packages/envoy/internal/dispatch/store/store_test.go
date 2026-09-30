@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io/fs"
 	"net/url"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -778,6 +780,54 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	_, err := store.Pool.Exec(ctx, `update asks set kind = 'action' where id = '5a660655-04ad-4ce0-8a9b-93dd03c412b7'`)
 	if err == nil || !strings.Contains(err.Error(), "asks_kind_check") {
 		t.Fatalf("action kind update error = %v, want asks_kind_check violation", err)
+	}
+}
+
+// 0053 pairs an ask's kind with its approval: an approval ask names the document version it asks
+// about, and no other kind names one. A hand-written row that breaks the pairing either way is
+// refused at insert.
+func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');
+	`); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	const approval = `{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`
+	for _, row := range []struct {
+		name     string
+		kind     string
+		approval *string
+		refused  bool
+	}{
+		{"an approval ask naming no document", "approval", nil, true},
+		{"a question naming a document", "question", new(approval), true},
+		{"an approval ask naming its document", "approval", new(approval), false},
+		{"a question naming none", "question", nil, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			_, err := store.Pool.Exec(ctx, `
+				insert into asks (issue_key, author, question, options, kind, approval)
+				values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 1)?',
+					'[{"label":"Approve"},{"label":"Request changes"}]', $1, $2::jsonb)
+			`, row.kind, row.approval)
+			if !row.refused {
+				if err != nil {
+					t.Fatalf("insert: %v", err)
+				}
+				return
+			}
+			var refusal *pgconn.PgError
+			if !errors.As(err, &refusal) || refusal.Code != "23514" || refusal.ConstraintName != "asks_approval_kind_check" {
+				t.Fatalf("insert error = %v, want SQLSTATE 23514 naming asks_approval_kind_check", err)
+			}
+		})
 	}
 }
 

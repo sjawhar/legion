@@ -412,58 +412,6 @@ func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
 	}
 }
 
-// Only the approval-request route writes an approval ask, always naming its document, but the
-// schema does not make an ask of kind approval carry one. An answer to a hand-written row that
-// names none is a server fault the route reports, 500 APPROVAL_ASK_INVALID, and it writes nothing.
-func TestAnsweringAnApprovalAskThatNamesNoDocumentIsAServerFault(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Hand-written approval", "A spec")
-	// The row and its ask.opened event, as an insert site writes them, with no approval.
-	ctx := context.Background()
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	ask := model.Ask{
-		IssueKey: &issue.Key, Author: model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
-		Question: "Approve spec.md (version 1)?", Options: []model.AskOption{{Label: "Approve"}, {Label: "Request changes"}},
-		Urgency: "high", State: "open", Kind: "approval",
-	}
-	if err := tx.QueryRow(ctx, `
-		insert into asks (issue_key, author, question, options, urgency, kind, approval)
-		values ($1, '{"kind":"session","id":"session-0123456789abcdef"}', 'Approve spec.md (version 1)?',
-			'[{"label":"Approve"},{"label":"Request changes"}]', 'high', 'approval', null)
-		returning id::text, created_at
-	`, issue.Key).Scan(&ask.ID, &ask.CreatedAt); err != nil {
-		t.Fatalf("insert an approval ask naming no document: %v", err)
-	}
-	if _, err := events.NewBroker().Append(ctx, tx, model.Event{
-		IssueKey: &issue.Key, Type: "ask.opened", Actor: ask.Author, Payload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-	}); err != nil {
-		t.Fatalf("append the ask's ask.opened: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	askID := ask.ID
-	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{"selected": []string{"Approve"}}, "alice")
-	if body := answered.Body.String(); answered.Code != http.StatusInternalServerError || !strings.Contains(body, `"code":"APPROVAL_ASK_INVALID"`) || !strings.Contains(body, askID) {
-		t.Fatalf("answer to an approval ask naming no document: status=%d body=%s", answered.Code, body)
-	}
-	var state string
-	var answer *string
-	var reviews int
-	if err := database.Pool.QueryRow(context.Background(), `
-		select state, answer::text, (select count(*) from artifact_reviews) from asks where id = $1
-	`, askID).Scan(&state, &answer, &reviews); err != nil {
-		t.Fatalf("read the ask after the answer: %v", err)
-	}
-	if state != "open" || answer != nil || reviews != 0 {
-		t.Fatalf("after the refused answer: ask %s with answer %v and %d reviews, want open, unanswered, none", state, answer, reviews)
-	}
-}
-
 // A new version of a document retracts an approval ask naming an older one in the same
 // transaction, with a reason naming the new version, since no answer could review that ask any
 // more; its followers learn from the ask.resolved that approval has to be requested again. Every
