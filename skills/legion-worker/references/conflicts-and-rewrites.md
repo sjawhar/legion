@@ -12,8 +12,8 @@ Every path it cites is in sjawhar/legion.
   "Please don't do unnecessary rebases (i.e. unless there are merge conflicts). The CI queue is too long and slow."
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
   because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
-  pick up `main` or refresh CI. A single failed CI job is re-run on its own with `legion gh -- run rerun <run-id> --failed`, never by
-  pushing a new commit. A conflict-forced rebase that leaves the branch's diff unchanged is a
+  pick up `main` or refresh CI (a single failed CI job is re-run on its own: *A red CI job* in
+  `skill://legion-worker`). A conflict-forced rebase that leaves the branch's diff unchanged is a
   confirmation, not a new round (see *The unchanged-diff check* below); that name is the event's,
   kept by the rules below and the learnings that cite it, and the operation it names is always
   the merge here. Before merging, record
@@ -123,4 +123,7 @@ Then rewrite, resolve, and push with the one push procedure (*Every role pushes 
 in `skill://legion-worker`). It lets the remote branch sit on the
 tip you recorded, which the rewrite replaced, and on nothing else: when another role pushed after
 you recorded it, the push is refused. The push deletes the file.
+
+Once a base is frozen for others to stack on, never rewrite it: fixes land as new commits on top,
+and the PR body's `Chain` line records what is frozen.
 

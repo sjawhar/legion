@@ -294,8 +294,11 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
   runs `legion threads resolve` before every push that answers a review, and the merger before
   READY: `skill://legion-worker/references/review-threads.md`.
-- **No deferrals.** A finding that changes behaviour, hides an error, or breaks a gate is fixed in
-  this pull request; naming, duplication, or wording cleanup is the one `Fast-follow:` line.
+- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." A finding that changes
+  behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
+  or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
+- **A red CI job** that failed on its own is re-run with
+  `legion gh -- run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.

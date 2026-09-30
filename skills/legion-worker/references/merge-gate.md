@@ -6,8 +6,10 @@ the merger publishing READY. Every path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the implementer's `.legion/` deletion push →
 the reviewer's approval of that head → retro → the merger's READY → the human merge → the
-implementer's production check. Nothing after the approval returns to the reviewer unless a
-conflict-forced merge changes the fingerprint (`skill://legion-worker/references/conflicts-and-rewrites.md`).
+implementer's production check. After the approval, only retro's `docs/solutions/` commit leaves
+it standing on its own (*Retro*, below). A conflict-forced merge goes back to the reviewer for a
+confirmation or a new round, as the fingerprint decides (*The reviewer*, below, and
+`skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change voids it.
 
 ## The reviewer
 
@@ -36,8 +38,8 @@ conflict-forced merge changes the fingerprint (`skill://legion-worker/references
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
   nothing restarts. Different: a new round — thermo again, one review.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
-  Apps, as `skill://legion-worker/references/review-threads.md` says, and approve only once every
-  thread you opened carries your `Accepted:` and the implementer's run has resolved it.
+  Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
+  when every thread is settled enough to approve.
 
 A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
 takes this order: write, commit and push the handoff; submit the review of the head that push
