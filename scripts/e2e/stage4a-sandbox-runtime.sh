@@ -71,12 +71,11 @@ ok=
 mkdir -p "$evidence"
 # tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
 # TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
-# ignores the signals the driver traps, and outlives the driver's last line. Whoever reads the
-# driver's output can go first (a supervised launcher's own tee, stopped with it): tee then ignores
-# SIGPIPE and, with -p, stops writing that reader and keeps writing the transcript, so it keeps
-# draining the driver's output, and cleanup's commands (kubectl delete among them) never fail on a
-# write of their own.
-exec > >(trap '' HUP INT TERM PIPE && exec tee -p -a "$evidence/transcript.log") 2>&1
+# ignores the signals the driver traps, and outlives the driver's last line. -p makes tee ignore
+# SIGPIPE and drop a reader that goes first (a supervised launcher's own tee, stopped with it) while
+# it keeps writing the transcript, so the driver's output stays open and cleanup's commands never
+# fail on a write.
+exec > >(trap '' HUP INT TERM && exec tee -p -a "$evidence/transcript.log") 2>&1
 # fd 7 keeps the transcript for cleanup: a signal runs the EXIT trap under the redirections of the
 # command it interrupted, whose output may be /dev/null or an evidence file.
 exec 7>&1
