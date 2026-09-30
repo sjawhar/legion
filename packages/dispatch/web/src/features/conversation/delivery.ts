@@ -64,7 +64,8 @@ export function isSafeRetry(attempt: DeliveryOutcome, now: number = Date.now()):
 }
 
 /** What a delivered-but-duplicate attempt reads as: it reached the listener and added nothing. */
-export const duplicateText = "Delivered; the listener already had this message";
+export const duplicateText =
+  "Delivered; the listener already had this message, so it wasn't sent again";
 
 /**
  * The guidance a failed attempt earns while a same-mode retry is still safe.

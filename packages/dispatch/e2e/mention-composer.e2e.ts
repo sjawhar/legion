@@ -190,7 +190,9 @@ test("a duplicated mention delivery says the listener already had it, and offers
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     const deliveries = page.getByRole("list", { name: "Mention deliveries" });
-    await expect(deliveries).toContainText("Delivered; the listener already had this message");
+    await expect(deliveries).toContainText(
+      "Delivered; the listener already had this message, so it wasn't sent again"
+    );
     // The promise belongs to a retry that can still be made safely; this attempt already
     // reached the listener, so neither the sentence nor the button may appear for it.
     await expect(deliveries).not.toContainText("Retry won't deliver it twice");

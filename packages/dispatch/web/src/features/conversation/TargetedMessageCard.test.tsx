@@ -108,7 +108,9 @@ test("a duplicate attempt says the listener already had the message", () => {
     card({ attempts: [attempt({ delivery: "steer", state: "sent", duplicate: true })] })
   );
   try {
-    expect(screen.getByText("Delivered; the listener already had this message")).toBeTruthy();
+    expect(
+      screen.getByText("Delivered; the listener already had this message, so it wasn't sent again")
+    ).toBeTruthy();
   } finally {
     view.unmount();
   }
