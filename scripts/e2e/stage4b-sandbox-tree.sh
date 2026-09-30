@@ -92,7 +92,8 @@ label_exact=legsmoke
 repo=sjawhar/legion-smoke
 dispatch_base=${LEGION_E2E_DISPATCH_URL:-}
 # The proof human writes with the agents' bearer, so it names a session of its own: one that holds
-# no claim, whose status writes the workflow therefore reads as a human's.
+# no claim, whose status write on a live root the daemon therefore sets back, as it does any outside
+# session's. The run takes a tree out with `legion status` (take_out), the daemon's own write.
 dispatch_actor=legion-e2e4b-proof-human-$$
 envoy_url=${LEGION_E2E_ENVOY_URL:-}
 nats_url=${LEGION_E2E_NATS_URL:-}
@@ -234,6 +235,23 @@ take_out() {
   until_true 120 "Dispatch to show $issue in backlog" dispatch_status_is "$issue" backlog
   until_true 600 "$issue's pods to be gone" sh -c \
     "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$issue' -o name) && [ -z \"\$out\" ]"
+}
+# status_set_back ISSUE WRITTEN: Dispatch no longer shows the status WRITTEN on ISSUE, and shows the
+# status the daemon records for it: the daemon set its own status back over the write.
+status_set_back() {
+  local status
+  status=$(dispatch_get "issues/$1" | jq -er .status) || return 1
+  [ "$status" != "$2" ] && daemon_state | jq -e --arg issue "$1" --arg status "$status" '.issues[$issue].status == $status' >/dev/null
+}
+# set_back_by_daemon FILE: in the issue events FILE, the newest backlog write is the proof human's,
+# and the status write after it is the daemon's own.
+set_back_by_daemon() {
+  jq -e --arg human "$dispatch_actor" --arg daemon "legion-daemon:$project" '
+    [.[] | select(.type | IN("issue.updated", "issue.closed"))] | sort_by(.seq)
+    | (map(select(.payload.status == "backlog")) | last) as $write
+    | $write != null and $write.actor.id == $human
+      and ([.[] | select(.seq > $write.seq and .payload.status != "backlog")] | first | .actor.id) == $daemon
+  ' "$1" >/dev/null
 }
 # tree_pod TREE prints a Running pod of the tree, whose worker container mounts the tree volume.
 tree_pod() {
@@ -1587,13 +1605,32 @@ wait_for_phase "$tree2" implementing 900
 pass
 
 begin issue-cap-moves
-# Tree 2 leaves the line: its slot frees and the waiting root takes it.
+# The proof human's session holds no claim in tree 2, so its backlog on tree 2's live root is set
+# back: Dispatch shows the daemon's own status again, written as legion-daemon:$project, tree 2's
+# architect is told who wrote backlog, and tree 2 keeps its slot. Tree 2 then leaves the line
+# through `legion status`, the daemon's own write: its slot frees and the waiting root takes it.
 set_status "$tree2" backlog
+until_true 300 "the daemon to set $tree2 back from backlog" status_set_back "$tree2" backlog
+needle=$(notice_needle status-reasserted "$tree2")
+until_true 300 "tree 2's architect to be told of the proof human's backlog" notice_delivered "$tree2" architect "$needle"
+# head ends the pipeline early, which pipefail would report as a failure, hence `|| true`: an empty
+# line fails the check below, naming it.
+told=$(notice_line "$tree2" architect "$needle" | head -1 || true)
+printf '%s\n' "$told" >"$evidence/notice-status-reasserted.jsonl"
+grep -qF -- "$dispatch_actor" <<<"$told" || fail "tree 2's status-reasserted notice does not name the proof human $dispatch_actor: $told"
+dispatch_events "$tree2" >"$evidence/tree2-events-set-back.json" || fail "tree 2's events could not be read"
+# The control re-attributes every write after the proof human's backlog to the proof human.
+jq --arg human "$dispatch_actor" '([.[] | select(.payload.status == "backlog") | .seq] | max) as $w | map(if .seq > $w then .actor.id = $human else . end)' \
+  "$evidence/tree2-events-set-back.json" >"$evidence/tree2-events-set-back-negative.json"
+expect_failure set-back-actor set_back_by_daemon "$evidence/tree2-events-set-back-negative.json"
+set_back_by_daemon "$evidence/tree2-events-set-back.json" || fail "tree 2's backlog was not the proof human's, or the write after it not legion-daemon:$project's"
+daemon_state | jq -e --arg b "$tree2" --arg c "$tree3" '(.admission.active | index($b)) != null and (.admission.waiting | index($c)) != null and .issues[$b].phase != "done"' >/dev/null ||
+  fail "the proof human's backlog took tree 2 out: $(daemon_state | jq -c --arg b "$tree2" '{admission, phase: .issues[$b].phase}')"
+note "the proof human's backlog on tree 2 was set back to $(dispatch_get "issues/$tree2" | jq -r .status) by legion-daemon:$project, its architect told, and tree 2 kept its slot"
+take_out "$tree2"
 until_true 300 "tree 3 to take tree 2's admission slot" sh -c \
   "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg c '$tree3' '(.admission.active | index(\$c)) != null'"
-until_true 300 "tree 2's Sandboxes to be suspended" sh -c \
-  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree2' -o name) && [ -z \"\$out\" ]"
-note "tree 2 moved to backlog, its pods gone; tree 3 ($tree3) admitted"
+note "legion status moved tree 2 to backlog, its pods gone; tree 3 ($tree3) admitted"
 pass
 
 begin tree-moved
@@ -2248,7 +2285,7 @@ esac
 [ "$(tree_objects "$tree1")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1")"
 [ "$(states1)" = "$claims_before" ] || fail "the refused close changed tree 1's claims: $claims_before, then $(states1)"
 note "the operator's close of workflow tree $tree1 was refused ($refusal); its claims $claims_before and objects $objects_before are unchanged"
-set_status "$tree1" backlog
+take_out "$tree1"
 printf '%s\n' "You are a Stage 4b operator-close fixture, the root of a tree no workflow issue backs. Do nothing and wait." >"$work/op-architect.md"
 printf '%s\n' "You are a Stage 4b operator-close fixture, a worker of that tree. Do nothing and wait." >"$work/op-worker.md"
 op_root=$(claims_cli spawn --json --tree "$optree" --issue "$optree" --role architect --prompt-file "$work/op-architect.md" | jq -er .token) ||

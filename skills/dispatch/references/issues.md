@@ -24,8 +24,10 @@ In-flight issues with no owner at all go
 back to `backlog` as well: no claim or route held by a live session, no Dispatch activity in the
 last day, and no pull request moving on GitHub (an owner working there leaves no Dispatch trace).
 The order keeper sweeps those. Never write the status of an issue that carries the `legion`
-label, or of any issue under one: the Legion daemon writes those statuses, and moving one of its
-admitted roots out of its flow parks the tree and stops its workers.
+label, or of any issue under one: the Legion daemon writes those statuses. A status your session
+writes on the root of a tree Legion is running is set back and the tree's architect told who wrote
+it; only a person in the dashboard, or `legion status`, stops that tree. On an issue under one, a
+status that takes it out of the flow parks that issue and stops its workers.
 
 One agent keeps the backlog's order against those priorities, with Sami
 (dispatch://AGENTC-34/ask/f6780f9e-8b96-49eb-9be7-7c7f2036d5cc). Setting an issue's priority
