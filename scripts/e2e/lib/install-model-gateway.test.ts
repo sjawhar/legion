@@ -343,16 +343,21 @@ describe("the model gateway key command", () => {
     expect(stopped.stdout).toContain(`${evidence} is not an empty directory`);
     mkdirSync(join(evidence, "model-gateway"));
     expect(unserved("--fresh", evidence).code).toBe(1);
-    // One it cannot list is refused too, never read as empty.
-    chmodSync(evidence, 0o000);
-    try {
-      const unlistable = unserved("--fresh", evidence);
-      expect(unlistable.code).toBe(1);
-      expect(unlistable.stdout).toContain(`${evidence} cannot be listed`);
-      // ls's own error is the reason; the environment carries no LANG, so ls prints the C locale's.
-      expect(unlistable.stdout).toContain("Permission denied");
-    } finally {
-      chmodSync(evidence, 0o755);
+    // One it cannot list is refused too, never read as empty. At mode 0300 (write and search, no
+    // read) a run it let through would append to the earlier run's transcript.log; at 000 it would
+    // die at its first mkdir. Both need a non-root runner: root lists any directory.
+    for (const mode of [0o300, 0o000]) {
+      chmodSync(evidence, mode);
+      try {
+        const unlistable = unserved("--fresh", evidence);
+        expect(unlistable.code).toBe(1);
+        expect(unlistable.stdout).toContain(`${evidence} cannot be listed`);
+        // ls's own error is the reason; the environment carries no LANG, so ls prints the C
+        // locale's.
+        expect(unlistable.stdout).toContain("Permission denied");
+      } finally {
+        chmodSync(evidence, 0o755);
+      }
     }
   });
 
