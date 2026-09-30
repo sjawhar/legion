@@ -15,10 +15,13 @@ import (
 
 // CheckEmbedsEveryFile reports an error unless embedded holds, in dir, every entry the directory
 // dir holds on disk, read from the test's working directory, the store's package directory.
-// pgmigrate.Load refuses a file named any other way than a migration, but only a file it is
-// given: a //go:embed pattern naming a directory without all: leaves out every name beginning
-// with _ or ., so a migration named _0054_x.up.sql would go unembedded and unapplied, with no
-// error, while its file sits in the tree.
+//
+// This is where the stores' embed rule is stated. pgmigrate.Load refuses a file named any other way
+// than a migration, but only a file it is given, and a //go:embed pattern can leave a file out
+// without an error: a directory pattern without all: drops every name beginning with _ or ., so
+// both stores embed all:migrations, and no directive embeds a symlink. A file left out would go
+// unapplied while it sits in the tree. On today's tree the all: prefix changes nothing, since
+// neither directory holds such a name; this check fails in the one state where it would.
 func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 	onDisk, err := os.ReadDir(dir)
 	if err != nil {
@@ -28,17 +31,19 @@ func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 	if err != nil {
 		return fmt.Errorf("list embedded %s: %w", dir, err)
 	}
-	names := func(entries []fs.DirEntry) []string {
-		out := make([]string, len(entries))
-		for i, entry := range entries {
-			out[i] = entry.Name()
-		}
-		return out
+	embeddedNames := make([]string, len(inBinary))
+	for i, entry := range inBinary {
+		embeddedNames[i] = entry.Name()
 	}
-	for _, name := range names(onDisk) {
-		if !slices.Contains(names(inBinary), name) {
-			return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
+	for _, entry := range onDisk {
+		name := entry.Name()
+		if slices.Contains(embeddedNames, name) {
+			continue
 		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s/%s is a symlink, which no //go:embed directive embeds, so no runner would see it; replace it with the file it points to, or remove it (an editor's lock file, such as Emacs's .#<file>, is one)", dir, name)
+		}
+		return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
 	}
 	return nil
 }

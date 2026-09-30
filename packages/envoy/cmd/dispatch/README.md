@@ -209,8 +209,10 @@ already applied; keep the number on the file that merged to `main` first and ren
 when a file is named other than `<version>_<name>.up.sql` or `<version>_<name>.down.sql` (a
 `.down.sql` is a rollback script an operator runs by hand, and needs its `.up.sql`), when a version
 is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
-embedded with `all:`, so a name beginning with `_` or `.` is refused like any other, and an editor's
-swap file left in the directory fails a local build's tests until it is gone. Versions are applied
+embedded whole (`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` says why), so a name beginning with
+`_` or `.` is refused like any other. An editor's swap file therefore stops a locally built
+`envoy-dispatch` from booting, and fails the store's tests, until it is gone; Vim writes its swap
+file beside the file it edits by default. Versions are applied
 by number, not by file name, and the store's tests require every file on disk to be embedded
 (`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap
 (`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number
