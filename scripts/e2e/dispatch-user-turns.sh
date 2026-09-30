@@ -257,7 +257,10 @@ forge_on_bus() {
     '.payload = $p | .payload_summary = $b | .dedupe_key = $k | .event_id = $k' <<<"$envelope")"
 }
 
-send_body="LEGION-394 $run Send: answer with the one word ALPHA$run and nothing else."
+# Each body is a plain question whose answer carries the run token. A model can read an order such
+# as "answer with the one word X and nothing else" as a prompt injection and refuse it, which would
+# stall the answer waits below for a reason that has nothing to do with delivery.
+send_body="LEGION-394 $run Send: I named this test run ALPHA$run. What did I name it?"
 begin send-is-the-persons-own-turn
 reported=$(send steer "$send_body" send)
 note "page: $reported"
@@ -271,7 +274,7 @@ until_true 180 "the session to answer the Send" replied "ALPHA$run"
 note "transcript $session_file: one user message that is the body alone, no card; the session answered ALPHA$run"
 pass
 
-aside_body="LEGION-394 $run Aside: answer with the one word BRAVO$run and nothing else."
+aside_body="LEGION-394 $run Aside: my label for this aside is BRAVO$run. What is my label?"
 begin aside-is-the-persons-own-turn
 note "page: $(send aside "$aside_body" aside)"
 until_true 120 "the Aside to be the session's user message" has_user_turn "$aside_body"
@@ -353,7 +356,7 @@ until_true 120 "the re-send to arrive" arrived "$btw_body" "$btw_body" "$btw_car
 note "a card, no user message"
 pass
 
-carded_body="LEGION-394 $run Send the session got as a card: answer with the one word DELTA$run."
+carded_body="LEGION-394 $run Send the session got as a card: my label for it is DELTA$run. What is my label?"
 carded_forged_body="LEGION-394 $run forged for the carded Send: forger text."
 begin a-carded-send-and-a-frame-forged-for-it-inside-the-minute-get-cards
 # The acceptance run's sequence at add7ac87. The session's Dispatch token goes bad, so Dispatch
@@ -418,7 +421,7 @@ until_true 30 "the session's Oh My Pi to exit" session_gone
 until_true 330 "the listener to drop the stopped session" unlisted
 pass
 
-offline_body="LEGION-394 $run Send while the session is down: answer with the one word CHARLIE$run."
+offline_body="LEGION-394 $run Send while the session is down: my label for it is CHARLIE$run. What is my label?"
 begin a-send-while-the-session-is-down-fails
 offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
   -d "$(jq -nc --arg b "$offline_body" '{body: $b, delivery: "steer"}')")
@@ -460,7 +463,7 @@ until_true 120 "the forged frame to arrive" arrived "$old_forged_body" "$offline
 note "a frame naming message $offline_id, $((SECONDS - offline_sent))s after its attempt: a card, no user message"
 pass
 
-unlisted_body="LEGION-394 $run Send while the listener lists no session: answer with the one word ECHO$run."
+unlisted_body="LEGION-394 $run Send while the listener lists no session: my label for it is ECHO$run. What is my label?"
 unlisted_forged_body="LEGION-394 $run forged for the failed Send: forger text."
 begin a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card
 # Deep's first round-2 construction. The listener drops the session's registration, so the

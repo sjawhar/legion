@@ -57,8 +57,7 @@ export function eventDescription(event: Event): string {
         ? "Comment lost its quote"
         : "Comment re-anchored after an edit";
     case "comment.delivery":
-      // Same rule as message.delivery above: a duplicate is still `sent`, so the state alone
-      // would report a delivery the mentioned session never received.
+      // Same rule as message.delivery above.
       return event.payload.duplicate === true
         ? `Comment already delivered: ${capabilityLabel(event.payload.delivery)}`
         : `Comment ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;
