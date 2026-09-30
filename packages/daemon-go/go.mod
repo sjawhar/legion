@@ -1,6 +1,6 @@
 module github.com/sjawhar/legion/daemon
 
-go 1.26.1
+go 1.26.8
 
 require (
 	github.com/docker/docker v28.5.2+incompatible

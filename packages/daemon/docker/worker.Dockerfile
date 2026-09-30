@@ -37,7 +37,7 @@ ARG JJ_TOOL=github:sjawhar/jj@0.45.1-sami.20260910-043938
 ARG GH_TOOL=gh@2.98.0
 # go.work's `go` line: the Go stage builds in workspace mode, and the golang image's GOTOOLCHAIN=local
 # fails the build if go.work moves past this.
-ARG GO_VERSION=1.26.1
+ARG GO_VERSION=1.26.8
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 archive the
 # stage downloads for it, which the build checks before unpacking anything.
 ARG UV_VERSION=0.12.21

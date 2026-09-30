@@ -100,8 +100,8 @@ docker exec "$POSTGRES_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -q -c "cre
 
 # --- Build the two binaries this stack needs. ---
 echo "dev-broker: building agent-secrets-devkey and broker..." >&2
-( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$DEVKEY_BIN" ./cmd/agent-secrets-devkey )
-( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$BROKER_BIN" ./cmd/broker )
+( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.8 go build -o "$DEVKEY_BIN" ./cmd/agent-secrets-devkey )
+( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.8 go build -o "$BROKER_BIN" ./cmd/broker )
 
 # --- Migrate the fresh database before seeding it. A freshly created database has no schema yet,
 # but the break-glass approver_key_seeds insert below must land before the broker's own first
