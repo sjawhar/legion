@@ -123,23 +123,15 @@ blocks stored as prose (inside a line, or a paste with something before every li
 and upload again; a mention on purpose belongs in code. Neither answer sees a spec wrapped whole in a
 code fence (take the fence off), a malformed opening inside a line (`::ask{`, `:::ask {`: an ask opens
 only as `:::ask{…}` on a line of its own), or any `dispatch_doc_edit`: after an edit that writes an
-ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<uuid> …}` on its own line.
+ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<id> …}` on its own line.
 
 **Wrong:** a **Decisions needed** list at the top of the spec with three bullets.
 **Right:** put each decision in the design section it belongs to as an `:::ask{#slug}` block, with
 2–4 options, a recommendation, and surrounding prose that explains the trade-off.
 
-A spec that already has the pile is repaired with `move`, not rewritten: `dispatch_doc_edit` with
-`{ op: "move", block: "<block-uuid>", after: "<the sentence that states the options>" }` relocates
-the block and keeps its ask, its answer and its followers; the context paragraphs that were lifted
-out of Design move the same way, and the emptied section is deleted (the same repair, made on
-AGENTC-397 after Sami's 2026-09-20 request: "move the decisions items to be in context of their
-discussion in the spec, not just all piled up at the start with no context"). An ask block has two
-ids: the block id, shown as `:::ask{#<uuid> …}` in the rendered document and taken bare by
-`move`/`delete` in `block` (the `block:<uuid>` form is only for `before`/`after` anchors), and the
-ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read` and
-`dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
-`not found`.
+A spec that already has the pile is repaired with `move`, not rewritten, keeping each ask, its answer
+and its followers: see [Editing a document](skill://dispatch/references/document-edits.md), which
+also tells an ask's block id from its ask id.
 
 See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
 [Asking](#asking) to decide whether the question is a real decision at all.
