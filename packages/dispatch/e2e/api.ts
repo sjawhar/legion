@@ -163,6 +163,7 @@ export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
 export function createIssue(
   input: Partial<Pick<Issue, "project" | "title">> & {
     external?: string;
+    force?: boolean;
     parent?: string;
     spec?: string;
   },

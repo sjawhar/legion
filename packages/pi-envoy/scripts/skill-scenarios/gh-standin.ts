@@ -4,9 +4,11 @@
 // file or stdin it hands GitHub a body through), then answered from the first route in
 // $SKILL_SCENARIO_RUN/fixtures.json whose regex matches "<as> <argv...>". A call no route matches
 // answers `gh: Not Found (HTTP 404)` and exits 1. Nothing is sent anywhere. `--json a,b` picks
-// fields and `--jq`/`-q` runs jq, as gh does.
+// fields and `--jq`/`-q` runs jq, as gh does. A pull request body edit (`gh pr edit --body`,
+// `--body-file`, or a PATCH through `gh api`) is kept: every route answering with an object that
+// has a `body` then answers with the new one, as GitHub's next read would.
 //   gh-standin.ts <gh|legion> <args...>
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
 interface Route {
   readonly match: string;
@@ -42,14 +44,39 @@ const readStdin = async () => {
 const files: Record<string, string> = {};
 const readSource = async (source: string) =>
   source === "-" ? readStdin() : readFileSync(source, "utf8");
+// A pull request body edit: `gh pr edit` takes it from `-b/--body` or `-F/--body-file`, a
+// `gh api -X PATCH repos/<o>/<r>/pulls/<n>` from a `body` field or an `--input` JSON object.
+const prEdit = as === "gh" && args[0] === "pr" && args[1] === "edit";
+const prPatch =
+  as === "gh" &&
+  args[0] === "api" &&
+  /(^|\s)(-X|--method)\s?PATCH(\s|$)/.test(args.join(" ")) &&
+  args.some((arg) => /^\/?repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(arg));
+let body: string | undefined;
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index] ?? "";
   const next = args[index + 1];
   if (!next) continue;
-  if (arg === "--input" || arg === "--body-file") files[next] = await readSource(next);
-  else if (arg === "-F" || arg === "--field") {
-    const value = next.split("=").slice(1).join("=");
-    if (value.startsWith("@")) files[value.slice(1)] = await readSource(value.slice(1));
+  if (prEdit && (arg === "-b" || arg === "--body")) body = next;
+  else if (prEdit && (arg === "-F" || arg === "--body-file")) {
+    files[next] = await readSource(next);
+    body = files[next];
+  } else if (arg === "--input" || arg === "--body-file") files[next] = await readSource(next);
+  else if (arg === "-F" || arg === "--field" || arg === "-f" || arg === "--raw-field") {
+    const [key = "", ...rest] = next.split("=");
+    let value = rest.join("=");
+    if ((arg === "-F" || arg === "--field") && value.startsWith("@")) {
+      files[value.slice(1)] = await readSource(value.slice(1));
+      value = files[value.slice(1)] ?? "";
+    }
+    if (prPatch && key === "body") body = value;
+  }
+}
+const input = args[args.indexOf("--input") + 1];
+if (prPatch && args.includes("--input") && input !== undefined) {
+  const parsed: unknown = JSON.parse(files[input] ?? "null");
+  if (typeof parsed === "object" && parsed !== null && "body" in parsed) {
+    if (typeof parsed.body === "string") body = parsed.body;
   }
 }
 const joined = `${as} ${args.join(" ")}`;
@@ -61,6 +88,14 @@ appendFileSync(
 if (!route) {
   console.error(as === "gh" ? "gh: Not Found (HTTP 404)" : `unknown command: ${args.join(" ")}`);
   process.exit(1);
+}
+if (body !== undefined) {
+  const edited = routes.map((candidate) =>
+    typeof candidate.stdout === "object" && candidate.stdout !== null && "body" in candidate.stdout
+      ? { ...candidate, stdout: { ...candidate.stdout, body } }
+      : candidate
+  );
+  writeFileSync(`${run}/fixtures.json`, JSON.stringify({ ...fixtures, routes: edited }));
 }
 let output: unknown = route.stdout ?? "";
 const jsonIndex = args.indexOf("--json");

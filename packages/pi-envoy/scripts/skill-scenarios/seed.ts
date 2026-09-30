@@ -36,11 +36,13 @@ if (command === "project") {
   console.log(`seeded ${issue.key}`);
 } else if (command === "ask-on-message" && out !== undefined) {
   // The owner session's world: an issue whose backfill was proposed and never run, the proposal
-  // as an attached table, and the message that posts the plan for the rest of the work.
+  // as an attached table, and the message that posts the plan for the rest of the work. Every run
+  // seeds the same issue, so `force` passes Dispatch's duplicate check.
   const owner = { as: "agent", actor: { kind: "session", id: "dispatch-owner" } } as const;
   const issue = await createIssue(
     {
       project: "LWEVAL",
+      force: true,
       title: "Make the Architecture page tell the truth: every issue attached to its components",
       spec: [
         "## Summary",

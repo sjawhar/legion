@@ -401,7 +401,10 @@ run_tester_proof() {
   mkdir -p "$R/cwd"
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
-  project=skills-${P##*/}-$n
+  # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
+  # hyphens go and `r` separates it from the run number.
+  project=skills${P##*/}r$n
+  project=${project//-/}
   mkdir -p "$state/gh" "$state/secrets"
   chmod 0700 "$state/secrets"
   (umask 077 && openssl rand -hex 16 >"$state/secrets/boot")
