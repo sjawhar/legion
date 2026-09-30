@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -191,15 +192,149 @@ func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
 	r.fake.enrollGate = gate
 	r.fake.revokeFailFirst = 0 // the lapsed id's next revoke lands; the re-enrollment then waits at the gate
 	r.fake.mu.Unlock()
+	replies := registerWaitBlocked(t, r)
+	open()
+	freshEnrollment(t, replies, lapsed)
+}
 
-	type reply struct {
-		resp Response
-		err  error
+// TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs: a session whose re-enrollment lapses too goes
+// through the whole cycle a second time. A lapse needs a refused renew, so an enrollment comes
+// before it, and that enrollment closes the ready channel a `register --wait` from the first
+// lapse holds: the second lapse can only follow that wait's answer. The fake holds the second
+// enrollment's first renew at its renew gate until the answer is in, so the second lapse cannot
+// race the reply, and holds the third enrollment at its enroll gate until a second `register
+// --wait` is waiting. Each wait answers only once the session is enrolled again, each lapsed id is
+// revoked before the next enrollment (the fake answers an unrevoked id's key with that same id),
+// and the session ends under a third id with no lapsed id left on it or on its record.
+func TestASecondLapseWaitsAgainAndRevokesBothLapsedIDs(t *testing.T) {
+	r, first, state := lapseRig(t, failAlways)
+	renewGate, releaseRenew := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.lease = 150 * time.Millisecond // the second enrollment renews at MinRenew,
+	r.fake.refuseRenewNext = 1            // and that renew is refused whenever the gate lets it through
+	r.fake.renewGate = renewGate
+	r.fake.mu.Unlock()
+	replies := registerWaitBlocked(t, r)
+	r.fake.mu.Lock()
+	r.fake.revokeFailFirst = 0 // the first lapsed id's revoke lands, and the session enrolls again
+	r.fake.mu.Unlock()
+	second := freshEnrollment(t, replies, first)
+
+	enrollGate, releaseEnroll := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.lease = time.Hour // the third enrollment cannot lapse under the assertions
+	r.fake.enrollGate = enrollGate
+	r.fake.mu.Unlock()
+	releaseRenew() // the second lapse
+	deadline := time.Now().Add(10 * time.Second)
+	for !revoked(r, second) {
+		if time.Now().After(deadline) {
+			t.Fatal("the second lapsed id was never revoked")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	replies := make(chan reply, 1)
+	replies = registerWaitBlocked(t, r)
+	releaseEnroll()
+	third := freshEnrollment(t, replies, first, second)
+
+	if !revoked(r, first) {
+		t.Fatalf("the first lapsed id %q was never revoked", first)
+	}
+	r.fake.mu.Lock()
+	live := slices.Collect(maps.Keys(r.fake.enrolled))
+	r.fake.mu.Unlock()
+	if !slices.Equal(live, []string{third}) {
+		t.Fatalf("live enrollments at the fake: %q; want only the third, %q", live, third)
+	}
+	if sess := r.srv.Registry.Get(os.Getpid()); sess.EnrollmentID() != third || sess.lapsed() != "" {
+		t.Fatalf("session enrollment %q, lapsed id %q; want %q and none", sess.EnrollmentID(), sess.lapsed(), third)
+	}
+	waitFor(t, func() bool { return recordedID(t, state, os.Getpid()) == third })
+}
+
+// TestARenewThatFailsTransientlyKeepsTheLease: a renew the broker cannot answer (503) is an outage,
+// not a refusal, so the session keeps its enrollment and its lease and renews again: it never
+// lapses, revokes or enrolls afresh. The fake holds the first renew at one gate until the test has
+// moved the enrollment's stored expiry an hour out, so no lease passes under the test however slow
+// the host is, and holds the retry at a second gate, so the session is read after it has handled
+// the 503 and before the retry succeeds.
+func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
+	r := startRig(t, "")
+	first, releaseFirst := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.lease = 150 * time.Millisecond // the first renew comes at MinRenew
+	r.fake.renewFail = 1
+	r.fake.renewGate = first
+	r.fake.mu.Unlock()
+	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
+	if !reg.OK || reg.State != "enrolled" {
+		t.Fatalf("register: %+v", reg)
+	}
+	id := reg.EnrollmentID
+	renews := func() int {
+		r.fake.mu.Lock()
+		defer r.fake.mu.Unlock()
+		return r.fake.renewAttempts
+	}
+	waitFor(t, func() bool { return renews() == 1 }) // the first renew is waiting at its gate
+	retry, releaseRetry := testGate(t)
+	r.fake.mu.Lock()
+	stored := time.Now().Add(time.Hour)
+	r.fake.leaseExpiry[id] = stored
+	r.fake.lease = time.Hour
+	r.fake.renewGate = retry
+	r.fake.mu.Unlock()
+	releaseFirst() // answered 503
+
+	sess := r.srv.Registry.Get(os.Getpid())
+	kept := func(when string) {
+		t.Helper()
+		_, deletes, _ := r.fake.snapshot()
+		r.fake.mu.Lock()
+		enrolls := len(r.fake.posts)
+		r.fake.mu.Unlock()
+		if sess.State() != "enrolled" || sess.EnrollmentID() != id || sess.lapsed() != "" || len(deletes) != 0 || enrolls != 1 {
+			t.Fatalf("%s: session %s under %q (lapsed id %q), revokes %q, %d enrolls; want enrolled under %q, no revoke, one enroll",
+				when, sess.State(), sess.EnrollmentID(), sess.lapsed(), deletes, enrolls, id)
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for renews() < 2 {
+		kept("after the 503")
+		if time.Now().After(deadline) {
+			t.Fatal("the session never renewed again after a renew that failed with 503")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	kept("with the retry waiting")
+	if resp := r.call(t, Request{Op: "sign", Method: "GET", URL: "https://secrets.test/v1/enrollments/self"}); !resp.OK {
+		t.Fatalf("sign while the retry waits: %+v", resp)
+	}
+	releaseRetry()
+	waitFor(t, func() bool {
+		r.fake.mu.Lock()
+		defer r.fake.mu.Unlock()
+		return r.fake.renews == 1
+	})
+	kept("after the retry")
+	r.fake.mu.Lock()
+	renewed := r.fake.leaseExpiry[id]
+	r.fake.mu.Unlock()
+	if !renewed.After(stored) {
+		t.Fatalf("the retry must renew the lease: expiry %v, want after %v", renewed, stored)
+	}
+}
+
+// registerWaitBlocked starts a `register --wait` from this process, the rig's one session, and
+// returns its answer's channel once the call is blocked in registerReply's select. The call
+// answering first fails the test: a session that is not enrolled must not answer a register that
+// waits.
+func registerWaitBlocked(t *testing.T, r *rig) <-chan registerAnswer {
+	t.Helper()
+	replies := make(chan registerAnswer, 1)
 	go func() {
 		resp, err := Call(r.sock, Request{Op: "register", WaitSeconds: 10}, 20*time.Second)
-		replies <- reply{resp, err}
+		replies <- registerAnswer{resp, err}
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for !blockedInRegisterReply() {
@@ -213,15 +348,29 @@ func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	open()
+	return replies
+}
+
+// registerAnswer is a register call's reply, or the error that ended the call.
+type registerAnswer struct {
+	resp Response
+	err  error
+}
+
+// freshEnrollment waits for the answer registerWaitBlocked's call gives once the session enrolls
+// again, requires it to name an enrollment none of stale holds, and returns that enrollment id.
+func freshEnrollment(t *testing.T, replies <-chan registerAnswer, stale ...string) string {
+	t.Helper()
 	select {
 	case got := <-replies:
-		if got.err != nil || !got.resp.OK || got.resp.State != "enrolled" || got.resp.EnrollmentID == "" || got.resp.EnrollmentID == lapsed {
-			t.Fatalf("register --wait in a lapsed session: %+v (%v); want the fresh enrollment, not %q", got.resp, got.err, lapsed)
+		if got.err != nil || !got.resp.OK || got.resp.State != "enrolled" || got.resp.EnrollmentID == "" || slices.Contains(stale, got.resp.EnrollmentID) {
+			t.Fatalf("register --wait in a lapsed session: %+v (%v); want a fresh enrollment, none of %q", got.resp, got.err, stale)
 		}
+		return got.resp.EnrollmentID
 	case <-time.After(15 * time.Second):
 		t.Fatal("register --wait never answered after the re-enrollment was released")
 	}
+	return ""
 }
 
 // blockedInRegisterReply reports whether some goroutine is blocked in a select inside

@@ -103,9 +103,16 @@ type fakeBroker struct {
 	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
 	// session enrolling for exactly as long as it needs.
 	enrollGate chan struct{}
-	// renewGate, when set, holds every renew until the test closes it, so a test can let a lease
-	// genuinely pass before the renew that meets it arrives.
+	// renewGate, when set, holds every renew until the test closes it. A renew reads the gate as it
+	// arrives, so a test can hold one renew, swap in another gate for the next, and release them
+	// one at a time.
 	renewGate chan struct{}
+	// renewAttempts counts every renew this fake received, on arrival and before any gate, so a
+	// test can tell that a renew is waiting at the gate.
+	renewAttempts int
+	// renewFail answers the next N renews 503 without touching the lease: an outage, not a
+	// refusal.
+	renewFail int
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -211,6 +218,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	})
 	mux.HandleFunc("POST /v1/enrollments/{id}/renew", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.renewAttempts++
 		gate := f.renewGate
 		f.mu.Unlock()
 		if gate != nil {
@@ -219,6 +227,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		id := r.PathValue("id")
+		if f.renewFail > 0 {
+			f.renewFail--
+			writeJSON(w, 503, map[string]string{"code": "DATABASE", "error": "postgres unreachable"})
+			return
+		}
 		if f.refuseRenewNext > 0 {
 			f.refuseRenewNext--
 			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
