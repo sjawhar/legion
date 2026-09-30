@@ -218,8 +218,9 @@ jobs:
             *) echo tool_error=true >> "$GITHUB_OUTPUT" ;;
           esac
 
-      # -format json exits 0 whatever it finds; a finding whose trace[0] names a function is a
-      # symbol-level (reachable) one, and module- and package-level findings are informational.
+      # -format json exits 0 whatever it finds; .github/scripts/deps-summary.sh reads a finding
+      # whose trace[0] names a function as reachable, and module- and package-level ones as
+      # informational.
       - name: govulncheck
         id: govulncheck
         if: steps.tools.outcome == 'success'
@@ -233,30 +234,22 @@ jobs:
           done
           echo "tool_error=$tool_error" >> "$GITHUB_OUTPUT"
 
+      # A scanner that did not run to completion, or wrote output not in its shape, is a tool
+      # error for its half (.github/scripts/deps-summary.sh).
       - name: Summarize
         if: always()
         env:
           OSV_ERROR: ${{ steps.osv.outputs.tool_error }}
           GOVULNCHECK_ERROR: ${{ steps.govulncheck.outputs.tool_error }}
         run: |
-          osv='{"total": null, "with_fix": null, "tool_error": true}'
+          args=(--out deps-summary.json)
           if [ "$OSV_ERROR" = false ]; then
-            osv=$(jq -c '[.results[]?.packages[]?.vulnerabilities[]?]
-              | {total: length, with_fix: (map(select(any(.affected[]?.ranges[]?.events[]?; has("fixed")))) | length),
-                 tool_error: false}' osv.json) || osv='{"total": null, "with_fix": null, "tool_error": true}'
+            args+=(--osv osv.json)
           fi
-          # One entry per (module, OSV id): reachable when any of its findings is symbol-level.
-          govulncheck='{"reachable": null, "informational": null, "tool_error": true}'
           if [ "$GOVULNCHECK_ERROR" = false ]; then
-            govulncheck=$(jq -n -c '[inputs | select(.finding) | {module: input_filename, osv: .finding.osv,
-                symbol: (.finding.trace[0].function != null)}]
-              | group_by([.module, .osv]) | map(any(.[]; .symbol))
-              | {reachable: (map(select(.)) | length), informational: (map(select(. | not)) | length), tool_error: false}' \
-              govulncheck-envoy.json govulncheck-daemon-go.json) ||
-              govulncheck='{"reachable": null, "informational": null, "tool_error": true}'
+            args+=(--govulncheck govulncheck-envoy.json --govulncheck govulncheck-daemon-go.json)
           fi
-          jq -n --argjson osv "$osv" --argjson govulncheck "$govulncheck" \
-            '{osv: $osv, govulncheck: $govulncheck}' > deps-summary.json
+          .github/scripts/deps-summary.sh summarize "${args[@]}"
           cat deps-summary.json
 
       - name: Upload the summary
@@ -310,7 +303,8 @@ jobs:
           name: deps-summary
           path: artifacts
 
-      # A missing artifact records a tool error for that half, never a clean run.
+      # A missing or malformed artifact records a tool error for that half, never a clean run
+      # (.github/scripts/deps-summary.sh report).
       - name: Build the report
         id: report
         env:
@@ -322,36 +316,11 @@ jobs:
           WORKFLOWS_RESULT: ${{ needs.workflows.result }}
           DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
         run: |
-          zizmor=$(jq -c '{head_count, new_count, tool_error: (.tool_error // false),
-            by_audit: (if .head then .head | group_by(.ident) | map({key: .[0].ident, value: length}) | from_entries
-                       else null end)}' artifacts/zizmor-findings.json) ||
-            zizmor='{"head_count": null, "new_count": null, "by_audit": null, "tool_error": true}'
-          deps=$(jq -c '{osv, govulncheck}' artifacts/deps-summary.json) ||
-            deps='{"osv": {"total": null, "with_fix": null, "tool_error": true}, "govulncheck": {"reachable": null, "informational": null, "tool_error": true}}'
-          jq -n --argjson run "$RUN_ID" --arg event "$EVENT" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
-            --arg report_only "$REPORT_ONLY" --argjson zizmor "$zizmor" --argjson deps "$deps" \
-            --arg workflows "$WORKFLOWS_RESULT" --arg dependencies "$DEPENDENCIES_RESULT" '{
-              run_id: $run, event: $event, head_sha: $head, base_sha: (if $base == "" then null else $base end),
-              report_only: (if $report_only == "true" then true elif $report_only == "false" then false else null end),
-              zizmor: $zizmor, osv: $deps.osv, govulncheck: $deps.govulncheck,
-              tool_error: ($zizmor.tool_error or $deps.osv.tool_error or $deps.govulncheck.tool_error),
-              gate: {workflows: $workflows, dependencies: $dependencies}}' > security-report.json
+          .github/scripts/deps-summary.sh report --zizmor artifacts/zizmor-findings.json \
+            --deps artifacts/deps-summary.json --run-id "$RUN_ID" --event "$EVENT" --head "$HEAD_SHA" \
+            --base "$BASE_SHA" --report-only "$REPORT_ONLY" --workflows "$WORKFLOWS_RESULT" \
+            --dependencies "$DEPENDENCIES_RESULT" --out security-report.json >> "$GITHUB_STEP_SUMMARY"
           cat security-report.json
-          {
-            echo "## Security (report_only: ${REPORT_ONLY:-unknown})"
-            echo
-            echo "| check | result |"
-            echo "| --- | --- |"
-            jq -r '"| zizmor | " + (if .zizmor.tool_error then "tool error" else
-                "\(.zizmor.head_count) findings on this tree, " + (if .zizmor.new_count == null then "no base to compare"
-                  else "\(.zizmor.new_count) new against the base" end) end) + " |",
-              "| zizmor by audit | " + ((.zizmor.by_audit // {}) | to_entries | map("\(.key) \(.value)") | join(", ")) + " |",
-              "| osv-scanner | " + (if .osv.tool_error then "tool error" else
-                "\(.osv.total) vulnerabilities, \(.osv.with_fix) with a fixed version" end) + " |",
-              "| govulncheck | " + (if .govulncheck.tool_error then "tool error" else
-                "\(.govulncheck.reachable) reachable, \(.govulncheck.informational) informational" end) + " |"' \
-              security-report.json
-          } >> "$GITHUB_STEP_SUMMARY"
           {
             echo "zizmor_tool_error=$(jq -r .zizmor.tool_error security-report.json)"
             echo "dependencies_tool_error=$(jq -r '.osv.tool_error or .govulncheck.tool_error' security-report.json)"

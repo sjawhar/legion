@@ -1,0 +1,39 @@
+{
+  "config": {
+    "protocol_version": "v1.0.0",
+    "scanner_name": "govulncheck",
+    "scanner_version": "v1.8.0",
+    "db": "https://vuln.go.dev",
+    "db_last_modified": "2026-09-28T16:43:40Z",
+    "go_version": "go1.27.0",
+    "scan_level": "symbol",
+    "scan_mode": "source"
+  }
+}
+{
+  "SBOM": {
+    "go_version": "go1.27.0",
+    "modules": [
+      {
+        "path": "example.com/clean"
+      },
+      {
+        "path": "stdlib",
+        "version": "v1.27.0"
+      }
+    ],
+    "roots": [
+      "example.com/clean"
+    ]
+  }
+}
+{
+  "progress": {
+    "message": "Fetching vulnerabilities from the database..."
+  }
+}
+{
+  "progress": {
+    "message": "Checking the code against the vulnerabilities..."
+  }
+}

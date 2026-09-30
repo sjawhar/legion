@@ -114,6 +114,9 @@ jobs:
       - name: Test the zizmor fingerprint script
         run: .github/scripts/zizmor-findings.test.sh
 
+      - name: Test the dependency summary script
+        run: .github/scripts/deps-summary.test.sh
+
       - name: Test the security settings script
         run: scripts/security-settings.test.sh
 
