@@ -1,8 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import * as os from "node:os";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import { type Block, messageStream } from "./test-anthropic-stream";
+import {
+  type Block,
+  type Cleanup,
+  messageStream,
+  ompRoot,
+  type Request,
+  serveStandin,
+  spawnRpc,
+  writeStandinProfile,
+} from "./test-omp-harness";
 
 // The phase-stall follow-up on the real Oh My Pi (src/legion/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
@@ -17,12 +25,6 @@ import { type Block, messageStream } from "./test-anthropic-stream";
 // The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
-const extensions = path.join(import.meta.dir);
-
-interface Request {
-  readonly path: string;
-  readonly body: Record<string, unknown>;
-}
 
 interface Pane {
   /** Every request the stand-in served: the model gateway's, the daemon's, and the listener's. */
@@ -49,7 +51,7 @@ function isSelfCheck(request: Request): boolean {
   return JSON.stringify(messages.at(-1) ?? null).includes("<btw>");
 }
 
-const cleanup: (() => Promise<void>)[] = [];
+const cleanup: Cleanup = [];
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
@@ -103,155 +105,100 @@ async function runPane(
   options: PaneOptions = {}
 ): Promise<Pane> {
   const legionPane = options.legion ?? true;
-  const root = await mkdtemp(path.join(os.tmpdir(), "legion-phase-stall-"));
-  cleanup.push(() => rm(root, { recursive: true, force: true }));
-  const home = path.join(root, "home");
+  const { root, home, workspace, sessions } = await ompRoot("legion-phase-stall-", cleanup);
   const state = path.join(root, "state");
-  const workspace = path.join(root, "workspace");
   const bin = path.join(root, "bin");
-  const sessions = path.join(root, "sessions");
   const legionLog = path.join(root, "legion.log");
-  for (const directory of [path.join(home, ".omp", "agent"), workspace, bin, sessions]) {
-    await mkdir(directory, { recursive: true });
-  }
+  await mkdir(bin, { recursive: true });
   await mkdir(path.join(state, "secrets"), { recursive: true, mode: 0o700 });
 
-  const requests: Request[] = [];
   let answered = 0;
   let selfChecks = 0;
   let grants = 0;
   let lastAnsweredAt = 0;
-  const server = Bun.serve({
-    port: 0,
-    hostname: "127.0.0.1",
-    async fetch(request) {
-      const url = new URL(request.url);
-      const text = request.method === "POST" ? await request.text() : "";
-      const body = text === "" ? {} : (JSON.parse(text) as Record<string, unknown>);
-      requests.push({ path: url.pathname, body });
-      if (url.pathname === "/anthropic/v1/messages") {
-        lastAnsweredAt = Date.now();
-        // The self-check is not a turn: it consumes no scripted reply, and the conversation's
-        // next turn is answered as if it had never happened — which is what the host's snapshot
-        // makes true.
-        if (isSelfCheck({ path: url.pathname, body })) {
-          selfChecks += 1;
-          const verdict = options.selfCheck ?? "PROCEEDING";
-          return new Response(
-            messageStream([{ type: "text", text: verdict }], `btw_${selfChecks}`),
-            { headers: { "content-type": "text/event-stream" } }
-          );
-        }
-        const reply = replies[answered];
-        answered += 1;
-        if (reply === undefined) {
-          return Response.json(
-            {
-              type: "error",
-              error: { type: "invalid_request_error", message: "no reply scripted" },
-            },
-            { status: 400 }
-          );
-        }
-        return new Response(messageStream(reply, `msg_${answered}`), {
+  const { requests, base } = serveStandin(cleanup, (url, body) => {
+    if (url.pathname === "/anthropic/v1/messages") {
+      lastAnsweredAt = Date.now();
+      // The self-check is not a turn: it consumes no scripted reply, and the conversation's
+      // next turn is answered as if it had never happened — which is what the host's snapshot
+      // makes true.
+      if (isSelfCheck({ path: url.pathname, body })) {
+        selfChecks += 1;
+        const verdict = options.selfCheck ?? "PROCEEDING";
+        return new Response(messageStream([{ type: "text", text: verdict }], `btw_${selfChecks}`), {
           headers: { "content-type": "text/event-stream" },
         });
       }
-      if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
-      if (url.pathname === "/api/v1/asks/open") {
-        const questions = options.openAskQuestions ?? [];
-        return Response.json({
-          session_id: "",
-          as_of: new Date().toISOString(),
-          opened_since: false,
-          count: options.openAsks ?? questions.length,
-          waiting_on_human: 0,
-          waiting_on_agent: 0,
-          asks: questions.map((question, index) => ({
-            id: `ask-${index}`,
-            ref: `/issues/LEGION-${index}#ask-${index}`,
-            question,
-            kind: "question",
-            urgency: "normal",
-            created_at: "2026-09-13T00:00:00Z",
-            age_seconds: 0,
-            priority: null,
-            owner: { issue: { key: `LEGION-${index}`, title: "Test" } },
-            human_replied: false,
-            last_reply: null,
-            waiting_on: "human",
-          })),
-        });
+      const reply = replies[answered];
+      answered += 1;
+      if (reply === undefined) {
+        return Response.json(
+          {
+            type: "error",
+            error: { type: "invalid_request_error", message: "no reply scripted" },
+          },
+          { status: 400 }
+        );
       }
-      if (url.pathname === "/legion/v1/worker/started") {
-        return Response.json({
-          roleToken: "legion-stall-stall-2-implementer",
-          secret: "stall-secret",
-          gitName: "Legion Worker",
-          gitEmail: "worker@example.test",
-        });
-      }
-      if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
-      if (url.pathname === "/legion/v1/grants") {
-        grants += 1;
-        return Response.json({
-          grantId: `stall-grant-${grants}`,
-          expiresAt: "2099-01-01T00:00:00Z",
-        });
-      }
-      if (url.pathname.startsWith("/legion/")) {
-        return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
-      }
-      // The Envoy listener: registration, the role claim, and any read answer with an interest.
-      return Response.json({
-        session_id: typeof body.session_id === "string" ? body.session_id : "",
-        machine_id: "stall-machine",
-        dir: workspace,
-        topics: [],
+      return new Response(messageStream(reply, `msg_${answered}`), {
+        headers: { "content-type": "text/event-stream" },
       });
-    },
+    }
+    if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
+    if (url.pathname === "/api/v1/asks/open") {
+      const questions = options.openAskQuestions ?? [];
+      return Response.json({
+        session_id: "",
+        as_of: new Date().toISOString(),
+        opened_since: false,
+        count: options.openAsks ?? questions.length,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: questions.map((question, index) => ({
+          id: `ask-${index}`,
+          ref: `/issues/LEGION-${index}#ask-${index}`,
+          question,
+          kind: "question",
+          urgency: "normal",
+          created_at: "2026-09-13T00:00:00Z",
+          age_seconds: 0,
+          priority: null,
+          owner: { issue: { key: `LEGION-${index}`, title: "Test" } },
+          human_replied: false,
+          last_reply: null,
+          waiting_on: "human",
+        })),
+      });
+    }
+    if (url.pathname === "/legion/v1/worker/started") {
+      return Response.json({
+        roleToken: "legion-stall-stall-2-implementer",
+        secret: "stall-secret",
+        gitName: "Legion Worker",
+        gitEmail: "worker@example.test",
+      });
+    }
+    if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
+    if (url.pathname === "/legion/v1/grants") {
+      grants += 1;
+      return Response.json({
+        grantId: `stall-grant-${grants}`,
+        expiresAt: "2099-01-01T00:00:00Z",
+      });
+    }
+    if (url.pathname.startsWith("/legion/")) {
+      return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
+    }
+    // The Envoy listener: registration, the role claim, and any read answer with an interest.
+    return Response.json({
+      session_id: typeof body.session_id === "string" ? body.session_id : "",
+      machine_id: "stall-machine",
+      dir: workspace,
+      topics: [],
+    });
   });
-  cleanup.push(async () => {
-    await server.stop(true);
-  });
-  const base = `http://127.0.0.1:${server.port}`;
+  await writeStandinProfile(home, base);
 
-  // The stand-in gateway as the profile's one provider, keyed by a literal: a plain API-key caller.
-  await writeFile(
-    path.join(home, ".omp", "agent", "models.yml"),
-    [
-      "providers:",
-      "  standin:",
-      `    baseUrl: ${base}/anthropic`,
-      "    auth: apiKey",
-      "    api: anthropic-messages",
-      "    apiKey: standin-key",
-      "    models:",
-      "      - id: standin-model",
-      "        name: Stand-in",
-      "        reasoning: false",
-      "        input: [text]",
-      "        contextWindow: 200000",
-      "        maxTokens: 8000",
-      "        cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}",
-      "",
-    ].join("\n")
-  );
-  // Every role on the stand-in, and the providers a devbox or runner could answer from without it
-  // disabled, so no turn reaches a real model.
-  await writeFile(
-    path.join(home, ".omp", "agent", "config.yml"),
-    [
-      "enabledModels:",
-      "  - standin/*",
-      "disabledProviders: [amazon-bedrock, bedrock-mantle, google, google-vertex, ollama, llama.cpp, lm-studio]",
-      "modelRoles:",
-      ...["default", "smol", "slow", "plan", "task", "commit", "tiny", "vision", "advisor"].map(
-        (role) => `  ${role}: standin/standin-model`
-      ),
-      "",
-    ].join("\n")
-  );
   const legion = path.join(bin, "legion");
   await writeFile(
     legion,
@@ -264,30 +211,20 @@ async function runPane(
   );
   await chmod(legion, 0o755);
 
-  const child = Bun.spawn(
-    [
-      binary,
-      "--mode",
-      "rpc",
-      "--no-extensions",
-      "-e",
-      path.join(extensions, "envoy.ts"),
-      "-e",
-      path.join(extensions, "legion.ts"),
-      "--no-skills",
-      "--no-rules",
-      "--no-lsp",
-      "--no-title",
-      "--session-dir",
-      sessions,
-      "--cwd",
-      workspace,
-    ],
+  // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
+  // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
+  // extension sends from `agent_end` instead starts its continuation after that frame, so
+  // `quietMs` waits for the gateway to fall silent rather than for the frame.
+  const settled = Promise.withResolvers<void>();
+  const rpc = spawnRpc(
+    binary,
     {
-      cwd: workspace,
+      extensions: ["envoy.ts", "legion.ts"],
+      home,
+      workspace,
+      sessions,
+      bin,
       env: {
-        HOME: home,
-        PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
         ENVOY_URL: base,
         ...(options.openAsks === undefined && options.openAskQuestions === undefined
           ? {}
@@ -310,52 +247,22 @@ async function runPane(
             }
           : {}),
       },
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    }
-  );
-  cleanup.push(async () => {
-    child.kill("SIGKILL");
-    await child.exited;
-  });
-
-  // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
-  // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
-  // extension sends from `agent_end` instead starts its continuation after that frame, so
-  // `quietMs` waits for the gateway to fall silent rather than for the frame. Both streams are
-  // read to the end, so a full pipe never blocks omp.
-  const stderr = new Response(child.stderr).text();
-  const settled = Promise.withResolvers<void>();
-  void (async () => {
-    let buffered = "";
-    for await (const chunk of child.stdout.pipeThrough(new TextDecoderStream())) {
-      buffered += chunk;
-      let newline = buffered.indexOf("\n");
-      while (newline !== -1) {
-        const frame: unknown = JSON.parse(buffered.slice(0, newline));
-        buffered = buffered.slice(newline + 1);
-        newline = buffered.indexOf("\n");
+      onFrame: (frame) => {
         if (
-          typeof frame === "object" &&
-          frame !== null &&
           "type" in frame &&
           frame.type === "agent_end" &&
           !("isTerminal" in frame && frame.isTerminal === false)
         ) {
           settled.resolve();
         }
-      }
-    }
-    settled.reject(new Error(`omp closed its RPC stream before its run settled:\n${await stderr}`));
-  })();
-  child.stdin.write(`${JSON.stringify({ type: "prompt", message: "Implement STALL-2." })}\n`);
-  child.stdin.flush();
+      },
+    },
+    cleanup
+  );
+  rpc.send({ type: "prompt", message: "Implement STALL-2." });
   if (options.quietMs === undefined) {
-    await settled.promise;
+    await Promise.race([settled.promise, rpc.closed]);
   } else {
-    // Nothing must be left unhandled: in quiet mode the settle frame is not what ends the wait.
-    settled.promise.catch(() => undefined);
     const quietMs = options.quietMs;
     const deadline = Date.now() + 90_000;
     await Promise.race([
@@ -369,13 +276,10 @@ async function runPane(
         }
         throw new Error(`the stand-in gateway never went quiet for ${quietMs} ms`);
       })(),
-      child.exited.then(async (code) => {
-        throw new Error(`omp exited (${code}) before the gateway went quiet:\n${await stderr}`);
-      }),
+      rpc.closed,
     ]);
   }
-  child.stdin.end();
-  await child.exited;
+  await rpc.end();
 
   return {
     requests,
