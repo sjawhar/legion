@@ -27,15 +27,18 @@ listener (inherited `ENVOY_URL`), which collides with nothing.
 `setup.sh` copies `~/.omp/profiles/legion/plugins` (about 240 MB: `package.json`, `bun.lock`,
 `node_modules`) into `~/.omp/profiles/l12rig/plugins`, removes the profile's `agent/extensions`
 so exactly one copy of each extension loads, and then swaps only the Legion plugin inside the
-copy:
+copy, for a tarball extracted in the installed package's place, so the rig runs exactly what
+`npm pack` ships (`dist/` with the bundles and `dist/skills`, `agents/`, `package.json`):
 
-- `RIG_LEGION_BUILD=branch` (default): `bun run build` in the checkout's `packages/pi-envoy`, its
-  `dist/envoy.js` and `dist/legion.js` copied over the installed package's `dist/`, and the
-  checkout's `skills/` staged as the package's `dist/skills`, as `prepack.sh` stages it for the
-  packed plugin (the installed `package.json` stays — its `omp.extensions` already names those two
-  files);
-- `RIG_LEGION_BUILD=<version>` (e.g. `1.17.1`): `npm pack @sjawhar/pi-legion-envoy@<version>`
-  extracted in place of the installed package, exactly what `bun add` would install.
+- `RIG_LEGION_BUILD=branch` (default): the checkout's plugin, packed by
+  `scripts/e2e/lib/pack-plugin.sh` as the release packs it — the same pack step the stage proofs'
+  `install-plugin-profile.sh` uses;
+- `RIG_LEGION_BUILD=<version>` (e.g. `1.17.1`): `npm pack @sjawhar/pi-legion-envoy@<version>`, the
+  released tarball, exactly what `bun add` would install.
+
+The rest of the copied tree stays, `secretsd` and the other plugins included. The Legion package
+needs none of it: its bundles inline every dependency except the `@oh-my-pi/*` packages Oh My Pi
+itself provides.
 
 Why: Sami's ruling (2026-09-13, AGENTC-79) after pi-envoy 1.17.1 shipped broken — proven on a rig
 that loaded the Legion extension alone, it failed on the first real worker because `secretsd`
