@@ -72,8 +72,9 @@ CI's message. Loading the machine only widens the window.
 
 On a devbox the `go` on `PATH` is a mise shim that sets `GOBIN` to the shared toolchain's `bin`, so
 `GOBIN=/tmp/x go install github.com/nats-io/nats-server/v2@v2.10.29` puts the binary where every
-session using that toolchain finds it. Call the real binary instead, which honours `GOBIN`:
-`GOBIN=/tmp/x /home/ubuntu/.mise/installs/go/1.27.0/bin/go install github.com/nats-io/nats-server/v2@v2.10.29`.
+session using that toolchain finds it. Call the real binary instead, which `mise which go` prints
+and which honours `GOBIN`:
+`GOBIN=/tmp/x "$(mise which go)" install github.com/nats-io/nats-server/v2@v2.10.29`.
 
 ## Fix
 
@@ -87,9 +88,15 @@ through `testnats.URL`: the session, interest and CI registries, the listener, a
 already did. A delete a test makes of its own stream is the first of that name in its account, so it
 renames as it should.
 
-A test that itself deletes one name twice can still meet the race:
+One test still deletes a name twice, and the race cannot fail it:
 `internal/kvwatch`'s `TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache` deletes
-`kvwatch-test` twice, on a server of its own.
+`kvwatch-test` twice on a server of its own and restores a stream snapshot right after the second
+delete. The restore removes any directory left at the stream's name before it moves the snapshot in
+(`server/stream.go` 5880-5883 at v2.10.29), so what a failed rename leaves never reaches the
+restored bucket. On a `nats:2.10` container with a non-empty `.KV_kvwatch-test` planted, both
+deletes failed their rename (the live bucket's warm-up read the first bucket's key too, which the
+test does not check) and the test passed. The same test creating the bucket again in place of the
+restore failed with the live bucket's key still in it (`live-key=true`).
 
 ## In production
 
