@@ -681,19 +681,33 @@ func TestReconcileNeverReadmitsAChildAsARoot(t *testing.T) {
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}})
 }
 
-// A lifecycle status change written by an agent holding a claim in the tree is never a human move:
-// here the implementer closes its own issue during the production check instead of completing the
-// phase. The workflow does not react (no linger, the slot kept, the phase unchanged) and the daemon
-// re-asserts its own status through the outbox; the same write by a human closes the tree.
-func TestAnAgentsLifecycleStatusWriteIsNotAHumanMove(t *testing.T) {
+// Who wrote a lifecycle status on an admitted root decides whether it takes the tree out of the
+// workflow. A person's move does (a user actor, which decodes to no session), and so does the
+// daemon's own write, legion-daemon:<PROJECT>, which every `legion status` and the controller's park
+// write under: the tree lingers and its slot is freed. A session holding a claim in the tree is an
+// agent, never a human move, since a phase ends only by its completion and a tree only by its
+// architect's sign-off; here the implementer closes its own issue during the production check
+// instead of completing the phase. The workflow does not react (no linger, the slot kept, the phase
+// unchanged) and the daemon re-asserts its own status through the outbox. Any other session —
+// another tree's agent, or one outside Legion that took the issue for its own — cannot end or park
+// the tree either: the daemon re-asserts its status, and the tree's architect is told who wrote what.
+func TestOnlyAPersonOrTheDaemonTakesAnAdmittedRootOutOfTheWorkflow(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		actor string
-		agent bool
+		name   string
+		actor  string
+		status string
+		ends   bool
+		told   bool
 	}{
-		{name: "the tree's implementer", actor: "ses-impl", agent: true},
-		{name: "a human", actor: ""},
-		{name: "another tree's session", actor: "ses-other"},
+		{name: "the tree's implementer closes it", actor: "ses-impl", status: "done"},
+		{name: "another tree's session closes it", actor: "ses-other", status: "done", told: true},
+		{name: "a session outside Legion closes it", actor: "ses-outsider", status: "done", told: true},
+		{name: "a session outside Legion parks it", actor: "ses-outsider", status: "backlog", told: true},
+		{name: "a session outside Legion ices it", actor: "ses-outsider", status: "icebox", told: true},
+		{name: "the daemon parks it for legion status", actor: "legion-daemon:LEGION", status: "backlog", ends: true},
+		{name: "a person closes it", actor: "", status: "done", ends: true},
+		{name: "a person parks it", actor: "", status: "backlog", ends: true},
+		{name: "a person ices it", actor: "", status: "icebox", ends: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -723,24 +737,38 @@ func TestAnAgentsLifecycleStatusWriteIsNotAHumanMove(t *testing.T) {
 				}
 			})
 
-			apply(t, pool, admission, "closed-by-"+tc.name, intake.DispatchIssue{Key: "LEGION-1", Seq: 2, Type: "issue.updated", Status: "done", Title: "LEGION-1", Rank: "A", ActorSession: tc.actor}, engine)
+			apply(t, pool, admission, "written-by-"+tc.name, intake.DispatchIssue{Key: "LEGION-1", Seq: 2, Type: "issue.updated", Status: tc.status, Title: "LEGION-1", Rank: "A", ActorSession: tc.actor}, engine)
 			got := issue(t, pool, "LEGION-1")
 			var reasserted int
+			var told []record.Notice
 			for _, effect := range effects(t, pool) {
-				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-1" && write == (record.StatusWrite{Status: "retro", ObservedStatus: "done"}) {
+				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-1" && write == (record.StatusWrite{Status: "retro", ObservedStatus: tc.status}) {
 					reasserted++
 				}
-			}
-			if !tc.agent {
-				if got.Phase != phase.Done || got.LingerUntil == nil {
-					t.Fatalf("root after a human's done = %#v, want its tree lingering", got)
+				if notice, ok := effect.payload.(record.Notice); ok && notice.Kind == "status-reasserted" {
+					told = append(told, notice)
 				}
+			}
+			if tc.ends {
+				if got.Phase != phase.Done || got.LingerUntil == nil || reasserted != 0 || len(told) != 0 {
+					t.Fatalf("root after %s = %#v with %d re-asserted status writes and notices %+v, want its tree lingering and nothing re-asserted or told", tc.name, got, reasserted, told)
+				}
+				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
 				return
 			}
 			if got.Phase != phase.ProductionCheck || got.LingerUntil != nil || got.Status != "retro" || got.LastDispatchSeq != 2 || reasserted != 1 {
-				t.Fatalf("root after its implementer's done = %#v with %d re-asserted status writes, want production_check, not lingering, status retro kept, seq 2, and retro re-asserted over done once", got, reasserted)
+				t.Fatalf("root after %s = %#v with %d re-asserted status writes, want production_check, not lingering, status retro kept, seq 2, and retro re-asserted over %s once", tc.name, got, reasserted, tc.status)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}, {Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
+			if !tc.told {
+				if len(told) != 0 {
+					t.Fatalf("notices %+v after the tree's own agent wrote %s, want none", told, tc.status)
+				}
+				return
+			}
+			if len(told) != 1 || told[0].Role != claim.RoleArchitect || !strings.Contains(told[0].Reason, tc.actor) || !strings.Contains(told[0].Reason, tc.status) {
+				t.Fatalf("notices %+v, want one status-reasserted notice for the architect naming %s and the %s it wrote", told, tc.actor, tc.status)
+			}
 		})
 	}
 }

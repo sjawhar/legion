@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -124,7 +126,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if fact.Seq != 0 && fact.Seq <= issue.LastDispatchSeq || fact.Status == issue.Status {
 		return intake.Result{}, nil
 	}
-	if agent, err := e.agentStatusWrite(ctx, tx, *issue, fact); err != nil || agent {
+	if reasserted, err := e.sessionStatusWrite(ctx, tx, *issue, fact); err != nil || reasserted {
 		return intake.Result{}, err
 	}
 	if record.OutOfWorkflow(fact.Status) {
@@ -136,28 +138,55 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	return intake.Result{}, nil
 }
 
-// agentStatusWrite takes a lifecycle status change written by a session holding a claim in the
-// issue's tree: an agent, never a human move, since a phase ends only by its completion (legion
-// handoff complete) and a tree only by the architect's sign-off. The workflow does not react.
-// The observation is recorded here, the status kept, so admission, running after this handler,
-// neither frees the slot nor re-admits; and the daemon re-asserts its own status through the
-// outbox over the agent's.
-func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
-	if fact.ActorSession == "" {
+// sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
+// does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
+// since a phase ends only by its completion (legion handoff complete) and a tree only by the
+// architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
+// one outside Legion that took the issue for its own — has no part in the running tree it would end
+// or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
+// the observation is recorded here, the status kept, so admission, running after this handler,
+// neither frees the slot nor re-admits; and the daemon re-asserts its own status through the outbox.
+// A person's move (a user actor, which carries no session) and the daemon's own write
+// (dispatch.DaemonSession: every `legion status`, the controller's park) are the workflow's to act on.
+func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
+	if fact.ActorSession == "" || fact.ActorSession == dispatch.DaemonSession(issue.Key) {
 		return false, nil
 	}
-	claims, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.ActorSession)
-	if err != nil || !claims {
+	agent, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.ActorSession)
+	if err != nil {
 		return false, err
 	}
-	e.log.Info("workflow: a claim session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
-		"session", fact.ActorSession, "wrote", fact.Status, "status", issue.Status)
+	if !agent {
+		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted {
+			return false, err
+		}
+	}
+	e.logOnCommit(ctx, "workflow: a session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
+		"session", fact.ActorSession, "claims_tree", agent, "wrote", fact.Status, "status", issue.Status)
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
 	issue.HandedOver = fact.HandedOver
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return false, err
 	}
-	return true, e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: issue.Status, ObservedStatus: fact.Status})
+	if err := e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: issue.Status, ObservedStatus: fact.Status}); err != nil || agent {
+		return true, err
+	}
+	return true, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "status-reasserted", Role: claim.RoleArchitect, Reason: fmt.Sprintf(
+		"session %s set %s to %s, and the daemon set it back to %s: a session with no claim in the tree neither ends nor parks it; a person does, from the Dispatch dashboard, and so does the controller's legion status",
+		fact.ActorSession, issue.Key, fact.Status, issue.Status)})
+}
+
+// admittedRoot says whether issue is the root of a tree that runs: it holds an admission slot and
+// does not linger. A root waiting for a slot runs nothing yet.
+func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue) (bool, error) {
+	if !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() {
+		return false, nil
+	}
+	slots, err := e.store.Slots(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == issue.Key }), nil
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission
