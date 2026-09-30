@@ -1,14 +1,19 @@
 -- 0053_asks_approval_kind_check.up.sql
 -- An ask of kind approval names the document version it asks a human to approve, and no other
 -- kind carries an approval at all. The approval-request route is the only writer of the column
--- and always pairs the two, but nothing refused a row that did not, and answering an approval ask
--- that named no document failed. An SQL null dereferenced a nil approval. docs.ScanAsk decodes
--- every other object, and the JSON null that encoding a nil *model.AskApproval writes, into a
--- non-nil approval, so one without the document's id read back as an approval of artifact "" and
--- failed the uuid cast its readers make. The check therefore requires what those readers use: the
--- document's id as Postgres writes a uuid (lowercase hex text, which the open-ask lookup compares
--- as text) and a numeric version on an approval ask, and SQL null on every other kind, so no
--- reader of an approval ask has to check for a missing document.
+-- and always pairs the two, but nothing refused a row that did not.
+--
+-- docs.ScanAsk reads SQL null as no approval and any other value as a model.AskApproval, and
+-- fails on one that does not decode. SQL null on an approval ask dereferenced a nil approval. The
+-- JSON null, which encoding a nil *model.AskApproval writes, reads as an approval of artifact ""
+-- at version 0, whose answer failed the uuid cast. A value that does not decode, such as a
+-- version of 1.5 or a name of 5, fails every read of the ask, the Inbox that lists it among them,
+-- and docs.ApprovalAskAt reads every open approval ask of a document on each version write, so
+-- one such row also stops the document taking versions. The check therefore admits on an approval
+-- ask only an approval in the shape the approval-request route writes: artifact_id as Postgres
+-- writes a uuid (lowercase hex text, which docs.ApprovalAskAt compares as text), name a string,
+-- and version a JSON number written as a whole number from 1 of at most ten digits, so it always
+-- decodes into the int model.AskApproval holds. On every other kind it admits only SQL null.
 --
 -- Adding the constraint validates every existing row under an ACCESS EXCLUSIVE lock on asks,
 -- which the runner holds until its transaction commits. The lock timeout bounds the wait for that
@@ -17,12 +22,14 @@
 -- the runner's transaction ends.
 set local lock_timeout = '5s';
 alter table asks add constraint asks_approval_kind_check check (
-	case
-		when kind = 'approval' then coalesce(
-			approval ->> 'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-				and jsonb_typeof(approval -> 'version') = 'number',
-			false
-		)
-		else approval is null
-	end
+    case
+        when kind = 'approval' then coalesce(
+            approval ->> 'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                and jsonb_typeof(approval -> 'name') = 'string'
+                and jsonb_typeof(approval -> 'version') = 'number'
+                and approval ->> 'version' ~ '^[1-9][0-9]{0,9}$',
+            false
+        )
+        else approval is null
+    end
 );

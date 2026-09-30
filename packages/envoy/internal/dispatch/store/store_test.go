@@ -783,9 +783,10 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	}
 }
 
-// 0053 pairs an ask's kind with its approval: an approval ask names the document id and version
-// its readers use, and no other kind carries an approval, not even the JSON null. A hand-written
-// row that breaks the pairing either way is refused at insert.
+// 0053 pairs an ask's kind with its approval: an approval ask carries an approval in the shape the
+// approval-request route writes, one that decodes into model.AskApproval and names a document
+// version, and no other kind carries one, not even the JSON null. A hand-written row that breaks
+// the pairing either way is refused at insert.
 func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -811,8 +812,9 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// approval-request route writes the column), and it names no document either: ScanAsk
 		// reads it as an approval with no artifact, and answering the ask fails on it.
 		{"an approval ask whose approval is the JSON null", "approval", new("null"), true},
+		// What ScanAsk reads the JSON null as. It separates this check from one that asks only for
+		// an object.
 		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
-		{"an approval ask naming no version", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md"}`), true},
 		// ScanAsk decodes the approval into model.AskApproval, whose version is an int and whose name
 		// is a string, so a number that is no int, or a name that is no string, fails every read of
 		// the ask: the ask itself, its issue, the inbox, answering it, and each new version of its
@@ -821,7 +823,14 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		{"an approval ask whose version is written with a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.0}`), true},
 		{"an approval ask whose version is past what an int holds", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":9223372036854775808}`), true},
 		{"an approval ask whose name is not a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":5,"version":1}`), true},
+		// jsonb stores 1e30 as a 31-digit integer, which a check on the digits alone has to bound.
+		{"an approval ask whose version is 1e30", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1e30}`), true},
+		// Version 0 decodes, but no version has that number and the approval-request route never
+		// writes it.
+		{"an approval ask at version 0", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":0}`), true},
 		{"a question naming a document", "question", new(approval), true},
+		// A check keyed on the approval being an object, (kind = 'approval') = (jsonb_typeof(approval)
+		// = 'object'), would store this, and ScanAsk would then put an approval on the question.
 		{"a question carrying the JSON null", "question", new("null"), true},
 		{"an approval ask naming its document", "approval", new(approval), false},
 		{"a question naming none", "question", nil, false},
