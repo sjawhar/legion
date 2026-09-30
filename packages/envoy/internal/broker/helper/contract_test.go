@@ -279,8 +279,8 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if b.cred.Load() != nil {
 		t.Fatal("an expired credential (401 LAUNCHER_INVALID) must clear the in-memory credential")
 	}
-	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" {
-		t.Fatalf("login-status after the broker refused the expired credential: %+v, want expired", status)
+	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" || !status.LoginRefused {
+		t.Fatalf("login-status after the broker refused the expired credential: %+v, want expired and refused", status)
 	}
 
 	// --- neither the machine key, the session key, nor any proof this test produced ever

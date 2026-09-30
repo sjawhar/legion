@@ -1076,7 +1076,8 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
 
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
  *  pinned to `version`; `reason` is required for changes requested; `ask_id` names the
- *  approval ask the review answered, null when given from the document header. */
+ *  approval ask the review answered, null when given from the document header with no
+ *  approval ask open at that version. */
 export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;

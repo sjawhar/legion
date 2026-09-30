@@ -12,6 +12,7 @@ import { QueryError } from "../../components/QueryError";
 import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
+  checkboxAccent,
   dangerText,
   focusVisibleRing,
   linkHoverText,
@@ -40,11 +41,14 @@ import {
   parseInboxSearch,
 } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
-import { closestMatching, roveFocus } from "../shell/roving";
+import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
+import { outsideAskCard } from "./ask-card";
+import { type AskOrdinal, askIssueKey, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
+import { BulkSnoozeBar } from "./BulkSnoozeBar";
 import { SnoozeControl } from "./SnoozeControl";
 import {
   COLLAPSED_SECTIONS,
@@ -56,6 +60,7 @@ import {
   SECTION_TITLES,
   sectionOf,
 } from "./sections";
+import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
 
 function ReplyChip({ children }: { children: ReactNode }): ReactNode {
   return <LabelPill>{children}</LabelPill>;
@@ -73,11 +78,12 @@ function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
 
 const ROW_ATTRIBUTE = "data-inbox-row";
 const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
+/** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
+const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
-  const active = document.activeElement;
-  return active instanceof HTMLElement && active.matches(ROW_SELECTOR) ? active : null;
+  return focusedMatching(ROW_SELECTOR);
 }
 
 function rowAround(node: Element | null): HTMLElement | null {
@@ -139,8 +145,11 @@ function AssignToMe({
 function InboxItem({
   ask,
   assignLive,
+  marked,
+  ordinal,
   onAnswered,
   onAssignLive,
+  onMark,
   onSnoozeLive,
   onRelease,
   section,
@@ -151,8 +160,14 @@ function InboxItem({
   /** True while this row's "Assign to me" write is in flight or failed, whatever section the
    *  optimistic update put the row in. */
   assignLive: boolean;
+  /** Whether the reader has marked this row for a bulk action. */
+  marked: boolean;
+  /** This ask's place among its owner's rows, when the owner has more than one listed. */
+  ordinal: AskOrdinal | undefined;
   onAnswered: (id: string) => void;
   onAssignLive: (askId: string, live: boolean) => void;
+  /** Marks or unmarks this row; `x` and the row's own checkbox are the two ways in. */
+  onMark: (askId: string) => void;
   /** The same registration for this row's snooze write; the Inbox keeps a live row rendered
    *  even when its band is folded, so `Snoozing…` and a refusal survive the fold. */
   onSnoozeLive: (askId: string, live: boolean) => void;
@@ -166,8 +181,9 @@ function InboxItem({
   /** The signed-in lowercase login; "Assign to me" writes it. */
   viewer: string;
 }): ReactNode {
-  const owner = ask.issue?.key ?? ask.issue_key;
+  const owner = askIssueKey(ask);
   const title = ask.issue?.title ?? owner ?? "Document ask";
+  const name = controlName(ask, ordinal);
   const releaseOnFocusOut =
     onRelease === undefined
       ? undefined
@@ -188,6 +204,13 @@ function InboxItem({
           Assign to me is a full-width row inside the right group, so it never draws over the
           issue key - and the reply chip truncates rather than squeezing the title away. */}
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <input
+          aria-label={`Select ${name}`}
+          checked={marked}
+          className={`size-4 shrink-0 ${checkboxAccent}`}
+          onChange={() => onMark(ask.id)}
+          type="checkbox"
+        />
         <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
           {ask.document === undefined ? (
             owner === null ? (
@@ -245,7 +268,7 @@ function InboxItem({
           ) : null}
           <SnoozeControl
             askId={ask.id}
-            label={owner ?? title}
+            label={name}
             onLive={onSnoozeLive}
             snoozedUntil={section === "later" ? ask.snoozed_until : null}
           />
@@ -305,6 +328,21 @@ function heldRow(
   return movedBetweenTurnSections ? { ask: listed, section: seen.section } : undefined;
 }
 
+/**
+ * What the bar says after a pick the server refused in part. The count alone cannot tell a
+ * sign-out from `snoozed_until must be in the future`, so the reason travels with it: one reason
+ * when every refusal gave the same one, otherwise the first and how many others there are.
+ */
+function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | undefined {
+  const first = failed[0];
+  if (first === undefined) return undefined;
+  const reasons = new Set(failed.map(({ reason }) => reason));
+  const head = `Could not snooze ${failed.length} of ${of}: ${first.reason}`;
+  if (reasons.size === 1) return `${head}.`;
+  const others = reasons.size - 1;
+  return `${head}, and ${others} other reason${others === 1 ? "" : "s"}.`;
+}
+
 export function Inbox(): ReactNode {
   const { search } = useLocation();
   const navigate = useNavigate();
@@ -353,8 +391,103 @@ export function Inbox(): ReactNode {
       return next;
     });
   }, []);
+  // The rows the reader has marked, by ask id: `x` and the row's own checkbox are the two ways
+  // in. An id the server no longer lists drops out here, so a row that is listed again comes back
+  // unmarked; a mark whose row this view does not list, or whose band is folded shut, drops out
+  // of `selected` below, so the bar never counts - and `h` never writes - a row that is not on
+  // the page. The mark itself outlives both: open the band, or switch back, and it is still made.
+  const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
+  // The bulk write lives here rather than in the bar, because the optimistic snooze can take
+  // every marked row off this view at once and a bar that owned the write would be unmounted
+  // before its own refusal arrived. The bar reports one pick downward and renders what it is
+  // told. The pick's size is held with it, because that same move empties the selection the bar
+  // would otherwise count: `0 selected` while two asks are being snoozed.
+  const bulkWrite = useAskSnoozeMany();
+  const [bulkSnoozing, setBulkSnoozing] = useState(0);
+  const bulkBarRef = useRef<HTMLFieldSetElement>(null);
+  const [bulkRefusal, setBulkRefusal] = useState<string | undefined>(undefined);
+  const clearSelection = useCallback(() => {
+    setMarked(new Set());
+    setBulkRefusal(undefined);
+  }, []);
+  const onMark = useCallback((askId: string) => {
+    setMarked((current) => {
+      const next = new Set(current);
+      if (!next.delete(askId)) next.add(askId);
+      return next;
+    });
+  }, []);
+  const listedIds = inbox.data?.map((row) => row.id).join(" ");
+  useEffect(() => {
+    if (listedIds === undefined) return;
+    const listed = new Set(listedIds === "" ? [] : listedIds.split(" "));
+    setMarked((current) =>
+      [...current].every((id) => listed.has(id))
+        ? current
+        : new Set([...current].filter((id) => listed.has(id)))
+    );
+  }, [listedIds]);
+  // What this view lists, narrowed the same way the bands are, and computed here rather than
+  // after the early returns so the bindings below speak for exactly the rows on the page.
+  const agent = filter.agent;
+  const fromAgent =
+    agent === undefined
+      ? (inbox.data ?? [])
+      : (inbox.data ?? []).filter(
+          (ask) => ask.author.kind === "session" && ask.author.id === agent
+        );
+  const inView = (rows: readonly InboxRow[]) =>
+    view === "everyone" || viewer === undefined
+      ? rows
+      : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
+  const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
   const [laterOpen, setLaterOpen] = useState(false);
+  // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn band
+  // on the first render after its moment passes. Computed here, with the selection, rather than
+  // after the early returns, because the bar's count and the bindings both read it.
+  const place = viewer === undefined ? undefined : { now: Date.now(), view, viewer };
+  // A row in a band the reader has not opened is not on the page: the band renders its heading
+  // and count and none of its rows, so there is no checkbox to untick, and the reader may well
+  // have set that row's own moment since marking it - a pick that wrote it would overwrite what
+  // they chose. A row whose own snooze write is still in flight stays rendered inside the fold,
+  // so it still counts. One rule, read by the selection here and by the render below.
+  const inShutBand = (row: InboxRow, section: InboxSection | undefined): boolean =>
+    section !== undefined &&
+    COLLAPSED_SECTIONS[section] === true &&
+    !laterOpen &&
+    !snoozing.has(row.id);
+  const selected = shown
+    .filter(
+      (row) =>
+        marked.has(row.id) && (place === undefined || !inShutBand(row, sectionOf(row, place)))
+    )
+    .map((row) => row.id);
+  // One pick, over the ids the bar is counting: the same optimistic move and rollback the per-row
+  // control makes, once per ask. The ids the server took leave the selection; the ones it refused
+  // are marked again under its own reason, even if Clear ran while the write was in flight, so a
+  // second pick retries exactly those.
+  const snoozePick = (until: string) => {
+    const ids = [...selected];
+    setBulkRefusal(undefined);
+    setBulkSnoozing(ids.length);
+    void bulkWrite.submit(ids, until).then(({ failed }) => {
+      setBulkSnoozing(0);
+      setBulkRefusal(refusalText(failed, ids.length));
+      const refused = new Set(failed.map(({ askId }) => askId));
+      const taken = new Set(ids.filter((id) => !refused.has(id)));
+      setMarked((current) => {
+        const next = new Set([...current].filter((id) => !taken.has(id)));
+        for (const id of refused) next.add(id);
+        return next;
+      });
+    });
+  };
+  // The bar, and the Clear it carries, shows while a mark is on the page, a pick is in the air or a
+  // refusal is showing. Escape with no row focused is the keyboard's Clear and is offered on this
+  // same predicate, so the two cannot drift: a pick whose optimistic move folds every marked row
+  // into Later empties `selected`, not the marks behind it, and Clear still has work to do.
+  const bulkBarShown = selected.length > 0 || bulkSnoozing !== 0 || bulkRefusal !== undefined;
   const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
@@ -380,6 +513,12 @@ export function Inbox(): ReactNode {
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
   const step = (delta: 1 | -1) => roveFocus(rows(), rowAround(document.activeElement), delta);
   const inFocusedRow = (selector: string) => focusedRow()?.querySelector<HTMLElement>(selector);
+  // The bar is reached through its own ref: the empty state a pick can leave behind renders it
+  // outside the list.
+  const bulkPicker = () => bulkBarRef.current?.querySelector<HTMLElement>(BULK_PICKER_SELECTOR);
+  // Which row `h` was pressed on, so Escape from the bulk picker - which sits above the bands and
+  // has no row to fall back through - is one level out rather than a dead end.
+  const pickerOrigin = useRef<string | null>(null);
   useKeymapScope("inbox");
   useKeymap("inbox", [
     { id: "next", keys: "j", label: "Next ask", run: () => step(1), when: () => rows().length > 0 },
@@ -443,26 +582,73 @@ export function Inbox(): ReactNode {
       },
       when: () => rowAround(document.activeElement) !== null,
     },
+    {
+      id: "select",
+      keys: "x",
+      label: "Select or deselect the focused ask",
+      run: () => {
+        const askId = focusedRow()?.dataset.inboxRow;
+        if (askId !== undefined) onMark(askId);
+      },
+      when: () => focusedRow() !== null,
+    },
+    {
+      id: "snooze",
+      keys: "h",
+      // One key for both: with rows marked it is the whole selection, otherwise the row in hand.
+      label: "Snooze the focused ask, or every selected ask",
+      run: () => {
+        if (selected.length === 0) {
+          inFocusedRow("[data-inbox-snooze]")?.focus();
+          return;
+        }
+        bulkPicker()?.focus();
+      },
+      // The selection's key works from wherever marking leaves the reader - a row, the checkbox
+      // they just ticked, the bar - but not from inside an ask they are answering: an option
+      // radio takes no typed text, so the registry passes the key through, and the card's own
+      // controls are not the list's. The issue page withholds its writing keys the same way.
+      when: () =>
+        (selected.length > 0 && outsideAskCard()) || inFocusedRow("[data-inbox-snooze]") != null,
+    },
+    {
+      id: "back-from-bulk",
+      inEditable: true,
+      keys: "Escape",
+      label: "Back to the list from the bulk snooze picker",
+      run: () => {
+        const origin = pickerOrigin.current;
+        const row =
+          origin === null
+            ? null
+            : listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${origin}"]`);
+        // With every marked row gone there is no row to return to, so the bar itself is the
+        // level out: it holds the count and the way to clear it. It is reached through its own
+        // ref, because the empty state a pick can leave behind renders it outside the list.
+        (row ?? rows()[0] ?? bulkBarRef.current)?.focus();
+      },
+      when: () => document.activeElement?.matches(BULK_PICKER_SELECTOR) === true,
+    },
+    {
+      id: "clear-selection",
+      keys: "Escape",
+      // Escape is one level out, and the selection is the outermost thing a row press made:
+      // `back` takes the reader off the row first, and this clears what they marked. It is
+      // offered exactly while the bar's Clear is, a pick in flight and a refusal the reader has
+      // since unticked the rows of included - the keyboard that raised them dismisses them.
+      label: "Clear the selection",
+      run: clearSelection,
+      when: () => focusedRow() === null && bulkBarShown,
+    },
   ]);
 
   if (inbox.isPending || whoAmI.isPending) {
     return <LoadingSkeleton label="Loading your inbox" />;
   }
-  if (inbox.isError || viewer === undefined) {
+  if (inbox.isError || viewer === undefined || place === undefined) {
     return <p className={dangerText}>Could not load your inbox.</p>;
   }
 
-  const agent = filter.agent;
-  const fromAgent =
-    agent === undefined
-      ? inbox.data
-      : inbox.data.filter((ask) => ask.author.kind === "session" && ask.author.id === agent);
-  const inView = (rows: readonly InboxRow[]) =>
-    view === "everyone" ? rows : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
-  const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
-  // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn
-  // band on the first render after its moment passes.
-  const place = { now: Date.now(), view, viewer };
   const seen =
     anchor === null || anchor.id === answered.current
       ? undefined
@@ -510,12 +696,29 @@ export function Inbox(): ReactNode {
       </Link>
     );
 
+  // The bar outlives an empty list: a pick that empties this view leaves its write in the air, and
+  // the refusal that comes back has to land somewhere the reader can see.
+  const bulkBar = bulkBarShown ? (
+    <BulkSnoozeBar
+      barRef={bulkBarRef}
+      count={selected.length}
+      onClear={clearSelection}
+      onPick={snoozePick}
+      onPickerFocus={(from) => {
+        pickerOrigin.current = rowAround(from)?.dataset.inboxRow ?? null;
+      }}
+      pending={bulkSnoozing}
+      refusal={bulkRefusal}
+    />
+  ) : null;
+
   if (shown.length === 0 && held === undefined) {
     return (
       <div className="space-y-6">
         <CredentialRequestsSection />
         {viewSwitch}
         {chip}
+        {bulkBar}
         <EmptyState
           label="Inbox empty state"
           message={
@@ -538,19 +741,21 @@ export function Inbox(): ReactNode {
     );
   const sections = INBOX_SECTIONS.map((section) => {
     const rows = rowsIn(section);
-    // A folded band renders its heading and count but none of its rows - except a row whose
-    // snooze write is still live, which stays until it settles - so keyboard roving, the
-    // viewport anchor, and `presented` all see exactly what the reader sees.
-    const folded = COLLAPSED_SECTIONS[section] === true && !laterOpen;
+    // The same rule the selection above reads, so keyboard roving, the viewport anchor,
+    // `presented` and the bar all see exactly what the reader sees.
     return {
       rows,
       section,
-      shownRows: folded ? rows.filter((ask) => snoozing.has(ask.id)) : rows,
+      shownRows: rows.filter((ask) => !inShutBand(ask, section)),
     };
   }).filter(({ rows }) => rows.length > 0);
   presented.current = sections.flatMap(({ section, shownRows }) =>
     shownRows.map((ask) => ({ ask, section }))
   );
+  // Names are read off the rows as they render - band by band, top to bottom - so "ask 2 of 2"
+  // never sits above "ask 1 of 2", and a twin folded away in `Later` leaves the row on screen
+  // with the short name rather than a count of something the reader cannot see.
+  const ordinals = askOrdinals(presented.current.map(({ ask }) => ask));
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
@@ -567,6 +772,7 @@ export function Inbox(): ReactNode {
       {viewSwitch}
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
+      {bulkBar}
       <ul className="space-y-3">
         {sections.flatMap(({ rows, section, shownRows }, index) => [
           <li
@@ -592,9 +798,12 @@ export function Inbox(): ReactNode {
             <InboxItem
               ask={ask}
               assignLive={assigning.has(ask.id)}
+              marked={marked.has(ask.id)}
+              ordinal={ordinals.get(ask.id)}
               key={ask.id}
               onAnswered={recordAnswered}
               onAssignLive={onAssignLive}
+              onMark={onMark}
               onSnoozeLive={onSnoozeLive}
               onRelease={ask.id === held?.ask.id ? release : undefined}
               section={section}
