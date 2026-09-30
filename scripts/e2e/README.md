@@ -198,7 +198,9 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
-`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. The
+`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. A failed
+run also [notes](#libmodel-gateway-unservedsh) each agent that could have failed that check for
+want of a model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
@@ -379,8 +381,10 @@ a close whose branch delete failed is reported as closed with the reason the bra
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
-pull request open and prints gh's reason, with a line saying some may still be open. The trap still
-closes the run's pull requests in two further cases ([`lib/transcript.sh`](#libtranscriptsh)):
+pull request open and prints gh's reason, with a line saying some may still be open. A failed run
+also [notes](#libmodel-gateway-unservedsh) each agent that could have failed the check for want of
+a model key, and still exits 1. The trap still closes the run's pull requests in two further cases
+([`lib/transcript.sh`](#libtranscriptsh)):
 - whoever reads the run's output goes first, for example a supervised launcher's own `tee` stopped
   with the run. The run keeps going, and the transcript still gets every line;
 - the transcript's disk fills. The run keeps going, and its output still reaches anyone reading.
@@ -413,11 +417,13 @@ proof pull request is retargeted to a scratch base before any merge (the one mer
 `awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
 merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
 (default the kept scratch work directory's `evidence/`), `transcript.log` (the whole run) among it.
-The `EXIT` trap closes every proof pull request still open and deletes the proof branches and both
-bases, also when whoever reads the run's output goes first or the transcript's disk fills, as in
-[stage 3](#stage3-devbox-workflowsh). The default evidence directory is under the scratch work
-directory, whose processes the teardown kills by path, so the script opens the transcript on fd 8
-and calls `transcript_to /dev/fd/8` ([`lib/transcript.sh`](#libtranscriptsh)).
+A run that ends on its soft failures gets [notes](#libmodel-gateway-unservedsh) for its first
+soft-failing check, from that check's own start. The `EXIT` trap closes every proof pull request
+still open and deletes the proof branches and both bases, also when whoever reads the run's output
+goes first or the transcript's disk fills, as in [stage 3](#stage3-devbox-workflowsh). The default
+evidence directory is under the scratch work directory, whose processes the teardown kills by path,
+so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
+([`lib/transcript.sh`](#libtranscriptsh)).
 
 ## stage4a-sandbox-runtime.sh
 
@@ -496,8 +502,9 @@ namespace list. Every evidence line names which one observed it (`[runtime]`, `[
 `[harness]` for the listener and its resolver).
 
 The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata) and port 13371 — the port the devbox's security group admits from Legion nodes, never
-`0.0.0.0` — and refuses to start while anything holds it, naming the holder. Its resolver accepts
+metadata, never `0.0.0.0`) and port 13373 — the rigs' worker-stream port, which the devbox's
+security group admits from Legion nodes beside the production daemon's 13370/13371 — and refuses
+to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
 pod's uid to a marker file in the tree volume's sessions directory, the file a resume names, and
@@ -608,7 +615,18 @@ keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the 
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
 every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
 controller's), the interest samples, the audit files and the negative controls. What the
-run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh).
+run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
+`stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
+on whether the controller could have failed that check for want of a model key; or
+`stage 4b e2e: BLOCKED (check <check>)` when the checkpoint could not run and the teardown checks
+(`namespace-clean`, `production-audit`) passed, which makes the run no verdict on the change while
+the checkpoints before it stand, and gets no notes. A failed teardown check outranks every reason
+the run stopped: it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and
+subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is
+`stage 4b e2e: FAIL (check <teardown check>, in the teardown after check <check>)` whenever the
+checkpoint that stopped the run did not fail itself: a `STAGE4B_UNTIL` run's last checkpoint, a
+blocked checkpoint, a signal. Every verdict but the pass exits non-zero: 1, or the
+stopping signal's 129, 130 or 143 when the teardown was clean.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -619,8 +637,9 @@ Three roots are set todo under `admission_cap: 2`:
 - Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
   is outstanding, and is taken out the same way.
 
-**One run at a time.** The project, the durable consumer names, ports 13370 and 13371 and the
-namespace label `legion.dev/project=legsmoke` are shared.
+**One run at a time.** The project, the durable consumer names, ports 13372 and 13373 (the rigs'
+pair; the production daemon keeps 13370 and 13371) and the namespace label
+`legion.dev/project=legsmoke` are shared.
 - The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
 - It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
   `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.
@@ -719,7 +738,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `daily-report` | the controller's daily report, which the proof's instructions exempt from their wait for a targeted message and fit to the run: an issue titled `Legion daily report (<run directory>)` appears in LEGSMOKE, parked in icebox and without the `legion` label, holding the controller session's message, which names tree 1 and the free slots within 2,000 characters; in the controller's session that message comes after the first `tick on LEGSMOKE` delivery, never in its start turn. `production-audit` then holds that the issue, like every write, is in LEGSMOKE |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done`; tree 1's events carry its architect's `issue.claimed`, and the done leaves its root issue unclaimed |
-| `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
+| `node-release` | tree 1's Sandboxes stay Suspended, its volume Bound, and no pod of the run is left on its node: after the pool's consolidation the node is gone, or, when a pod of another project (a production daemon running beside the run) is on it, Pending or Running, the node stays; the note says which, and a timeout lists what the node still held |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
 | `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/workspace-recovered.json` naming `legion/<tree 1>` |
 | `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
@@ -737,8 +756,7 @@ the command runs in real tmux panes, as an operator would. The pinned Oh My Pi i
 mise. The run needs no model route: the controller's one model turn, the start message
 `legion controller start` opens it with, fails against the profile's default, a static-key
 provider that listens nowhere, and no check reads its answer. The profile names the roles the
-task agents use (`review`, `oracle`) and that default, which is all the boot gate's agent-model
-check resolves.
+task agents use and that default, which is all the boot gate's agent-model check resolves.
 
 ```bash
 bash scripts/e2e/controller-start-tmux.sh
@@ -1070,12 +1088,14 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
 is unset for it), for that one command. It appends one line per invocation, one per mint, one per
-call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout
-carries the key alone. The profile's
-`agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
-and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
-(`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
-`oracle`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
+call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`, and one line
+per call and its outcome to `<dir>/hawk-token.calls`
+([`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads it); stdout carries the key
+alone. The profile's `agent/models.yml` points the `anthropic` provider at
+`LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My
+Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started,
+so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model
+role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
 `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
 `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 
@@ -1109,8 +1129,9 @@ Its first mint is the preflight, before any pane exists. It exits 1 naming the c
 `hawk-token`, `flock` or `timeout` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
 `lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
-unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
-last line of its stderr); an argument refusal exits 2. The installer runs that one call with
+unlock-keyring skill) and rerun`), when the key command gets no key (quoting its own reason: the
+outcome and `hawk-token`'s last stderr line), and when `hawk-token` prints anything but one JWT;
+an argument refusal exits 2. The installer runs that one call with
 `--preflight`, which exempts it from the key command's deadline (below): on a machine where
 `hawk-token` has never run, its first-run build takes about a minute in the foreground, and it
 happens here rather than inside a pane's ten-second `!command`. The key is never printed.
@@ -1121,9 +1142,9 @@ reads the hawk login from the keyring over the session bus, and the devbox's key
 serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run. A Stage 3 run
 invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before
 the cache. Every call inside the window gets the kept key. A key the gateway refuses before then is
-not re-minted: the proof's model turns fail, loudly, which is right for a proof. (The command cannot
-tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/sh -c`, so each call
-has a fresh parent process.)
+not re-minted: the proof's model turns fail, loudly, which is right for a proof. (A call's parent
+is a helper the Oh My Pi process starts for each call, on 18.2.9 a child of the agent's own `omp`,
+so the record names the agent by the Legion pane's role and generation instead.)
 
 One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
 once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
@@ -1138,11 +1159,78 @@ reach its first line), whether it is waiting on the lock or minting under `timeo
 A waiter that takes the lock with under 2000 ms left starts no mint: the fastest mint measured on
 the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wait is bounded by
 one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
-succeeds is served inside every caller's ten seconds. A call that gets no key exits 1, which Oh My
-Pi reports as `No API key found for anthropic.` and retries 30 s later.
+succeeds is served inside every caller's ten seconds.
+
+Every agent's call appends one tab-separated line to `<dir>/hawk-token.calls`, and to the caller's
+`MODEL_GATEWAY_CALLS_FILE` when its environment names one: the time, the caller's pid, the
+directory Oh My Pi ran it in, the agent, the outcome, and a detail. The fields, and the values the
+agent and outcome take, are stated once, in the header of
+[`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh), the file that reads them. The
+installer's preflight is no agent's and is left out; a call that gets no key also says why on
+stderr, which is where the installer reads the preflight's reason. The key command tells a spent
+budget from a refused login only by `hawk-token`'s own sentence (`in <spent> ms of a <budget> ms
+budget`, spent at least the budget), since the wrapper exits 1 either way; a `hawk-token` that
+words it otherwise has a spent budget recorded as `failed`, never as a starve. A harness that gives
+each agent its own file can judge one run from that run's directory alone.
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
+
+## lib/model-gateway-unserved.sh
+
+Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) wrote
+left an agent without a key, and why. Oh My Pi answers every call that gets no key the same way
+(`No API key found for anthropic.`, exit 1, and for `omp -p` on 18.2.9 no session file at all),
+whatever the cause, so a run cannot say for itself that it never got a model turn.
+
+```sh
+bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-calls"                                # a scorer: one agent run
+bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$evidence/model-gateway" "$check_started" "$check"  # a failed stage proof's EXIT trap
+bash scripts/e2e/lib/model-gateway-unserved.sh --fresh "$evidence"                                         # a stage proof's setup
+```
+
+An agent is a working directory and an agent field together, so a relaunched pane, with its new
+generation, is a new agent. An agent's last call decides whether it went without a key: Oh My Pi
+retries a failed key command 30 s later and after a 401.
+
+`--record` scores one agent run from the `MODEL_GATEWAY_CALLS_FILE` a harness named in that
+agent's environment: a file of the run's own, which does not exist before the run, so every line
+in it is that agent's. The skill-scenario rig runs one `omp -p` per run, which keeps its key for
+the life of the process, so a starved run has no model turn and the record agrees with the
+outcome. It exits 0 when the last call was served or the file holds none (no file included), `75`
+(`STARVED, not scored`: rerun it) when that call ran out of time or had its mint killed, and `77`
+(`KEY FAILED, not scored`) when the mint failed otherwise, which a rerun does not fix. A run from a
+checkout whose key command predates the record carries the same signal without the reason: no
+session file at all.
+
+`--notes` is a stage proof's diagnostic: the `EXIT` trap runs it once it has decided the run
+failed, guarded so that it never changes the exit status, and not after a hangup, an interrupt or
+a termination (129, 130, 143), which stopped the run rather than failed it; a child a signal killed
+is a failure and still gets them. It prints, after the check's own failure, each agent that could
+have failed the check for want of a key: when it last got none, from where, and why.
+
+- **An agent whose last call got no key is still without one.** It is listed whenever that call
+  came, marked when it came before the check began: it had no key when the check asked it.
+- **An agent served again after its last starve recovered.** It is listed, with when it was first
+  served again, when that starve came at or after `<since>` less 30 s. The 30 s is the wait Oh My
+  Pi 18.2.9 keeps before it runs a failed key command again: a request inside it fails with no key
+  and runs no command, so it leaves no line, and a check's first calls can fail on a starve from
+  just before the check began.
+- **An agent served again before that window** held a key through the whole check, and is left out.
+
+A person then sees whether starvation could explain the failure. A run-wide "not scored" would not
+be honest: in Stage 4b the key command's one caller is the operator's controller, while every pod
+uses its projected token, so a worker's failure cannot come from a starved controller.
+
+`--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make first, before they write
+anything into their evidence directory or set any trap, when the operator's evidence directory
+exists and is not empty, or cannot be listed: whatever it holds is an earlier run's, whether or not
+that run got as far as its key command, and this run must neither overwrite it nor read it as its
+own. An absent directory, or an empty one it can list (every default), passes. Stage 4b prints its
+verdict line in that refusal, since no trap exists yet to print it.
+
+Every form exits 2 on an argument refusal (a `--record` in a directory that does not exist
+included), and `--record` and `--notes` 1 on a record line they cannot read.
 
 ## lib/check-model-route.sh
 

@@ -22,11 +22,11 @@ func TestASessionRegistryOverKeysAnEarlierListenerStoredServesAndDeletesThem(t *
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	raw, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: SessionBucket, TTL: 10 * time.Second, Storage: natsgo.FileStorage})
+	raw, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: client.Bucket, TTL: 10 * time.Second, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create session bucket: %v", err)
 	}
-	readable, unreadable := testnats.LegacyKeys(SessionBucket, "s")
+	readable, unreadable := testnats.LegacyKeys(client.Bucket, "s")
 	for _, sessionID := range []string{"ses_ordinary", readable, unreadable} {
 		entry, err := json.Marshal(SessionEntry{Port: 13381, MachineID: "earlier", UpdatedAt: time.Now().UnixMilli()})
 		if err != nil {
@@ -37,7 +37,7 @@ func TestASessionRegistryOverKeysAnEarlierListenerStoredServesAndDeletesThem(t *
 		}
 	}
 
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("open over the earlier listener's keys: %v", err)
 	}

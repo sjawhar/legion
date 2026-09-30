@@ -135,7 +135,7 @@ func TestMergeForClaim_KeepsIncumbentMetadataWhenChallengerLoses(t *testing.T) {
 
 func TestSessionRegistry_PutRejectsNonDrivingClaimOverLiveDriver(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestSessionRegistry_PutRejectsNonDrivingClaimOverLiveDriver(t *testing.T) {
 
 func TestSessionRegistry_PutAcceptsDrivingClaimOverBystander(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}

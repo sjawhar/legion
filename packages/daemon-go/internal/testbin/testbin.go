@@ -1,4 +1,5 @@
-// Package testbin names the pinned binaries the real-binary tests run.
+// Package testbin names the pinned binaries the real-binary tests run, and readies the fresh HOME
+// a test runs Oh My Pi under (OMPHome).
 package testbin
 
 import (

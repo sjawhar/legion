@@ -25,6 +25,13 @@ work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 # Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
 # its cleanup, which closes the run's pull requests, never fail on a write whoever is reading.
@@ -33,6 +40,7 @@ mkdir -p "$evidence/logs" "$evidence/transcripts"
 transcript_to "$evidence/transcript.log"
 ok=
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="S3$(( ($$ + $(date +%s)) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -77,7 +85,7 @@ prod_dispatch_url=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
 
-begin() { check=$1; printf '== %s\n' "$check"; }
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s\n' "$check"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
@@ -101,7 +109,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -129,6 +137,10 @@ cleanup() {
     printf "the run's scratch workspace is %s\n" "$work" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run: it never sets the status. A hangup, an interrupt or a termination
+  # (129, 130, 143, as trapped below) stopped the run and gets none.
+  [ -n "${ok:-}" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
   return 0
 }
 trap cleanup EXIT
