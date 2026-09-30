@@ -5,15 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,133 +18,23 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-var (
-	sharedNATSOnce sync.Once
-	sharedNATSURI  string
-	sharedNATSErr  error
-	// sharedNATSContainer is the container the tests share, which TestMain terminates.
-	sharedNATSContainer *tcnats.NATSContainer
-)
-
-// sharedTestNATSURI returns the package's shared NATS server, starting it for the first test that
-// asks. Every test that asks is checked on cleanup: one that opened the production session bucket
-// there, bypassing OpenRegistry, fails, however it reached the server (refuseProductionBucket).
-func sharedTestNATSURI(t *testing.T) string {
+// setupNATS connects t to the package's shared NATS server, in the JetStream account testnats.URL
+// hands t, where no earlier test made a session bucket.
+func setupNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	sharedNATSOnce.Do(func() {
-		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, testnats.Image)
-		if err != nil {
-			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(ctx)
-		if sharedNATSErr != nil {
-			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSContainer = ctr
-	})
-	if sharedNATSErr != nil {
-		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
-	}
-	uri := sharedNATSURI
-	t.Cleanup(func() { refuseProductionBucket(t, uri) })
-	return uri
-}
-
-// sessionBuckets numbers the session buckets the package's tests open on the shared server.
-var sessionBuckets atomic.Int64
-
-// testNATS is one test's client of the package's shared NATS server and the session bucket that
-// test alone opens there.
-type testNATS struct {
-	*bus.Client
-	// Bucket is the session bucket OpenRegistry opens.
-	Bucket string
-}
-
-// setupNATS connects t to the package's shared NATS server and names a session bucket no other
-// test uses. No test deletes or recreates a bucket there: nats-server moves a deleted stream's
-// directory aside and removes it from a background goroutine, a second delete of the same name
-// before that goroutine has run leaves the stream's files in place while still answering success,
-// and the next create of the name recovers its messages. Tests that each deleted and recreated
-// the one production-named bucket therefore read an earlier test's sessions.
-func setupNATS(t *testing.T) testNATS {
-	t.Helper()
-	uri := sharedTestNATSURI(t)
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	return testNATS{Client: client, Bucket: fmt.Sprintf("%s_%d", SessionBucket, sessionBuckets.Add(1))}
-}
-
-// OpenRegistry opens a session registry on the test's own bucket.
-func (n testNATS) OpenRegistry(options ...SessionRegistryOption) (*SessionRegistry, error) {
-	return OpenSessionRegistry(n.Conn, append(options, func(o *sessionRegistryOpts) { o.bucket = n.Bucket })...)
-}
-
-// refuseProductionBucket fails t when the shared server holds SessionBucket, which only a registry
-// opened bypassing OpenRegistry creates there, on the one name every such test would share. It
-// deletes the bucket, so no later test fails for it.
-func refuseProductionBucket(t *testing.T, uri string) {
-	t.Helper()
-	conn := testnats.Connect(t, uri)
-	defer conn.Close()
-	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
-	_, err = js.KeyValue(SessionBucket)
-	if errors.Is(err, natsgo.ErrBucketNotFound) {
-		return
-	}
-	if err != nil {
-		t.Fatalf("look up the %s bucket: %v", SessionBucket, err)
-	}
-	t.Errorf("the shared NATS server holds the %s bucket: open the registry with setupNATS(t).OpenRegistry, on a bucket no other test uses", SessionBucket)
-	if err := js.DeleteKeyValue(SessionBucket); err != nil {
-		t.Errorf("delete the %s bucket: %v", SessionBucket, err)
-	}
-}
-
-// guardProbe runs TestSharedServerGuardFailsTheTestThatReachedTheServerWithoutSetupNATS's probe
-// in the child test binary that test starts.
-const guardProbe = "ENVOY_SESSION_GUARD_PROBE"
-
-// The guard fails the test that created the production-named bucket on the shared server however
-// that test reached the server, not the next test that calls setupNATS, and not no test at all
-// when it is the last. The probe reaches the server the way stopwatch_test.go reaches its own,
-// through the URL and testnats.Connect, and runs in a child test binary, since a test cannot pass
-// while one of its own cleanups fails it.
-func TestSharedServerGuardFailsTheTestThatReachedTheServerWithoutSetupNATS(t *testing.T) {
-	if os.Getenv(guardProbe) == "1" {
-		conn := testnats.Connect(t, sharedTestNATSURI(t))
-		t.Cleanup(conn.Close)
-		if _, err := OpenSessionRegistry(conn, WithSessionReplicas(1)); err != nil {
-			t.Fatalf("open the registry on the production name: %v", err)
-		}
-		return
-	}
-	probe := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
-	probe.Env = append(os.Environ(), guardProbe+"=1")
-	out, err := probe.CombinedOutput()
-	failed := strings.Contains(string(out), "--- FAIL: "+t.Name())
-	named := strings.Contains(string(out), "the shared NATS server holds the "+SessionBucket+" bucket")
-	if err == nil || !failed || !named {
-		t.Fatalf("a test that opened the %s bucket on the shared server without setupNATS was not failed by the guard (probe exit: %v):\n%s", SessionBucket, err, out)
-	}
+	return client
 }
 
 func TestSessionRegistry_PutAndGet(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -171,7 +58,7 @@ func TestSessionRegistry_PutAndGet(t *testing.T) {
 
 func TestSessionRegistry_GetNotFound(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -184,7 +71,7 @@ func TestSessionRegistry_GetNotFound(t *testing.T) {
 
 func TestSessionRegistry_TTLExpiry(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(2*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -210,7 +97,7 @@ func TestSessionRegistry_TTLExpiry(t *testing.T) {
 
 func TestSessionRegistry_PutRefreshesTTL(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(2*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -234,7 +121,7 @@ func TestSessionRegistry_PutRefreshesTTL(t *testing.T) {
 
 func TestSessionRegistry_Delete(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -254,7 +141,7 @@ func TestSessionRegistry_Delete(t *testing.T) {
 
 func TestSessionRegistry_Ping_Healthy(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open: %v", err)
 	}
@@ -267,7 +154,7 @@ func TestSessionRegistry_Ping_ClosedConnReturnsError(t *testing.T) {
 	// A closed KV handle must remain observable through Ping so /healthz can
 	// report the unavailable dependency while NATS reconnects.
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open: %v", err)
 	}
@@ -284,7 +171,7 @@ func TestSessionRegistry_Ping_ClosedConnReturnsError(t *testing.T) {
 
 func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
 	client := setupNATS(t)
-	registry, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	registry, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open registry: %v", err)
 	}
@@ -317,7 +204,7 @@ func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open replacement JetStream: %v", err)
 	}
-	kv, err := js.KeyValue(client.Bucket)
+	kv, err := js.KeyValue(SessionBucket)
 	if err != nil {
 		t.Fatalf("open replacement session bucket: %v", err)
 	}
@@ -338,7 +225,7 @@ func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
 func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {
 	logs := captureSessionRegistryLogs(t)
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("OpenSessionRegistry: %v", err)
 	}
@@ -372,7 +259,7 @@ func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {
 
 func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("OpenSessionRegistry: %v", err)
 	}
@@ -416,7 +303,7 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 
 func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("OpenSessionRegistry: %v", err)
 	}
@@ -543,17 +430,5 @@ func (b *lockedBuffer) String() string {
 	return b.buffer.String()
 }
 
-// TestMain terminates the NATS container this package's tests share once they have all run.
-// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedNATSContainer != nil {
-		if err := testcontainers.TerminateContainer(sharedNATSContainer); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
-	os.Exit(code)
-}
+// TestMain removes the NATS server the package's tests share (testnats.Main).
+func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
