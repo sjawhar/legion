@@ -29,6 +29,7 @@ import {
 import { statusText } from "../project/board-model";
 import { referenceRouteFromHref } from "../refs/RefLink";
 import { referenceTriggerProps } from "../refs/RefPreview";
+import type { DispatchReferenceRoute } from "../refs/routes";
 import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/keymap";
 import { KeyHints } from "../shell/ShortcutHelp";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
@@ -121,6 +122,53 @@ function SearchResultIcon({ kind }: { kind: SearchResultKind }): ReactNode {
   );
 }
 
+/** One row of the listbox, a hit or a command: the selected outline and fill, and a click, Enter
+ *  or Space selecting it. `layout` arranges the row's own content. */
+function PaletteOption({
+  active,
+  children,
+  id,
+  layout = "",
+  onSelect,
+  reference,
+}: {
+  active: boolean;
+  children: ReactNode;
+  id: string;
+  layout?: string;
+  onSelect: () => void;
+  /** A hit's target, which makes the row a `RefPreview` trigger. */
+  reference?: DispatchReferenceRoute;
+}): ReactNode {
+  return (
+    <div
+      aria-selected={active}
+      className={`relative isolate min-h-11 cursor-pointer border-b px-3 py-2 last:border-b-0 ${layout} ${borderDefault} ${
+        active ? selectedCardBorder : ""
+      }`}
+      id={id}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      role="option"
+      tabIndex={-1}
+      {...(reference === undefined ? undefined : referenceTriggerProps(reference))}
+    >
+      {active ? (
+        <div
+          aria-hidden="true"
+          className={`pointer-events-none absolute inset-0 -z-10 ${selectedCardBg}`}
+        />
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
 function ResultOption({
   active,
   muted,
@@ -134,32 +182,14 @@ function ResultOption({
 }): ReactNode {
   const segments = snippetSegments(result.snippet);
   let segmentStart = 0;
-  const route = referenceRouteFromHref(result.href);
 
   return (
-    <div
-      aria-selected={active}
-      className={`relative isolate min-h-11 cursor-pointer border-b px-3 py-2 last:border-b-0 ${borderDefault} ${
-        active ? selectedCardBorder : ""
-      }`}
+    <PaletteOption
+      active={active}
       id={optionId(result)}
-      onClick={onSelect}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect();
-        }
-      }}
-      role="option"
-      tabIndex={-1}
-      {...(route === undefined ? undefined : referenceTriggerProps(route))}
+      onSelect={onSelect}
+      reference={referenceRouteFromHref(result.href)}
     >
-      {active ? (
-        <div
-          aria-hidden="true"
-          className={`pointer-events-none absolute inset-0 -z-10 ${selectedCardBg}`}
-        />
-      ) : null}
       <div
         className={`flex min-w-0 items-center gap-2 text-xs ${
           muted ? textMutedOnSelectedCard : textSecondaryOnSurface
@@ -190,11 +220,11 @@ function ResultOption({
           );
         })}
       </p>
-    </div>
+    </PaletteOption>
   );
 }
 
-/** An action or project row: a label, an optional trailing hint, and the hits' selection contract. */
+/** An action or project row: a label and an optional trailing hint. */
 function CommandOption({
   active,
   hint,
@@ -209,31 +239,15 @@ function CommandOption({
   onSelect: () => void;
 }): ReactNode {
   return (
-    <div
-      aria-selected={active}
-      className={`relative isolate flex min-h-11 cursor-pointer items-center justify-between gap-4 border-b px-3 py-2 last:border-b-0 ${borderDefault} ${
-        active ? selectedCardBorder : ""
-      }`}
+    <PaletteOption
+      active={active}
       id={id}
-      onClick={onSelect}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect();
-        }
-      }}
-      role="option"
-      tabIndex={-1}
+      layout="flex items-center justify-between gap-4"
+      onSelect={onSelect}
     >
-      {active ? (
-        <div
-          aria-hidden="true"
-          className={`pointer-events-none absolute inset-0 -z-10 ${selectedCardBg}`}
-        />
-      ) : null}
       <span className={`min-w-0 truncate text-sm ${textPrimaryOnSurface}`}>{label}</span>
       {hint}
-    </div>
+    </PaletteOption>
   );
 }
 
@@ -278,6 +292,12 @@ export function SearchPalette({
   });
   if (opened.mode !== mode) {
     setOpened({ actions: mode === "all" ? appKeymap.actions() : emptyActions, mode });
+    // Each open starts empty. The palette stays mounted while closed, so a query left behind
+    // would come back on the next open and filter the new page's actions down to nothing.
+    if (mode !== null) {
+      setQuery("");
+      setDebouncedQuery("");
+    }
   }
   // A chosen row runs once the palette is gone and `useDialog`'s cleanup has put focus back on
   // that same element: running it here, with focus in the input, would act on nothing, and a row
@@ -314,15 +334,6 @@ export function SearchPalette({
     const run = pendingAction.current;
     pendingAction.current = null;
     run?.();
-  }, [mode]);
-
-  // Each open starts empty. The palette stays mounted while closed, so a query left behind would
-  // come back on the next open and filter the new page's actions down to nothing.
-  useEffect(() => {
-    if (mode !== null) {
-      setQuery("");
-      setDebouncedQuery("");
-    }
   }, [mode]);
 
   useEffect(() => {
