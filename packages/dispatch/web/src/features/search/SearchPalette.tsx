@@ -1,4 +1,5 @@
 import { snippetSegments } from "@legion/contracts/dispatch-snippet";
+import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -193,7 +194,10 @@ export function SearchPalette({
       : []
   );
   const searchText = query.trim();
-  const queryEnabled = searchText.length >= 2;
+  const tooShort = searchText.length < 2;
+  // The server refuses a longer query; name the limit here instead of sending it.
+  const tooLong = searchText.length > SEARCH_QUERY_MAX;
+  const queryEnabled = !tooShort && !tooLong;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(searchText), 150);
@@ -201,7 +205,7 @@ export function SearchPalette({
   }, [searchText]);
 
   const search = useQuery({
-    enabled: debouncedQuery.length >= 2,
+    enabled: debouncedQuery.length >= 2 && debouncedQuery.length <= SEARCH_QUERY_MAX,
     queryFn: () => api.search(debouncedQuery),
     queryKey: ["search", debouncedQuery],
   });
@@ -269,8 +273,13 @@ export function SearchPalette({
               value={query}
             />
           </div>
-          {!queryEnabled ? (
+          {tooShort ? (
             <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>Type at least 2 characters</p>
+          ) : tooLong ? (
+            <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>
+              Search with a short phrase: {searchText.length} characters is over the{" "}
+              {SEARCH_QUERY_MAX}-character limit
+            </p>
           ) : waitingForQuery || search.isPending ? (
             <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>Searching…</p>
           ) : search.isError ? (

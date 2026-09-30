@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 )
 
@@ -21,9 +22,12 @@ type ControllerStore interface {
 }
 
 // ControllerSecretResponse is `POST /legion/v1/controller/secret`'s answer: the capability the
-// controller's Oh My Pi registers with.
+// controller's Oh My Pi registers with, and the project's design gate policy (`gates.design`),
+// which `legion controller start` tells the controller so its take comment promises a design
+// approval only when the gate is armed. `legion controller start` reads it; the plugin never does.
 type ControllerSecretResponse struct {
-	Secret string `json:"secret"`
+	Secret     string            `json:"secret"`
+	DesignGate config.DesignGate `json:"designGate"`
 }
 
 // ControllerRole is the role a controller registration names: the operator's controller, which
@@ -69,7 +73,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	s.grants.RevokeControllers()
 	s.log.Info("api: minted a controller capability; the previous controller's registration and grants are revoked", "generation", generation)
-	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret})
+	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
 }
 
 // registerController is a registration whose token is no launch's boot token: it registers

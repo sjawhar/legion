@@ -29,8 +29,9 @@ type answerRevision struct {
 	EditedAt *string
 }
 
-// answerTransition records a human answer. Approval asks have their review options,
-// and questions accept their configured options.
+// answerTransition records a human answer. Approval asks have their review options and are
+// answered only while they name the document's latest settled version; questions accept their
+// configured options.
 func answerTransition(
 	actor model.Actor,
 	selected []string,
@@ -59,6 +60,9 @@ func answerTransition(
 			switch ask.Kind {
 			case "approval":
 				if _, _, err := reviewFromAnswer(selected, text); err != nil {
+					return model.Ask{}, err
+				}
+				if err := refuseStaleApprovalAsk(ctx, tx, ask); err != nil {
 					return model.Ask{}, err
 				}
 			default:
@@ -90,13 +94,6 @@ func answerTransition(
 			return ask, nil
 		},
 	}
-}
-
-// answerAskTx answers an ask inside the caller's transaction without appending
-// or publishing its event; the header review path uses it to close an open
-// approval ask alongside the review it writes.
-func (s *server) answerAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, selected []string, text *string) (model.Ask, error) {
-	return s.transitionAskTx(ctx, tx, id, answerTransition(actor, selected, text, nil, nil))
 }
 
 func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
@@ -151,10 +148,10 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
 	)
-	// An approval ask's answer is a review of the document it names, pinned to
-	// the document's latest settled version at answer time.
+	// An approval ask's answer is a review of the document it names, pinned to the version its
+	// question named, which the transition has already found to be the latest settled one.
 	transition.After = func(ctx context.Context, tx pgx.Tx, ask model.Ask) ([]model.Event, error) {
-		if ask.Kind != "approval" || ask.Approval == nil {
+		if ask.Kind != "approval" {
 			return nil, nil
 		}
 		state, reason, err := reviewFromAnswer(input.Selected, input.Text)
@@ -165,11 +162,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		version, err := settledVersionNumber(ctx, tx, artifact.ID)
-		if err != nil {
-			return nil, err
-		}
-		_, event, err := s.writeReview(ctx, tx, artifact, version, state, actor, reason, new(ask.ID))
+		_, event, err := s.writeReview(ctx, tx, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID))
 		if err != nil {
 			return nil, err
 		}
@@ -221,11 +214,6 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, askTransition{
 		EventType: "ask.resolved",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
-			resolution := model.AskResolution{Kind: kind, Reason: reason, Actor: actor, At: time.Now().UTC()}
-			resolutionJSON, err := encodeJSON(resolution)
-			if err != nil {
-				return model.Ask{}, err
-			}
 			// A block ask's closed state belongs in its block too, written by whoever closed
 			// it: left to settlement, the repair lands on whoever next touches the document.
 			if ask.BlockID != nil {
@@ -239,12 +227,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 					return model.Ask{}, err
 				}
 			}
-			if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, resolutionJSON); err != nil {
-				return model.Ask{}, err
-			}
-			ask.State = "resolved"
-			ask.Resolution = &resolution
-			return ask, nil
+			return docs.WriteAskResolution(ctx, tx, ask, kind, reason, actor)
 		},
 	})
 	if err != nil {
@@ -262,30 +245,40 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	defer tx.Rollback(ctx)
 	documentCtx, ledger := s.deps.Docs.Join(ctx, tx)
 	defer ledger.Discard()
-	ask, err := s.transitionAskTx(documentCtx, tx, id, transition)
+	ask, events, err := s.closeAskTx(documentCtx, tx, id, actor, transition)
 	if err != nil {
 		return model.Ask{}, err
-	}
-	// A transition writes no question text, so it moves no references and says so.
-	event, err := s.appendEvent(documentCtx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
-		transition.EventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-	))
-	if err != nil {
-		return model.Ask{}, err
-	}
-	events := []model.Event{event}
-	if transition.After != nil {
-		more, err := transition.After(documentCtx, tx, ask)
-		if err != nil {
-			return model.Ask{}, err
-		}
-		events = append(events, more...)
 	}
 	if err := ledger.Commit(ctx); err != nil {
 		return model.Ask{}, err
 	}
 	s.publish(events...)
 	return ask, nil
+}
+
+// closeAskTx applies a transition to an open ask inside the caller's transaction, appends the
+// transition's event and runs its After; the caller commits and publishes the events.
+func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, transition askTransition) (model.Ask, []model.Event, error) {
+	ask, err := s.transitionAskTx(ctx, tx, id, transition)
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	// A transition writes no question text, so it moves no references and says so.
+	event, err := s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+		transition.EventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+	))
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	events := []model.Event{event}
+	if transition.After != nil {
+		more, err := transition.After(ctx, tx, ask)
+		if err != nil {
+			return model.Ask{}, nil, err
+		}
+		events = append(events, more...)
+	}
+	return ask, events, nil
 }
 
 // transitionAskTx locks an open ask and applies a transition inside the caller's

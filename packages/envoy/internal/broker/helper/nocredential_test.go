@@ -44,7 +44,7 @@ func TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential(t *testi
 func TestSignAnswersNoCredentialWhileTheHelperHoldsNone(t *testing.T) {
 	r := newRig(t, "")
 	r.fake.mu.Lock()
-	r.fake.failFirst = 1 << 30
+	r.fake.failFirst = failAlways
 	r.fake.mu.Unlock()
 	if reg := r.call(t, Request{Op: "register"}); !reg.OK {
 		t.Fatalf("register: %+v", reg)
