@@ -2219,9 +2219,10 @@ describe("Legion OMP extension", () => {
   });
   test("leaves the repository-scoped jj config untouched at worker boot: identity is the pane's environment, not config", async () => {
     // Every issue workspace is a workspace of one shared clone, and `--repo` config is one file
-    // for all of them: a boot that wrote its identity there set the author for every other tree
-    // (LEGION-44). A sentinel written before boot must survive it — neither overwritten with the
-    // daemon-reported identity nor removed (that one-time cleanup is provisioning's, daemon-side).
+    // for all of them: a boot that wrote its identity there would set the author for every other
+    // tree (LEGION-44). A sentinel written before boot must survive it — neither overwritten
+    // with the daemon-reported identity nor removed (that one-time cleanup is provisioning's,
+    // daemon-side).
     const workspace = await createJjWorkspace();
     await setJjRepoConfig(workspace, "user.name", "Sentinel Before Boot");
 

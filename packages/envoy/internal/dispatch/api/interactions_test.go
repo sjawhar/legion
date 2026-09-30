@@ -1058,14 +1058,13 @@ func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T
 	}
 }
 
-// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent reproduces a
-// regression an adversarial review found: a legacy open anchored ask whose
-// ask.opened event has been pruned is still readable through GET
+// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent: a legacy open anchored ask
+// whose ask.opened event has been pruned is still readable through GET
 // /api/v1/asks/{id} (attachOpenedEventIDs falls back across
-// ask.opened/answered/resolved/edited), but the anchor-refresh cascade used a
-// stricter ask.opened-only lookup and aborted the whole document mutation
-// with a load error when that row's anchor needed refreshing. The fix shares
-// attachOpenedEventIDs's fallback (events.OpenedEventIDs) between both paths.
+// ask.opened/answered/resolved/edited), and the anchor-refresh cascade must find it the same
+// way: a stricter ask.opened-only lookup there would abort the whole document mutation with a
+// load error when that row's anchor needs refreshing. Both paths share attachOpenedEventIDs's
+// fallback (events.OpenedEventIDs).
 func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Legacy ask fallback", "The quick brown fox")
@@ -1085,7 +1084,7 @@ func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T
 		t.Fatalf("delete ask.opened event: %v", err)
 	}
 
-	// The read API still serves this legacy row, via the same fallback the fix now shares.
+	// The read API serves this legacy row through the same fallback.
 	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
 	if read.Code != http.StatusOK {
 		t.Fatalf("read legacy ask: status=%d body=%s", read.Code, read.Body.String())

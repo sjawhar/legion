@@ -108,12 +108,12 @@ func (lazyAwareTable) Extend(m goldmark.Markdown) {
 // no table whose header line holds one pipe and nothing else but spaces and tabs. In GFM, and in
 // the browser editor's parser, a line that continues a paragraph in a list item, a quote or a
 // footnote definition without that container's prefix only continues the paragraph; goldmark's
-// transformer reads a paragraph's lines as rows wherever they came from, so `- a\n|-|` became a
-// table in the list item. A lazy line is one the reader began at its line start although the
-// paragraph's first line began after a container's prefix. The browser editor's parser reads a
-// header line of a lone `|` as text, so `|\n-|` is the paragraph `| -|`, where goldmark read a
-// table of one empty cell. Where goldmark would read a table (findTableRows), the budget pays for
-// its padded cells before goldmark's transformer builds them.
+// transformer reads a paragraph's lines as rows wherever they came from, so `- a\n|-|` would
+// become a table in the list item. A lazy line is one the reader began at its line start
+// although the paragraph's first line began after a container's prefix. The browser editor's
+// parser reads a header line of a lone `|` as text, so `|\n-|` is the paragraph `| -|`, where
+// goldmark reads a table of one empty cell. Where goldmark would read a table (findTableRows),
+// the budget pays for its padded cells before goldmark's transformer builds them.
 type lazyTableRows struct{ table parser.ParagraphTransformer }
 
 func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {

@@ -372,9 +372,9 @@ func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T)
 // 0033's table, on the raw actor id, while the read mark above is canonical. The write's rawness
 // is what this pins - canonicalising it while the read stays raw loses a non-lowercase viewer's
 // Clear outright and puts their count back up. The second read pins the keying itself, which
-// packages/envoy/AGENTS.md records as a known inconsistency this change does not fix: a future
-// backfill that normalises user_agent_state turns it red on purpose, as the invariant asking to
-// be decided again rather than a fault in the change that trips it. Why the write must stay raw
+// packages/envoy/AGENTS.md records as a known inconsistency: a future backfill that normalises
+// user_agent_state turns it red on purpose, as the invariant asking to be decided again rather
+// than a fault in the change that trips it. Why the write must stay raw
 // is held by neither assertion, since canonicalising the write and the state query's read
 // together is self-consistent and green: a Dispatch image predating user_agent_read wrote
 // cleared_before under the raw actor id and must still read it back across a rolling deploy.

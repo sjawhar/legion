@@ -735,10 +735,10 @@ test("a soft line break in markdown written through the API is a space in the ed
 });
 
 // A pasted table whose first or last row is empty keeps its table and its cells. With an empty first
-// row the paste hung the page: prosemirror-tables' fixTables filled the cell-less header row with
-// body cells, which Milkdown's header row can't hold, so ProseMirror fitted them as a new row and
-// fixTables ran again, forever. With an empty last row, preset-gfm's paste rule counted the table's
-// columns in that row, found none, and replaced the table with an empty paragraph.
+// row, prosemirror-tables' fixTables would fill the cell-less header row with body cells, which
+// Milkdown's header row can't hold, so ProseMirror would fit them as a new row and fixTables would
+// run again, forever, hanging the page. With an empty last row, preset-gfm's paste rule would count
+// the table's columns in that row, find none, and replace the table with an empty paragraph.
 const tableRows = (header: readonly string[], body: readonly string[], indent = "") =>
   [header, header.map(() => ":---"), body]
     .map((cells) => `${indent}| ${cells.join(" | ")} |\n`)

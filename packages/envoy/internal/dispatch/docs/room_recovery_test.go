@@ -107,7 +107,7 @@ func TestARoomThatFailsWhileItIsLoadingRecovers(t *testing.T) {
 	persist.armed.Store(true)
 
 	// The load runs on context.Background(), as the settlement warm-up and a committed write's
-	// publish do, so nothing but the fix ends it.
+	// publish do, so nothing but the recovery this test pins ends it.
 	loaded := make(chan error, 1)
 	go func() { loaded <- service.warmLiveDocument(context.Background(), artifactID) }()
 	<-persist.failed

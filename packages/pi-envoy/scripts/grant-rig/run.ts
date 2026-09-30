@@ -637,7 +637,7 @@ async function analyze(input: {
     // failure, not only the exact line shape the 1.17.0 hook used to write.
     const mentions = call.command.split(GRANT_NAME).length - 1;
     if (T > 0 || mentions > 0) textFree = false;
-    // Nothing reads the bash tool's env any more; a LEGION_GRANT key there is model imitation of
+    // Nothing reads the bash tool's env; a LEGION_GRANT key there is model imitation of
     // the 1.17.1 shape (informational, since the command still runs under the file's grant).
     if (call.envGrant !== undefined) {
       envGrantFree = false;
