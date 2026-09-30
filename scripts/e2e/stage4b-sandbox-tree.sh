@@ -590,10 +590,11 @@ pod_end_observed() {
     jq -e '.metadata.generation as $g | .status.conditions[]? | select(.type == "Finished" and .status == "True" and .observedGeneration == $g)' >/dev/null ||
     claim_moved_or_held "$1" "$2" "$3"
 }
-# relaunch_ends CLAIM UID... prints one line for each UID, a relaunch of CLAIM the driver deleted:
-# when the driver's delete, the relaunch's registration (the first `api: claim registered` of CLAIM
-# between its `supervise: launched` and its `supervise: process died`) and its death fell, in
-# seconds after its launch, and whether the daemon charged the death as one with work outstanding
+# relaunch_ends CLAIM UID... prints one line for each UID, a relaunch of CLAIM the driver ended:
+# when the driver's end (its kill or its delete), the relaunch's registration (the first
+# `api: claim registered` of CLAIM between its `supervise: launched` and its `supervise: process
+# died`) and its death fell, in seconds after its launch, and whether the daemon charged the death
+# as one with work outstanding
 # (a `supervise: the agent died with work outstanding` of CLAIM after that death and before the
 # next launch). A deleted pod that is still starting can run on, register and take its task before
 # its containers are stopped, and a death is charged only once the agent is ready, which follows its
@@ -611,7 +612,7 @@ relaunch_ends() {
     def since($t): . - $t | . * 100 | round / 100 | tostring;
     ($log | split("\n") | map(fromjson? // empty | select(.claim == $c) | . + {t: (.time | secs)})) as $lines
     | ($lines | map(select(.msg == "supervise: launched") | .t)) as $launches
-    | ($actions | split("\n") | map(split(" ") | select(length == 3 and .[0] == "delete") | {key: .[1], value: .[2]}) | from_entries) as $deletes
+    | ($actions | split("\n") | map(split(" ") | select(length == 3 and (.[0] == "kill" or .[0] == "delete")) | {key: .[1], value: .[2]}) | from_entries) as $ends_issued
     | [$ARGS.positional[] as $u
         | ($lines | map(select(.msg == "supervise: launched" and .incarnation == $u)) | first) as $launch
         | ($lines | map(select(.msg == "supervise: process died" and .incarnation == $u)) | first) as $death
@@ -621,10 +622,10 @@ relaunch_ends() {
             | {u: $u, l: $l, d: $d,
                r: ($lines | map(select(.msg == "api: claim registered" and .t > $l and .t < $d) | .t) | first),
                charged: ($lines | any(.msg == "supervise: the agent died with work outstanding" and .t >= $d and .t < $next)),
-               del: $deletes[$u]}
+               ended: $ends_issued[$u]}
           end] as $ends
     | ($ends[] as $e | if $e.missing then "relaunch \($e.u[0:8]): the daemon log has no \($e.missing) of it"
-        else "relaunch \($e.u[0:8]): delete issued +\(if $e.del == null then "(none recorded)" else ($e.del | secs | since($e.l)) + " s" end), \(if $e.r == null then "never registered" else "registered +" + ($e.r | since($e.l)) + " s" end), died +\($e.d | since($e.l)) s, \(if $e.charged then "charged as a death with work outstanding" else "not charged (a launch failure)" end)" end),
+        else "relaunch \($e.u[0:8]): end issued +\(if $e.ended == null then "(none recorded)" else ($e.ended | secs | since($e.l)) + " s" end), \(if $e.r == null then "never registered" else "registered +" + ($e.r | since($e.l)) + " s" end), died +\($e.d | since($e.l)) s, \(if $e.charged then "charged as a death with work outstanding" else "not charged (a launch failure)" end)" end),
       ( ($ends | map(select(.missing)) | first) as $gap
         | ($ends | map(select(.missing | not) | select(.charged and .r == null)) | first) as $bad
         | if $gap then "refused: the daemon log has no \($gap.missing) of relaunch \($gap.u)"
@@ -1873,40 +1874,47 @@ note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
 wait_for_worker "$tree3" architect
 drive_spec "$tree3"
 wait_for_worker "$tree3" planner
+# The daemon holds a phase when one of its claim's budgets reaches launch_failure_limit (3)
+# (supervise/budgets.go): launch failures, which restart at the agent's ready, or deaths after a
+# ready while the claim has its task outstanding. Tree 3's planner finishes its task turn when the
+# tree is admitted, so an end of it or of a relaunch leaves no task outstanding, and a relaunch that
+# reaches ready restarts the launch count. So the hold is driven on tree 3's implementer, whose task
+# is fresh: the planner is told to plan, and each implementer launch is killed once its agent is
+# ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
+# either budget.
+send_agent "$tree3" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+wait_for_phase "$tree3" implementing 900
+wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
-# The daemon holds a phase when its claim's launches fail launch_failure_limit (3) times in a row,
-# and a failed launch is one that never became a working agent: the count restarts at the agent's
-# ready (supervise/budgets.go). So each relaunch is deleted the moment the claim names it; an exec's
-# kill cannot reach it, since the pod's worker container has not started. The first end takes the
-# ready planner, and the ones after it take relaunches. A deleted pod that is still starting can
-# run on, register and take its task before its containers are stopped, and each such relaunch dies
-# with work outstanding once its agent is ready: then the deaths budget can run out instead, and the
-# check below accepts either.
-# new_planner_pod: tree 3's planner claim names a pod none of the ends took. It runs in this shell:
-# the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
-new_planner_pod() {
-  local inc
-  inc=$("$work/legion" state --json --config "$work/legion.yaml" | jq -r --arg i "$tree3" '.issues[$i].workers.planner.claim.locator.incarnation // empty')
-  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed"
+# held_ready_with_work: tree 3's implementer claim names a pod none of the ends took, its agent is
+# ready or in a turn, and its task is outstanding, as `legion claims` shows it. It runs in this
+# shell: the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax
+# error.
+held_ready_with_work() {
+  local claim inc
+  claim=$(claims_cli list --json | jq -ce --arg t "$(claim_token "$tree3" implementer)" '.claims[] | select(.token == $t)') || return 1
+  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed" &&
+    jq -e '(.state | IN("ready", "working", "idle")) and .pending != null' <<<"$claim" >/dev/null
 }
 until issue_phase "$tree3" held >/dev/null 2>&1; do
-  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended planner launches"
-  until_true 600 "a new planner pod on $tree3" new_planner_pod
-  state=$(claim_view "$tree3" planner | jq -r '.state // "none"')
-  end_claim_pod "$tree3" planner delete
+  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended implementer launches"
+  until_true 600 "$tree3's implementer ready with its task outstanding" held_ready_with_work
+  state=$(claim_view "$tree3" implementer | jq -r '.state // "none"')
+  end_claim_pod "$tree3" implementer kill
   uid=$ended_pod_uid
   killed="$killed$uid "
   kills=$((kills + 1))
-  note "ended planner launch $kills of $tree3 (uid $uid), its claim $state"
-  until_true 600 "$tree3 to be held or its planner relaunched" claim_moved_or_held "$tree3" planner "$uid"
+  note "ended implementer launch $kills of $tree3 (uid $uid), its claim $state with its task outstanding"
+  until_true 600 "$tree3 to be held or its implementer relaunched" claim_moved_or_held "$tree3" implementer "$uid"
 done
-note "$tree3 is held after $kills ended planner launches"
-# The hold is one of the planner claim's own supervise budgets, launches or deaths with work
+note "$tree3 is held after $kills ended implementer launches"
+# The hold is one of the implementer claim's own supervise budgets, launches or deaths with work
 # outstanding, and no other path that also holds an issue (a prompt budget, the architect's
 # escalation).
-planner_claim=$(claim_token "$tree3" planner)
-failed=$(log_lines "supervise: claim failed" | jq -c --arg c "$planner_claim" 'select(.claim == $c)' | tail -1)
+held_claim=$(claim_token "$tree3" implementer)
+failed=$(log_lines "supervise: claim failed" | jq -c --arg c "$held_claim" 'select(.claim == $c)' | tail -1)
 why=$(jq -r '.why // empty' <<<"${failed:-null}")
 # The daemon's own record judges the reason: its claim-failed line carries the claim's budget
 # counters, and the reason must name the one at launch_failure_limit, with the other below it, as
@@ -1914,23 +1922,23 @@ why=$(jq -r '.why // empty' <<<"${failed:-null}")
 case $why in
   "launch failures ran out") counter=launchFailures other=deaths ;;
   "deaths with work outstanding ran out") counter=deaths other=launchFailures ;;
-  *) fail "$tree3's planner claim $planner_claim failed with '${why:-no logged failure}', not one of its launch or death budgets" ;;
+  *) fail "$tree3's implementer claim $held_claim failed with '${why:-no logged failure}', not one of its launch or death budgets" ;;
 esac
 counts=$(jq -r '"launchFailures \(.launchFailures), deaths \(.deaths)"' <<<"$failed")
 jq -e --arg c "$counter" --arg o "$other" --argjson n "$launch_failure_limit" '.[$c] >= $n and .[$o] < $n' <<<"$failed" >/dev/null ||
-  fail "$tree3's planner claim $planner_claim failed with '$why', but the daemon's counters ($counts, bound $launch_failure_limit) do not name that budget"
-# The first end takes the ready planner; every later one is a relaunch, whose ends set the hold
-# they lead to (relaunch_ends).
+  fail "$tree3's implementer claim $held_claim failed with '$why', but the daemon's counters ($counts, bound $launch_failure_limit) do not name that budget"
+# The first end takes the implementer's first launch; every later one is a relaunch, whose ends set
+# the hold they lead to (relaunch_ends).
 read -r -a ended <<<"$killed"
-ends=$(relaunch_ends "$planner_claim" "${ended[@]:1}") || fail "the ends of $tree3's planner relaunches could not be read from the daemon log"
+ends=$(relaunch_ends "$held_claim" "${ended[@]:1}") || fail "the ends of $tree3's implementer relaunches could not be read from the daemon log"
 while IFS= read -r line; do note "$line"; done < <(sed '$d' <<<"$ends")
 last=$(tail -1 <<<"$ends")
 case $last in
   "expect: "*) expected=${last#expect: } ;;
-  *) fail "$tree3's planner relaunches: ${last#refused: }" ;;
+  *) fail "$tree3's implementer relaunches: ${last#refused: }" ;;
 esac
-[ "$why" = "$expected" ] || fail "$tree3's planner claim $planner_claim failed with '$why', but its last relaunch's death leads to '$expected'"
-note "the daemon failed $planner_claim because $why ($counts, bound $launch_failure_limit)"
+[ "$why" = "$expected" ] || fail "$tree3's implementer claim $held_claim failed with '$why', but its last relaunch's death leads to '$expected'"
+note "the daemon failed $held_claim because $why ($counts, bound $launch_failure_limit)"
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
 controller_notice() {
   local file
