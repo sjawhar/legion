@@ -498,8 +498,9 @@ PRICES = {
     # Bedrock rerank bills per 100 document chunks; a chunk is estimated as 2,048 characters (512 tokens).
     "bedrock:cohere.rerank-v3-5:0": ("bedrock_chunk_units", 2.00e-3, None),
     "bedrock:amazon.rerank-v1:0": ("bedrock_chunk_units", 1.00e-3, None),
-    "cohere:rerank-v4.0-pro": ("search_units", 5.00e-3, "assumed at $5 per 1,000 searches"),
-    "cohere:rerank-v4.0-fast": ("search_units", 2.00e-3, "assumed at rerank-v3.5's $2 per 1,000 searches"),
+    # Rerank 4 Pro $2.50 and Rerank 4 Fast $2.00 per 1,000 searches: cohere.com/pricing, read 2026-09-30.
+    "cohere:rerank-v4.0-pro": ("search_units", 2.50e-3, None),
+    "cohere:rerank-v4.0-fast": ("search_units", 2.00e-3, None),
     "voyage:rerank-2.5": ("tokens", 0.05e-6, None),
     "voyage:rerank-2.5-lite": ("tokens", 0.02e-6, None),
 }
