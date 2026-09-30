@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"reflect"
@@ -13,7 +14,6 @@ import (
 	"github.com/yuin/goldmark/extension"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
-	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
@@ -410,32 +410,42 @@ func textOutside(paragraph ast.Node, source []byte) string {
 	return rest
 }
 
+// parseTableRows reads markdown as body rows of a table width cells wide, under a header it writes
+// itself, and reports false when it is not table rows alone. Whether a row is too wide is decided
+// by the parse, as for a whole document (markWideRows), so one row gets one answer on every write
+// path; here that refusal is ErrTableWidth.
 func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*Node, bool, error) {
 	if width == 0 {
 		return nil, false, nil
 	}
-	fragment := strings.TrimSpace(markdown)
+	// A fragment's blank lines at either end, and the white space its last line ends with, are no
+	// part of a row. Nothing else is trimmed: a space outside ASCII, a vertical tab or a form feed
+	// is a cell's text to goldmark, and the first row's indentation decides whether it is a row at
+	// all (markBlockRows), as on every other line.
+	fragment := strings.TrimRight(markdown, " \t\r\n")
+	for {
+		line, rest, more := strings.Cut(fragment, "\n")
+		if !more || strings.Trim(line, " \t\r") != "" {
+			break
+		}
+		fragment = rest
+	}
 	if fragment == "" {
 		return nil, false, nil
 	}
 
-	source := []byte(fragment)
 	lines := strings.Split(fragment, "\n")
-	start := 0
 	for _, line := range lines {
 		cells, ok := tableRowCells(line)
 		if !ok || tableDelimiterRow(cells) {
 			return nil, false, nil
 		}
-		// The width rule a whole document's rows get (textPastWidth), so one row gets one answer on
-		// every write path.
-		if written, text := textPastWidth(gmtext.NewSegment(start, start+len(line)), source, width); text {
-			return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, written, width)
-		}
-		start += len(line) + 1
 	}
 
 	parsed, err := parseStamped(syntheticTableHeader(width)+fragment+"\n", budget)
+	if wide := (wideRow{}); errors.As(err, &wide) {
+		return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, wide.cells, wide.width)
+	}
 	if err != nil {
 		return nil, false, err
 	}

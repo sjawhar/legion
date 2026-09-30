@@ -96,8 +96,7 @@ func blockRefusal(node ast.Node, source []byte) error {
 			return refuse("a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, or indented code - which the browser editor's parser reads as that block after the table")
 		}
 		if value, wide := current.Attribute(wideRowAttr); wide {
-			row := value.(wideRow)
-			return refuse(fmt.Sprintf("a table row holding %d cells where its table has %d, written \"%s\": a cell ends at every | not written \\|, in code and links too, and goldmark drops the cells past the table's width, which the browser editor's parser keeps; write a | inside a cell as \\|, or give the header and delimiter rows as many cells as the row", row.cells, row.width, row.opening))
+			return fmt.Errorf("%w: %w", ErrSchema, value.(wideRow))
 		}
 	default:
 		if node.Type() == ast.TypeBlock && !convertedBlocks[node.Kind()] {

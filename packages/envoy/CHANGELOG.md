@@ -44,13 +44,24 @@
   `markdown` answers `INVALID_OP`), naming the row's cells, its table's width and its opening
   words, and both fixes: write a `|` inside a cell as `\|`, or give the header and delimiter rows
   as many cells as the row. A row whose cells past the width are all blank is still read at the
-  table's width, and a bare-row insert, which refused any cell past the width as `TABLE_WIDTH`,
-  now drops blank ones too, refusing only text there. Versions written before 2026-09-19 hold
-  such rows, since the renderer then wrote a code span's pipe unescaped; re-uploading one is
-  refused rather than stored short. A row's closing `|` after an odd run of backslashes
-  (`| x | y \|`) is now kept as the last cell's text, as the browser editor reads it, where it was
-  dropped (`y \`). An image's alt holding a backslash before a pipe in a table cell is written so
-  that the browser editor reads it as one cell too.
+  table's width. A bare-row insert is now judged by that same rule, in the parse of its rows,
+  where it used to count cells itself first, so it answers as an upload does in five cases. First,
+  it refused any cell past the width as `TABLE_WIDTH`, and now drops blank ones, refusing only
+  text there. Second, it split a row at a `|` after an even run of backslashes, as the browser
+  editor does, and refused `| A11 | new \\| extra |` under two columns as `TABLE_WIDTH`. It now
+  reads that pipe as text, as uploads always have, and stores one cell reading `new \| extra`;
+  the browser editor's reading of such a pipe is LEGION-412. Third, it trimmed Unicode spaces
+  from the fragment's edges, so `| A11 | new |` then U+00A0 was stored as two cells. It now
+  refuses it as three, as an upload does. Fourth, a line opening another block (`- | a | b |`,
+  `> | a | b |`) was counted as a row and refused as `TABLE_WIDTH`. It is now inserted as that
+  block after the table, as `- | a |` already was. Fifth, a first row indented four spaces or a
+  tab is refused as indented code, `INVALID_OP` on `markdown`, as a second row already was. Versions
+  written before 2026-09-19 hold rows with text past their table's width, since the renderer then
+  wrote a code span's pipe unescaped; re-uploading one is refused rather than stored short. A
+  row's closing `|` after an odd run of backslashes (`| x | y \|`) is now kept as the last cell's
+  text, as the browser editor reads it, where it was dropped (`y \`). An image's alt holding a
+  backslash before a pipe in a table cell is written so that the browser editor reads it as one
+  cell too.
 
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before

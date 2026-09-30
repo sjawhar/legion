@@ -829,10 +829,13 @@ goldmark drops the cells past the table's width, where that parser keeps them, a
 every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a row
 that fills its table lost the rest of the row's text when it was stored. A row whose cells past
 the width are blank loses nothing and is read at the table's width. A bare-row insert
-(`InsertTableRows`) applies the same rule before it parses, answering `TABLE_WIDTH`: both count a
-row's cells as goldmark splits them, through one function (`textPastWidth`). Goldmark also drops a row's
-closing `|` whatever stands before it, where that parser reads one after an odd run of backslashes
-as the last cell's text, so that pipe is put back in the cell (`keepEscapedClosingPipes`). The
+(`InsertTableRows`) is judged by the same `markWideRows`, in the parse of its rows under the
+header it writes (`parseTableRows`), which answers that refusal as `TABLE_WIDTH`. Its fragment
+loses only its blank lines at either end, so a row at its edge is read as on any other line, and a
+line opening another block is no row, which the edit route inserts as blocks. Goldmark also drops a
+row's closing `|` whatever stands before it, where that parser reads one after an odd run of
+backslashes as the last cell's text, so that pipe is put back in the cell
+(`keepEscapedClosingPipes`). The
 renderer writes a cell's pipe `\|` and the header as wide as the widest row (`tableGrid`), so no
 rendering holds a wide row. A setext underline under a
 table is the table's row, as that parser reads it (`underlineAfterTable`), all but a lone `-`, an

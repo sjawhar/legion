@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -444,38 +443,40 @@ func markBlockRows(table *extensionast.Table, lines []gmtext.Segment, source []b
 var wideRowAttr = []byte("pmdoc-wide-row")
 
 // wideRow is the first body row markWideRows found holding text past its table's width: how many
-// cells it holds, the table's width, and the row's opening words, which name it in the refusal.
+// cells it holds, the table's width, and the row's opening words, which name it. It is the reason
+// the refusal walk gives (blockRefusal); a bare-row insert answers it as ErrTableWidth instead
+// (parseTableRows).
 type wideRow struct {
 	cells, width int
 	opening      string
 }
 
+func (row wideRow) Error() string {
+	return fmt.Sprintf("a table row holding %d cells where its table has %d, written \"%s\": a cell ends at every | not written \\|, in code and links too, and goldmark drops the cells past the table's width, which the browser editor's parser keeps; write a | inside a cell as \\|, or give the header and delimiter rows as many cells as the row", row.cells, row.width, row.opening)
+}
+
 // markWideRows marks table (wideRowAttr) where one of its body rows - the lines past its header
 // and delimiter rows, the first two of lines - holds text in a cell past the table's delimiter
-// row (textPastWidth).
+// row, each row split as goldmark's transformer splits it (rowCells). A row whose cells past the
+// width are all blank loses no text where goldmark drops them, and is read at the table's width.
+// It is the one place a row's width is judged, for a whole document and for bare rows alike.
 func markWideRows(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
 	width := len(table.Alignments)
 	for index := 2; index < len(lines); index++ {
 		line := tabExpandedLine(lines[index], source)
-		if cells, text := textPastWidth(line, source, width); text {
-			opening := openingWords(strings.TrimSpace(string(line.Value(source))))
-			table.SetAttribute(wideRowAttr, wideRow{cells: cells, width: width, opening: opening})
+		cells, text := 0, false
+		rowCells(line, source, func(cell int, value []byte) {
+			cells++
+			text = text || cell >= width && !util.IsBlank(value)
+		})
+		if text {
+			// Trimmed as rowCells trims it, so a space outside ASCII, a cell's text, is quoted.
+			written := line.TrimLeftSpace(source)
+			written = written.TrimRightSpace(source)
+			table.SetAttribute(wideRowAttr, wideRow{cells: cells, width: width, opening: openingWords(string(written.Value(source)))})
 			return
 		}
 	}
-}
-
-// textPastWidth is the width rule every write path applies to a table row (markWideRows for a
-// whole document, parseTableRows for bare rows): it splits the row as goldmark's transformer
-// splits it (rowCells) and reports how many cells it holds and whether one past width holds text.
-// Goldmark drops the cells past the table's width, so text there would be stored short; a row
-// whose cells past the width are all blank loses nothing and is read at the table's width.
-func textPastWidth(segment gmtext.Segment, source []byte, width int) (cells int, text bool) {
-	rowCells(segment, source, func(cell int, value []byte) {
-		cells++
-		text = text || cell >= width && !util.IsBlank(value)
-	})
-	return cells, text
 }
 
 // keepEscapedClosingPipes puts a row's closing `|` back into its last cell where an odd run of

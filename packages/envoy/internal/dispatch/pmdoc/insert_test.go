@@ -111,19 +111,54 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 	}
 }
 
-// One row gets one answer on every path: a table-row insert and a whole-document write each read a
-// blank cell past the table's width as dropped, and refuse a cell there holding text. Both count
-// the cells as goldmark splits them, so a `|` after an even run of backslashes ends no cell on
-// either path.
+// One row gets one answer on every path: a table-row insert and a whole-document write each drop a
+// blank cell past the table's width, refuse a cell there holding text, and store an accepted row
+// as the same markdown, wherever in the fragment the row stands. Both count the cells as goldmark
+// splits them, so a `|` after an even run of backslashes ends no cell on either path, and markdown
+// that opens another block is no table row to either.
 func TestTableRowInsertAndDocumentWriteAgreeOnCellsPastTheWidth(t *testing.T) {
 	const table = "| Key | Value |\n| --- | --- |\n| A10 | old |\n"
 	for _, test := range []struct {
-		row     string
-		refused bool
+		row string
+		// stored is the row as both paths store it, where both accept it as rows.
+		stored string
+		// refusal is the insert's refusal where both paths refuse the markdown: ErrTableWidth for a
+		// row too wide, ErrSchema for one the two parsers read as different blocks. The document
+		// write refuses either as ErrSchema.
+		refusal error
+		// blocks marks markdown that is no table rows: the insert reports it is not rows, for the
+		// edit route to write as blocks, and the document write stores it as a block after the table.
+		blocks bool
 	}{
-		{"| A11 | new | |", false},
-		{"| A11 | new | extra |", true},
-		{`| A11 | new \\| extra |`, false},
+		{row: "| A11 | new | |", stored: "| A11 | new |"},
+		{row: "| A11 | new |   |  |", stored: "| A11 | new |"},
+		{row: "| A11 | new | extra |", refusal: ErrTableWidth},
+		{row: "| A11 | `x | y` |", refusal: ErrTableWidth},
+		{row: `| A11 | new | z \|`, refusal: ErrTableWidth},
+		{row: `| A11 | new \| extra |`, stored: `| A11 | new \| extra |`},
+		{row: `| A11 | new \\| extra |`, stored: `| A11 | new \\\| extra |`},
+		// A space outside ASCII at the fragment's first or last edge is a cell's text to goldmark and
+		// to the browser editor's parser, as it is on the fragment's other lines: the browser reads
+		// `| A11 | new |` then U+00A0 as three cells, and a U+00A0 before the row's first `|` moves
+		// A11 into the second column.
+		{row: "| A11 | new |\u00a0", refusal: ErrTableWidth},
+		{row: "\u00a0| A11 | new |", refusal: ErrTableWidth},
+		{row: "| A11 | x |\n| A12 | y |\u3000", refusal: ErrTableWidth},
+		{row: "| A11 | x |\u00a0\n| A12 | y |", refusal: ErrTableWidth},
+		// So is a vertical tab, which goldmark trims from no row.
+		{row: "| A11 | new |\v", refusal: ErrTableWidth},
+		// The first row's indentation is read as any row's: three spaces are nothing, four or a tab
+		// open indented code, which the browser editor's parser reads after the table.
+		{row: "   | A11 | new |", stored: "| A11 | new |"},
+		{row: "    | A11 | new |", refusal: ErrSchema},
+		{row: "\t| A11 | new |", refusal: ErrSchema},
+		{row: "| A11 | x |\n    | A12 | y |", refusal: ErrSchema},
+		// A line that opens a list or a quote is no table row to either parser, so its marker is no
+		// cell and the insert is not a table-row insert: `- | a |` is written as a list after the
+		// table, and `- | a | b |` must be as well.
+		{row: "- | a | b |", blocks: true},
+		{row: "> | a | b |", blocks: true},
+		{row: "- | a |", blocks: true},
 	} {
 		doc, err := Parse(table)
 		if err != nil {
@@ -133,10 +168,36 @@ func TestTableRowInsertAndDocumentWriteAgreeOnCellsPastTheWidth(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, _, insertErr := InsertTableRows(doc, anchor, test.row+"\n", true, NewTablePaddingBudget())
-		_, writeErr := ParseForWrite(table+test.row+"\n", nil)
-		if (insertErr != nil) != test.refused || (writeErr != nil) != test.refused {
-			t.Errorf("%q: insert = %v, document write = %v, want both refused: %v", test.row, insertErr, writeErr, test.refused)
+		inserted, rows, insertErr := InsertTableRows(doc, anchor, test.row+"\n", true, NewTablePaddingBudget())
+		written, writeErr := ParseForWrite(table+test.row+"\n", nil)
+		switch {
+		case test.blocks:
+			if insertErr != nil || rows || writeErr != nil {
+				t.Errorf("%q: insert = %v with rows %v, document write = %v, want no table rows and both accepted", test.row, insertErr, rows, writeErr)
+			}
+		case test.refusal != nil:
+			// A too-wide row is TABLE_WIDTH alone: an insert refusal that also read as a schema
+			// refusal would answer INVALID_OP on the edit route (docs.invalidSchemaOp).
+			if !errors.Is(insertErr, test.refusal) || (test.refusal == ErrTableWidth && errors.Is(insertErr, ErrSchema)) || !errors.Is(writeErr, ErrSchema) {
+				t.Errorf("%q: insert = %v, document write = %v, want both refused, the insert with %v", test.row, insertErr, writeErr, test.refusal)
+			}
+		default:
+			if insertErr != nil || !rows || writeErr != nil {
+				t.Errorf("%q: insert = %v with rows %v, document write = %v, want both accepted as rows", test.row, insertErr, rows, writeErr)
+				continue
+			}
+			for _, path := range []struct {
+				name string
+				doc  *Node
+			}{{"insert", inserted}, {"document write", written}} {
+				got, err := Render(path.doc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := table + test.stored + "\n"; got != want {
+					t.Errorf("%q: the %s stored %q, want %q", test.row, path.name, got, want)
+				}
+			}
 		}
 	}
 }
