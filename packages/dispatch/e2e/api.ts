@@ -50,12 +50,17 @@ export const e2eAgentToken = process.env.PLAYWRIGHT_BASE_URL
   : "e2e-token";
 const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 
-interface ApiOptions {
+export interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+  /** The origin the call goes to, such as the evaluation proxy (`e2e/eval/proxy.ts`); the
+   *  harness server when absent. */
+  base?: string;
+  /** Each answer's status is appended here, so a caller can compare two origins' answers. */
+  statuses?: number[];
 }
 
 async function request<T>(
@@ -79,17 +84,28 @@ async function request<T>(
     headers["X-Dispatch-User"] = options.login ?? "alice";
   }
 
-  const response = await fetch(new URL(path, baseUrl), {
+  const response = await fetch(new URL(path, options.base ?? baseUrl), {
     body: payload === undefined ? undefined : JSON.stringify(payload),
     headers,
     method,
   });
+  options.statuses?.push(response.status);
 
   if (!response.ok) {
     throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
   }
 
   return (response.status === 204 ? undefined : await response.json()) as T;
+}
+
+/** A read of any route, for the routes no helper below names. */
+export function apiGet<T>(path: string, options: ApiOptions = {}): Promise<T> {
+  return request<T>(path, "GET", undefined, options);
+}
+
+/** A write to any route, for the routes no helper below names. */
+export function apiPost<T>(path: string, body: object, options: ApiOptions = {}): Promise<T> {
+  return request<T>(path, "POST", body, options);
 }
 
 export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
@@ -161,8 +177,9 @@ export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
 }
 
 export function createIssue(
-  input: Partial<Pick<Issue, "project" | "title">> & {
+  input: Partial<Pick<Issue, "project" | "title" | "priority" | "labels">> & {
     external?: string;
+    force?: boolean;
     parent?: string;
     spec?: string;
   },
@@ -277,6 +294,16 @@ export function createComment(
   );
 }
 
+/** `POST /api/v1/comments/{id}/resolve`: any caller may resolve a thread. */
+export function resolveComment(id: string, options: ApiOptions = {}): Promise<Comment> {
+  return request<Comment>(
+    `/api/v1/comments/${encodeURIComponent(id)}/resolve`,
+    "POST",
+    {},
+    options
+  );
+}
+
 export function acceptSuggestion(id: string, options: ApiOptions = {}): Promise<Comment> {
   return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/accept`, "POST", {}, options);
 }
@@ -319,12 +346,17 @@ export function listAskFollowers(
 }
 
 /** A session follows an ask: the bearer body names the session, which must equal the path. */
-export function followAsk(id: string, sessionID: string, actor: Actor): Promise<void> {
+export function followAsk(
+  id: string,
+  sessionID: string,
+  actor: Actor,
+  options: ApiOptions = {}
+): Promise<void> {
   return request(
     `/api/v1/asks/${encodeURIComponent(id)}/followers/${encodeURIComponent(sessionID)}`,
     "PUT",
     {},
-    { actor, as: "agent" }
+    { ...options, actor, as: "agent" }
   );
 }
 
@@ -399,14 +431,15 @@ export function editArtifact(
 }
 
 /** `POST /api/v1/issues/{key}/claim`: the claimant is the caller itself, so `options.actor`
- *  (the session a bearer names, as on every other write) is the holder recorded. */
-export function claimIssue(issue: string, options: ApiOptions = {}): Promise<IssueDetails> {
-  return request<IssueDetails>(
-    `/api/v1/issues/${encodeURIComponent(issue)}/claim`,
-    "POST",
-    {},
-    options
-  );
+ *  (the session a bearer names, as on every other write) is the holder recorded. The answer is
+ *  the issue, without the fields only an issue read adds. */
+export function claimIssue(issue: string, options: ApiOptions = {}): Promise<Issue> {
+  return request<Issue>(`/api/v1/issues/${encodeURIComponent(issue)}/claim`, "POST", {}, options);
+}
+
+/** `DELETE /api/v1/issues/{key}/claim`: the holder gives the issue up. */
+export function releaseIssue(issue: string, options: ApiOptions = {}): Promise<Issue> {
+  return request<Issue>(`/api/v1/issues/${encodeURIComponent(issue)}/claim`, "DELETE", {}, options);
 }
 
 export function createMessage(
@@ -475,16 +508,14 @@ export function replyToMessageDelivery(
   messageID: string,
   input: { attempt: number; body?: string; error?: string },
   actor: Actor,
-  { followUp = false }: { followUp?: boolean } = {}
+  { followUp = false }: { followUp?: boolean } = {},
+  options: ApiOptions = {}
 ): Promise<Message | MessageDelivery> {
   return request<Message | MessageDelivery>(
     `/api/v1/messages/${encodeURIComponent(messageID)}/reply${followUp ? "?follow_up=true" : ""}`,
     "POST",
     input,
-    {
-      actor,
-      as: "agent",
-    }
+    { ...options, actor, as: "agent" }
   );
 }
 

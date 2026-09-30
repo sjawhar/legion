@@ -438,6 +438,17 @@ navigation, so a copy-button test asserts the written value rather than only the
 common shapes): `page.mouse` on a touch context still emits mouse events, which never reach
 dnd-kit's TouchSensor, so the board's long-press, tap and swipe rows on the `iphone` project use it.
 
+`e2e/eval/proxy.ts` is not a test: it is the Dispatch evaluation proxy, the `DISPATCH_URL` a skill
+evaluation gives the agent it runs. It forwards a GET allow-list to a real Dispatch with its own
+bearer, records every write to a JSONL file instead of sending it, answers the writes it models as
+the server would and shows them in later reads, and hides the issues `--exclude-key` names; its
+header is the contract, including what it does not follow. `e2e/eval/proxy.e2e.ts` holds it to that
+contract against this harness's server: each modelled write and each read after it is compared
+with the answer the server gives once the same writes really land. `e2e/api.ts`'s `base` option
+sends a helper's call to the proxy instead of the harness server, and `statuses` collects each
+answer's status. Run the spec alone with
+`bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/eval/proxy.e2e.ts`.
+
 `e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
 (`POST /api/v1/artifacts/_test/quiesce`, mounted by `DISPATCH_TEST_HOOKS=1`), which closes every
 live document and waits for the settlements in flight: a settlement locks its document's owner
