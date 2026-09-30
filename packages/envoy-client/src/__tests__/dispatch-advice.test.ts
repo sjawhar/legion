@@ -227,7 +227,7 @@ beforeEach(() => resetAdviceMemory());
 
 describe("Dispatch write advice", () => {
   const zeroBlocks =
-    'This spec holds 0 ask blocks (a block opens with a `:::ask{…}` line of its own), so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".';
+    'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".';
 
   test.each([
     ["dispatch_issue", { project: "DSP", title: "Created issue", spec: "# Spec\n" }],
@@ -270,7 +270,7 @@ describe("Dispatch write advice", () => {
   ])("does not render decision-block advice for %s", async (_case, tool, args, rawAdvice) => {
     const result = await executeWrite(tool, args, rawAdvice);
 
-    expect(result.text).not.toContain("0 ask blocks");
+    expect(result.text).not.toContain("holds no ask blocks");
     expect(result.details.advice).toEqual(rawAdvice);
   });
 

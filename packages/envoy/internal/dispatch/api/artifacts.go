@@ -417,13 +417,13 @@ func (s *server) storeArtifact(
 		blocks = readDocumentBlocks(documentMarkdown)
 	}
 	if advice != nil {
-		advice.setDocumentBlocks(blocks)
+		advice.documentBlocks = blocks
 	}
 	responsePayload := map[string]any{"artifact": artifact, "version": version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
 	} else if blocks != nil {
-		WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(responsePayload, *blocks))
+		WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(responsePayload, blocks))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}

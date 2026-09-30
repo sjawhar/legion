@@ -165,9 +165,9 @@ func TestWriteAdviceOmitsDecisionBlocksWhenMarkdownCannotBeParsed(t *testing.T) 
 	if blocks != nil {
 		t.Fatalf("invalid markdown document blocks = %#v, want absent", blocks)
 	}
-	advice := &writeAdvice{IssueStatus: "triage", YourOpenAsks: []adviceAsk{}}
-	advice.setDocumentBlocks(blocks)
-	encoded, err := json.Marshal(withAdvice(map[string]bool{"ok": true}, advice))
+	encoded, err := json.Marshal(withAdvice(map[string]bool{"ok": true}, &writeAdvice{
+		IssueStatus: "triage", YourOpenAsks: []adviceAsk{}, documentBlocks: blocks,
+	}))
 	if err != nil {
 		t.Fatalf("marshal advice: %v", err)
 	}
@@ -192,6 +192,18 @@ func TestReadDocumentBlocksReadsPastCode(t *testing.T) {
 	blocks := readDocumentBlocks("Context\n\n```md\n:::ask{urgency=\"med\"}\n```\n\n:::ask{urgency=\"med\"}\nShip it?\n:::\n\nThen write :::callout{kind=\"note\"} as text.\n")
 	if blocks == nil || blocks.DecisionBlocks != 1 || blocks.UnparsedOpeners == nil || blocks.UnparsedOpeners.Count != 1 {
 		t.Fatalf("blocks = %#v (unparsed %#v), want one ask block and the one opening after it", blocks, blocks.UnparsedOpeners)
+	}
+}
+
+// An opening longer than the stretch an example quotes - a long name, or a long run of colons - is
+// quoted whole rather than taking the write's response down after the write committed.
+func TestReadDocumentBlocksQuotesLongOpenings(t *testing.T) {
+	name := strings.Repeat("n", 90)
+	colons := strings.Repeat(":", 90)
+	blocks := readDocumentBlocks("Write :::" + name + "{a=\"b\"} and " + colons + "ask{} as text.\n")
+	if blocks == nil || blocks.UnparsedOpeners == nil || blocks.UnparsedOpeners.Count != 2 ||
+		!strings.Contains(blocks.UnparsedOpeners.Examples[0], ":::"+name+"{") || !strings.Contains(blocks.UnparsedOpeners.Examples[1], colons+"ask{") {
+		t.Fatalf("blocks = %#v, want both long openings quoted whole", blocks)
 	}
 }
 

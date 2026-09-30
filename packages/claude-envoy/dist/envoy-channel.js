@@ -39314,7 +39314,7 @@ function renderAdvice(tool, key, advice, opts) {
     lines.push(`${subject2}: ${quoted}. An opening like \`:::ask{\u2026}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`);
   }
   if (advice.decision_blocks === 0 && opts.isPrimarySpec === true && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
-    lines.push('This spec holds 0 ask blocks (a block opens with a `:::ask{\u2026}` line of its own), so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
+    lines.push('This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
   }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
     const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";

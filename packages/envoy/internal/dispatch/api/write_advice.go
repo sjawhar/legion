@@ -22,20 +22,11 @@ type adviceAsk struct {
 }
 
 type writeAdvice struct {
-	IssueStatus             string           `json:"issue_status"`
-	SessionWritesSinceHuman int              `json:"session_writes_since_human"`
-	YourOpenAsks            []adviceAsk      `json:"your_open_asks"`
-	DecisionBlocks          *int             `json:"decision_blocks,omitempty"`
-	UnparsedOpeners         *unparsedOpeners `json:"unparsed_openers,omitempty"`
-}
-
-// setDocumentBlocks puts what a document write read of its document's typed blocks on the advice.
-func (advice *writeAdvice) setDocumentBlocks(blocks *documentBlocks) {
-	if blocks == nil {
-		return
-	}
-	advice.DecisionBlocks = &blocks.DecisionBlocks
-	advice.UnparsedOpeners = blocks.UnparsedOpeners
+	IssueStatus             string      `json:"issue_status"`
+	SessionWritesSinceHuman int         `json:"session_writes_since_human"`
+	YourOpenAsks            []adviceAsk `json:"your_open_asks"`
+	// documentBlocks is set by a document write whose document reads; nil omits its fields.
+	*documentBlocks
 }
 
 type adviceQueryError struct {
@@ -166,17 +157,14 @@ func (s *server) logAdviceError(route, issueKey, query string, err error) {
 // documentBlocks is what a document write's advice reports about the typed blocks in the document
 // it stored: how many ask blocks it holds, and the typed block openings it holds as text.
 type documentBlocks struct {
-	DecisionBlocks int
-	// UnparsedOpeners is nil when the document holds no opening as text.
-	UnparsedOpeners *unparsedOpeners
+	DecisionBlocks  int              `json:"decision_blocks"`
+	UnparsedOpeners *unparsedOpeners `json:"unparsed_openers,omitempty"`
 }
 
 // unparsedOpeners is the typed block openings (`:::ask{…}`) a document holds as text rather than
-// as blocks, outside code: written inside a line, or escaped. The parser refuses such an opening
-// where it starts a line of a paragraph (pmdoc's typedOpeningAsText), so this reports the ones it
-// stores, where a writer who meant a block would otherwise hear only that the document holds none
-// (LEGION-416). A mention of the syntax in prose is reported too, and harmlessly: it is never
-// refused.
+// as blocks, outside code: written inside a line, or escaped. A writer who
+// meant a block would otherwise hear only that the document holds none (LEGION-416). A mention of
+// the syntax in prose is reported too, and harmlessly: it is never refused.
 type unparsedOpeners struct {
 	Count    int      `json:"count"`
 	Examples []string `json:"examples"`
@@ -254,7 +242,7 @@ func openerExample(text string, start, end int) string {
 	for from > 0 && !utf8.RuneStart(text[from]) {
 		from--
 	}
-	to := min(len(text), start+unparsedOpenerSpan)
+	to := min(len(text), max(end, start+unparsedOpenerSpan))
 	if brace := strings.IndexByte(text[end:to], '}'); brace >= 0 {
 		to = end + brace + 1
 	}
@@ -305,16 +293,8 @@ func withAdvice(payload any, advice *writeAdvice) any {
 	return advisedResponse{payload: payload, advice: advice}
 }
 
-// documentBlockAdvice is a project document write's advice: only what it read of the document's
-// typed blocks, since a project document has no issue state to report.
-type documentBlockAdvice struct {
-	DecisionBlocks  int              `json:"decision_blocks"`
-	UnparsedOpeners *unparsedOpeners `json:"unparsed_openers,omitempty"`
-}
-
-func withDocumentBlockAdvice(payload any, blocks documentBlocks) any {
-	return advisedResponse{payload: payload, advice: documentBlockAdvice{
-		DecisionBlocks:  blocks.DecisionBlocks,
-		UnparsedOpeners: blocks.UnparsedOpeners,
-	}}
+// withDocumentBlockAdvice is a project document write's response: its advice is only what it read
+// of the document's typed blocks, since a project document has no issue state to report.
+func withDocumentBlockAdvice(payload any, blocks *documentBlocks) any {
+	return advisedResponse{payload: payload, advice: blocks}
 }

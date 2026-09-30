@@ -401,14 +401,15 @@ func paragraphDirectiveReason(lines *gmtext.Segments, source []byte) (string, bo
 // Each line is read after its containers' prefixes, so a quote's marker does not hide it. A line
 // that escapes the opening (`\:::`) or writes it in code is text on purpose and never matches; the
 // paragraph's first line is the typed block itself wherever a block can open, and in inline
-// markdown the text a replace writes on purpose. The renderer never writes such a line (it escapes
-// a line-start opening and encodes a line's leading spaces), so no stored rendering is refused.
+// markdown the text a replace writes on purpose. Only spaces and tabs, a line's indentation, are
+// trimmed, so a line opening with another space character - a no-break space a rendering can carry
+// raw - is text and never matches.
 func typedOpeningAsText(lines *gmtext.Segments, source []byte) (string, bool) {
 	for index := 1; index < lines.Len(); index++ {
 		segment := lines.At(index)
-		line := bytes.TrimRight(bytes.TrimLeftFunc(segment.Value(source), jsWhitespace), "\n")
+		line := bytes.TrimRight(bytes.TrimLeft(segment.Value(source), " \t"), "\n")
 		if paragraphTypedOpening.Match(line) {
-			return fmt.Sprintf("the line %q continues a paragraph, so it is the paragraph's text rather than a typed block: a typed block opens on a line of its own, indented less than four columns past the lines around it, and inline text holds no block; escape its first colon (\\:::) or put it in code to write it as text", line), true
+			return fmt.Sprintf("the line %q continues a paragraph, so it is the paragraph's text rather than a typed block: a typed block opens on a line of its own, indented less than four columns past the lines around it, and inline text holds no block; put it in code to write it as text", line), true
 		}
 	}
 	return "", false

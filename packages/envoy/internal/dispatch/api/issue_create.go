@@ -341,7 +341,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	s.deps.Docs.ScheduleSettlement(artifactID)
 	s.publish(event)
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		advice.setDocumentBlocks(readDocumentBlocks(markdown))
+		advice.documentBlocks = readDocumentBlocks(markdown)
 	}
 	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
 }

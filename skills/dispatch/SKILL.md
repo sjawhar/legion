@@ -116,7 +116,7 @@ terrible!! Decisions should be in context in the spec".
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
-When `dispatch_issue` or `dispatch_artifact` answers `This spec holds 0 ask blocks …`, read it as a
+When `dispatch_issue` or `dispatch_artifact` answers `This spec holds no ask blocks …`, read it as a
 question, not an error: either no decision is needed and you say nothing, or you forgot to make the
 decision a block and must fix the spec. When it answers `… typed-block openings in this document are
 text, not blocks`, the openings it quotes are blocks you wrote that were stored as prose: an opening

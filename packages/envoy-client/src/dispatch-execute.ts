@@ -198,7 +198,7 @@ function renderAdvice(
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
     lines.push(
-      'This spec holds 0 ask blocks (a block opens with a `:::ask{…}` line of its own), so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+      'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
     );
   }
 
