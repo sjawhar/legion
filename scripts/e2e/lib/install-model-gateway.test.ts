@@ -349,6 +349,8 @@ describe("the model gateway key command", () => {
       const unlistable = unserved("--fresh", evidence);
       expect(unlistable.code).toBe(1);
       expect(unlistable.stdout).toContain(`${evidence} cannot be listed`);
+      // ls's own error is the reason; the environment carries no LANG, so ls prints the C locale's.
+      expect(unlistable.stdout).toContain("Permission denied");
     } finally {
       chmodSync(evidence, 0o755);
     }
