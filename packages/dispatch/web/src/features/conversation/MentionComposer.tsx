@@ -485,6 +485,10 @@ interface MentionComposerProps {
   /** Every change to the draft, for a caller that will hand it back after a remount of its own. */
   readonly onCarry?: (draft: CarriedDraft) => void;
   readonly onClose: () => void;
+  /** Whether a send is in flight, from the render that shows it and after that render's `onCarry`.
+   *  A caller that remounts this composer only once it reads `false` hands the next instance the
+   *  draft the send left behind - none after a success - never one the server is still taking. */
+  readonly onSending?: (sending: boolean) => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: MentionReplyTarget | null;
@@ -506,6 +510,7 @@ export function MentionComposer({
   onCancelReply,
   onCarry,
   onClose,
+  onSending,
   onSent,
   owner,
   replyTo = null,
@@ -558,8 +563,9 @@ export function MentionComposer({
    *  ask's options - on a successful send and on Discard alike, in every host: one whose `onClose`
    *  only moves focus (`AgentsPage`'s rows) keeps the composer mounted and shows it empty, as one
    *  that unmounts it would. The kind, the urgency and `Allow multiple` are the reader's settings,
-   *  not the draft, and stay. The carry is reported empty with it, so no later remount can bring a
-   *  sent or discarded draft back. */
+   *  not the draft, and stay. The carry is reported empty with it, from the render that shows it,
+   *  and a send's end is reported only after that (`onSending`), so a host that remounts once the
+   *  send has ended cannot bring a sent or discarded draft back. */
   const clearDraft = () => {
     setBody("");
     previousBody.current = "";
@@ -773,6 +779,9 @@ export function MentionComposer({
       if (!inline && edit === undefined) onClose();
     },
   });
+  useEffect(() => {
+    onSending?.(save.isPending);
+  }, [onSending, save.isPending]);
   const upload = useMutation({
     mutationFn: (file: File) => {
       if (owner.kind === "session")

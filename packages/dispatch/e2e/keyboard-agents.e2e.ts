@@ -1,6 +1,13 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { openAgents, plannerSession, seedAgents, setLiveSessions } from "./agents";
+import {
+  type FakeSession,
+  openAgents,
+  plannerSession,
+  reviewerSession,
+  seedAgents,
+  setLiveSessions,
+} from "./agents";
 import { createMessage } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -112,6 +119,75 @@ test.describe("agents page", () => {
       await expect(
         agentsSection.getByRole("listitem").filter({ hasText: "Back to the agent row" })
       ).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A pin moves a row between the open list and a fold, which remounts it, and the focused node
+  // leaves the page with the old one. Focus follows the row to where it lands - or, when it lands
+  // in a folded section, to that section's toggle - so the next `j`/`k` go on from the reader's
+  // place instead of from the top.
+  test("Shift+P keeps focus on the row it moves, or on the fold it moves into", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    // No Dispatch activity, so both fold under `No Dispatch activity` until one is pinned.
+    const silent = (id: string, title: string): FakeSession => ({
+      capabilities: ["aside", "btw"],
+      dir: `/srv/${id}`,
+      machine_id: "box-1",
+      roles: ["tester"],
+      session_id: `${id}-session`,
+      title,
+    });
+    await setLiveSessions([
+      plannerSession,
+      reviewerSession,
+      silent("quiet", "Quiet"),
+      silent("silent", "Silent"),
+    ]);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const rows = page.locator("[data-agent-row]");
+      const silentRow = page.locator('[data-agent-row="silent-session"]');
+      const fold = page.getByRole("button", { name: /^No Dispatch activity/ });
+      await fold.click();
+      await expect(rows).toHaveCount(4);
+      await page.locator("body").focus();
+      for (const _ of [1, 2, 3, 4]) await page.keyboard.press("j");
+      await expect(silentRow).toBeFocused();
+
+      // Out of the fold and to the top of the open list; `j` then goes on from there.
+      await page.keyboard.press("Shift+P");
+      await expect(silentRow.getByRole("button", { name: "Unpin Silent" })).toBeVisible();
+      await expect(rows.nth(0)).toHaveAttribute("data-agent-row", "silent-session");
+      await expect(silentRow).toBeFocused();
+      await page.keyboard.press("j");
+      await expect(rows.nth(1)).toBeFocused();
+      await page.keyboard.press("k");
+      await expect(silentRow).toBeFocused();
+
+      // Back into the open fold.
+      await page.keyboard.press("Shift+P");
+      await expect(silentRow.getByRole("button", { name: "Pin Silent" })).toBeVisible();
+      await expect(rows.nth(3)).toHaveAttribute("data-agent-row", "silent-session");
+      await expect(silentRow).toBeFocused();
+
+      // Into a folded section, where the row has no node: the section's toggle takes focus.
+      await page.keyboard.press("Shift+P");
+      await expect(silentRow).toBeFocused();
+      await fold.click();
+      await expect(fold).toHaveAttribute("aria-expanded", "false");
+      await page.locator("body").focus();
+      await page.keyboard.press("j");
+      await expect(silentRow).toBeFocused();
+      await page.keyboard.press("Shift+P");
+      await expect(silentRow).toHaveCount(0);
+      await expect(fold).toHaveAccessibleName("No Dispatch activity (2)");
+      await expect(fold).toBeFocused();
     } finally {
       await context.close();
     }

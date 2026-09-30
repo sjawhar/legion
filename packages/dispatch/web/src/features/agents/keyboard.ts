@@ -99,9 +99,16 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       label: "Pick an issue for the message",
       // The picker takes focus itself once its list lands (`AgentsPage.tsx`'s `issueSelect`), so
       // the key that opens it leaves the reader inside it, where the arrows choose an issue and
-      // Escape is the control's own way out.
+      // Escape is the control's own way out. A collapsed row renders no picker, so the row says
+      // whether one can open; an open row's picker is disabled while its message is in flight.
       run: () => inOpenRow((row) => row.querySelector<HTMLElement>(ISSUE_PICKER_SELECTOR)?.click()),
-      when: () => focusedAgentRow()?.hasAttribute("data-agent-can-pick-issue") === true,
+      when: () => {
+        const row = focusedAgentRow();
+        return (
+          row?.hasAttribute("data-agent-can-pick-issue") === true &&
+          row.querySelector<HTMLButtonElement>(ISSUE_PICKER_SELECTOR)?.disabled !== true
+        );
+      },
     },
     {
       id: "pin",

@@ -45,6 +45,7 @@ import {
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
+  secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
   secondaryButtonText,
   textMutedHoverToSecondary,
@@ -64,6 +65,7 @@ import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { closestMatching } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { deliveryAttempts } from "./attempts";
@@ -87,6 +89,14 @@ const composerLine = `mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-s
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
+}
+
+/** Whether focus has fallen to the document, where a control that is disabled or leaves the page
+ *  drops it. That is the only focus this page takes back on the reader's behalf: anywhere else,
+ *  the reader put it there. */
+function focusOnDocument(): boolean {
+  const focused = document.activeElement;
+  return focused === null || focused === document.body;
 }
 
 /** Open asks from each session whose turn is the viewer's, keyed by session ID. */
@@ -544,8 +554,7 @@ function AgentMessageComposer({
     const field = box.current?.querySelector("textarea");
     if (field === null || field === undefined) return;
     const takeBack = () => {
-      const active = document.activeElement;
-      if (active === null || active === document.body) field.focus();
+      if (focusOnDocument()) field.focus();
     };
     refocusWatcher.current?.disconnect();
     if (!field.disabled) {
@@ -567,6 +576,9 @@ function AgentMessageComposer({
   const keepCarry = useCallback((draft: CarriedDraft) => {
     carried.current = draft;
   }, []);
+  /** Whether the composer's send is in flight (`onSending`). The message is addressed by then, so
+   *  neither the picker nor the channel the composer is mounted for may change until it lands. */
+  const [sending, setSending] = useState(false);
   /** What the picker's selection reads while it is open, which is the reader's until they commit
    *  it: the select's own keys move it, `Enter`, or a pick made with the pointer or in the native
    *  popup, takes it, and leaving the select without committing puts it back on `issueKey`. */
@@ -609,6 +621,16 @@ function AgentMessageComposer({
     queryFn: () => api.listIssues({ open: true }),
     queryKey: ["agents", "issue-picker"],
   });
+  /** The committed issue, once the open list has come back without it: closed since it was
+   *  picked. The select and the toggle keep naming it, marked, until the reader picks another -
+   *  the issue header's Status select keeps a closed issue's own status among its options the same
+   *  way - so what the picker shows, what the toggle says and where the message goes stay one
+   *  issue; a send to it is the server's to refuse (409 `ISSUE_CLOSED`). */
+  const committedClosed =
+    issueKey !== "" &&
+    issues.data !== undefined &&
+    !issues.data.some((issue) => issue.key === issueKey);
+  const committedLabel = committedClosed ? `${issueKey} (closed)` : issueKey;
   // The picker exists to be used, so opening it hands over the control inside it - the same
   // move `MultiSelect` makes with its search box. It is what `i` needs (a key that opened
   // something no keystroke could then reach would be a dead end) and what a pointer wants too,
@@ -655,6 +677,24 @@ function AgentMessageComposer({
   const composerOwner = useDirectChannel
     ? { kind: "session" as const, sessionId: agent.session_id }
     : { issueKey: replyIssueKey ?? issueKey, kind: "issue" as const };
+  const channel = useDirectChannel ? "session" : "issue";
+  /** The channel the mounted composer was built for. It follows `channel`, except while a send is
+   *  in flight: the instance holding that body is the one the server's answer reaches, so a
+   *  channel change made meanwhile - a reply started or cancelled, since the picker is disabled -
+   *  remounts only once the answer is in, when a success has already emptied the draft `carried`
+   *  hands on. Remounted mid-send, the new instance would start from the body in the air, enabled,
+   *  where the old one's `clearDraft` could not reach it: one Ctrl+Enter from sending it twice. */
+  const [composerChannel, setComposerChannel] = useState(channel);
+  if (!sending && composerChannel !== channel) setComposerChannel(channel);
+  // A remount takes the focused field out of the page with the instance it belonged to - after a
+  // send whose channel change waited for it, say - while the reader is still writing to this
+  // agent. As in `refocusComposer`, only focus the remount dropped on the document is taken back.
+  const mountedChannel = useRef(composerChannel);
+  useLayoutEffect(() => {
+    if (mountedChannel.current === composerChannel) return;
+    mountedChannel.current = composerChannel;
+    if (focusOnDocument()) box.current?.querySelector("textarea")?.focus();
+  }, [composerChannel]);
 
   return (
     <div className={`mt-3 border-t pt-3 ${borderDefault}`} ref={box}>
@@ -662,12 +702,13 @@ function AgentMessageComposer({
         <button
           aria-expanded={issuePickerOpen}
           aria-label="Choose issue"
-          className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+          className={`min-h-11 rounded-lg border px-3 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
           data-agent-issue-picker=""
+          disabled={sending}
           onClick={() => setIssuePickerOpen((open) => !open)}
           type="button"
         >
-          Issue: {issueKey === "" ? "No issue" : issueKey}
+          Issue: {issueKey === "" ? "No issue" : committedLabel}
         </button>
       ) : null}
       {issuePickerOpen && replyTo === null ? (
@@ -683,7 +724,8 @@ function AgentMessageComposer({
               Issue (optional)
               <select
                 aria-label="Issue"
-                className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
+                className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal disabled:cursor-not-allowed disabled:opacity-50 ${inputClasses(true)}`}
+                disabled={sending}
                 onBlur={() => {
                   // A step is not a pick until `Enter`, so leaving the select any other way -
                   // Tab, Shift+Tab, a click elsewhere - drops it, as Escape does: the open select
@@ -714,6 +756,11 @@ function AgentMessageComposer({
                 value={pendingIssue}
               >
                 <option value="">No issue</option>
+                {committedClosed ? (
+                  <option disabled value={issueKey}>
+                    {committedLabel}
+                  </option>
+                ) : null}
                 {issues.data.map((issue) => (
                   <option key={issue.key} value={issue.key}>
                     {issue.key} · {issue.title}
@@ -735,8 +782,9 @@ function AgentMessageComposer({
         // The channel decides which mention the message needs - an issue comment reaches this
         // agent by mentioning it, a direct message does not - so the composer is remounted when
         // the channel changes, and only then; one issue to another keeps the same instance. The
-        // pick carries the reader's draft across that remount (`carried`).
-        key={useDirectChannel ? "session" : "issue"}
+        // pick carries the reader's draft across that remount (`carried`), which waits for a send
+        // in flight to land (`composerChannel`).
+        key={composerChannel}
         onCancelReply={onCancelReply}
         onClose={() => {
           if (sentJustNow.current) {
@@ -745,6 +793,7 @@ function AgentMessageComposer({
           }
           onClose();
         }}
+        onSending={setSending}
         onSent={() => {
           sentJustNow.current = true;
           onCancelReply();
@@ -955,6 +1004,10 @@ function AgentRow({
   );
 }
 
+/** The two folds' labels, which also name them to the pin's focus hand-off (`data-agent-fold`). */
+const QUIET_FOLD = "No Dispatch activity";
+const INACTIVE_FOLD = "Inactive";
+
 /** A collapsed disclosure over rows the page keeps out of the way, labelled by `foldLabel`;
  * absent when empty, closed on every load, and open only while this page stays mounted. */
 function AgentFold({
@@ -979,7 +1032,7 @@ function AgentFold({
   return (
     // A block wrapper, not a fragment: the global `button { display: inline-flex }` would
     // otherwise let two collapsed toggles share one line below the desktop breakpoint.
-    <div className="space-y-3">
+    <div className="space-y-3" data-agent-fold={label}>
       <DisclosureToggle
         expanded={expanded}
         label={foldLabel(label, agents, selected)}
@@ -1382,7 +1435,18 @@ export function AgentsPage(): ReactNode {
   // set ordered any other way (the registry's own, say) would name the recipients in an order the
   // reader never sees, and send them in it.
   const matching = [...active, ...quiet, ...inactive];
+  /** The row a pin was made from while it held focus, until the render that moves it. A pin can
+   *  move a row between the open list and a fold, which remounts it, and focus leaves the page
+   *  with the old node; it follows the row to where it lands instead - or, when that is a closed
+   *  fold, to the fold's toggle, as `IssueBoard`'s `focusAfterMove` lands on a collapsed rail - so
+   *  the next `j`/`k` go on from the reader's place rather than from the top. */
+  const focusAfterPin = useRef<string | null>(null);
   const togglePin = (sessionID: string) => {
+    if (
+      closestMatching(document.activeElement, AGENT_ROW_SELECTOR)?.dataset.agentRow === sessionID
+    ) {
+      focusAfterPin.current = sessionID;
+    }
     const next = pinned.includes(sessionID)
       ? pinned.filter((candidate) => candidate !== sessionID)
       : [...pinned, sessionID];
@@ -1398,6 +1462,21 @@ export function AgentsPage(): ReactNode {
   };
   const listRef = useRef<HTMLElement>(null);
   useAgentsKeymap(listRef);
+  // A layout effect, so the frame the move paints already has focus where the row went.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `pinned` is the trigger, not a read; `quiet` is read from the render that moved the row
+  useLayoutEffect(() => {
+    const sessionID = focusAfterPin.current;
+    if (sessionID === null) return;
+    focusAfterPin.current = null;
+    // Only focus the move dropped on the document is the page's to give back.
+    if (!focusOnDocument()) return;
+    const list = listRef.current;
+    const row = [...(list?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? [])].find(
+      (node) => node.dataset.agentRow === sessionID
+    );
+    const fold = quiet.some((agent) => agent.session_id === sessionID) ? QUIET_FOLD : INACTIVE_FOLD;
+    (row ?? list?.querySelector<HTMLElement>(`[data-agent-fold="${fold}"] > button`))?.focus();
+  }, [pinned]);
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;
@@ -1448,7 +1527,7 @@ export function AgentsPage(): ReactNode {
               ))}
               <AgentFold
                 agents={quiet}
-                label="No Dispatch activity"
+                label={QUIET_FOLD}
                 liveAgents={agents}
                 needsYouBySession={needsYouBySession}
                 onPin={togglePin}
@@ -1457,7 +1536,7 @@ export function AgentsPage(): ReactNode {
               />
               <AgentFold
                 agents={inactive}
-                label="Inactive"
+                label={INACTIVE_FOLD}
                 liveAgents={agents}
                 needsYouBySession={needsYouBySession}
                 onPin={togglePin}
