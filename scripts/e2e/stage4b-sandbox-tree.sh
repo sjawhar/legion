@@ -1534,12 +1534,32 @@ send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implement
 wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
-send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. Your decision is APPROVE, submitted as legion-reviewer[bot]; take the round's steps in the order your role gives, and complete the reviewer handoff."
+# A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
+# The daemon leaves the issue in reviewing and tells the architect, naming the head; the architect,
+# on its own, asks the reviewer for the decision over Envoy, and the reviewer's approval ends the
+# round. The proof asks the reviewer nothing more: a peer message in its session is the architect's.
+peers_before=$(notice_deliveries "$tree1" reviewer '"customType":"envoy-message"')
+send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is APPROVE."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
 until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"
 note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
+until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_number" reviewer_commented
+until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
+# Read at the completion, before the architect can have asked anything: no approval yet, the round
+# still open, and the head the notice must name.
+stuck_head=$(gh api "repos/$repo/pulls/$pr_number" --jq .head.sha)
+if reviewer_approved_head; then fail "the reviewer approved $stuck_head before anyone asked it for the round's decision"; fi
+issue_phase "$tree1" reviewing >/dev/null || fail "$tree1 left reviewing on a round no review decided"
+until_true 300 "the review-stuck notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle review-stuck "$tree1")"
+stuck=$({ claim_session_text "$tree1" architect || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$(notice_needle review-stuck "$tree1")" | head -1 || true)
+printf '%s\n' "$stuck" >"$evidence/notice-review-stuck.jsonl"
+grep -qF -- "$stuck_head" <<<"$stuck" || fail "the review-stuck notice on $tree1's architect does not name the head $stuck_head: $stuck"
+note "the reviewer commented and completed; $tree1 stayed in reviewing and its architect was told review-stuck naming $stuck_head (kept in $evidence/notice-review-stuck.jsonl)"
+architect_asked() { [ "$(notice_deliveries "$tree1" reviewer '"customType":"envoy-message"')" -gt "$peers_before" ]; }
+until_true 900 "$tree1's architect to ask the reviewer for the round's decision" architect_asked
 until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
+note "the architect asked the reviewer over Envoy, and the reviewer's approval of the head ended the round"
 until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
 if issue_phase "$tree1" retro >/dev/null; then
   wait_for_worker "$tree1" implementer

@@ -236,6 +236,15 @@ reviewer_approved_head() {
     --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
   grep -qx -- "$head" <<<"$approved"
 }
+# reviewer_commented: the review App submitted a COMMENT review on the proof's pull request.
+reviewer_commented() {
+  local commented
+  commented=$(timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "COMMENTED") | .id') || return 1
+  [ -n "$commented" ]
+}
+# reviewer_completed ISSUE: the daemon recorded the reviewer's completion of the issue's open round.
+reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].workers.reviewer.handoffCommit // "") != ""' >/dev/null; }
 # approve_as_reviewer asks the reviewer for the round's last review and waits for it to approve the
 # head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/, since
 # the Go daemon has no .legion/ deletion step before Stage 7. The merge then carries the run's
@@ -511,7 +520,7 @@ worker_notices() {
   while IFS=$'\t' read -r f role; do
     jq -R -r --arg file "${f##*/}" --arg role "$role" '
       fromjson? | select(.customType == "envoy-message") | (.content | tostring)
-      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up|checks-red) on [^\\n]*)")
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up|checks-red|review-stuck) on [^\\n]*)")
       | "\($file) \($role) \(.summary)"' "$f"
   done < <(worker_sessions "$1")
 }
