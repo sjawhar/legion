@@ -1046,8 +1046,9 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
-is unset for it), for that one command. It appends one line per invocation, one per mint, and
-`hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's
+is unset for it), for that one command. It appends one line per invocation, one per mint, one per
+call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout
+carries the key alone. The profile's
 `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
 and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
 (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
@@ -1082,13 +1083,14 @@ with no key. Every role is the one model because the gateway answers `claude-hai
 model OMP gave that Stage 3 scout once Bedrock failed it, with `404 model not found`.
 
 Its first mint is the preflight, before any pane exists. It exits 1 naming the cause when
-`hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
+`hawk-token`, `flock` or `timeout` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
 `lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
 unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
-last line of its stderr); an argument refusal exits 2. The mint also runs `hawk-token`'s own periodic
-self-refresh, which can take longer than OMP's ten-second budget for a `!command`, before any pane
-needs a key rather than inside one. The key is never printed.
+last line of its stderr); an argument refusal exits 2. The installer runs that one call with
+`--preflight`, which exempts it from the key command's deadline (below): on a machine where
+`hawk-token` has never run, its first-run build takes about a minute in the foreground, and it
+happens here rather than inside a pane's ten-second `!command`. The key is never printed.
 
 The key command mints once and keeps the key in `<cache-dir>/hawk-token.key` (`0600`) until
 300 seconds before its JWT `exp`, or for 300 seconds when the key has none. Each `hawk-token` run
@@ -1099,6 +1101,22 @@ the cache. Every call inside the window gets the kept key. A key the gateway ref
 not re-minted: the proof's model turns fail, loudly, which is right for a proof. (The command cannot
 tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/sh -c`, so each call
 has a fresh parent process.)
+
+One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
+once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
+finds no kept key takes an `flock` on `<cache-dir>/hawk-token.key.lock`, looks at the cache again,
+and mints only when the key is still missing; every other call waits on the lock and serves the key
+the holder kept. The mint runs with the lock's descriptor closed, since `hawk-token` can start a
+detached refresh that would otherwise hold the lock for minutes.
+
+Oh My Pi kills a `!command` 10 s after it starts it, so every call but the preflight gives up at
+9500 ms of a clock that starts with its own process (under load bash can take half a second to
+reach its first line), whether it is waiting on the lock or minting under `timeout`, and logs why.
+A waiter that takes the lock with under 2000 ms left starts no mint: the fastest mint measured on
+the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wait is bounded by
+one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
+succeeds is served inside every caller's ten seconds. A call that gets no key exits 1, which Oh My
+Pi reports as `No API key found for anthropic.` and retries 30 s later.
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
