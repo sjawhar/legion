@@ -306,7 +306,7 @@ func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
 	}
 }
 
-func TestCreateIssueWithMissingOrBlankSpecSeedsPrimaryDocument(t *testing.T) {
+func TestCreateIssueWithMissingOrBlankSpecGetsAnEmptyPrimaryDocument(t *testing.T) {
 	handler := newTestHandler(t)
 	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -344,57 +344,12 @@ func TestCreateIssueWithMissingOrBlankSpecSeedsPrimaryDocument(t *testing.T) {
 			}
 			text := decodeBody[struct {
 				Markdown string `json:"markdown"`
+				Version  *int   `json:"version"`
 			}](t, textResponse)
-			if !strings.HasPrefix(text.Markdown, "## Summary") {
-				t.Fatalf("primary document = %q, want it to start with Summary", text.Markdown)
+			if text.Markdown != "" || text.Version == nil || *text.Version != 1 {
+				t.Fatalf("primary document = %#v, want empty markdown at version 1", text)
 			}
 		})
-	}
-}
-
-func TestSeededSpecHeadingsMatchDispatchWritingGuidance(t *testing.T) {
-	handler := newTestHandler(t)
-	issue := createArtifactIssue(t, handler)
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("read primary document: status=%d body=%s", response.Code, response.Body.String())
-	}
-	document := decodeBody[struct {
-		Markdown string `json:"markdown"`
-	}](t, response)
-
-	skill, err := os.ReadFile("../../../../../skills/dispatch/SKILL.md")
-	if err != nil {
-		t.Fatalf("read Dispatch skill: %v", err)
-	}
-	const tableHeader = "| Section | Required content | Form |\n"
-	_, table, found := strings.Cut(string(skill), tableHeader)
-	if !found {
-		t.Fatal("Dispatch skill has no Writing a spec section table")
-	}
-	var want []string
-	for _, line := range strings.Split(table, "\n") {
-		if line == "" {
-			break
-		}
-		if !strings.HasPrefix(line, "| **") {
-			continue
-		}
-		section, _, found := strings.Cut(strings.TrimPrefix(line, "| **"), "** |")
-		if !found {
-			t.Fatalf("malformed Dispatch skill section row %q", line)
-		}
-		want = append(want, section)
-	}
-
-	var got []string
-	for _, line := range strings.Split(document.Markdown, "\n") {
-		if section, found := strings.CutPrefix(line, "## "); found {
-			got = append(got, section)
-		}
-	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("seeded spec headings = %q, want %q from Dispatch guidance", got, want)
 	}
 }
 

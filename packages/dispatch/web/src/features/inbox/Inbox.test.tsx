@@ -1440,7 +1440,7 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
 
     const row = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
     if (row === null) throw new Error("ask-b row missing");
-    fireEvent.change(within(row).getByLabelText("Snooze CORE-2"), {
+    fireEvent.change(within(row).getByLabelText("Snooze CORE-2: Which format?"), {
       target: { value: "tomorrow" },
     });
 
@@ -1456,7 +1456,9 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
     const later = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
     expect(later?.getAttribute("data-inbox-section")).toBe("later");
 
-    fireEvent.click(within(later as HTMLElement).getByRole("button", { name: "Un-snooze CORE-2" }));
+    fireEvent.click(
+      within(later as HTMLElement).getByRole("button", { name: "Un-snooze CORE-2: Which format?" })
+    );
     await waitFor(() => expect(headings()).toEqual(["Waiting on you"]));
     expect(unsnoozeAsk).toHaveBeenCalledWith("ask-b");
     expect(rowIds()).toEqual(["ask-a", "ask-b"]);
@@ -1560,7 +1562,9 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
   const { unmount } = renderInbox();
   try {
     await screen.findByText("Which format?");
-    fireEvent.change(screen.getByLabelText("Snooze CORE-1"), { target: { value: "tomorrow" } });
+    fireEvent.change(screen.getByLabelText("Snooze CORE-1: Which format?"), {
+      target: { value: "tomorrow" },
+    });
 
     // The optimistic update has already put the row in Later, which is right - it is where the
     // snooze is going - but the label must say what the reader did, not where the row landed.
@@ -1577,7 +1581,9 @@ test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it
       await Promise.resolve();
     });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Un-snooze CORE-1" }).textContent).toBe("Un-snooze")
+      expect(
+        screen.getByRole("button", { name: "Un-snooze CORE-1: Which format?" }).textContent
+      ).toBe("Un-snooze")
     );
     expect(screen.queryByText("Snoozing…")).toBeNull();
   } finally {
@@ -1598,7 +1604,9 @@ test("a refused snooze rolls the row back and says why, where the reader can sti
   const { unmount } = renderInbox();
   try {
     await screen.findByText("Which format?");
-    fireEvent.change(screen.getByLabelText("Snooze CORE-1"), { target: { value: "tomorrow" } });
+    fireEvent.change(screen.getByLabelText("Snooze CORE-1: Which format?"), {
+      target: { value: "tomorrow" },
+    });
 
     // The row comes back to the band it was in, and the reason comes with it - the control is
     // kept mounted through the fold, so the refusal is not thrown away with the row.

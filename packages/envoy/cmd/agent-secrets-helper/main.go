@@ -10,6 +10,7 @@
 //
 //	agent-secrets-helper [serve]     run (the unit's ExecStart)
 //	agent-secrets-helper sessions    list live sessions: pid, runtime_id, enrollment_id, state
+//	agent-secrets-helper --version   the release this binary was built as
 package main
 
 import (
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
 type config struct {
@@ -60,6 +62,10 @@ func main() {
 	if len(os.Args) > 1 {
 		sub = os.Args[1]
 	}
+	if sub == "--version" {
+		fmt.Printf("agent-secrets-helper %s\n", buildversion.String())
+		return
+	}
 	cfg, err := loadConfig(os.Getenv)
 	fatal(err)
 	switch sub {
@@ -68,7 +74,7 @@ func main() {
 	case "sessions":
 		fatal(printSessions(cfg.Socket))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: agent-secrets-helper [serve|sessions]")
+		fmt.Fprintln(os.Stderr, "usage: agent-secrets-helper [serve|sessions|--version]")
 		os.Exit(2)
 	}
 }
@@ -109,7 +115,9 @@ func serve(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	srv.Recover(ctx)
-	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL)
+	// The version and the credential say which release a restart came up on and that it holds no
+	// launcher credential yet (a restart discards it), so the journal answers both.
+	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL, "version", buildversion.String(), "launcher_credential", srv.Broker.HasCredential())
 	return srv.Serve(ctx, ln)
 }
 

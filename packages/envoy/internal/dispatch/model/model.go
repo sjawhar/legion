@@ -425,7 +425,8 @@ type ArtifactApproval struct {
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
 // artifact.changes_requested: the review pinned to its version, and the approval
-// ask it answered (nil when given from the document header with no request open).
+// ask it answered (nil when given from the document header with no request open at
+// that version).
 type ArtifactReviewEventPayload struct {
 	ArtifactID string  `json:"artifact_id"`
 	Name       string  `json:"name"`

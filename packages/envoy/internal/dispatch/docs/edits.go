@@ -864,15 +864,21 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 				return nil, err
 			}
 		}
+		// A document with nothing in it holds one empty paragraph, which the insert takes the place
+		// of rather than leaving an empty line beside what it writes, so it lands at the start.
+		at := pmdoc.Range{From: position, To: position}
+		if pmdoc.EmptyDocument(tree) {
+			at = pmdoc.Range{From: 0, To: pmdoc.Size(tree)}
+		}
 		// Front matter opens only the document's start, so only there does the insert read it.
-		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position), budget)
+		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, at.From), budget)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
 			return out, invalidSchemaOp("markdown", err)
 		}
-		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		out, err := pmdoc.Splice(tree, at, with)
 		if err != nil {
 			return nil, invalidSchemaOp("markdown", err)
 		}
