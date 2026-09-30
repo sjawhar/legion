@@ -11,7 +11,7 @@
 #   security-run.sh summarize [--osv osv.json] [--govulncheck govulncheck.json]… --out deps-summary.json
 #   security-run.sh report --zizmor zizmor-findings.json --deps deps-summary.json --run-id ID
 #       --event EVENT --head SHA --base SHA --report-only-zizmor true|false
-#       --report-only-dependencies true|false --workflows RESULT --dependencies RESULT
+#       --report-only-dependencies true|false --window RESULT --workflows RESULT --dependencies RESULT
 #       --out security-report.json
 #   security-run.sh enforce security-report.json
 #
@@ -59,20 +59,21 @@
 # report — the security job's security-report.json, which scripts/security-report.sh reads, from
 # the run's two artifacts: {run_id, event, head_sha, base_sha, report_only: {zizmor, dependencies},
 # zizmor: {head_count, new_count, by_audit, tool_error}, osv, govulncheck, tool_error, gate:
-# {workflows, dependencies}}. Each --report-only-* is that check's flag as the window job read it
-# from .github/security-window.json; an empty one (the window job did not run) and an empty --base
-# are null. A missing or malformed artifact records a tool error for its half, never a clean run,
-# and says why on stderr: zizmor-findings.json is either zizmor-findings.sh's output or the
-# workflow's {"tool_error": true} form; deps-summary.json is summarize's output. The step summary's
-# markdown table goes to stdout.
+# {window, workflows, dependencies}}, gate holding each job's result. Each --report-only-* is that
+# check's flag as the window job read it from .github/security-window.json; an empty one (the
+# window job did not run) and an empty --base are null. A missing or malformed artifact records a
+# tool error for its half, never a clean run, and says why on stderr: zizmor-findings.json is either
+# zizmor-findings.sh's output or the workflow's {"tool_error": true} form; deps-summary.json is
+# summarize's output. The step summary's markdown table goes to stdout.
 #
-# enforce — the security job's last step. A check whose flag in security-report.json is false is
-# blocking, and enforce exits 1 when that check's job (workflows for zizmor, dependencies for the
-# dependency scanners) concluded anything but success: that job's Gate no longer runs under
-# continue-on-error, so its failure is the finding. A check whose flag is true is report-only and
-# never fails here, so requiring the security check refuses nothing a report-only check found. A
-# flag that is unknown (null: the window job read none) fails: nothing says that check is
-# report-only.
+# enforce — the security job's last step. It exits 1 when the window job concluded anything but
+# success: the scanner jobs need it, so they did not run, and whatever flags it wrote were not read
+# to the end. A check whose flag in security-report.json is false is blocking, and enforce exits 1
+# when that check's job (workflows for zizmor, dependencies for the dependency scanners) concluded
+# anything but success: that job's Gate no longer runs under continue-on-error, so its failure is
+# the finding. A check whose flag is true is report-only and never fails here, so requiring the
+# security check refuses nothing a report-only check found. A flag that is unknown (null: the
+# window job read none) fails: nothing says that check is report-only.
 #
 # Exit codes: 0 printed, written or nothing to enforce; 1 a blocking check's job did not succeed, a
 # flag enforce does not know, or a window file window-check refuses; 2 a usage error, a report
@@ -454,7 +455,7 @@ def markdown(report):
 
 def report(args):
     flags = ("--zizmor", "--deps", "--run-id", "--event", "--head", "--base", "--report-only-zizmor",
-             "--report-only-dependencies", "--workflows", "--dependencies", "--out")
+             "--report-only-dependencies", "--window", "--workflows", "--dependencies", "--out")
     opts = options(args, flags)
     missing = [flag for flag in flags if flag not in opts]
     if missing:
@@ -476,7 +477,7 @@ def report(args):
         "osv": deps["osv"],
         "govulncheck": deps["govulncheck"],
         "tool_error": zizmor["tool_error"] or deps["osv"]["tool_error"] or deps["govulncheck"]["tool_error"],
-        "gate": {"workflows": opts["--workflows"], "dependencies": opts["--dependencies"]},
+        "gate": {"window": opts["--window"], "workflows": opts["--workflows"], "dependencies": opts["--dependencies"]},
     }
     write(opts["--out"], result)
     print(markdown(result))
@@ -499,9 +500,13 @@ def enforce(args):
             flag = document["report_only"].get(check, "missing")
             need(flag is None or isinstance(flag, bool), f"has no report_only.{check} of true, false or null")
             need(isinstance(document["gate"].get(job), str), f"has no gate.{job}")
+        need(isinstance(document["gate"].get("window"), str), "has no gate.window")
     except Malformed as error:
         usage(f"enforce: {args[0]} {error}")
-    failed = False
+    failed = document["gate"]["window"] != "success"
+    if failed:
+        print(f"::error::the window job concluded {document['gate']['window']}: the scanner jobs need it, so they did "
+              "not run, and its flags are not a finished reading")
     for check, job in GATE_JOBS.items():
         flag, result = document["report_only"][check], document["gate"][job]
         if flag is None:

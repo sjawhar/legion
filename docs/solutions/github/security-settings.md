@@ -77,10 +77,10 @@ job's step summary and an annotation name each problem. A pull request's or merg
 is validated and never obeyed: a copy not in its shape fails the `window` job, so a malformed file
 cannot reach `main`. The `security` job gathers each run's counts and both flags into the
 `security-report` artifact and the step summary. Its last step enforces: once a check's flag is
-not `true`, `security` fails whenever that check's job did not succeed, and it fails on a flag the
-`window` job never produced, so a ruleset that requires the `security` check refuses what a
-promoted check found; while the flag is `true`, `security` stays `success` whatever the check
-found.
+not `true`, `security` fails whenever that check's job did not succeed, so a ruleset that requires
+the `security` check refuses what a promoted check found; while the flag is `true`, `security`
+stays `success` whatever the check found. It also fails whenever the `window` job did not succeed,
+since then neither scanner job runs, and on a flag the `window` job never produced.
 
 A pull request or merge group reads the flags from its base's copy of the file, not its own; a
 push to `main` and the daily run read `main`'s. So a promotion takes effect on `main` from its

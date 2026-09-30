@@ -361,14 +361,16 @@ jobs:
           BASE_SHA: ${{ needs.window.outputs.base }}
           ZIZMOR_REPORT_ONLY: ${{ needs.window.outputs.zizmor }}
           DEPENDENCIES_REPORT_ONLY: ${{ needs.window.outputs.dependencies }}
+          WINDOW_RESULT: ${{ needs.window.result }}
           WORKFLOWS_RESULT: ${{ needs.workflows.result }}
           DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
         run: |
           .github/scripts/security-run.sh report --zizmor artifacts/zizmor-findings.json \
             --deps artifacts/deps-summary.json --run-id "$RUN_ID" --event "$EVENT" --head "$HEAD_SHA" \
             --base "$BASE_SHA" --report-only-zizmor "$ZIZMOR_REPORT_ONLY" \
-            --report-only-dependencies "$DEPENDENCIES_REPORT_ONLY" --workflows "$WORKFLOWS_RESULT" \
-            --dependencies "$DEPENDENCIES_RESULT" --out security-report.json >> "$GITHUB_STEP_SUMMARY"
+            --report-only-dependencies "$DEPENDENCIES_REPORT_ONLY" --window "$WINDOW_RESULT" \
+            --workflows "$WORKFLOWS_RESULT" --dependencies "$DEPENDENCIES_RESULT" --out security-report.json \
+            >> "$GITHUB_STEP_SUMMARY"
           cat security-report.json
           {
             echo "zizmor_tool_error=$(jq -r .zizmor.tool_error security-report.json)"
@@ -417,8 +419,10 @@ jobs:
 
       # The step that fails this job on a promoted check's finding: a check whose flag is false is
       # blocking, and its job's failure fails this job too, so a ruleset that requires `security`
-      # refuses what a promoted check found. While a check is report-only its job concludes
-      # success and this step passes it by (.github/scripts/security-run.sh enforce).
+      # refuses what a promoted check found. It also fails when the window job did not succeed, since
+      # then neither scanner job ran, and on a flag the window job never produced. While a check is
+      # report-only its job concludes success and this step passes it by
+      # (.github/scripts/security-run.sh enforce).
       - name: Enforce the promoted checks
         if: always() && steps.report.outcome == 'success'
         run: .github/scripts/security-run.sh enforce security-report.json

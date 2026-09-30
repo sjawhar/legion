@@ -119,16 +119,16 @@ check "no subcommand exits 2" "$(is "$rc" 2)"
 summarize deps --osv "$testdata/osv.json" --govulncheck "$testdata/govulncheck.json" \
   --govulncheck "$testdata/govulncheck-clean.json"
 
-# report NAME ZIZMOR DEPS [ARG…]: runs `security-run.sh report` for run 42, a pull request with
-# both checks report-only, into $work/NAME.json; its stdout (the step summary) in $work/NAME.md,
-# stderr in $work/NAME.stderr.
+# report NAME ZIZMOR DEPS [ARG…]: runs `security-run.sh report` for run 42, a pull request whose
+# window job succeeded with both checks report-only, into $work/NAME.json; its stdout (the step
+# summary) in $work/NAME.md, stderr in $work/NAME.stderr.
 report() {
   local name="$1" zizmor="$2" deps="$3"
   shift 3
   rc=0
   "$run_script" report --zizmor "$zizmor" --deps "$deps" --run-id 42 --event pull_request \
     --head abc123 --base def456 --report-only-zizmor true --report-only-dependencies true \
-    --workflows success --dependencies success --out "$work/$name.json" "$@" \
+    --window success --workflows success --dependencies success --out "$work/$name.json" "$@" \
     > "$work/$name.md" 2> "$work/$name.stderr" || rc=$?
 }
 
@@ -142,7 +142,8 @@ check "zizmor: head count, new count and the count per audit" \
 check "osv and govulncheck as summarized" \
   "$(is "$(out full '[.osv, .govulncheck]')" '[{"total":5,"with_fix":3,"tool_error":false},{"reachable":1,"informational":1,"tool_error":false}]')"
 check "no tool error" "$(is "$(out full .tool_error)" false)"
-check "the scanner jobs' results" "$(is "$(out full .gate)" '{"workflows":"success","dependencies":"success"}')"
+check "the window and scanner jobs' results" \
+  "$(is "$(out full .gate)" '{"window":"success","workflows":"success","dependencies":"success"}')"
 check "the step summary's rows" "$(is "$(cat "$work/full.md")" "## Security (report_only: zizmor true, dependencies true)
 
 | check | result |
@@ -209,7 +210,7 @@ enforce() {
   "$run_script" enforce "$work/$1.json" > "$work/$1.enforce" 2>&1 || rc=$?
 }
 
-echo "=== 10. enforce: the security job fails only for a promoted check whose gate failed ==="
+echo "=== 10. enforce: the security job fails for a promoted check whose gate failed, an unknown flag, or a window job that did not succeed ==="
 report open-failed "$work/zizmor-findings.json" "$work/deps.json" --workflows failure --dependencies failure
 enforce open-failed
 check "both checks report-only, both gates failed: exits 0" "$(is "$rc" 0)"
@@ -241,6 +242,19 @@ check "naming each unknown flag" \
     echo true || echo false)"
 check "and prints no 'not enforced'" \
   "$( [ "$(contains "$(cat "$work/flags-unknown.enforce")" "not enforced")" = false ] && echo true || echo false)"
+report window-failed "$work/zizmor-findings.json" "$work/deps.json" --window failure \
+  --workflows skipped --dependencies skipped
+enforce window-failed
+check "the window job failed after writing its flags (both true), the scanner jobs skipped: exits 1" "$(is "$rc" 1)"
+check "naming the window job's result" \
+  "$(contains "$(cat "$work/window-failed.enforce")" "the window job concluded failure")"
+report window-cancelled "$work/zizmor-findings.json" "$work/deps.json" --window cancelled \
+  --report-only-zizmor false --report-only-dependencies false
+enforce window-cancelled
+check "a window job that did not succeed fails even with every scanner job green: exits 1" "$(is "$rc" 1)"
+jq 'del(.gate.window)' "$work/zizmor-failed.json" > "$work/no-window.json"
+enforce no-window
+check "a report without the window job's result exits 2" "$(is "$rc" 2)"
 rc=0
 "$run_script" enforce "$work/nowhere.json" > /dev/null 2>&1 || rc=$?
 check "a missing report exits 2" "$(is "$rc" 2)"

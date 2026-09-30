@@ -185,7 +185,7 @@ security_report() {
   printf '%s' "$1" > "$dir/zizmor-findings.json"
   "$producers/security-run.sh" report --zizmor "$dir/zizmor-findings.json" --deps "$work/deps/$2.json" \
     --run-id 1 --event push --head 0 --base "" --report-only-zizmor true --report-only-dependencies true \
-    --workflows success --dependencies success --out "$dir/security-report.json" > /dev/null
+    --window success --workflows success --dependencies success --out "$dir/security-report.json" > /dev/null
   cat "$dir/security-report.json"
 }
 clean_report=$(security_report "$(zizmor_findings '[]')" clean)
