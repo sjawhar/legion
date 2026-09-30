@@ -147,6 +147,15 @@ const ReceiptTimeoutCause = "The listener didn't answer within the send window; 
 // cannot drift apart.
 const MaxBroadcastRecipients = 100
 
+// SearchQueryMax is the longest GET /api/v1/search query, in UTF-16 units. Generated from
+// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the dispatch_search tool's
+// cannot drift apart.
+const SearchQueryMax = 1000
+
+// SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
+// from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
+const SearchQueryHint = "search with a short phrase of a few words, not a passage"
+
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
