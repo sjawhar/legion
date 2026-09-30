@@ -331,12 +331,14 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// stored so when the suggestion is created, but one created before that holds its text as
 		// sent.
 		with := pmdoc.LineFeeds(replaceWith)
+		// The replacement's markdown and the tables its splice cuts are this accept's to pad.
+		budget := pmdoc.NewTablePaddingBudget()
 		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node
 		if code {
 			replacement = codeReplacement(acceptedCode(tree, with, at, range_))
-		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
+		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From), budget); err != nil {
 			return err
 		}
 		// Accepted text stays inside every ask and comment anchor the suggestion lay wholly inside,
@@ -357,8 +359,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// after a reject, before anything reads the accept back, where the browser's accept writes
 		// the replacement where Splice does (padsLikeTheBrowser).
 		if padsLikeTheBrowser(tree, range_, at, inline) {
-			if next, err = padCutTables(tree, next, range_); err != nil {
-				return err
+			if next, err = padCutTables(tree, next, range_, budget); err != nil {
+				return acceptSpliceRefusal(err)
 			}
 		}
 		if code {

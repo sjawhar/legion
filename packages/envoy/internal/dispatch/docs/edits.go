@@ -445,7 +445,12 @@ func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 	return applyOperationsWithValidation(tree, ops, nil)
 }
 
+// applyOperationsWithValidation applies ops as applyOperations does, running validate before each.
+// The batch is one caller write, so its operations' markdown and table rows spend one table-padding
+// budget; each run of a batch - a conditional one runs to check its anchors and preconditions as
+// well as to apply - takes its own, so no run charges the batch's padding twice.
 func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
+	budget := pmdoc.NewTablePaddingBudget()
 	before, err := nodeToken(tree)
 	if err != nil {
 		return editBatch{}, err
@@ -482,7 +487,7 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 				}
 			}
 		}
-		next, err := applyOperation(tree, op)
+		next, err := applyOperation(tree, op, budget)
 		if err != nil {
 			return editBatch{}, stampOperation(index, err)
 		}
@@ -753,7 +758,9 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 	}
 }
 
-func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
+// applyOperation applies op to tree, padding the tables and table rows it writes on budget, its
+// batch's.
+func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
 	// Every text an operation writes - a replace's with, an insert's markdown, whether it becomes
 	// blocks or table rows, and a retype's attributes - reaches the document with line feeds
 	// alone (pmdoc.LineFeeds), before any check below reads it.
@@ -858,11 +865,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			}
 		}
 		// Front matter opens only the document's start, so only there does the insert read it.
-		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position))
+		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position), budget)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
 			return out, invalidSchemaOp("markdown", err)
 		}
 		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
@@ -1276,9 +1283,9 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 
 // inlineAware parses a suggestion's replacement as blocks written into the document, keeping the
 // edge whitespace of a replacement that stays inline. opensDocument says whether the replacement
-// lands where the document begins.
-func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.Node, error) {
-	tree, err := parseFragmentInput(markdown, opensDocument)
+// lands where the document begins; its tables are padded on budget, the accept's.
+func inlineAware(markdown string, edges textEdges, opensDocument bool, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+	tree, err := parseFragmentInput(markdown, opensDocument, budget)
 	if err != nil {
 		return nil, err
 	}
