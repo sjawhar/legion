@@ -41,15 +41,8 @@ base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
-# A reused ACCEPT_EVIDENCE_DIR holds an earlier run's key command, whose calls are not this run's.
-if [ -e "$evidence/model-gateway" ]; then
-  echo "FAIL setup: $evidence/model-gateway is an earlier run's; give this run an evidence directory of its own" >&2
-  rmdir "$work"
-  exit 1
-fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
-gateway_dest= # the key command's directory once this run installs it (lib/model-gateway-unserved.sh)
 check=setup
 TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="AC$(( ($$ + stamp) % 100000000 ))"
@@ -107,7 +100,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local status=$? p
+  local p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -139,7 +132,9 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
-  bash "$unserved_reader" --notes "$status" "$gateway_dest" "$check_started" "$check" >&2
+  # Only a hard failure gets notes: a run that ends on its soft failures sets ok after its last
+  # check, once every pane has stopped, so its notes could only be empty.
+  [ -n "${ok:-}" ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$check_started" "$check" >&2
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
@@ -164,6 +159,8 @@ trap 'printf "FAIL %s: line %s exited %s: %s\n" "$check" "$LINENO" "$?" "$BASH_C
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# A reused ACCEPT_EVIDENCE_DIR holds an earlier run's key command.
+reason=$(bash "$unserved_reader" --fresh "$evidence") || fail "$reason"
 
 # ---- the rig: copied from stage3-devbox-workflow.sh ------------------------------------------------
 start_listener() {
@@ -615,8 +612,7 @@ printf '%s\n' "$head_commit" >"$evidence/head.txt"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-gateway_dest=$evidence/model-gateway
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed"
 note "the agents' model route keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"

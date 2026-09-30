@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -151,7 +151,8 @@ describe("the model gateway key command", () => {
     // Each agent's own file does.
     const s = unserved("--record", calls("starved"));
     expect(s.code).toBe(75);
-    expect(s.stdout).toContain(`${join(run, "starved", "cwd")}: timeout: `);
+    expect(s.stdout).toContain(`in ${join(run, "starved", "cwd")} (pid `);
+    expect(s.stdout).toContain("): timeout: ");
     expect(s.stdout).toContain("9021 ms of a 9000 ms budget");
     const r = unserved("--record", calls("refused"));
     expect(r.code).toBe(77);
@@ -179,7 +180,7 @@ describe("the model gateway key command", () => {
     expect(unserved("--record", file)).toMatchObject({ code: 0, stdout: "" });
   });
 
-  test("tells a failed stage proof which agents got no key since its failing check began, and never changes its status", async () => {
+  test("tells a failed stage proof which agents got no key since its failing check began", async () => {
     const { run, dest, mints, keyCommand } = install();
     await call(keyCommand, join(run, "pane-earlier"), mints, { mode: "budget" });
     // The failing check begins after that call. The record's times are whole seconds, so it begins
@@ -191,7 +192,7 @@ describe("the model gateway key command", () => {
     await call(keyCommand, join(run, "pane-recovered"), mints, { mode: "budget" });
     await call(keyCommand, join(run, "pane-recovered"), mints);
 
-    const notes = unserved("--notes", "1", dest, since, "held-worker");
+    const notes = unserved("--notes", dest, since, "held-worker");
     expect(notes.code).toBe(0);
     expect(notes.stdout).toStartWith(
       `model-gateway-unserved: since check held-worker began (${since}), 3 agent(s) got no model key, 2 of them still without one`
@@ -208,15 +209,12 @@ describe("the model gateway key command", () => {
     expect(of("pane-starved")).not.toContain("served again");
     // An agent served again after its starve recovered, but spent the wait the check may have needed.
     expect(of("pane-recovered")).toMatch(/: timeout: .*; served again at \d{4}-/);
-    // A pass says nothing, nor does a run that failed before it installed the key command (an
-    // empty directory), since a directory an earlier run left holds that run's calls.
-    expect(unserved("--notes", "0", dest, since, "held-worker")).toMatchObject({
+    // A run that failed before it installed the key command has no record to read.
+    expect(unserved("--notes", join(run, "not-installed"), since, "setup")).toMatchObject({
       code: 0,
       stdout: "",
     });
-    expect(unserved("--notes", "1", "", since, "setup")).toMatchObject({ code: 0, stdout: "" });
-    expect(unserved("--notes", "x", dest, since, "setup").code).toBe(2);
-    expect(unserved("--notes", "1", dest, "yesterday", "setup").code).toBe(2);
+    expect(unserved("--notes", dest, "yesterday", "setup").code).toBe(2);
   }, 30_000);
 
   test("gives up on a mint that outlasts the caller, and on the wait behind it, before Oh My Pi's ten seconds", async () => {
@@ -236,7 +234,7 @@ describe("the model gateway key command", () => {
       expect([c.code, c.stdout]).toEqual([1, ""]);
       expect(c.ms).toBeLessThan(10_000);
     }
-    const notes = unserved("--notes", "1", dest, since, "outlast").stdout;
+    const notes = unserved("--notes", dest, since, "outlast").stdout;
     expect(notes).toContain(": timeout: the mint ran past the call's 9500 ms");
     expect(notes).toContain("for another call's mint");
   }, 30_000);
@@ -247,4 +245,41 @@ describe("the model gateway key command", () => {
     install({ sleep: 11 });
     expect(performance.now() - started).toBeGreaterThan(11_000);
   }, 30_000);
+
+  test("keeps the installer's preflight out of the record, and says why it got no key once", () => {
+    const run = join(dir, "preflight-refused");
+    mkdirSync(join(run, "omp-home", ".omp"), { recursive: true });
+    const result = Bun.spawnSync(
+      [
+        "bash",
+        join(lib, "install-model-gateway.sh"),
+        "--profile",
+        "legion-e2e-test",
+        "--home",
+        join(run, "omp-home"),
+        "--dest",
+        join(run, "model-gateway"),
+        "--cache-dir",
+        join(run, "model-gateway-cache"),
+      ],
+      { env: env(join(run, "mints"), { mode: "refused" }) }
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain(
+      "the preflight got no gateway key: hawk-token key command: no key (failed): hawk-token exited 1 without a key: error: no usable hawk login"
+    );
+    // The preflight is no agent: a failed run's notes do not count it, nor repeat its reason.
+    expect(existsSync(join(run, "model-gateway", "hawk-token.calls"))).toBe(false);
+  });
+
+  test("refuses a stage proof's evidence directory an earlier run left a key command in", () => {
+    const evidence = join(dir, "evidence");
+    mkdirSync(evidence);
+    expect(unserved("--fresh", evidence)).toMatchObject({ code: 0, stdout: "" });
+    mkdirSync(join(evidence, "model-gateway"));
+    const reused = unserved("--fresh", evidence);
+    expect(reused.code).toBe(1);
+    expect(reused.stdout).toContain("is an earlier run's key command");
+  });
 });

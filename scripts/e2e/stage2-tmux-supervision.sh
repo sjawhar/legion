@@ -30,7 +30,6 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e2.$$.XXXXXXXX")
 ok=
-gateway_dest= # the key command's directory once this run installs it (lib/model-gateway-unserved.sh)
 daemon_pid=
 deadline_pid=
 listener_pid=
@@ -109,7 +108,7 @@ run_processes() {
   done
 }
 cleanup() {
-  local status=$? p
+  local p
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
   for p in "$ptoken" "$deadline_ptoken"; do
@@ -123,7 +122,7 @@ cleanup() {
     rm -rf "$work" || true
   else
     echo "the run's workspace is $work (daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
-    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$status" "$gateway_dest" "$check_started" "$check" >&2
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$work/model-gateway" "$check_started" "$check" >&2
   fi
   return 0
 }
@@ -237,8 +236,7 @@ make_omp_home "$omp_home"
 # The model route, installed while this shell still holds the operator's HOME and XDG directories,
 # which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring
 # stops the run here, by name.
-gateway_dest=$work/model-gateway
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$gateway_dest" --cache-dir "$work/model-gateway-cache") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers

@@ -602,8 +602,8 @@ every agent transcript (the tree pods' and, under `transcripts/controller/`, the
 controller's), the interest samples, the audit files and the negative controls. What the
 run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
 `stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
-on whether the controller, the key command's one caller, got no model key since that check began;
-or `stage 4b e2e: BLOCKED (check <check>)` when a prerequisite stopped the run, which then proved
+on whether the controller got no model key since that check began; or
+`stage 4b e2e: BLOCKED (check <check>)` when a prerequisite stopped the run, which then proved
 nothing and gets no notes. Every one but the pass exits 1.
 
 Three roots are set todo under `admission_cap: 2`:
@@ -1097,8 +1097,9 @@ Its first mint is the preflight, before any pane exists. It exits 1 naming the c
 `hawk-token`, `flock` or `timeout` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
 `lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
-unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
-last line of its stderr); an argument refusal exits 2. The installer runs that one call with
+unlock-keyring skill) and rerun`), when the key command gets no key (quoting its own reason: the
+outcome and `hawk-token`'s last stderr line), and when `hawk-token` prints anything but one JWT;
+an argument refusal exits 2. The installer runs that one call with
 `--preflight`, which exempts it from the key command's deadline (below): on a machine where
 `hawk-token` has never run, its first-run build takes about a minute in the foreground, and it
 happens here rather than inside a pane's ten-second `!command`. The key is never printed.
@@ -1128,8 +1129,10 @@ the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wa
 one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
 succeeds is served inside every caller's ten seconds.
 
-Every call appends one tab-separated line to `<dir>/hawk-token.calls`: the time, the caller's pid,
-the directory Oh My Pi ran it in (the agent's own), the outcome, and a detail. The outcome is
+Every agent's call appends one tab-separated line to `<dir>/hawk-token.calls`: the time, the
+caller's pid, the directory Oh My Pi ran it in (the agent's own), the outcome, and a detail. The
+installer's preflight is no agent's and is left out; a call that gets no key also says why on
+stderr, which is where the installer reads the preflight's reason. The outcome is
 `served`; `timeout` when the call ran out of time — its own deadline, its wait behind another call's
 mint, or `hawk-token` saying it spent its whole budget (`in <spent> ms of a <budget> ms budget`,
 spent at least the budget); `killed` when a signal ended the mint while it had time left; and
@@ -1152,7 +1155,8 @@ whatever the cause, so a run cannot say for itself that it never got a model tur
 
 ```sh
 bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-calls"                                # a scorer: one agent run
-bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$status" "$gateway_dest" "$check_started" "$check"         # a stage proof's EXIT trap
+bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$evidence/model-gateway" "$check_started" "$check"  # a failed stage proof's EXIT trap
+bash scripts/e2e/lib/model-gateway-unserved.sh --fresh "$evidence"                                         # a stage proof's setup
 ```
 
 An agent's last call decides whether it went without a key: Oh My Pi retries a failed key command
@@ -1168,21 +1172,24 @@ outcome. It exits 0 when the last call was served or the file holds none (no fil
 checkout whose key command predates the record carries the same signal without the reason: no
 session file at all.
 
-`--notes` is a stage proof's diagnostic, and never changes its exit status. A failed run prints,
-after the check's own failure, each agent (the calls from one working directory) that got no key at
-or after `<since>`, the time the failing check began: when, from which directory, and why. One whose
-last call got no key is still without one. One served again later is listed too, with when, since
-Oh My Pi backs a failed key command off 30 s before retrying: that agent recovered but spent the
-wait, which can time out a check that waited on it. A starve before the check began is not listed.
-A person then sees whether starvation could explain the failure. A run-wide "not scored"
+`--notes` is a stage proof's diagnostic: the `EXIT` trap runs it once it has decided the run
+failed, and it never changes the exit status. It prints, after the check's own failure, each agent
+(the calls from one working directory) that got no key at or after `<since>`, the time the failing
+check began: when, from which directory, and why. One whose last call got no key is still without
+one. One served again later is listed too, with when: it recovered, but spent the 30 s Oh My Pi
+waits before retrying, which can time out a check that waited on it. A starve before the check
+began is left out, whether the agent was served again before the check or made no call during it:
+either way it was not the failing check's, and so is every call an earlier run left, which predates
+`<since>`. A person then sees whether starvation could explain the failure. A run-wide "not scored"
 would not be honest: in Stage 4b the key command's one caller is the operator's controller, while
 every pod uses its projected token, so a worker's failure cannot come from a starved controller.
-`<dest>` is the key command's directory this run created, and empty until it did: each stage proof
-sets it just before installing the key command, and refuses, before it installs its `EXIT` trap,
-an evidence directory that already holds one, whose calls would be an earlier run's.
 
-Either form exits 2 on an argument refusal (a `--record` in a directory that does not exist
-included), and 1 on a record line whose outcome it does not know.
+`--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make at setup, through their
+own `fail`, when the operator's evidence directory already holds `model-gateway/`: the key command
+would refuse that `--dest` anyway, and the message says why.
+
+Every form exits 2 on an argument refusal (a `--record` in a directory that does not exist
+included), and `--record` and `--notes` 1 on a record line whose outcome they do not know.
 
 ## lib/check-model-route.sh
 

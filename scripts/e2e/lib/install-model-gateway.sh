@@ -166,13 +166,15 @@ done
 # agent's ten seconds, and is where hawk-token's first-run build (in the foreground, about a minute)
 # happens on a fresh machine, so that one call has no deadline.
 #
-# Every call appends its outcome to the record, tab-separated: time, caller pid, caller working
-# directory, outcome and detail. The outcome is served, timeout (the call ran out of time: its own
-# deadline, its wait behind another call's mint, or hawk-token's budget), killed (a signal ended the
-# mint while it had time left) or failed (the mint ended without a key for any other reason). A
-# caller whose environment names MODEL_GATEWAY_CALLS_FILE gets its line there too: that is for a
-# harness that runs one agent per run and names a file of that run's own, which does not exist
-# before the run (lib/model-gateway-unserved.sh --record).
+# Every agent's call appends its outcome to the record, tab-separated: time, caller pid, caller
+# working directory, outcome and detail. The outcome is served, timeout (the call ran out of time:
+# its own deadline, its wait behind another call's mint, or hawk-token's budget), killed (a signal
+# ended the mint while it had time left) or failed (the mint ended without a key for any other
+# reason). The installer's preflight is no agent, so it is not recorded; a call that gets no key
+# also says why on stderr, which is where the installer reads it. A caller whose environment names
+# MODEL_GATEWAY_CALLS_FILE gets its line there too: that is for a harness that runs one agent per
+# run and names a file of that run's own, which does not exist before the run
+# (lib/model-gateway-unserved.sh --record).
 EOF
   printf 'log=%q\n' "$log"
   printf 'cache=%q\n' "$cache_dir/hawk-token.key"
@@ -213,9 +215,10 @@ left_ms() { left=$((deadline_ms - (${EPOCHREALTIME/[.,]/} - started_us) / 1000))
 TZ=UTC printf '%(%FT%TZ)T invoked by pid %s\n' -1 "$PPID" >>"$log"
 # PWD names the directory Oh My Pi ran the call in, the agent's own, physically.
 cd -P . || exit
-# record OUTCOME DETAIL appends this call's line to the record, and to the caller's
+# record OUTCOME DETAIL appends an agent's call to the record, and to the caller's
 # MODEL_GATEWAY_CALLS_FILE when its environment names one.
 record() {
+  [ -z "$preflight" ] || return 0
   local at line detail=${2//[$'\t\n']/ }
   TZ=UTC printf -v at '%(%FT%TZ)T' -1
   printf -v line '%s\t%s\t%s\t%s\t%s' "$at" "$PPID" "${PWD//[$'\t\n']/ }" "$1" "$detail"
@@ -232,10 +235,11 @@ serve_kept() {
   printf '%s\n' "$key"
   exit 0
 }
-# no_key OUTCOME DETAIL records and logs why this call gets no key, and ends it.
+# no_key OUTCOME DETAIL records, logs and says on stderr why this call gets no key, and ends it.
 no_key() {
   record "$1" "$2"
   TZ=UTC printf '%(%FT%TZ)T no key for pid %s (%s): %s\n' -1 "$PPID" "$1" "$2" >>"$log"
+  printf 'hawk-token key command: no key (%s): %s\n' "$1" "$2" >&2
   exit 1
 }
 serve_kept
@@ -303,16 +307,22 @@ EOF
 } >"$key_command"
 chmod 0700 "$key_command"
 
-# The preflight mint: the value is checked for a JWT's shape and never printed.
+# The preflight mint: the value is checked for a JWT's shape and never printed. A call that gets no
+# key says why on stderr.
 status=0
-key=$("$key_command" --preflight) || status=$?
-if [ "$status" != 0 ] || ! [[ "$key" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
-  why=$(grep -v -e '^[0-9TZ:-]* invoked by pid' -e '^[0-9TZ:-]* minted a key for pid' -e '^[0-9TZ:-]* no key for pid' "$log" | grep -v '^[[:space:]]*$' | tail -1 || true)
+key=$("$key_command" --preflight 2>"$cache_dir/hawk-token.preflight") || status=$?
+reason=$(<"$cache_dir/hawk-token.preflight")
+rm -f "$cache_dir/hawk-token.preflight"
+if [ "$status" != 0 ]; then
   unset key
   if grep -qi keyring "$log"; then
-    fail "the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the unlock-keyring skill) and rerun. hawk-token: $why"
+    fail "the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the unlock-keyring skill) and rerun ($reason; log: $log)"
   fi
-  fail "$key_command (hawk-token) exited $status without a gateway key; hawk-token: ${why:-no output} (log: $log)"
+  fail "the preflight got no gateway key: ${reason:-$key_command exited $status and said nothing} (log: $log)"
+fi
+if ! [[ "$key" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+  unset key
+  fail "$key_command printed something other than one JWT (log: $log)"
 fi
 unset key
 
