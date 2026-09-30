@@ -84,10 +84,10 @@ func documentBlock(doc *Node, target Range, caller string) (index, start, end in
 	return 0, 0, 0, ErrTargetNotFound
 }
 
-// InsertTableRows inserts a pipe-table row fragment beside the row containing
-// target. It reports inserted=false when target is outside a table or markdown
-// is not exclusively table rows.
-func InsertTableRows(doc *Node, target Range, markdown string, after bool) (*Node, bool, error) {
+// InsertTableRows inserts a pipe-table row fragment beside the row containing target, its rows
+// padded to the table's width on budget, the caller write's. It reports inserted=false when target
+// is outside a table or markdown is not exclusively table rows.
+func InsertTableRows(doc *Node, target Range, markdown string, after bool, budget *TablePaddingBudget) (*Node, bool, error) {
 	if doc == nil || doc.Type != "doc" {
 		return nil, false, fmt.Errorf("%w: InsertTableRows wants a document", ErrSchema)
 	}
@@ -116,7 +116,7 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool) (*Nod
 
 	table := nodeAtPath(doc, tablePath)
 	width := len(table.Children[0].Children)
-	rows, supported, err := parseTableRows(markdown, width)
+	rows, supported, err := parseTableRows(markdown, width, budget)
 	if err != nil || !supported {
 		return nil, supported, err
 	}

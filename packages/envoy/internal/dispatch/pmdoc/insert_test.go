@@ -63,7 +63,7 @@ func TestTableRowInsertAfterCellAnchorExtendsContainingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, inserted, err := InsertTableRows(doc, anchor, "| A11 | new |\n", true)
+	out, inserted, err := InsertTableRows(doc, anchor, "| A11 | new |\n", true, NewTablePaddingBudget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestTableRowInsertBeforeCellAnchorExtendsContainingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, inserted, err := InsertTableRows(doc, anchor, "| A11 | new |\n", false)
+	out, inserted, err := InsertTableRows(doc, anchor, "| A11 | new |\n", false, NewTablePaddingBudget())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = InsertTableRows(doc, anchor, "| A11 | new | extra |\n", true)
+	_, _, err = InsertTableRows(doc, anchor, "| A11 | new | extra |\n", true, NewTablePaddingBudget())
 	if !errors.Is(err, ErrTableWidth) {
 		t.Fatalf("InsertTableRows() error = %v, want ErrTableWidth", err)
 	}
@@ -120,7 +120,7 @@ func TestTableRowInsertPadsRowsToContainingTableWidth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, inserted, err := InsertTableRows(doc, anchor, "| A11 |\n", true)
+	out, inserted, err := InsertTableRows(doc, anchor, "| A11 |\n", true, NewTablePaddingBudget())
 	if err != nil {
 		t.Fatal(err)
 	}

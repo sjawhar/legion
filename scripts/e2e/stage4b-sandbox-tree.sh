@@ -1403,6 +1403,12 @@ issue's own primary document and registers the gate, then waits. Apart from that
 a targeted human Dispatch message gives the next exact proof operation. Follow that instruction
 precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
 smoke branch.
+
+## Scope of this proof
+
+The controller hands Legion no issue itself: this proof admits only the issues its driver sets to
+`todo`. LEGSMOKE holds earlier runs' roots, and a slot the proof frees stays for the tree the driver
+admits next.
 EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
