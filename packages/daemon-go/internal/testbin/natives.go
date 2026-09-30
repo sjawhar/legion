@@ -29,6 +29,10 @@ import (
 //
 // It assumes the test's environment names no XDG_DATA_HOME, as no test that runs omp does: omp
 // keeps its natives under $XDG_DATA_HOME/omp when that directory exists.
+//
+// pi-envoy's real-binary tests keep the same copy
+// (packages/pi-envoy/extensions/test-omp-natives.ts): the same directory, name, layout, lock and
+// fill, so either language fills it for the other. A change to one is a change to both.
 func OMPHome(t *testing.T, omp, home string) {
 	t.Helper()
 	cache, err := nativesCache(omp)
