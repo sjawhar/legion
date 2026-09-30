@@ -133,7 +133,7 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
 				// probes it.
 				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
-					contract: 3, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
+					contract: 3, roleReferences: references, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
 			} else {
 				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
 					SkipAgentModels: testCase.skip, RoleReferences: references, Log: log})
