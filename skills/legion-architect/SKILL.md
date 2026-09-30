@@ -46,10 +46,12 @@ separate coordinator to finish necessary work.
   already holds the issue, start nothing and write no status, and never close the tree: `done`
   would clear the holder's claim. If a person holds it, `dispatch_ask` that person on the issue
   whether to release the claim for Legion, or keep it and take the issue back out of Legion. If a
-  session holds it, message that session with `envoy_send` (`envoy_sessions` finds its id from
-  the title the refusal names). Either way, tell the controller on its role topic (`envoy_publish`
-  to `notifications.role.legion-<project>-controller`), so its report shows the tree waiting on
-  the claim. A sub-architect claims nothing; its child is the tree's.
+  session holds it, message the session the refusal names with `envoy_send`. Either way, tell the
+  controller on its role topic (`envoy_publish` to
+  `notifications.role.legion-<project>-controller`), so its report shows the tree waiting on the
+  claim. When the holder answers that it released the claim, or the controller tells you the
+  claim no longer holds, claim again and carry on. A sub-architect claims nothing; its child is
+  the tree's.
 
 ## Deployment instructions
 

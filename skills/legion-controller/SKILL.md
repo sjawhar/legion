@@ -150,6 +150,15 @@ only while a slot stands free and no identical wake is still waiting:
 - `tick on <PROJECT>`: the daemon's periodic wake (`controller_wake_interval_seconds`, an hour by
   default), so an earlier walk that found nothing, or a day with no event, is walked again.
 
+**Trees waiting on a claim, first.** A root architect whose claim was refused starts nothing and
+waits, holding its slot, until its root issue's claim is free. Nothing tells it when a session
+holder lets go, so on every walk, before anything below and whether or not a slot is free, read
+each root in `admission.active` whose `issues.<KEY>.phase` is still `admitted` with
+`dispatch_read`. When its `Claimed by:` line is `nobody` or ends `· not running`, tell that tree's
+architect to claim again: `envoy_publish` to its role topic,
+`notifications.role.legion-<project>-<key, lower-cased>-architect` (its claim in `legion state
+--json` names the token). A claim of its own, or one that still holds, needs nothing.
+
 **Scope first.** The scope the deployment instructions state decides which issues are candidates
 at all, before anything below. When they say you hand Legion no issue yourself, or that Legion
 runs only issues someone else sets to `todo`, the walk takes nothing: stop here, whatever slots
@@ -283,7 +292,9 @@ and the highest-priority issues.
 
 Deployment instructions, when present, are the operator's standing rules for this repository —
 required checks, deploy/smoke commands, code-owner expectations, and standing roles you may
-consult. They override this skill's defaults where they conflict.
+consult. They override this skill's defaults where they conflict, and may narrow which issues the
+walk takes, but never widen it past `todo` issues ([Keeping the slots
+full](#keeping-the-slots-full-go-daemon)).
 
 ## Turn discipline
 
