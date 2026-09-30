@@ -425,10 +425,13 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 	// whether it is a row at all (markBlockRows), as on every other line.
 	lines := strings.Split(markdown, "\n")
 	blank := func(line string) bool { return strings.Trim(line, " \t\r") == "" }
+	start, end := 0, len(markdown)
 	for len(lines) > 0 && blank(lines[0]) {
+		start += len(lines[0]) + 1
 		lines = lines[1:]
 	}
 	for len(lines) > 0 && blank(lines[len(lines)-1]) {
+		end -= len(lines[len(lines)-1]) + 1
 		lines = lines[:len(lines)-1]
 	}
 	if len(lines) == 0 {
@@ -441,7 +444,7 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 		}
 	}
 
-	parsed, err := parseStamped(syntheticTableHeader(width)+strings.Join(lines, "\n")+"\n", budget)
+	parsed, err := parseStamped(syntheticTableHeader(width)+markdown[start:end]+"\n", budget)
 	// Only the table this parse leads with holds the rows; a table nested in a block the fragment
 	// opens keeps its own refusal.
 	if wide := (wideRow{}); errors.As(err, &wide) && wide.leading {
