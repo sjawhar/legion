@@ -5,6 +5,7 @@ import {
   type FakeSession,
   holdPosts,
   openAgents,
+  pasteFile,
   plannerSession,
   reviewerSession,
   seedAgents,
@@ -15,10 +16,11 @@ import { createAgentMessage, createMessage, replyToMessageDelivery } from "./api
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// Shift+P and what a pin moves. A pin takes a row between the open list and a fold, and the page
-// keeps every row in one keyed list (`AgentsPage.tsx`), so the row that moves is the same row:
-// these rows pin what it still holds when it lands - focus, whether it is open, its draft, its
-// issue, a reply in progress, a send or an upload still out, and the unread set it opened with.
+// What an Agents row keeps when it moves between the open list and a fold - by Shift+P, or by
+// its fold closing. The page keeps every row in one keyed list (`AgentsPage.tsx`), so the row that
+// moves is the same row: these rows pin what it still holds when it lands - focus, whether it is
+// open, its draft, its issue, a reply in progress, a send or an upload still out, and the unread
+// set it opened with - and that while a closed fold hides it, it marks nothing read.
 
 /** `seedAgents`, plus `Quiet` and `Silent`: live sessions with no Dispatch activity, which fold
  *  under `No Dispatch activity` until one is pinned - the rows a pin moves across. */
@@ -107,6 +109,7 @@ test.describe("agents page pins", () => {
       await page.keyboard.press("j");
       await expect(silentRow).toBeFocused();
       await page.keyboard.press("Shift+P");
+      await expect(silentRow).toHaveCount(1);
       await expect(silentRow).toBeHidden();
       await expect(fold).toHaveAccessibleName("No Dispatch activity (2)");
       await expect(fold).toBeFocused();
@@ -322,14 +325,7 @@ test.describe("agents page pins", () => {
       await silentRow.getByRole("button", { name: "Choose issue" }).click();
       await silentRow.getByRole("combobox", { name: "Issue" }).selectOption("CORE-1");
       await expect(field).toHaveValue("@Silent");
-      // A pasted file, as the clipboard hands one to the field.
-      await field.evaluate((node) => {
-        const data = new DataTransfer();
-        data.items.add(new File(["# Notes\n"], "notes.md", { type: "text/markdown" }));
-        node.dispatchEvent(
-          new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
-        );
-      });
+      await pasteFile(field, "notes.md", "# Notes\n");
       const uploading = silentRow.getByRole("button", { name: "Uploading file…" });
       await expect(uploading).toBeDisabled();
 
@@ -404,6 +400,85 @@ test.describe("agents page pins", () => {
       await expect(conversation).toContainText("Second answer");
       await expect(conversation).toContainText("First answer");
       await expect(staleRow.getByRole("button", { name: /^Show \d+ older$/ })).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A row in a closed fold is out of sight however open it is - folded by the reader, by Shift+P,
+  // or by its agent going quiet for ten minutes. A reply that lands then stays unread, on the
+  // navigation's badge, until the reader can see it, which is when the fold opens again.
+  test("a row hidden in a closed fold marks nothing read, and reopening the fold shows the reply", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const stale: FakeSession = {
+      capabilities: ["aside", "btw", "steer"],
+      dir: "/srv/stale",
+      // Unseen for ten minutes, so it folds under Inactive whatever it has said.
+      last_seen: Date.now() - 45 * 60_000,
+      machine_id: "box-1",
+      roles: ["tester"],
+      session_id: "stale-session",
+      title: "Stale",
+    };
+    await setLiveSessions([plannerSession, reviewerSession, stale]);
+    const actor = { id: stale.session_id, kind: "session" as const };
+    const first = await createAgentMessage(stale.session_id, {
+      body: "First question",
+      delivery: "btw",
+    });
+    await replyToMessageDelivery(first.id, { attempt: 1, body: "First answer" }, actor);
+    const second = await createAgentMessage(stale.session_id, {
+      body: "Second question",
+      delivery: "btw",
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      const readMarks: string[] = [];
+      page.on("request", (request) => {
+        const path = new URL(request.url()).pathname;
+        if (request.method() === "PUT" && path === `/api/v1/me/agents/${stale.session_id}/state`) {
+          readMarks.push(request.postData() ?? "");
+        }
+      });
+      await openAgents(page);
+      const staleRow = agentRow(page, stale.session_id);
+      const conversation = staleRow.getByRole("list", { name: "Conversation with Stale" });
+      const fold = page.getByRole("button", { name: /^Inactive/ });
+      const navigation = page.getByRole("link", { name: /^Agents/ });
+
+      await fold.click();
+      await staleRow.getByRole("button", { exact: true, name: "Stale" }).click();
+      await expect(conversation).toContainText("First answer");
+      await expect.poll(() => readMarks.length).toBeGreaterThan(0);
+      await expect(navigation).not.toContainText("New replies");
+      const marked = readMarks.length;
+
+      // The fold closes over the open row: it stays mounted, hidden, and its list still hears
+      // the reply the agent sends now.
+      await fold.click();
+      await expect(staleRow).toBeHidden();
+      await expect(staleRow).toHaveCount(1);
+      const refetched = page.waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          new URL(response.url()).pathname === `/api/v1/agents/${stale.session_id}/messages`
+      );
+      await replyToMessageDelivery(second.id, { attempt: 1, body: "Second answer" }, actor);
+      await refetched;
+      await expect(navigation).toContainText("New replies 1");
+      // Nothing may mark it read from here, so the check waits out the render and effect a
+      // hidden list would take to write one.
+      await page.waitForTimeout(1_500);
+      expect(readMarks).toHaveLength(marked);
+      await expect(navigation).toContainText("New replies 1");
+
+      await fold.click();
+      await expect(conversation).toContainText("Second answer");
+      await expect.poll(() => readMarks.length).toBeGreaterThan(marked);
+      await expect(navigation).not.toContainText("New replies");
     } finally {
       await context.close();
     }

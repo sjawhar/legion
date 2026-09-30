@@ -111,8 +111,11 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     const inactiveToggle = agents.getByRole("button", { name: "Inactive (1)" });
     await expect(quietToggle).toHaveAttribute("aria-expanded", "false");
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "false");
-    // A closed fold's rows stay in the one list, mounted and hidden, not gone.
+    // A closed fold's rows stay in the one list, mounted and hidden, not gone: `toBeHidden` alone
+    // would also pass for a row that is not there, so each is counted too.
+    await expect(silentCard).toHaveCount(1);
     await expect(silentCard).toBeHidden();
+    await expect(archivistCard).toHaveCount(1);
     await expect(archivistCard).toBeHidden();
     const shownTitles = shownAgentRows(page).locator("h2");
     await expect(shownTitles).toHaveText(["Planner", "Reviewer"]);
@@ -135,6 +138,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
       silentCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
     ).toBeVisible();
     await quietToggle.click();
+    await expect(silentCard).toHaveCount(1);
     await expect(silentCard).toBeHidden();
 
     await inactiveToggle.click();
@@ -146,6 +150,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await archivistCard.getByRole("button", { exact: true, name: "Archivist" }).click();
     await expect(archivistCard.getByRole("textbox", { name: "Comment" })).toBeVisible();
     await inactiveToggle.click();
+    await expect(archivistCard).toHaveCount(1);
     await expect(archivistCard).toBeHidden();
     await expect(
       plannerCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
@@ -156,9 +161,12 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     // draft in it - hidden; no card that was never opened has one at all.
     const composers = agents.getByRole("textbox", { includeHidden: true, name: "Comment" });
     await expect(composers).toHaveCount(1);
-    await expect(
-      archivistCard.getByRole("textbox", { includeHidden: true, name: "Comment" })
-    ).toBeHidden();
+    const archivistComposer = archivistCard.getByRole("textbox", {
+      includeHidden: true,
+      name: "Comment",
+    });
+    await expect(archivistComposer).toHaveCount(1);
+    await expect(archivistComposer).toBeHidden();
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`agents-collapsed-${width}.png`),
@@ -173,9 +181,12 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     ).toHaveCount(0);
     await reviewerToggle.click();
     // A card opened once keeps its composer - and its draft - when it collapses, hidden.
-    await expect(
-      reviewerCard.getByRole("textbox", { includeHidden: true, name: "Comment" })
-    ).toBeHidden();
+    const reviewerComposer = reviewerCard.getByRole("textbox", {
+      includeHidden: true,
+      name: "Comment",
+    });
+    await expect(reviewerComposer).toHaveCount(1);
+    await expect(reviewerComposer).toBeHidden();
 
     // The identifiers copy from the collapsed row.
     await plannerCard.getByRole("button", { name: "Copy session ID planner-session" }).click();

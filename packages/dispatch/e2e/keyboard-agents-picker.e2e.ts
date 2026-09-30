@@ -10,7 +10,7 @@ import {
   setLiveSessions,
   shownAgentRows,
 } from "./agents";
-import { createMessage, patchIssue } from "./api";
+import { createAgentMessage, createMessage, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -290,9 +290,12 @@ test.describe("agents page", () => {
     }
   });
 
-  // Cancelling the reply while it is in the air changes the channel too, and the text in the air
-  // must still not come back once the server has taken it.
-  test("a reply cancelled mid-send never brings its text back", async ({ browser }) => {
+  // Ending the reply while it is in the air would move the message to another channel under the
+  // send, so Cancel reply holds until the server answers, as Reply and the picker do. The send
+  // then ends the reply itself, and the text it took does not come back.
+  test("Cancel reply holds while a reply is out, and the sent text never comes back", async ({
+    browser,
+  }) => {
     const issueKey = await seedAgents();
     await createMessage(issueKey, {
       body: "Can this ship?",
@@ -314,9 +317,10 @@ test.describe("agents page", () => {
       await field.fill("Once the build is green");
       await field.press("Control+Enter");
       await expect(field).toBeDisabled();
-      await row.getByRole("button", { name: "Cancel reply" }).click();
+      await expect(row.getByRole("button", { name: "Cancel reply" })).toBeDisabled();
       send.release();
 
+      await expect(row.getByRole("button", { name: "Cancel reply" })).toHaveCount(0);
       await expect(field).toBeEnabled();
       await expect(field).toHaveValue("");
       await expect(row.getByRole("button", { name: "Choose issue" })).toContainText("No issue");
@@ -327,52 +331,55 @@ test.describe("agents page", () => {
     }
   });
 
-  // A send the server refuses after the reader cancelled their reply mid-flight: the composer that
-  // sent is the one on screen, so it says so, beside the draft that was sent.
-  test("a send refused after its reply is cancelled mid-flight still says so, beside its draft", async ({
+  // The reply a refused send was for stays until the reader ends it. Ended then, the message goes
+  // back to the issue picked and the draft takes that issue's mention, so Retry reaches the agent
+  // there - a direct reply's refusal retried as an issue comment that still tells the agent.
+  test("a reply refused and then cancelled retries on the issue, mentioning the agent", async ({
     browser,
   }) => {
     const issueKey = await seedAgents();
-    await createMessage(issueKey, {
-      body: "Can this ship?",
+    await createAgentMessage(plannerSession.session_id, {
+      body: "Are you free?",
       delivery: "btw",
-      target: `session:${plannerSession.session_id}`,
     });
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = shownAgentRows(page).nth(0);
+      const row = agentRow(page, plannerSession.session_id);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const refuse = await refusePosts(page, "**/api/v1/issues/*/messages");
+      const cancelReply = row.getByRole("button", { name: "Cancel reply" });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
 
       await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await page.keyboard.press("ArrowDown");
       await page.keyboard.press("Enter");
-      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("@Planner");
+      // A reply to a direct exchange is a direct message, whatever issue is picked.
       await row.getByRole("button", { name: "Reply" }).first().click();
-      await field.fill("Once the build is green");
+      await field.fill("Yes");
       await field.press("Control+Enter");
       await expect(field).toBeDisabled();
-      await row.getByRole("button", { name: "Cancel reply" }).click();
+      await expect(cancelReply).toBeDisabled();
       refuse();
 
-      const refusal = row.getByText("Couldn't send — the server is down");
-      await expect(refusal).toBeVisible();
-      await expect(field).toBeEnabled();
-      await expect(field).toHaveValue("Once the build is green");
-      await expect(row.getByRole("button", { name: "Choose issue" })).toContainText("No issue");
-
-      // The notice lasts until the composer sends again: now a direct message, which goes.
-      const resent = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          new URL(response.url()).pathname ===
-            `/api/v1/agents/${plannerSession.session_id}/messages`
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(field).toHaveValue("Yes");
+      await cancelReply.click();
+      await expect(row.getByRole("button", { name: "Choose issue" })).toContainText(issueKey);
+      await expect(field).toHaveValue("@Planner Yes");
+      const retried = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          new URL(request.url()).pathname === `/api/v1/issues/${issueKey}/comments`
       );
-      await field.press("Control+Enter");
-      expect((await resent).ok()).toBe(true);
-      await expect(refusal).toHaveCount(0);
-      await expect(field).toHaveValue("");
+      await row.getByRole("button", { name: "Retry" }).click();
+      expect((await retried).postDataJSON()).toEqual({
+        body: "@Planner Yes",
+        delivery: "steer",
+        mentions: [{ target: `session:${plannerSession.session_id}` }],
+      });
     } finally {
       await context.close();
     }
@@ -596,6 +603,37 @@ test.describe("agents page", () => {
           path: `/api/v1/agents/${plannerSession.session_id}/messages`,
         },
       ]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // `i` opens the picker; it never shuts one. A row keeps its picker open when it collapses, so on
+  // that row `i` goes back into the select rather than clicking the toggle closed.
+  test("i on a collapsed row goes back into the picker it left open", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = agentRow(page, plannerSession.session_id);
+      const opener = row.getByRole("button", { exact: true, name: "Planner" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("i");
+      await expect(picker).toBeFocused();
+      await opener.click();
+      await expect(opener).toHaveAttribute("aria-expanded", "false");
+      // Back on the row itself - a click beside its controls - for the key.
+      await row.getByText("box-1 · /srv/planner").click();
+      await expect(row).toBeFocused();
+      await page.keyboard.press("i");
+
+      await expect(opener).toHaveAttribute("aria-expanded", "true");
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(picker).toBeFocused();
     } finally {
       await context.close();
     }

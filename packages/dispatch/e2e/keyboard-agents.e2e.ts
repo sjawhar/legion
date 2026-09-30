@@ -1,6 +1,15 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { openAgents, plannerSession, seedAgents, setLiveSessions, shownAgentRows } from "./agents";
+import {
+  agentRow,
+  holdPosts,
+  openAgents,
+  pasteFile,
+  plannerSession,
+  seedAgents,
+  setLiveSessions,
+  shownAgentRows,
+} from "./agents";
 import { createMessage } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -249,6 +258,43 @@ test.describe("agents page", () => {
       await row.getByRole("combobox", { name: "Issue" }).selectOption("");
       await expect(toggle).toContainText("No issue");
       await expect(field).toHaveValue("please look at the migration");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A file goes to the issue the message was addressed to when the upload started, and its
+  // reference names that issue's artifact, even when the reader picks another issue while the
+  // file is in the air.
+  test("an upload's reference names the issue it went to, not one picked while it was out", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const upload = await holdPosts(page, "**/api/v1/issues/*/artifacts");
+      const row = agentRow(page, plannerSession.session_id);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await toggle.click();
+      await picker.selectOption("CORE-1");
+      await expect(field).toHaveValue("@Planner");
+      await pasteFile(field, "notes.md", "# Notes\n");
+      await expect(row.getByRole("button", { name: "Uploading file…" })).toBeDisabled();
+      await toggle.click();
+      await picker.selectOption("CORE-2");
+      await expect(toggle).toContainText("CORE-2");
+      upload.release();
+
+      await expect(field).toHaveValue("@Planner dispatch://CORE-1/artifact/notes");
+      expect(upload.posts()).toBe(1);
     } finally {
       await context.close();
     }
@@ -704,15 +750,7 @@ test.describe("agents page", () => {
       const reviewer = rows.nth(1);
 
       // Hold the send open so the reader has a window to click in, as a slow server would.
-      let release: (() => void) | undefined;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      await page.route("**/api/v1/agents/*/messages", async (route) => {
-        if (route.request().method() !== "POST") return route.fallback();
-        await held;
-        return route.fallback();
-      });
+      const send = await holdPosts(page, "**/api/v1/agents/*/messages");
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -725,7 +763,7 @@ test.describe("agents page", () => {
       const reviewerBox = reviewer.getByRole("checkbox", { name: "Select Reviewer for broadcast" });
       await reviewerBox.focus();
       await expect(reviewerBox).toBeFocused();
-      release?.();
+      send.release();
       await expect(composer).toHaveValue("");
       await expect(reviewerBox).toBeFocused();
       await expect(composer).not.toBeFocused();
