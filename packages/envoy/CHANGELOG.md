@@ -15,11 +15,13 @@
   conversation list, each reply, and every message event. A session confirming a person's direct
   message reads it, since a broadcast keeps its envelope (LEGION-394).
 - `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: the attempt's session records, once
-  per message, that it took a person's fresh, latest attempt as its user's own turn, or is refused
-  with a 409 naming the check (`ACCEPT_SUPERSEDED`, `ACCEPT_ALREADY_ACCEPTED`,
-  `ACCEPT_NOT_REQUESTED_BY_PERSON`, `ACCEPT_STALE`) or 403 `ACCEPT_FORBIDDEN`. It appends
-  `message.accepted`. Every delivery attempt now reads `requested_by` (who asked for it, kept on a
-  resume, null before migration 0053), `accepted_at` and `accepted_as` (LEGION-394).
+  per message, that it took a person's fresh, latest attempt of a direct message to it as its
+  user's own turn, or is refused with a 409 naming the check (`ACCEPT_NOT_DIRECT` for a message on
+  an issue, a broadcast's copy or a reply in a broadcast's thread, `ACCEPT_SUPERSEDED`,
+  `ACCEPT_ALREADY_ACCEPTED`, `ACCEPT_NOT_REQUESTED_BY_PERSON`, `ACCEPT_STALE`) or 403
+  `ACCEPT_FORBIDDEN`. It appends `message.accepted`. Every delivery attempt now reads
+  `requested_by` (who asked for it, kept on a resume, null before migration 0053), `accepted_at`
+  and `accepted_as` (LEGION-394).
 
 ### Changed
 

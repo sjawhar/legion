@@ -409,8 +409,9 @@ export class DispatchClient {
 
   /** `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: this session records that it took
    *  that attempt of the message as its user's own turn. Dispatch allows one acceptance per
-   *  message, of its latest attempt, which a person asked for within the last minute; any
-   *  refusal throws a `DispatchServiceError` naming the check. */
+   *  message, of a person's direct message to this session (no issue, no broadcast), of its latest
+   *  attempt, which a person asked for within the last minute; any refusal throws a
+   *  `DispatchServiceError` naming the check. */
   async acceptMessageDelivery(
     id: string,
     attempt: number,

@@ -259,19 +259,106 @@ func TestAcceptRefusesEveryAttemptThatIsNotAPersonsFreshLatestDeliveryToThisSess
 			if refused.Code != test.status || responseCode(t, refused) != test.code {
 				t.Fatalf("accept: status=%d body=%s, want %d %s", refused.Code, refused.Body.String(), test.status, test.code)
 			}
-			if got := len(acceptedEvents(t, database, root.ID)); got != before {
-				t.Fatalf("a refused accept left %d message.accepted events, want %d", got, before)
+			assertNothingAccepted(t, database, root.ID, attempt, before)
+		})
+	}
+}
+
+// assertNothingAccepted fails t when a refused accept of attempt `attempt` recorded anything: an
+// acceptance on the attempt, or a message.accepted event beyond the `before` already logged.
+func assertNothingAccepted(t *testing.T, database *store.Store, messageID string, attempt, before int) {
+	t.Helper()
+	if got := len(acceptedEvents(t, database, messageID)); got != before {
+		t.Fatalf("a refused accept left %d message.accepted events, want %d", got, before)
+	}
+	var accepted int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from message_deliveries
+		where message_id = $1 and attempt = $2 and (accepted_at is not null or accepted_as is not null)
+	`, messageID, attempt).Scan(&accepted); err != nil {
+		t.Fatalf("read the refused attempt: %v", err)
+	}
+	if accepted != 0 {
+		t.Fatal("a refused accept recorded the attempt as accepted")
+	}
+}
+
+// Only a person's direct message from the Agents page is ever taken as a session's own turn, so
+// only one can be accepted as that: a message on an issue, a broadcast's copy, a reply in a
+// broadcast's thread, and an attempt for a session the thread's root does not target are each
+// refused, although a person asked for each within the minute and it is the latest attempt,
+// never accepted. Otherwise a bearer could have the page say one of them reached the
+// conversation.
+func TestAcceptRefusesAMessageThatIsNotAPersonsDirectMessageToTheSession(t *testing.T) {
+	broadcastCopy := func(t *testing.T) (http.Handler, *store.Store, string) {
+		t.Helper()
+		listener, _ := newBroadcastListener(t, broadcastSessions)
+		handler, database := newTargetedMessageHandler(t, listener.URL)
+		created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner"},
+		}, "alice"))
+		return handler, database, awaitBroadcastDeliveries(t, handler, created.ID).Recipients[0].Message.ID
+	}
+	for _, test := range []struct {
+		name string
+		// message is the message whose attempt 1 `session` then accepts.
+		message func(t *testing.T) (http.Handler, *store.Store, string)
+		session string
+	}{
+		{
+			name: "a message on an issue",
+			message: func(t *testing.T) (http.Handler, *store.Store, string) {
+				live := true
+				sent := []map[string]any{}
+				listener := sessionListener(t, &live, &sent)
+				t.Cleanup(listener.Close)
+				handler, database := newTargetedMessageHandler(t, listener.URL)
+				issue := createInteractionIssue(t, handler, "TEST", "Not a direct message", "before")
+				return handler, database, createIssueMessage(t, handler, issue.Key, map[string]any{
+					"body": "Can this ship?", "target": "session:s1", "delivery": "steer",
+				}, "alice").ID
+			},
+			session: "s1",
+		},
+		{name: "a broadcast's copy", message: broadcastCopy, session: "planner"},
+		{
+			name: "a person's reply in a broadcast's thread",
+			message: func(t *testing.T) (http.Handler, *store.Store, string) {
+				handler, database, copyID := broadcastCopy(t)
+				reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/planner/messages", map[string]any{
+					"body": "And the logs?", "delivery": "steer", "in_reply_to": copyID,
+				}, "alice")
+				if reply.Code != http.StatusCreated {
+					t.Fatalf("person's reply in the broadcast's thread: status=%d body=%s", reply.Code, reply.Body.String())
+				}
+				return handler, database, decodeBody[model.Message](t, reply).ID
+			},
+			session: "planner",
+		},
+		{
+			name: "an attempt for a session the thread's root does not target",
+			message: func(t *testing.T) (http.Handler, *store.Store, string) {
+				handler, database, root, _, _ := directConversationFrom(t, "alice")
+				if _, err := database.Pool.Exec(context.Background(), `
+					update message_deliveries set session_id = 's2' where message_id = $1 and attempt = 1
+				`, root.ID); err != nil {
+					t.Fatalf("re-point the attempt: %v", err)
+				}
+				return handler, database, root.ID
+			},
+			session: "s2",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler, database, messageID := test.message(t)
+			if who := requester(t, database, messageID, 1); who == nil || who.Kind != "user" {
+				t.Fatalf("attempt 1 records requested_by %+v, want the person who sent it", who)
 			}
-			var accepted int
-			if err := database.Pool.QueryRow(context.Background(), `
-				select count(*) from message_deliveries
-				where message_id = $1 and attempt = $2 and (accepted_at is not null or accepted_as is not null)
-			`, root.ID, attempt).Scan(&accepted); err != nil {
-				t.Fatalf("read the refused attempt: %v", err)
+			refused := acceptDelivery(t, handler, messageID, 1, test.session)
+			if refused.Code != http.StatusConflict || responseCode(t, refused) != "ACCEPT_NOT_DIRECT" {
+				t.Fatalf("accept: status=%d body=%s, want 409 ACCEPT_NOT_DIRECT", refused.Code, refused.Body.String())
 			}
-			if accepted != 0 {
-				t.Fatal("a refused accept recorded the attempt as accepted")
-			}
+			assertNothingAccepted(t, database, messageID, 1, 0)
 		})
 	}
 }

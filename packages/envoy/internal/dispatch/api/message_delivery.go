@@ -62,11 +62,25 @@ const acceptedAsUserTurn = "user_turn"
 // a Claude Code session - can never be taken as a turn later.
 const acceptFresh = `created_at >= now() - interval '1 minute'`
 
+// acceptDirect is the check that the message is the one kind pi-envoy takes as a turn, a person's
+// direct message from the Agents page: on no issue, neither a broadcast's copy nor a reply in a
+// broadcast's thread, in a thread whose root targets the accepting session ($3). "Accepted as a
+// user turn" means nothing for any other message, so it is refused rather than let a bearer have
+// the page say one reached the conversation. It reads messageThreadCTE's thread of the message
+// ($1); a message's issue, broadcast, target and parent are written once, at insert.
+const acceptDirect = `coalesce((
+	select m.issue_key is null and m.broadcast_id is null
+	       and root.target = 'session:' || $3::text and root.broadcast_id is null
+	from messages m, thread t join messages root on root.id = t.id
+	where m.id = $1 and t.in_reply_to is null
+), false)`
+
 // acceptDelivery is POST /api/v1/messages/{id}/deliveries/{attempt}/accept: the session an
 // attempt went to records that it took the message as its user's own turn, the one write
 // pi-envoy makes before it injects anything. It is one compare-and-set under the message's row
-// lock, and it succeeds only for the latest attempt of a message none of whose attempts was
-// accepted before, which a person asked for within the last minute; a refusal names the check.
+// lock, and it succeeds only for a person's direct message to that session (acceptDirect), and
+// only for the latest attempt of one none of whose attempts was accepted before, which a person
+// asked for within the last minute; a refusal names the check.
 //
 // It may land while the attempt is still pending, since pi-envoy answers the frame before
 // Dispatch settles the send, so it writes neither state nor claimed_at, which the settle is
@@ -125,18 +139,19 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sessionID string
-	var latest, fresh bool
+	var direct, latest, fresh bool
 	var taken *int
 	var requester *string
-	err = tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, messageThreadCTE+`
 		select session_id,
+		       `+acceptDirect+`,
 		       attempt = (select max(attempt) from message_deliveries where message_id = $1),
 		       (select attempt from message_deliveries where message_id = $1 and accepted_at is not null),
 		       requested_by ->> 'kind',
 		       `+acceptFresh+`
 		from message_deliveries
 		where message_id = $1 and attempt = $2
-	`, message.ID, number).Scan(&sessionID, &latest, &taken, &requester, &fresh)
+	`, message.ID, number, actor.ID).Scan(&sessionID, &direct, &latest, &taken, &requester, &fresh)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message delivery not found")
 		return
@@ -148,6 +163,10 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case sessionID != actor.ID:
 		writeError(w, "ACCEPT_FORBIDDEN", http.StatusForbidden, "session may accept only its own delivery")
+		return
+	case !direct:
+		writeError(w, "ACCEPT_NOT_DIRECT", http.StatusConflict,
+			"only a person's direct message to this session, on no issue and from no broadcast, is taken as its turn")
 		return
 	case taken != nil:
 		writeError(w, "ACCEPT_ALREADY_ACCEPTED", http.StatusConflict,
