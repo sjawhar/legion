@@ -680,8 +680,8 @@ func matchingRequest(ctx context.Context, q interface {
 // under are still current or the current rules still allow it (stillAllowed, the check Values
 // makes) and its whole approval chain still verifies (VerifyChain, the same check Values makes). A
 // caller that already holds a live grant for these exact names never re-asks a human who already
-// approved it, a rule tightened since then is never bypassed by reuse, and neither is a chain a
-// since-revoked approver key broke.
+// approved it, a rule tightened since then is never bypassed by reuse, and neither is a chain that
+// no longer verifies.
 func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names []string, set *rules.Set, requester rules.Requester) (Request, bool, error) {
 	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
 		join request_secrets s on s.request_id=r.id

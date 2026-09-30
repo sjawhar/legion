@@ -298,8 +298,8 @@ type RecordDetail struct {
 }
 
 // ReadRecord reads a credential-request record's full detail by id, for GET
-// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup (which adds
-// its own challenges on top). pgx.ErrNoRows means no such record.
+// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
+// pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
 	var canonical, approver, kind string
 	var createdAt, expiresAt time.Time

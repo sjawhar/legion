@@ -116,68 +116,65 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 
 `features/credentials/` renders the whole AGENTC-393 credential-request approval surface —
 directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
-only relays and renders. The feature is off — the inbox section hidden, its routes 404-clean —
-whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server; every SPA read of that state comes
-from an ordinary `404 FEATURE_OFF` on the pending-list query, never a separate capability flag.
-`CredentialRequestsSection.tsx` mounts in `features/inbox/Inbox.tsx`, above the ask sections and
-outside its roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row shows
-a kind badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_credential`), the
-requested identifiers, and a relative `Timestamp`, linking to `/credentials/:recordId` — except a
-machine-kind row, which links to `/credentials/machine` instead, since a machine record's
-WebAuthn challenge is obtainable only through the typed-code lookup route (ruling 13: a direct
-record link can never approve a machine login).
+relays, renders, and names the deciding human. The feature is off — the inbox section and the
+Settings grants section hidden, its routes 404-clean — whenever `DISPATCH_AGENT_SECRETS_URL` is
+unset on the server; every SPA read of that state comes from an ordinary `404 FEATURE_OFF` on the
+pending-list query, never a separate capability flag. `CredentialRequestsSection.tsx` mounts in
+`features/inbox/Inbox.tsx`, above the ask sections and outside its roving-focus/`ViewportAnchor`
+mechanism (it is not an ask row): each pending row shows a kind badge ("Secret request" for
+`agent_secret`, "Machine login" for `launcher_credential`), the requested identifiers, and a
+relative `Timestamp`, linking to `/credentials/:recordId` — except a machine-kind row, which links
+to `/credentials/machine` instead, since only the typed code selects a machine login (ruling 13: a
+direct record link can never approve a machine login).
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
 lifetime, requested/expiry timestamps, rules version, approver, then the agent's reason) and
-`CredentialDecisionButtons.tsx` (the Approve/Deny pair). The reason renders inside a
-`<blockquote>` as **plain text only** — no Markdown pipeline, no linkification, `white-space:
-pre-wrap` — since it is the agent's own words, not reviewed content; a machine-kind record adds
-the sentence "Approving lets `<host>` start agent sessions as you." verbatim and renders no
-buttons at all, pointing instead at the machine page, whose code-entry lookup is the only way to
-obtain that record's challenges. Every WebAuthn ceremony (`lib/webauthn.ts`: `getAssertion`,
-`createCredential`, and the `b64urlToBuf`/`bufToB64url` base64url codec) runs with `rpId =
-location.hostname` and a challenge taken **only** from the same response that carried the
-record's facts — never from a URL, a prop, or any other side channel. A plain record's approve
-POST body is `{assertion}`; a machine record's is `{assertion, code}` (the code re-entered, not
-cached) — deny is always `{assertion}` alone. Terminal-state records (`approved`, `denied`,
-`expired`, `cancelled`, `revoked`) render their recorded decision and no buttons; every broker
-error surfaces verbatim through `ApiError`'s message, never reworded.
+`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
+The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
+linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
+a machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as you."
+verbatim and renders no buttons at all, pointing instead at the machine page, whose code-entry
+lookup is the only way to decide it. A decision is one plain POST: a plain record's approve and
+deny send no body, and a machine record's approve and deny both send `{code}`, the code the viewer
+typed for that lookup (the broker requires it on either decision). The page never says who
+decides: Dispatch's server names the signed-in viewer (below), and the broker refuses anyone but
+the record's approver with `403 NOT_APPROVER`, surfaced verbatim. Terminal-state records
+(`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their recorded decision and no
+buttons; every broker error surfaces verbatim through `ApiError`'s message, never reworded.
 
-`KeysPage.tsx` (`/credentials/keys`, linked from an "Approver keys" section on `/settings`) lists
-the signed-in login's own keys and offers **Register key** (begin → `createCredential` → finish,
-rendering the broker's returned rules-file YAML entry in a copyable `<pre>` with the instruction
-to add it to `agent-c`'s `agent-secret-rules.yaml`) and, once a key is freshly registered,
-**Endorse with another key** (an assertion by an already-live key over that new key's id/hash,
-finishing into an endorsement YAML block) — a freshly registered key has no persisted
-`approver_keys` row yet (the broker's rules-file reconciliation is what actually admits it), so
-endorsement necessarily operates on the in-hand registration response held in this page's own
-React state, not on anything fetched from the keys list. `GrantsSection.tsx` lists the viewer's
-live approval-granted secret grants with a Revoke control; since the UI grants list carries no
-per-grant challenge, `keys.ts`'s `revokeChallenge` computes it client-side via the Web Crypto API
-(`SHA-256("agent-secrets/revoke/v1\n" + grantId)`, base64url-encoded) — the same deterministic
-construction contract v9 fixes, so the broker independently derives and verifies the identical
-value.
+`GrantsSection.tsx` renders on `/settings`, under the same `FEATURE_OFF` gate: the viewer's live
+approval-granted grants (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`), each with a Revoke
+button that POSTs `{}` to `/api/v1/credential-grants/{id}/revoke`.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
 resolved in `cmd/dispatch/main.go`'s boot config with the repo's usual trimmed-file-wins `_FILE`
 convention, threaded through `api.Deps`/`routes.AppContextOptions` as `Deps.AgentSecrets`, nil
-when unconfigured): every method returns the broker's JSON body as `json.RawMessage` and relays
-it unmodified, since Dispatch never models or decides — only the broker's assertion verification
-does. `packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth
-proxy rows every page above calls: `GET/POST /api/v1/credential-requests[/{id}[/approve|/deny]]`,
-`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-keys/{login}`,
-`POST /api/v1/credential-keys/{login}/{kind}/{step}` (`kind` `register|endorse`, `step`
-`begin|finish`; anything else a plain `404 NOT_FOUND`), and `GET /api/v1/credential-grants` +
+when unconfigured). Its reads and the machine lookup return the broker's JSON body as
+`json.RawMessage`, relayed unmodified. The UI bearer is the approval credential: the broker takes
+the approving human from the request body on that bearer's word, so Dispatch builds every decision
+body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
+is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
+browser's body; any other field the browser sends, an `approver` among them, is dropped.
+`RevokeByApprover` sends only the caller's canonical login. Cookie-authenticated unsafe requests
+must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
+so another site cannot send a decision from a signed-in human's browser.
+`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the seven `human`-auth proxy
+rows every page above calls:
+`GET /api/v1/credential-requests`, `GET /api/v1/credential-requests/{id}`,
+`POST /api/v1/credential-requests/{id}/approve|deny`,
+`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`, and
 `POST /api/v1/credential-grants/{id}/revoke`. Every handler requires a human caller first, then a
 configured client (`404 FEATURE_OFF` on a nil one); the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
 canonical login — the UI never asks for anyone else's list. A `*agentsecrets.Error` forwards the
-broker's exact status and body verbatim (e.g. `409 RECORD_TERMINAL`); any other failure is
-`503 AGENT_SECRETS_UNAVAILABLE`. `internal/dispatch/api/contract_test.go` proves this round-trips
-a real broker (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`, a real
-`webauthntest` assertion) rather than a fake built from this client's own assumptions.
+broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); any other
+failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go` pins the decision bodies
+against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
+(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
+`403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
+whatever login its body names, and the value released.
 
 ## Dark mode
 

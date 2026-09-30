@@ -77,13 +77,13 @@ func expireLauncherCredential(t *testing.T, rig *brokertest.Rig) {
 
 // TestContractMachineLoginEnrollRevokeExpireReenroll is Task 3's whole flow, driven against a
 // real broker: Login mints a key and asks for a launcher credential; approving it through the
-// real UI routes (a real WebAuthn assertion, real record.VerifyRequestObject verification) moves
-// LoginStatus to issued; Enroll registers a pod authenticated by a real k8s pod token against a
-// real local OIDC issuer (brokertest.Rig's own PodVerifier, wired in NewRig); Revoke ends it and
-// is idempotent; SQL-expiring the launcher credential and enrolling again proves doProof's
-// automatic re-login: the broker answers 401 LAUNCHER_INVALID, the client starts a fresh Login,
-// and Enroll surfaces NO_MACHINE_CREDENTIAL naming that fresh code. That second login is also
-// approved and driven to issued before the test returns, so no poll goroutine outlives it.
+// real UI routes (the operator's login and the typed code, real record.VerifyRequestObject
+// verification) moves LoginStatus to issued; Enroll registers a pod authenticated by a real k8s pod
+// token against a real local OIDC issuer (brokertest.Rig's own PodVerifier, wired in NewRig);
+// Revoke ends it and is idempotent; SQL-expiring the launcher credential and enrolling again proves
+// doProof's automatic re-login: the broker answers 401 LAUNCHER_INVALID, the client starts a fresh
+// Login, and Enroll surfaces NO_MACHINE_CREDENTIAL naming that fresh code. That second login is
+// also approved and driven to issued before the test returns, so no poll goroutine outlives it.
 func TestContractMachineLoginEnrollRevokeExpireReenroll(t *testing.T) {
 	withFastPolling(t)
 	rig := brokertest.NewRig(t)

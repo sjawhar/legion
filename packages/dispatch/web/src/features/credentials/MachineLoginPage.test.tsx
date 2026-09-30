@@ -37,7 +37,7 @@ function renderPage() {
   );
 }
 
-test("code -> lookup -> Approve posts the looked-up code, with no key ceremony", async () => {
+test("code -> lookup -> Approve posts the looked-up code", async () => {
   const record = machineRecord();
   const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue(record);
   const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({

@@ -60,7 +60,7 @@ test("renders the broker's facts before the agent's reason, rendered as plain te
   }
 });
 
-test("Approve is one plain POST for the record, with no key ceremony", async () => {
+test("Approve is one plain POST for the record, with no body", async () => {
   const record = secretRecord();
   const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(record);
   const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({

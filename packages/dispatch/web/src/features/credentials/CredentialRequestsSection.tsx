@@ -15,9 +15,9 @@ import {
 import { Timestamp } from "../refs/Timestamp";
 import { credentialPendingQuery } from "./pending";
 
-/** A `launcher_credential` (machine) record's challenge only ever comes from the code-lookup
- *  route (contract v9 ruling 13): its inbox row links to the code-entry page rather than trying
- *  to deep-link the specific pending request. */
+/** A `launcher_credential` (machine) record is decided only through the code-lookup route (contract
+ *  v9 ruling 13): its inbox row links to the code-entry page rather than trying to deep-link the
+ *  specific pending request. */
 function pendingRowPath(row: CredentialPendingRow): string {
   return row.kind === "launcher_credential"
     ? "/credentials/machine"

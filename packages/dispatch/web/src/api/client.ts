@@ -132,7 +132,7 @@ export function isSourceNotFound(error: unknown): boolean {
 // A broker deployed without credential requests configured (no DISPATCH_AGENT_SECRETS_URL)
 // answers every credential route with this 404 — the same class as the architecture-source
 // 404 above it: retrying changes nothing, and every credential query (the Inbox's requests
-// section, Settings' approver keys) treats it as "not configured" rather than a failure.
+// section, Settings' live grants) treats it as "not configured" rather than a failure.
 export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
