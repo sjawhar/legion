@@ -198,10 +198,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
-`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. A failed
-run in which the model key command served an agent no key ends instead with
-[`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh)'s verdict and exits 75 (starved)
-or 77 (the key failed): no verdict on the change. The
+`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
@@ -382,10 +379,7 @@ a close whose branch delete failed is reported as closed with the reason the bra
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
-pull request open and prints gh's reason, with a line saying some may still be open. A failed run
-in which the model key command served an agent no key ends with
-[`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh)'s verdict and exits 75 (starved)
-or 77 (the key failed) rather than 1: no verdict on the change.
+pull request open and prints gh's reason, with a line saying some may still be open.
 
 ## stage3-4b13b-acceptance.sh
 
@@ -411,8 +405,7 @@ phase-finished notice's summary and verdict, the daemon posting and publishing t
 proof pull request is retargeted to a scratch base before any merge (the one merged at
 `awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
 merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
-(default the kept scratch work directory's `evidence/`). As in Stage 3, a failed run in which the
-model key command served an agent no key exits 75 or 77 with the key command's verdict.
+(default the kept scratch work directory's `evidence/`).
 
 ## stage4a-sandbox-runtime.sh
 
@@ -630,9 +623,6 @@ the run that owns it. A signal to the whole process group does not stop the remo
   went to `/dev/null`;
 - a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
   line, and leaves the exit status the checks set.
-- a failed run in which the controller's model key command served it no key prints
-  [`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh)'s verdict and exits 75 (starved)
-  or 77 (the key failed) rather than 1, unless the teardown fails too, which exits 1.
 - **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
   named by the Dispatch key: `legion-go-LEGSMOKE-dispatch` (`notifications.dispatch.issue.>`) and
   `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
@@ -1057,10 +1047,8 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
 is unset for it), for that one command. It appends one line per invocation, one per mint, one per
-call it served no key, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`, and one line per
-call it served no key to `<dir>/hawk-token.unserved`
-([`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads it); stdout carries the key
-alone. The profile's
+call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout
+carries the key alone. The profile's
 `agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
 and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
 (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
@@ -1099,10 +1087,10 @@ Its first mint is the preflight, before any pane exists. It exits 1 naming the c
 `lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
 unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
-last line of its stderr, after the key command's own `timeout` or `failed` verdict when it recorded
-one); an argument refusal exits 2. The mint also runs `hawk-token`'s own periodic
-self-refresh, which can take longer than OMP's ten-second budget for a `!command`, before any pane
-needs a key rather than inside one. The key is never printed.
+last line of its stderr); an argument refusal exits 2. The installer runs that one call with
+`--preflight`, which exempts it from the key command's deadline (below): on a machine where
+`hawk-token` has never run, its first-run build takes about a minute in the foreground, and it
+happens here rather than inside a pane's ten-second `!command`. The key is never printed.
 
 The key command mints once and keeps the key in `<cache-dir>/hawk-token.key` (`0600`) until
 300 seconds before its JWT `exp`, or for 300 seconds when the key has none. Each `hawk-token` run
@@ -1114,65 +1102,24 @@ not re-minted: the proof's model turns fail, loudly, which is right for a proof.
 tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/sh -c`, so each call
 has a fresh parent process.)
 
-One call mints at a time. A wave of agents that starts as the kept key expires calls the command at
-once, and with a mint per caller, on a skill-scenario rig at load average 172, the kept key expired
-at 14:50:44Z, five agents started at 14:51:18-22Z, one mint served its agent after 9 s, and the
-other four ended at 9021, 9043, 9046 and 9034 ms of `hawk-token`'s 9000 ms budget, so four of the
-five agents started with no key and a transcript holding no message. A call that finds no kept
-key takes an `flock` on `<cache-dir>/hawk-token.key.lock`, looks at the cache again, and mints
-only when the key is still missing; every other call waits on the lock and serves the key the
-holder kept. The mint runs with the lock's descriptor closed, since `hawk-token` can start a
+One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
+once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
+finds no kept key takes an `flock` on `<cache-dir>/hawk-token.key.lock`, looks at the cache again,
+and mints only when the key is still missing; every other call waits on the lock and serves the key
+the holder kept. The mint runs with the lock's descriptor closed, since `hawk-token` can start a
 detached refresh that would otherwise hold the lock for minutes.
 
-Oh My Pi kills a `!command` 10 s after it starts it, and a killed call records nothing, so each
-call gives up at 9500 ms of a clock that starts with its own process (on a loaded devbox bash took
-580 ms to reach its first line), whether it is waiting on the lock or minting under `timeout`, and a
-waiter that takes the lock with under 1000 ms left starts no mint (one took 2 to 4.5 s on the
-devbox), so a doomed mint never holds the lock from a caller with more time. A waiter's wait is
-bounded by one mint, since it started no earlier than the call it waits on, so a wave served by a
-mint that succeeds is served inside every caller's ten seconds. Each call that
-gets no key appends one tab-separated line to `<dir>/hawk-token.unserved`: the time, the caller's
-pid, the directory Oh My Pi ran it in (the agent's own), the reason, and a detail. The reason is
-`timeout` when the call ran out of time — its own deadline, its wait behind another call's mint, or
-`hawk-token` saying it spent its whole budget (`in <spent> ms of a <budget> ms budget`, spent at
-least the budget) — and `failed` when the mint ended without a key before then, with `hawk-token`'s
-last stderr line. A caller whose environment names `MODEL_GATEWAY_UNSERVED_FILE` gets its line in
-that file too, so a harness that gives each agent its own file can judge one run from that run's
-directory alone.
+Oh My Pi kills a `!command` 10 s after it starts it, so every call but the preflight gives up at
+9500 ms of a clock that starts with its own process (under load bash can take half a second to
+reach its first line), whether it is waiting on the lock or minting under `timeout`, and logs why.
+A waiter that takes the lock with under 2000 ms left starts no mint: the fastest mint measured on
+the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wait is bounded by
+one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
+succeeds is served inside every caller's ten seconds. A call that gets no key exits 1, which Oh My
+Pi reports as `No API key found for anthropic.` and retries 30 s later.
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
-
-## lib/model-gateway-unserved.sh
-
-Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) wrote
-left any call without a key, and why, so a run in which an agent never got a model turn is scored
-neither as a pass nor as a failure of what it tests. Oh My Pi answers every such call the same way
-(`No API key found for anthropic`, exit 1, a transcript holding no message), whatever the cause.
-
-```sh
-bash scripts/e2e/lib/model-gateway-unserved.sh "$work/model-gateway"             # every call
-bash scripts/e2e/lib/model-gateway-unserved.sh "$work/model-gateway" "$pane_cwd"  # one agent's
-bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-unserved"
-```
-
-The first two read `<dest>/hawk-token.unserved`, the second keeping only the calls made from that
-working directory; `--record` reads one agent's `MODEL_GATEWAY_UNSERVED_FILE`, where a missing file
-means the command served that agent every time. It prints a verdict line and each call's line, and
-exits `0` when every call was served (printing nothing), `75` when every unserved call ran out of
-time (`STARVED, not scored`: rerun it), and `77` when any mint ended without a key before its time
-ran out (`KEY FAILED, not scored`: the hawk login needs fixing, which a rerun does not do; it
-outranks a starve). It exits 2 on an argument refusal, a `<dest>` that holds no key command, or a
-`--record` in a directory that does not exist, and 1 on a line whose reason it does not know.
-
-The tmux stage proofs (Stage 2, Stage 3, the 4b.13b acceptance) and Stage 4b's controller call it
-from their `EXIT` trap when a run is failing with status 1: a run whose record holds an unserved
-call ends with the reader's verdict and its status, 75 or 77, instead of 1. Stage 4b's teardown can
-still set the status back to 1 when it fails itself. A harness that scores each agent's run from its
-directory, such as the skill-scenario rig's scorer, gives each agent its own
-`MODEL_GATEWAY_UNSERVED_FILE` and reads it with `--record`; for a run from a checkout whose key
-command predates this record, a session transcript holding no assistant message is the same signal
-without the reason.
 
 ## lib/check-model-route.sh
 

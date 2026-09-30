@@ -106,7 +106,7 @@ run_processes() {
   done
 }
 cleanup() {
-  local status=$? p
+  local p
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
   for p in "$ptoken" "$deadline_ptoken"; do
@@ -120,11 +120,6 @@ cleanup() {
     rm -rf "$work" || true
   else
     echo "the run's workspace is $work (daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
-    # A failed run in which the key command left an agent without a key is no verdict on the change.
-    # A bare exit in a trap would keep the status the trap began with.
-    if [ "$status" = 1 ] && [ -f "$work/model-gateway/hawk-token" ]; then
-      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" "$work/model-gateway" >&2 || exit "$?"
-    fi
   fi
   return 0
 }

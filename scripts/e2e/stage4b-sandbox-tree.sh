@@ -1004,11 +1004,6 @@ cleanup() {
   # one the checks set. Inside this EXIT trap BASH_COMMAND is still the command the trap interrupted,
   # so the warning names the line alone.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
-  # A failed run whose controller the key command left without a key is no verdict on the change,
-  # unless the teardown below fails too, which sets the status back to 1.
-  if [ "$status" = 1 ] && [ -f "$evidence/model-gateway/hawk-token" ]; then
-    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" "$evidence/model-gateway" || status=$?
-  fi
   stop_tree "$shape_pid"
   [ -z "$tree1" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
