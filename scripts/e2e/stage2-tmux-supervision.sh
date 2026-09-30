@@ -108,7 +108,7 @@ run_processes() {
   done
 }
 cleanup() {
-  local p
+  local status=$? p
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
   for p in "$ptoken" "$deadline_ptoken"; do
@@ -122,7 +122,9 @@ cleanup() {
     rm -rf "$work" || true
   else
     echo "the run's workspace is $work (daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
-    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$work/model-gateway" "$check_started" "$check" >&2
+    # A diagnostic: it never sets the run's status (errexit is on here), and after a signal the run
+    # was stopped, not failed.
+    [ "$status" -gt 128 ] || bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$work/model-gateway" "$check_started" "$check" >&2 || true
   fi
   return 0
 }

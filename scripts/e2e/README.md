@@ -602,9 +602,10 @@ every agent transcript (the tree pods' and, under `transcripts/controller/`, the
 controller's), the interest samples, the audit files and the negative controls. What the
 run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
 `stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
-on whether the controller got no model key since that check began; or
-`stage 4b e2e: BLOCKED (check <check>)` when a prerequisite stopped the run, which then proved
-nothing and gets no notes. Every one but the pass exits 1.
+on whether the controller could have failed that check for want of a model key; or
+`stage 4b e2e: BLOCKED (check <check>)` when the checkpoint could not run, which makes the run no
+verdict on the change while the checkpoints before it stand, and gets no notes. Every one but the
+pass exits 1.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -1111,8 +1112,8 @@ serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run. A St
 invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before
 the cache. Every call inside the window gets the kept key. A key the gateway refuses before then is
 not re-minted: the proof's model turns fail, loudly, which is right for a proof. (A call's parent
-is the Oh My Pi process that ran it, on 18.2.9 a child of the agent's own `omp` rather than the
-agent's pid, so the record tells agents apart by the working directory each call ran in.)
+is a helper the Oh My Pi process starts for each call, on 18.2.9 a child of the agent's own `omp`,
+so the record names the agent by the Legion pane's role and generation instead.)
 
 One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
 once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
@@ -1130,9 +1131,12 @@ one mint, since it started no earlier than the call it waits on, so a wave serve
 succeeds is served inside every caller's ten seconds.
 
 Every agent's call appends one tab-separated line to `<dir>/hawk-token.calls`: the time, the
-caller's pid, the directory Oh My Pi ran it in (the agent's own), the outcome, and a detail. The
-installer's preflight is no agent's and is left out; a call that gets no key also says why on
-stderr, which is where the installer reads the preflight's reason. The outcome is
+caller's pid, the directory Oh My Pi ran it in, the agent, the outcome, and a detail. On the Go tmux
+runtime every agent of one issue shares the issue's directory, so the agent field names the pane
+that called as `LEGION_ROLE/LEGION_GENERATION`, from the environment Oh My Pi hands the command,
+and `-` outside a Legion pane (the operator's controller, a harness's `omp -p`). The installer's
+preflight is no agent's and is left out; a call that gets no key also says why on stderr, which is
+where the installer reads the preflight's reason. The outcome is
 `served`; `timeout` when the call ran out of time — its own deadline, its wait behind another call's
 mint, or `hawk-token` saying it spent its whole budget (`in <spent> ms of a <budget> ms budget`,
 spent at least the budget); `killed` when a signal ended the mint while it had time left; and
@@ -1159,8 +1163,9 @@ bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$evidence/model-gateway"
 bash scripts/e2e/lib/model-gateway-unserved.sh --fresh "$evidence"                                         # a stage proof's setup
 ```
 
-An agent's last call decides whether it went without a key: Oh My Pi retries a failed key command
-30 s later and after a 401, and a relaunched pane calls again.
+An agent is a working directory and an agent field together. Its last call decides whether it
+went without a key: Oh My Pi retries a failed key command 30 s later and after a 401, and a
+relaunched pane calls again.
 
 `--record` scores one agent run from the `MODEL_GATEWAY_CALLS_FILE` a harness named in that
 agent's environment: a file of the run's own, which does not exist before the run, so every line
@@ -1173,23 +1178,30 @@ checkout whose key command predates the record carries the same signal without t
 session file at all.
 
 `--notes` is a stage proof's diagnostic: the `EXIT` trap runs it once it has decided the run
-failed, and it never changes the exit status. It prints, after the check's own failure, each agent
-(the calls from one working directory) that got no key at or after `<since>`, the time the failing
-check began: when, from which directory, and why. One whose last call got no key is still without
-one. One served again later is listed too, with when: it recovered, but spent the 30 s Oh My Pi
-waits before retrying, which can time out a check that waited on it. A starve before the check
-began is left out, whether the agent was served again before the check or made no call during it:
-either way it was not the failing check's, and so is every call an earlier run left, which predates
-`<since>`. A person then sees whether starvation could explain the failure. A run-wide "not scored"
-would not be honest: in Stage 4b the key command's one caller is the operator's controller, while
-every pod uses its projected token, so a worker's failure cannot come from a starved controller.
+failed, guarded so that it never changes the exit status, and not after a signal, which stopped
+the run rather than failed it. It prints, after the check's own failure, each agent that could
+have failed the check for want of a key: when it last got none, from where, and why.
+
+- **An agent whose last call got no key is still without one.** It is listed whenever that call
+  came, marked when it came before the check began: it had no key when the check asked it.
+- **An agent served again after its last starve recovered.** It is listed, with when it was first
+  served again, when that starve came at or after `<since>` less 30 s. The 30 s is the wait Oh My
+  Pi 18.2.9 keeps before it runs a failed key command again: a request inside it fails with no key
+  and runs no command, so it leaves no line, and a check's first calls can fail on a starve from
+  just before the check began.
+- **An agent served again before that window** held a key through the whole check, and is left out.
+
+Every call an earlier run left there is refused with its directory by `--fresh`. A person then sees
+whether starvation could explain the failure. A run-wide "not scored" would not be honest: in Stage
+4b the key command's one caller is the operator's controller, while every pod uses its projected
+token, so a worker's failure cannot come from a starved controller.
 
 `--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make at setup, through their
 own `fail`, when the operator's evidence directory already holds `model-gateway/`: the key command
 would refuse that `--dest` anyway, and the message says why.
 
 Every form exits 2 on an argument refusal (a `--record` in a directory that does not exist
-included), and `--record` and `--notes` 1 on a record line whose outcome they do not know.
+included), and `--record` and `--notes` 1 on a record line they cannot read.
 
 ## lib/check-model-route.sh
 

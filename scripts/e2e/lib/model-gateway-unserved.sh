@@ -8,10 +8,11 @@
 #   bash scripts/e2e/lib/model-gateway-unserved.sh --notes <dest> <since> <check>
 #   bash scripts/e2e/lib/model-gateway-unserved.sh --fresh <evidence-dir>
 #
-# The key command records every agent's call: time, caller pid, caller working directory, outcome
-# and detail, tab-separated, the outcome one of served, timeout (out of time), killed (a signal ended
-# its mint) and failed (anything else). Oh My Pi retries a failed key command 30 s later and after
-# a 401, and a relaunched pane calls again.
+# The key command records every agent's call: time, caller pid, caller working directory, agent
+# (the Legion pane's role/generation, or -), outcome and detail, tab-separated, the outcome one of
+# served, timeout (out of time), killed (a signal ended its mint) and failed (anything else). An
+# agent is its working directory and agent field together: on the Go tmux runtime every agent of an
+# issue shares the issue's directory, and the pid is a helper Oh My Pi starts for each call.
 #
 # --record judges one agent run from its MODEL_GATEWAY_CALLS_FILE: a harness that runs one agent per
 # run (the skill-scenario rig: one `omp -p` process, which keeps its key for its life) names a file
@@ -26,40 +27,58 @@
 # --notes is what a stage proof's EXIT trap runs once it has decided the run failed; it never changes
 # the run's status. <dest> is the key command's directory (install-model-gateway.sh --dest), <since>
 # the time the failing check began (%FT%TZ, UTC, as the record writes it) and <check> its name. It
-# prints each agent (the calls from one working directory) that got no key at or after <since>:
-# when, from which directory, and why. One whose last call got no key is still without one. One
-# served again later is listed too, with when: it recovered, but spent the 30 s Oh My Pi waits
-# before retrying, which can time out a check that waited on it. A starve before <since> is not
-# the failing check's, whether the agent was served again before the check began or made no call
-# during it, so it is left out; so is every call an earlier run left, which predates <since>. It says
-# nothing when no agent went without a key in that window, or when <dest> holds no record yet.
+# prints each agent that could have failed the check for want of a key: when it last got none, from
+# where, and why.
+#   - An agent whose last call got no key is still without one, and is listed whenever that call
+#     came, marked when it came before the check began: it had no key when the check asked it.
+#   - An agent served again after its last starve recovered, and is listed, with when it was first
+#     served again, when that starve came at or after <since> less the 30 s Oh My Pi's 18.2.9 waits
+#     before it runs a failed key command again (resolve-config-value.ts COMMAND_FAILURE_RETRY_MS).
+#     Inside that wait a request fails with no key and runs no command, so it leaves no line, and
+#     the agent's first calls in the check can fail on a starve just before it.
+#   - An agent served again before that window held a key through the whole check, and is left out.
+# Every call an earlier run left in <dest> is refused with the directory by --fresh. It says nothing
+# when no agent is listed, or when <dest> holds no record yet.
 #
 # --fresh is the stage proofs' refusal of a reused evidence directory: it exits 0 when
 # <evidence-dir>/model-gateway does not exist, and otherwise prints why the run cannot use it and
 # exits 1, for the stage to fail with.
 #
-# Every form exits 2 on an argument refusal, and --record and --notes 1 on a record line whose
-# outcome they do not know.
+# Every form exits 2 on an argument refusal, and --record and --notes 1 on a record line they
+# cannot read.
 set -euo pipefail
 
 me=model-gateway-unserved
+# Oh My Pi 18.2.9's COMMAND_FAILURE_RETRY_MS, in seconds.
+retry_s=30
 refuse() {
   echo "$me: $*" >&2
   exit 2
 }
 usage="usage: $0 --record <file> | $0 --notes <dest> <since> <check> | $0 --fresh <evidence-dir>"
-# known OUTCOME refuses a line of $record whose outcome the key command does not write.
+# known OUTCOME DETAIL refuses a line of $record the key command does not write: an outcome it does
+# not know, or a short line, whose fields have moved.
 known() {
   case "$1" in
   served | timeout | killed | failed) ;;
   *)
-    echo "$me: $record holds a line whose outcome is '$1', none of served, timeout, killed and failed" >&2
+    echo "$me: $record holds a line whose outcome is '$1', none of served, timeout, killed and failed (or a line of fewer than six fields)" >&2
     exit 1
     ;;
   esac
+  [ -n "$2" ] || {
+    echo "$me: $record holds a line with no detail, which the key command never writes" >&2
+    exit 1
+  }
 }
-# render AT PID CWD OUTCOME DETAIL prints one record line as both forms show it.
-render() { printf '  %s in %s (pid %s): %s: %s' "$1" "$3" "$2" "$4" "$5"; }
+# render AT PID CWD AGENT OUTCOME DETAIL prints one record line as every form shows it.
+render() {
+  if [ "$4" = - ]; then
+    printf '  %s in %s (pid %s): %s: %s' "$1" "$3" "$2" "$5" "$6"
+  else
+    printf '  %s %s in %s (pid %s): %s: %s' "$1" "$4" "$3" "$2" "$5" "$6"
+  fi
+}
 
 case "${1:-}" in
 --record)
@@ -70,8 +89,8 @@ case "${1:-}" in
   last=
   while IFS= read -r line; do last=$line; done <"$record"
   [ -n "$last" ] || exit 0
-  IFS=$'\t' read -r at pid cwd outcome detail <<<"$last"
-  known "$outcome"
+  IFS=$'\t' read -r at pid cwd agent outcome detail <<<"$last"
+  known "$outcome" "$detail"
   case "$outcome" in
   served) exit 0 ;;
   failed)
@@ -83,7 +102,7 @@ case "${1:-}" in
     status=75
     ;;
   esac
-  render "$at" "$pid" "$cwd" "$outcome" "$detail"
+  render "$at" "$pid" "$cwd" "$agent" "$outcome" "$detail"
   echo
   exit "$status"
   ;;
@@ -92,29 +111,37 @@ case "${1:-}" in
   [[ $3 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || refuse "--notes <since> $3 is not a UTC time as %FT%TZ"
   record=$2/hawk-token.calls
   [ -e "$record" ] || exit 0
-  declare -A last_outcome=() last_at=() starve_at=() starve_line=()
-  while IFS=$'\t' read -r at pid cwd outcome detail; do
-    known "$outcome"
-    last_outcome[$cwd]=$outcome
-    last_at[$cwd]=$at
-    if [ "$outcome" != served ]; then
-      starve_at[$cwd]=$at
-      starve_line[$cwd]=$(render "$at" "$pid" "$cwd" "$outcome" "$detail")
+  lookback=$(date -u -d "$3 $retry_s seconds ago" +%FT%TZ)
+  # Per agent: its last outcome, its last starve (time and line), and its first served call after
+  # that starve.
+  declare -A last_outcome=() starve_at=() starve_line=() served_after=()
+  while IFS=$'\t' read -r at pid cwd agent outcome detail; do
+    known "$outcome" "$detail"
+    key="$cwd $agent"
+    last_outcome[$key]=$outcome
+    if [ "$outcome" = served ]; then
+      [ -z "${starve_at[$key]:-}" ] || [ -n "${served_after[$key]:-}" ] || served_after[$key]=$at
+    else
+      starve_at[$key]=$at
+      starve_line[$key]=$(render "$at" "$pid" "$cwd" "$agent" "$outcome" "$detail")
+      served_after[$key]=
     fi
   done <"$record"
   lines=()
   without=0
-  for cwd in "${!starve_at[@]}"; do
-    [[ ! ${starve_at[$cwd]} < $3 ]] || continue
-    if [ "${last_outcome[$cwd]}" = served ]; then
-      lines+=("${starve_line[$cwd]}; served again at ${last_at[$cwd]}")
+  for key in "${!starve_at[@]}"; do
+    before=
+    [[ ! ${starve_at[$key]} < $3 ]] || before=" (before check $4 began)"
+    if [ "${last_outcome[$key]}" = served ]; then
+      [[ ! ${starve_at[$key]} < $lookback ]] || continue
+      lines+=("${starve_line[$key]}$before; served again at ${served_after[$key]}")
     else
-      lines+=("${starve_line[$cwd]}")
+      lines+=("${starve_line[$key]}$before")
       without=$((without + 1))
     fi
   done
   [ "${#lines[@]}" != 0 ] || exit 0
-  echo "$me: since check $4 began ($3), ${#lines[@]} agent(s) got no model key, $without of them still without one on their last call; if the check waited on one of them, that may be why it failed ($record):"
+  echo "$me: ${#lines[@]} agent(s) may have failed check $4 for want of a model key: $without still without one on their last call, and $((${#lines[@]} - without)) served again after a starve from $lookback on ($retry_s s before the check began); if the check waited on one of them, that may be why it failed ($record):"
   printf '%s\n' "${lines[@]}" | sort
   ;;
 --fresh)

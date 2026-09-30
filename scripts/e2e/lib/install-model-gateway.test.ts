@@ -45,6 +45,9 @@ interface Fake {
   sleep?: number;
   // The MODEL_GATEWAY_CALLS_FILE a harness names in one agent's environment.
   callsFile?: string;
+  // A Legion pane's identity, as the Go tmux runtime sets it on the pane's environment.
+  role?: string;
+  generation?: string;
 }
 let installs = 0;
 function env(mints: string, fake: Fake = {}) {
@@ -57,6 +60,8 @@ function env(mints: string, fake: Fake = {}) {
     FAKE_MINT_MODE: fake.mode ?? "ok",
     FAKE_MINT_SLEEP: String(fake.sleep ?? 0),
     ...(fake.callsFile === undefined ? {} : { MODEL_GATEWAY_CALLS_FILE: fake.callsFile }),
+    ...(fake.role === undefined ? {} : { LEGION_ROLE: fake.role }),
+    ...(fake.generation === undefined ? {} : { LEGION_GENERATION: fake.generation }),
   };
 }
 
@@ -180,42 +185,69 @@ describe("the model gateway key command", () => {
     expect(unserved("--record", file)).toMatchObject({ code: 0, stdout: "" });
   });
 
-  test("tells a failed stage proof which agents got no key since its failing check began", async () => {
+  test("tells apart the agents of one issue, which share its workspace, by their Legion pane", async () => {
     const { run, dest, mints, keyCommand } = install();
-    await call(keyCommand, join(run, "pane-earlier"), mints, { mode: "budget" });
-    // The failing check begins after that call. The record's times are whole seconds, so it begins
-    // a second later: real time, since no fake timer reaches another process's clock.
-    await Bun.sleep(1100);
     const since = now();
-    await call(keyCommand, join(run, "pane-starved"), mints, { mode: "budget" });
-    await call(keyCommand, join(run, "pane-refused"), mints, { mode: "refused" });
-    await call(keyCommand, join(run, "pane-recovered"), mints, { mode: "budget" });
-    await call(keyCommand, join(run, "pane-recovered"), mints);
+    const workspace = join(run, "issue-workspace");
+    // The tester's mint fails, and the architect's call in the same directory is served after it.
+    await call(keyCommand, workspace, mints, { mode: "refused", role: "tester", generation: "1" });
+    await call(keyCommand, workspace, mints, { role: "architect", generation: "2" });
 
-    const notes = unserved("--notes", dest, since, "held-worker");
+    const notes = unserved("--notes", dest, since, "tester-handoff");
     expect(notes.code).toBe(0);
-    expect(notes.stdout).toStartWith(
-      `model-gateway-unserved: since check held-worker began (${since}), 3 agent(s) got no model key, 2 of them still without one`
-    );
     const listed = notes.stdout.split("\n").filter((line) => line.startsWith("  "));
-    // The starve before the check began is not the check's.
-    expect(listed).toHaveLength(3);
-    const of = (pane: string) =>
-      listed.find((line) => line.includes(`in ${join(run, pane)} `)) ?? "";
-    expect(of("pane-refused")).toContain(
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toContain(` tester/1 in ${workspace} (pid `);
+    expect(listed[0]).toContain(
       ": failed: hawk-token exited 1 without a key: error: no usable hawk login"
     );
-    expect(of("pane-starved")).toContain(": timeout: hawk-token: mint produced no token");
-    expect(of("pane-starved")).not.toContain("served again");
-    // An agent served again after its starve recovered, but spent the wait the check may have needed.
-    expect(of("pane-recovered")).toMatch(/: timeout: .*; served again at \d{4}-/);
-    // A run that failed before it installed the key command has no record to read.
-    expect(unserved("--notes", join(run, "not-installed"), since, "setup")).toMatchObject({
+    expect(listed[0]).not.toContain("served again");
+    const record = readFileSync(join(dest, "hawk-token.calls"), "utf8");
+    expect(record).toContain("\ttester/1\tfailed\t");
+    expect(record).toContain("\tarchitect/2\tserved\t");
+  });
+
+  test("lists for a failed check each agent still without a key, and each that recovered from a starve within 30 s of the check's start", () => {
+    // The rules are the reader's over the record's own lines, so this writes them at chosen times.
+    const dest = join(dir, "notes-window");
+    mkdirSync(dest);
+    const since = "2026-09-30T12:00:00Z";
+    const line = (at: string, agent: string, outcome: string) =>
+      `${at}\t42\t/ws\t${agent}\t${outcome}\t${outcome === "served" ? "the kept key" : "why"}\n`;
+    writeFileSync(
+      join(dest, "hawk-token.calls"),
+      [
+        line("2026-09-30T11:50:00Z", "implementer/1", "timeout"), // still without, long before
+        line("2026-09-30T11:50:00Z", "reviewer/1", "timeout"),
+        line("2026-09-30T11:50:10Z", "reviewer/1", "served"), // recovered before the window
+        line("2026-09-30T11:59:50Z", "merger/1", "killed"), // inside the 30 s window
+        line("2026-09-30T12:00:02Z", "merger/1", "served"),
+        line("2026-09-30T12:00:20Z", "merger/1", "served"),
+        line("2026-09-30T12:00:05Z", "tester/1", "timeout"), // still without, during the check
+        line("2026-09-30T12:00:06Z", "architect/1", "served"),
+      ].join("")
+    );
+
+    const notes = unserved("--notes", dest, since, "merge");
+    expect(notes.code).toBe(0);
+    expect(notes.stdout).toStartWith(
+      "model-gateway-unserved: 3 agent(s) may have failed check merge for want of a model key: 2 still without one on their last call, and 1 served again after a starve from 2026-09-30T11:59:30Z on"
+    );
+    const listed = notes.stdout.split("\n").filter((l) => l.startsWith("  "));
+    expect(listed).toEqual([
+      "  2026-09-30T11:50:00Z implementer/1 in /ws (pid 42): timeout: why (before check merge began)",
+      "  2026-09-30T11:59:50Z merger/1 in /ws (pid 42): killed: why (before check merge began); served again at 2026-09-30T12:00:02Z",
+      "  2026-09-30T12:00:05Z tester/1 in /ws (pid 42): timeout: why",
+    ]);
+    // No record yet, a malformed time, and a line of the old five-field shape.
+    expect(unserved("--notes", join(dir, "not-installed"), since, "setup")).toMatchObject({
       code: 0,
       stdout: "",
     });
     expect(unserved("--notes", dest, "yesterday", "setup").code).toBe(2);
-  }, 30_000);
+    writeFileSync(join(dest, "hawk-token.calls"), "2026-09-30T12:00:05Z\t42\t/ws\ttimeout\twhy\n");
+    expect(unserved("--notes", dest, since, "merge").code).toBe(1);
+  });
 
   test("gives up on a mint that outlasts the caller, and on the wait behind it, before Oh My Pi's ten seconds", async () => {
     const { run, dest, mints, keyCommand } = install();

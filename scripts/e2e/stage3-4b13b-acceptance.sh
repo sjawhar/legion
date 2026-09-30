@@ -100,7 +100,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -132,9 +132,10 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
-  # Only a hard failure gets notes: a run that ends on its soft failures sets ok after its last
-  # check, once every pane has stopped, so its notes could only be empty.
-  [ -n "${ok:-}" ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$check_started" "$check" >&2
+  # A diagnostic for a hard failure: it never sets the status, and after a signal the run was
+  # stopped. A run that ends on its soft failures sets ok after its last check, once every pane has
+  # stopped, so its notes could only be empty.
+  [ -n "${ok:-}" ] || [ "$status" -gt 128 ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
