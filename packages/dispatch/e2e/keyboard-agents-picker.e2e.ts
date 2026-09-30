@@ -19,6 +19,18 @@ test.beforeEach(async () => {
   }
 });
 
+/** The send the rows below make, and the path of the one `POST` it produces. A comment and a
+ *  direct message share this shape, so the row that calls this names the path it expects. */
+async function sendAndCapturePath(page: Page, field: Locator): Promise<string> {
+  const sent = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" && /\/(comments|messages)$/.test(new URL(request.url()).pathname)
+  );
+  await field.fill("Status please");
+  await field.press("Control+Enter");
+  return new URL((await sent).url()).pathname;
+}
+
 test.describe("agents page", () => {
   // The arrows choose and Enter commits, so a reader can pass the first option to reach the
   // second - and the Enter that picks is the picker's, not a newline at the top of the message.
@@ -103,14 +115,7 @@ test.describe("agents page", () => {
         await expect(picker).toHaveValue(issueKey);
         await expect(toggle).toContainText(issueKey);
 
-        const sent = page.waitForRequest(
-          (request) =>
-            request.method() === "POST" &&
-            /\/(comments|messages)$/.test(new URL(request.url()).pathname)
-        );
-        await field.fill("Status please");
-        await field.press("Control+Enter");
-        expect(new URL((await sent).url()).pathname).toBe(`/api/v1/issues/${issueKey}/comments`);
+        expect(await sendAndCapturePath(page, field)).toBe(`/api/v1/issues/${issueKey}/comments`);
       } finally {
         await context.close();
       }
@@ -141,14 +146,7 @@ test.describe("agents page", () => {
       await expect(picker).toHaveValue("");
       await expect(toggle).toContainText("No issue");
 
-      const sent = page.waitForRequest(
-        (request) =>
-          request.method() === "POST" &&
-          /\/(comments|messages)$/.test(new URL(request.url()).pathname)
-      );
-      await field.fill("Status please");
-      await field.press("Control+Enter");
-      expect(new URL((await sent).url()).pathname).toBe(
+      expect(await sendAndCapturePath(page, field)).toBe(
         `/api/v1/agents/${plannerSession.session_id}/messages`
       );
     } finally {
