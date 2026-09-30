@@ -349,7 +349,7 @@ func (s *Server) unenrollBox(ctx context.Context, enrollmentID string) Response 
 // old enrollment id here so the revoke and the fresh enroll for the same runtime_id can never
 // race (see enrollLoop's doc comment); every other caller of adopt passes "". That revoke-first
 // ordering couples priorID's fate to this session's lifecycle until the first successful
-// Enroll, so enrollLoop's own doc comment covers the fallback for the session ending first.
+// Enroll, so revokeLapsed's doc comment covers the fallback for the session ending first.
 func (s *Server) adopt(ctx context.Context, sess *Session, priorID string) {
 	go s.enrollLoop(ctx, sess, priorID)
 	go s.watchExit(ctx, sess)
@@ -412,25 +412,10 @@ func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-cha
 // same way once it returns here — the broker's idempotent-enroll conflict path can otherwise
 // keep answering the same dead id forever (a base-branch bug tracked separately) — so by the
 // time control returns here that way the old id is actually gone and this enroll call mints a
-// fresh one.
-//
-// If the session ends (sess.stop closes) before that revoke ever succeeds — the recovered
-// process exits or is unregistered while the broker is unreachable and revokeLapsed is
-// mid-backoff — retire's own revoke cannot help: it only ever revokes sess.EnrollmentID(),
-// still empty here since this session never reached its first successful Enroll, so priorID
-// would otherwise be abandoned for good the moment Registry.Remove drops this session's
-// record. revokeLapsed returns false both when the session ends and when ctx is done, and
-// ctx.Err() tells them apart: only the former still has anywhere useful to send priorID (ctx
-// done means the whole daemon is exiting, and nothing further should be attempted), so this
-// loop then falls back to firing the same bounded, independent revoke retire uses for its own
-// enrollment id — decoupled from this session exactly like the pre-fix "adopt now, revoke
-// independently" ordering — so priorID still gets its guaranteed best-effort attempts even
-// though the new session is gone.
+// fresh one. A session that ends before that revoke succeeds still gets its revoke: revokeLapsed
+// hands the id on (see its comment).
 func (s *Server) enrollLoop(ctx context.Context, sess *Session, priorID string) {
 	if priorID != "" && !s.revokeLapsed(ctx, sess, priorID) {
-		if ctx.Err() == nil {
-			go s.revoke(ctx, priorID)
-		}
 		return
 	}
 	for {
@@ -468,8 +453,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session, priorID string) 
 // giving up after a fixed number of tries the way retire's revoke does, since returning early
 // here would leave the session stuck re-enrolling onto a broker that keeps handing back the
 // same dead id — before enrollLoop is told to enroll fresh. A session that ends while that
-// revoke is still retrying hands the lapsed id to the same bounded, independent revoke
-// enrollLoop's priorID path uses, since retire revokes only a live enrollment.
+// revoke is still retrying still gets it: revokeLapsed hands the lapsed id on.
 func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) bool {
 	for {
 		interval := max(s.MinRenew, time.Until(lease)/3)
@@ -486,9 +470,6 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 			id := sess.markLapsed()
 			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID, "code", be.Code, "enrollment_id", id)
 			if !s.revokeLapsed(ctx, sess, id) {
-				if ctx.Err() == nil {
-					go s.revoke(ctx, id)
-				}
 				return false
 			}
 			sess.clearLapsed()
@@ -502,19 +483,25 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 	}
 }
 
-// revokeLapsed retries Broker.Revoke for a renew-refused enrollment until it succeeds, the
-// session ends, or ctx is done. Backoff matches enrollLoop's: 1 s doubling to a 1-minute cap,
-// retried indefinitely rather than a fixed number of times — giving up would hand the dead id
-// straight back to the broker's idempotent-enroll conflict path, which can keep answering it
-// forever — and, like enrollLoop's, woken by a login, since a revoke needs the credential too.
-// One refusal is final rather than retried: 403 OPERATOR_MISMATCH, when the enrollment was made
-// under another operator's launcher credential (a helper logged back in as someone else). This
-// credential can never revoke it, and it cannot block the fresh enrollment either, since the
-// broker's conflict is keyed on the launcher credential; so the revoke counts as done, and the old
-// enrollment ends with its own lease. Returns false only when the session ended or ctx was
-// canceled first.
+// revokeLapsed retries Broker.Revoke for a lapsed enrollment (a renew-refused one, or a
+// re-pinned session's prior one) until it succeeds, the session ends, or ctx is done. Backoff
+// matches enrollLoop's: 1 s doubling to a 1-minute cap, retried indefinitely rather than a fixed
+// number of times — giving up would hand the dead id straight back to the broker's
+// idempotent-enroll conflict path, which can keep answering it forever — and, like enrollLoop's,
+// woken by a login, since a revoke needs the credential too. One refusal is final rather than
+// retried: 403 OPERATOR_MISMATCH, when the enrollment was made under another operator's launcher
+// credential (a helper logged back in as someone else). This credential can never revoke it, and
+// it cannot block the fresh enrollment either, since the broker's conflict is keyed on the
+// launcher credential; so the revoke counts as done, and the old enrollment ends with its own
+// lease.
+//
+// Returns false only when the session ended or ctx was canceled first. A session that ends
+// mid-backoff cannot leave the id to retire, which revokes only sess.EnrollmentID(): a
+// re-pinned session has not enrolled yet, and a lapsed one has had its id moved off by
+// markLapsed. So the id goes to the same bounded, independent revoke retire uses, decoupled from
+// the session. ctx done means the whole daemon is exiting, and nothing further is attempted.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
-	return retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
 	}, func() error {
 		err := s.Broker.Revoke(ctx, id)
@@ -525,6 +512,10 @@ func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) boo
 		}
 		return err
 	})
+	if !revoked && ctx.Err() == nil {
+		go s.revoke(ctx, id)
+	}
+	return revoked
 }
 
 func (s *Server) watchExit(ctx context.Context, sess *Session) {

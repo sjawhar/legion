@@ -573,9 +573,12 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // "pending"/"denied"/"expired" and for "" (login never run) — the same distinction the doctor
 // and installer checks in ~/.dotfiles need and, before this verb existed, had no side-effect-free
 // way to make (AGENTC-834). An issued login whose credential the broker later refused reads
-// "expired", the word the dotfiles launcher gate matches, and its stderr line says the broker
-// refused it and why that can happen. The state is the most recent login's: a re-login that was
-// denied, expired or is still pending reads that way even while the credential an earlier login
+// "expired", the word the dotfiles launcher gate matches, and when the helper says so
+// (login_refused) stderr says the broker refused it and why that can happen. Any other
+// "expired" gets the neutral line: a login that expired before anyone approved it reads the
+// same, and so does a refused credential on a helper from before login_refused, which keeps
+// running until it restarts. The state is the most recent login's: a re-login that was denied,
+// expired or is still pending reads that way even while the credential an earlier login
 // installed is still held. Every state but "issued" says on stderr what to do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
@@ -597,19 +600,15 @@ func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 		state = "none"
 	}
 	fmt.Fprintln(stdout, state)
-	switch state {
-	case "issued":
+	switch {
+	case state == "issued":
 		return 0
-	case "pending":
+	case state == "pending":
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: a machine login is waiting for approval (code %s)\n", resp.Code)
-	case "none":
+	case state == "none":
 		fmt.Fprintln(stderr, "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login")
-	case "expired":
-		if resp.LoginRefused {
-			fmt.Fprintln(stderr, "agent-secrets launcher login-status: the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login")
-			break
-		}
-		fmt.Fprintln(stderr, "agent-secrets launcher login-status: the last machine login expired before it was approved; run: agent-secrets launcher login")
+	case state == "expired" && resp.LoginRefused:
+		fmt.Fprintln(stderr, "agent-secrets launcher login-status: the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login")
 	default:
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: the last machine login is %s; run: agent-secrets launcher login\n", state)
 	}

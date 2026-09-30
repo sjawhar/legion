@@ -139,7 +139,9 @@ func TestCommandsOnAHelperWithoutALauncherCredentialPrintTheNotice(t *testing.T)
 // launcher proof it rejects, a clock step or an AGENT_SECRETS_URL mismatch as well as an expired
 // or revoked credential, so a refused credential must not be reported as merely expired.
 // login-status keeps the word the dotfiles launcher gate matches, "expired", and says on stderr
-// which kind of expired it is.
+// that the broker refused it when the helper reports so. Without that report, from a login that
+// expired unapproved or from a helper that predates the field, it says only that the login is
+// expired (TestLoginStatusDoesNotClaimAnUnapprovedLoginFromAnOlderHelper).
 func TestLoginStatusSaysARefusedCredentialWasRefused(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	for _, tc := range []struct {
@@ -148,7 +150,7 @@ func TestLoginStatusSaysARefusedCredentialWasRefused(t *testing.T) {
 		want    string
 	}{
 		{"refused", true, "the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login"},
-		{"never approved", false, "the last machine login expired before it was approved; run: agent-secrets launcher login"},
+		{"not reported refused", false, "the last machine login is expired; run: agent-secrets launcher login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sock := filepath.Join(t.TempDir(), "h.sock")
