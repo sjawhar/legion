@@ -17,11 +17,11 @@ import {
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import {
+  createDeliveryDedupe,
   type DispatchDelivery,
   expectsLaneReceipt,
   inboundTimestamp,
   postDeliveryReply,
-  rememberBounded,
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
@@ -334,7 +334,7 @@ export default function envoyExtension(pi: PiApi): void {
   };
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
-  const dedupeKeys = new Set<string>();
+  const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
@@ -561,8 +561,7 @@ export default function envoyExtension(pi: PiApi): void {
     // also reaches the issue's own topic (every subscriber, not just the
     // removed session), so this only fires for a removal naming us.
     for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) closeIntentionally(topic);
-    const dedupeKey = rendered.envelope?.dedupe_key;
-    const duplicate = dedupeKey !== undefined && dedupeKeys.has(dedupeKey);
+    const duplicate = delivered.isRepeat(rendered.envelope);
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
@@ -624,7 +623,7 @@ export default function envoyExtension(pi: PiApi): void {
         );
         throw error;
       }
-      if (dedupeKey !== undefined) rememberBounded(dedupeKeys, dedupeKey, 1000);
+      delivered.remember(rendered.envelope);
     }
   };
 

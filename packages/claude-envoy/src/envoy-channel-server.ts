@@ -915,7 +915,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
     instructions:
-      "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id is the dedupe identity, urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.",
+      "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.",
   })
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch })
   let runtime: ChannelToolRuntime | undefined

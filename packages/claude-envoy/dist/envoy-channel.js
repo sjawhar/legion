@@ -38124,13 +38124,32 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
-function rememberBounded(seen, key, limit) {
-  seen.add(key);
-  if (seen.size > limit) {
-    const oldest = seen.values().next();
-    if (!oldest.done)
-      seen.delete(oldest.value);
-  }
+function createDeliveryDedupe(now = Date.now) {
+  const deliveredAt = new Map;
+  return {
+    isRepeat(frame) {
+      const key = frame?.dedupe_key;
+      const at = key === undefined ? undefined : deliveredAt.get(key);
+      return at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS;
+    },
+    remember(frame) {
+      const key = frame?.dedupe_key;
+      if (key === undefined)
+        return;
+      const at = now();
+      for (const [oldest, deliveredAtOldest] of deliveredAt) {
+        if (at - deliveredAtOldest < DELIVERY_DUPLICATE_WINDOW_MS)
+          break;
+        deliveredAt.delete(oldest);
+      }
+      deliveredAt.delete(key);
+      deliveredAt.set(key, at);
+    },
+    forget(frame) {
+      if (frame?.dedupe_key !== undefined)
+        deliveredAt.delete(frame.dedupe_key);
+    }
+  };
 }
 function isCommentTargetedDelivery(delivery) {
   return "comment_id" in delivery;
@@ -43862,16 +43881,14 @@ class StdioServerTransport {
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
-var version2 = "0.5.0";
+var version2 = "0.5.1";
 
 // src/channel-forwarder.ts
 var DeliveryIdentity = exports_external.object({
-  event_id: exports_external.string().min(1).optional(),
   dedupe_key: exports_external.string().min(1).optional(),
   topic: exports_external.string().min(1).optional()
 });
 var decoder = new TextDecoder;
-var SEEN_KEYS_LIMIT = 1000;
 var DEFAULT_DRAIN_TIMEOUT_MS = 1000;
 function deliveryIdentity(raw) {
   let parsed;
@@ -43889,18 +43906,17 @@ function report(what, error48) {
 }
 function createChannelForwarder(connection, options) {
   const following = new Map;
-  const seen = new Set;
+  const dedupe = createDeliveryDedupe();
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   const deliver = async (topic, subscription) => {
     try {
       for await (const message of subscription) {
+        const raw = decoder.decode(message.data);
+        const identity = deliveryIdentity(raw);
+        const duplicate = dedupe.isRepeat(identity);
+        if (!duplicate)
+          dedupe.remember(identity);
         try {
-          const raw = decoder.decode(message.data);
-          const identity = deliveryIdentity(raw);
-          const key = identity?.event_id ?? identity?.dedupe_key;
-          const duplicate = key !== undefined && seen.has(key);
-          if (key !== undefined && !duplicate)
-            rememberBounded(seen, key, SEEN_KEYS_LIMIT);
           await options.deliver({
             subject: message.subject,
             data: message.data,
@@ -43910,6 +43926,8 @@ function createChannelForwarder(connection, options) {
             ...duplicate ? { duplicate: true } : {}
           });
         } catch (error48) {
+          if (!duplicate)
+            dedupe.forget(identity);
           report(`could not deliver a message on ${message.subject}`, error48);
         }
       }
@@ -44611,7 +44629,7 @@ async function runEnvoyChannelServer() {
   const stateDirectory = pluginStateDirectory();
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id is the dedupe identity, urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
   });
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch });
   let runtime;

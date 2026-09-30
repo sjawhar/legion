@@ -16,7 +16,7 @@ function envelope(eventId: string): string {
   })
 }
 
-test("delivers each event id once even when concrete and wildcard subscriptions overlap", async () => {
+test("delivers each dedupe key once even when concrete and wildcard subscriptions overlap", async () => {
   const broker = new FakeNatsServer()
   const connection = await connect({ servers: broker.url })
   const received: string[] = []

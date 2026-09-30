@@ -7,6 +7,7 @@ import {
   agentSubject,
   ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
   CommentEventPayloadSchema as CommentPayloadSchema,
+  DELIVERY_DUPLICATE_WINDOW_MS,
   type DeliveryCapability,
   DISPATCH_DOCUMENT_TOPIC_PREFIX,
   DISPATCH_TOPIC_PREFIX,
@@ -149,13 +150,49 @@ export function expectsLaneReceipt<
   );
 }
 
-/** Remembers `key` in a dedupe set, dropping the oldest entry once the set exceeds `limit`. */
-export function rememberBounded(seen: Set<string>, key: string, limit: number): void {
-  seen.add(key);
-  if (seen.size > limit) {
-    const oldest = seen.values().next();
-    if (!oldest.done) seen.delete(oldest.value);
-  }
+/** The part of an inbound frame a host recognises a repeat by: its `dedupe_key`, never its `event_id`. */
+export interface DedupeIdentity {
+  readonly dedupe_key?: string | undefined;
+}
+
+/**
+ * A host's record of the frames it handed its agent, which drops a repeat. The whole promise it is
+ * part of is stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`; every host that
+ * subscribes over core NATS (the Oh My Pi extension, the Claude Code channel) keeps one.
+ */
+export interface DeliveryDedupe {
+  /** Whether a frame under this dedupe key was handed to the agent inside the window. */
+  isRepeat(frame: DedupeIdentity | undefined): boolean;
+  /** Records a frame handed to the agent. */
+  remember(frame: DedupeIdentity | undefined): void;
+  /** Drops a frame whose delivery failed, so the agent still gets it when it is sent again. */
+  forget(frame: DedupeIdentity | undefined): void;
+}
+
+export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
+  // Insertion order is delivery order, so the entries past the window are always at the front.
+  const deliveredAt = new Map<string, number>();
+  return {
+    isRepeat(frame) {
+      const key = frame?.dedupe_key;
+      const at = key === undefined ? undefined : deliveredAt.get(key);
+      return at !== undefined && now() - at < DELIVERY_DUPLICATE_WINDOW_MS;
+    },
+    remember(frame) {
+      const key = frame?.dedupe_key;
+      if (key === undefined) return;
+      const at = now();
+      for (const [oldest, deliveredAtOldest] of deliveredAt) {
+        if (at - deliveredAtOldest < DELIVERY_DUPLICATE_WINDOW_MS) break;
+        deliveredAt.delete(oldest);
+      }
+      deliveredAt.delete(key);
+      deliveredAt.set(key, at);
+    },
+    forget(frame) {
+      if (frame?.dedupe_key !== undefined) deliveredAt.delete(frame.dedupe_key);
+    },
+  };
 }
 
 function isCommentTargetedDelivery(

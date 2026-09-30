@@ -150,7 +150,7 @@ test("never answers the reply inbox of a JetStream publish to the direct subject
   expect(nats.published).toEqual([])
 })
 
-test("delivers each event id once while acknowledging every forwarded request after enqueue", async () => {
+test("delivers each dedupe key once while acknowledging every forwarded request after enqueue", async () => {
   const nats = new FakeNats()
   const notifier = new FakeNotifier(nats.order)
   const stateDirectory = await scratchState()
@@ -172,6 +172,101 @@ test("delivers each event id once while acknowledging every forwarded request af
       ["_INBOX.receipt", 0],
       ["_INBOX.receipt", 0],
     ])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+/**
+ * One Dispatch message as the listener publishes it for one send: `/v1/messages/send` mints a
+ * fresh `event_id`, `source_event_id` and `trace_id` for every request and derives `dedupe_key`
+ * from the idempotency key Dispatch passes, which is the same for an attempt and its same-mode
+ * Retry (`packages/envoy/cmd/listener/api.go` messageEnvelope, sendHandler).
+ */
+function listenerSend(send: string): string {
+  return JSON.stringify({
+    event_id: `evt-${send}`,
+    source: "dispatch",
+    source_event_id: `src-${send}`,
+    topic: directSubject,
+    dedupe_key: "agent.ses_claude.33333333-3333-4333-8333-333333333333:aside",
+    issued_at: 1_760_000_000_000,
+    payload_summary: "Run the migration",
+    payload: JSON.stringify({
+      event: {
+        actor: { id: "alice", kind: "user" },
+        issue_key: "CORE-1",
+        payload: {
+          author: { id: "alice", kind: "user" },
+          body: "Run the migration",
+          created_at: "2026-09-30T00:00:00Z",
+          deliveries: [],
+          id: "33333333-3333-4333-8333-333333333333",
+          in_reply_to: null,
+          issue_key: "CORE-1",
+          target: "session:ses_claude",
+        },
+        type: "message.created",
+      },
+      delivery: { attempt: 1, mode: "aside" },
+    }),
+    trace_id: `trace-${send}`,
+  })
+}
+
+test("a Dispatch Retry the listener re-sends under the same dedupe key reaches Claude once", async () => {
+  const nats = new FakeNats()
+  const notifier = new FakeNotifier()
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      notifier,
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, listenerSend("attempt"))
+    nats.emit(directSubject, listenerSend("retry"))
+    await settled()
+
+    expect(notifier.notifications).toHaveLength(1)
+    expect(notifier.notifications[0]?.params.meta["event_id"]).toBe("evt-attempt")
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a send whose notification failed is delivered when it is sent again", async () => {
+  const nats = new FakeNats()
+  const delivered: string[] = []
+  let failNext = true
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      notifier: {
+        notification: async (notification) => {
+          if (failNext) {
+            failNext = false
+            throw new Error("the MCP transport refused the write")
+          }
+          delivered.push(String(notification.params.meta["event_id"]))
+        },
+      },
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, listenerSend("attempt"))
+    await settled()
+    nats.emit(directSubject, listenerSend("retry"))
+    await settled()
+
+    // Claude never saw the first send, so its key must not turn the second away as a repeat.
+    expect(delivered).toEqual(["evt-retry"])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
