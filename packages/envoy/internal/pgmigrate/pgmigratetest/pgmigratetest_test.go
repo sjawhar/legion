@@ -31,11 +31,11 @@ func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 		{
 			name: "an empty directory",
 			place: func(t *testing.T, dir string) {
-				if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
+				if err := os.Mkdir(filepath.Join(dir, ".empty"), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			},
-			want: "migrations/empty is a directory holding nothing //go:embed can carry",
+			want: "migrations/.empty is a directory holding nothing //go:embed can carry",
 		},
 		{
 			name: "a name a directive without all: drops",
@@ -53,7 +53,7 @@ func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: "migrations/.0001_a.up.sql.swp is on disk but not embedded, so no runner would see it; embed the directory with all:",
+			want: "migrations/.0001_a.up.sql.swp is on disk but not embedded, so no runner would see it; embed the directory with all:, or rename it if all: is already there, since Go's module paths refuse some names (one holding a colon, for instance)",
 		},
 		{
 			name: "a regular file the store's pattern leaves out",
@@ -79,11 +79,11 @@ func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 		{
 			name: "a FIFO, which is not a regular file",
 			place: func(t *testing.T, dir string) {
-				if err := syscall.Mkfifo(filepath.Join(dir, "0002_b.up.sql"), 0o644); err != nil {
+				if err := syscall.Mkfifo(filepath.Join(dir, "_0002_b.up.sql"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			},
-			want: "migrations/0002_b.up.sql is not a regular file (a FIFO, socket or device), which no //go:embed directive embeds; remove it",
+			want: "migrations/_0002_b.up.sql is not a regular file (a FIFO, socket or device), which no //go:embed directive embeds; remove it",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
