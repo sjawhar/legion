@@ -433,9 +433,10 @@ bounded: parsing pads only while the markdown one write sends adds at most 10,00
 a spec, an upload or a version; every operation of an edit batch, table-row fragments included; or
 an accepted suggestion's replacement together with the tables its splice cuts, as a reject's cut
 tables (`pmdoc.PadTables`). A larger write is refused before its cells are allocated
-(`pmdoc.ErrTablePadding`: `400 INVALID_MARKDOWN` for a document, `INVALID_OP` on an edit's
-`markdown`, an accept's `replace_with` or a reject's `anchor`), naming the table, the cells it
-writes, the cells padding its rows to the table's width would make, and the limit. Every table
+(`pmdoc.ErrTablePadding`: `400 INVALID_MARKDOWN` for a document or an accepted suggestion's own
+replacement, `INVALID_OP` on an edit's `markdown`, on an accept's `replace_with` for the tables
+its splice cuts, or on a reject's `anchor`), naming the table, the cells it writes, the cells
+padding its rows to the table's width would make, and the limit. Every table
 goldmark reads is charged, however it is written, a header narrower than its delimiter row among
 them, which goldmark pads with the rest: `findTableRows` reads a paragraph's lines as goldmark's
 table transformer does, and `TestFindTableRowsReadsWhatGoldmarkReads` holds the two together. A
