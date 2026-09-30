@@ -512,6 +512,16 @@ comment anchor. A question about a document is written as an `ask` block through
 directive, not as an issue-level `dispatch_ask`. The extension passes the host tool AbortSignal to every
 Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 
+With Dispatch configured, a `context` handler (`src/dispatch-first.ts`) puts the `dispatch-first`
+skill into every provider request as a user message after any leading `compactionSummary`
+messages: top-level sessions, Legion panes and `task` subagents alike. Oh My Pi keeps nothing a
+`context` handler returns, so the insert runs on each request rather than once; its text is read
+once at module load (a package without `dist/skills/dispatch-first/SKILL.md` fails to load naming
+it) and it carries no id, so its digest and the append-only prompt cache's prefix stay stable. A
+request that already carries `DISPATCH_FIRST_MARKER` gets no second copy.
+`extensions/legion-phase-stall-omp.test.ts` checks turn 1, turn 2, after a compaction, and
+without Dispatch on the real binary.
+
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
 nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first
 window. It runs only for a session the stop could actually nudge — the host awaits this handler, so
