@@ -261,6 +261,26 @@ func reviewFromAnswer(selected []string, text *string) (string, *string, error) 
 	}
 }
 
+// refuseStaleApprovalAsk refuses an answer to an approval ask that names an older version than
+// the document's latest settled one, since its question never named what the review would pin.
+// The caller holds the document owner's row, which every version write takes first, so the
+// version cannot move between this read and the review.
+func refuseStaleApprovalAsk(ctx context.Context, q queryer, ask model.Ask) error {
+	version, err := settledVersionNumber(ctx, q, ask.Approval.ArtifactID)
+	if err != nil {
+		return err
+	}
+	if version == ask.Approval.Version {
+		return nil
+	}
+	return errorf(
+		http.StatusConflict,
+		"APPROVAL_ASK_STALE",
+		"this approval ask names %s version %d, and the document is at version %d; review version %d from the document header, or wait for a new approval request",
+		ask.Approval.Name, ask.Approval.Version, version, version,
+	)
+}
+
 // GET /api/v1/artifacts/{id}/reviews
 func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -340,6 +360,14 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	if open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	} else if open != nil && open.Approval.Version != version {
+		// The open ask names a version the document has moved past, which no answer can review any
+		// more (APPROVAL_ASK_STALE), so this review retracts it and cites no ask.
+		retraction := fmt.Sprintf("%s moved on to version %d; that version was reviewed from the document header instead", artifact.Name, version)
+		if _, events, err = s.closeAskTx(r.Context(), tx, open.ID, actor, s.resolveTransition(actor, "retracted", retraction)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	} else if open != nil {
 		selected := approvalOptionApprove
 		if state == "changes_requested" {

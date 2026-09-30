@@ -29,8 +29,9 @@ type answerRevision struct {
 	EditedAt *string
 }
 
-// answerTransition records a human answer. Approval asks have their review options,
-// and questions accept their configured options.
+// answerTransition records a human answer. Approval asks have their review options and are
+// answered only while they name the document's latest settled version; questions accept their
+// configured options.
 func answerTransition(
 	actor model.Actor,
 	selected []string,
@@ -59,6 +60,9 @@ func answerTransition(
 			switch ask.Kind {
 			case "approval":
 				if _, _, err := reviewFromAnswer(selected, text); err != nil {
+					return model.Ask{}, err
+				}
+				if err := refuseStaleApprovalAsk(ctx, tx, ask); err != nil {
 					return model.Ask{}, err
 				}
 			default:
@@ -144,12 +148,10 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
 	)
-	// An approval ask's answer is a review of the document it names, pinned to
-	// the document's latest settled version at answer time. An ask naming an older
-	// version is not answered, since its question never named what the review would
-	// approve; the owner lock the transition holds keeps the version from moving here.
+	// An approval ask's answer is a review of the document it names, pinned to the version its
+	// question named, which the transition has already found to be the latest settled one.
 	transition.After = func(ctx context.Context, tx pgx.Tx, ask model.Ask) ([]model.Event, error) {
-		if ask.Kind != "approval" || ask.Approval == nil {
+		if ask.Kind != "approval" {
 			return nil, nil
 		}
 		state, reason, err := reviewFromAnswer(input.Selected, input.Text)
@@ -160,19 +162,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		version, err := settledVersionNumber(ctx, tx, artifact.ID)
-		if err != nil {
-			return nil, err
-		}
-		if version != ask.Approval.Version {
-			return nil, errorf(
-				http.StatusConflict,
-				"APPROVAL_ASK_STALE",
-				"this approval ask names %s version %d, and the document is at version %d; approve version %d from the document header, or wait for a new approval request",
-				ask.Approval.Name, ask.Approval.Version, version, version,
-			)
-		}
-		_, event, err := s.writeReview(ctx, tx, artifact, version, state, actor, reason, new(ask.ID))
+		_, event, err := s.writeReview(ctx, tx, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID))
 		if err != nil {
 			return nil, err
 		}

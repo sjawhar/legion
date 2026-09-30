@@ -321,7 +321,8 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 
 // An answer to an approval ask pins its review to the document's latest settled version, so an ask
 // naming an older version is not answered: its question never named what the review would
-// approve. The human approves from the document header, or waits for a new request.
+// approve. The human reviews from the document header, or waits for a new request; the header's
+// review retracts the old ask rather than citing it.
 func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -374,12 +375,28 @@ func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
 		t.Fatalf("ask after the refused answers = %#v, want open", stillOpen)
 	}
 
-	// Approving from the document header reviews the version it shows, and closes the old ask.
+	// Approving from the document header reviews the version it shows. The ask naming version 1 is
+	// retracted, with a reason naming version 2, and the review cites no ask.
 	if header := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]any{"state": "approved"}, "alice"); header.Code != http.StatusCreated {
 		t.Fatalf("header approve: status=%d body=%s", header.Code, header.Body.String())
 	}
-	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "approved" || got.Approval.Version == nil || *got.Approval.Version != 2 || got.Approval.AskID == nil || *got.Approval.AskID != askID {
-		t.Fatalf("approval after the header approve = %#v, want approved at version 2 through ask %s", got.Approval, askID)
+	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "approved" || got.Approval.Version == nil || *got.Approval.Version != 2 || got.Approval.AskID != nil {
+		t.Fatalf("approval after the header approve = %#v, want approved at version 2 citing no ask", got.Approval)
+	}
+	retracted := decodeBody[struct {
+		Ask struct {
+			State      string `json:"state"`
+			Resolution *struct {
+				Kind   string `json:"kind"`
+				Reason string `json:"reason"`
+				Actor  struct {
+					ID string `json:"id"`
+				} `json:"actor"`
+			} `json:"resolution"`
+		} `json:"ask"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")).Ask
+	if retracted.State != "resolved" || retracted.Resolution == nil || retracted.Resolution.Kind != "retracted" || !strings.Contains(retracted.Resolution.Reason, "version 2") || retracted.Resolution.Actor.ID != "alice" {
+		t.Fatalf("the ask naming version 1 after the header approve = %#v, want retracted by alice with a reason naming version 2", retracted)
 	}
 }
 
