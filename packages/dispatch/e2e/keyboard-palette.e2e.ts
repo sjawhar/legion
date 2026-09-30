@@ -344,7 +344,18 @@ test("a board card's row runs on the card that opened the palette", async ({
     const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
       name: "Actions",
     });
-    await expect(actions.getByRole("option", { name: "Next card" })).toHaveCount(0);
+    await expect(actions.getByRole("option", { name: "Open issue" })).toHaveCount(1);
+    // `Enter` on the card opens it too, and `Open issue` is already that action's row. Soft, so
+    // one run names every row that should not be there.
+    for (const absent of [
+      "Next card",
+      "Previous card",
+      "Next column",
+      "Previous column",
+      "Open the focused card's issue",
+    ]) {
+      await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
+    }
     await actions.getByRole("option", { name: "Open issue" }).click();
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}`));
   } finally {

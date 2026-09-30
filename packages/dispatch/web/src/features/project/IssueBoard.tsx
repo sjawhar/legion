@@ -465,10 +465,12 @@ export function IssueBoard({
       when: focusedCard,
     },
     {
-      // Only from the card itself: Enter on the title link is the browser's own navigation.
+      // Only from the card itself: Enter on the title link is the browser's own navigation. Out of
+      // the palette, where `open` above is already the row for the same action.
       id: "open-enter",
       keys: "Enter",
       label: "Open the focused card's issue",
+      palette: false,
       run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
       when: () => document.activeElement?.matches(CARD_SELECTOR) === true,
     },
