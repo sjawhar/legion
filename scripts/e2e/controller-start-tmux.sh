@@ -13,7 +13,7 @@
 # creates is its own and goes on any exit: its scratch directory, which holds the isolated OMP
 # profile under the HOME the run gives its Oh My Pi processes (make_omp_home, lib/omp-home.sh),
 # the tmux servers, and its Postgres and NATS containers. CONTROLLER_START_EVIDENCE_DIR (default a
-# fresh /tmp directory, kept and printed) keeps the daemon and listener logs.
+# fresh /tmp directory, kept and printed) keeps the transcript and the daemon and listener logs.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -25,6 +25,12 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e-controller.$$.XXXXXXXX")
 evidence=${CONTROLLER_START_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-controller-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/checks"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which stops the panes and removes both containers, never fail on a write whoever is
+# reading.
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to "$evidence/transcript.log"
 ok=
 daemon_pid=
 listener_pid=
@@ -70,7 +76,7 @@ cleanup() {
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
   [ -n "$ok" ] || echo "controller start e2e: FAIL (check $check)"
-  echo "evidence: $evidence (logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
+  echo "evidence: $evidence (transcript.log, logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
   return 0
 }
 trap cleanup EXIT
