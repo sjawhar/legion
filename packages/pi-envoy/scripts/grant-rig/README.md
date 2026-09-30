@@ -30,8 +30,10 @@ so exactly one copy of each extension loads, and then swaps only the Legion plug
 copy:
 
 - `RIG_LEGION_BUILD=branch` (default): `bun run build` in the checkout's `packages/pi-envoy`, its
-  `dist/envoy.js` and `dist/legion.js` copied over the installed package's `dist/` (the installed
-  `package.json` stays — its `omp.extensions` already names those two files);
+  `dist/envoy.js` and `dist/legion.js` copied over the installed package's `dist/`, and the
+  checkout's `skills/` staged as the package's `dist/skills`, as `prepack.sh` stages it for the
+  packed plugin (the installed `package.json` stays — its `omp.extensions` already names those two
+  files);
 - `RIG_LEGION_BUILD=<version>` (e.g. `1.17.1`): `npm pack @sjawhar/pi-legion-envoy@<version>`
   extracted in place of the installed package, exactly what `bun add` would install.
 

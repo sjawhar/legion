@@ -50,22 +50,22 @@ daemon runs from `$LEGION_WORKSPACE`. Every grep that must be ≥ 1 on leg B mus
 checkout on disk rather than to the branch; with it, the only variable between the legs is the branch.
 Do leg A first: once leg B's profile exists you will not want to rebuild it.
 
-## 2. What `setup.sh`'s branch mode does not swap: `dist/skills` and the manifest
+## 2. What `setup.sh`'s branch mode does not swap: the manifest
 
 `RIG_LEGION_BUILD=branch` copies `dist/envoy.js` and `dist/legion.js` over the installed package and
-nothing else. `skill://` resolves from `package.json`'s `omp.skills` → `dist/skills`, which `prepack.sh`
-builds as `cp -r ../../skills dist/skills` at publish time, so the rig profile still serves the
-*released* skills until you do the same by hand:
+stages the checkout's `skills/` as `dist/skills`, as `prepack.sh` does at publish time, so `skill://`
+(`package.json`'s `omp.skills` → `dist/skills`) serves the branch's skills. It keeps the installed
+`package.json`, so swap the manifest by hand and check the branch's skill text before any pane
+launches:
 
 ```sh
 PKG="$HOME/.omp/profiles/<rig>/plugins/node_modules/@sjawhar/pi-legion-envoy"
-rm -rf "$PKG/dist/skills" && cp -r "$LEGION_WORKSPACE/skills" "$PKG/dist/skills"
 cp "$LEGION_WORKSPACE/packages/pi-envoy/package.json" "$PKG/package.json"
 jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' "$PKG/package.json" > "$PKG/p.tmp" && mv "$PKG/p.tmp" "$PKG/package.json"
 grep -c '<new phrase>' "$PKG/dist/skills/legion-worker/SKILL.md"   # ≥ 1 before any pane launches
 ```
 
-The manifest copy matters for a second reason: the daemon's boot gate compares the installed
+The manifest copy matters because the daemon's boot gate compares the installed
 `legion.daemonApiVersion` with its own `LEGION_DAEMON_API_VERSION`, and it reads that manifest through
 OMP's ambient plugin root — **the daemon's own `OMP_PROFILE`**. So the rig daemon is started with
 `OMP_PROFILE=<rig> PI_PROFILE=<rig>` (and this pane's `PI_CODING_AGENT_DIR` unset), and the manifest

@@ -68,10 +68,14 @@ if [ "$PLUGINS_MODE" = production ]; then
   }
   # Swap only the Legion plugin.
   if [ "$LEGION_BUILD" = branch ]; then
-    # The checkout's build over the installed dist/. The installed package.json stays: its
+    # The checkout's build and skills over the installed dist/, staged as prepack.sh stages them for
+    # the packed plugin: the envoy extension reads dist/skills/dispatch-first/SKILL.md at load, so
+    # the installed release's skills would fail it. The installed package.json stays: its
     # omp.extensions already names dist/envoy.js and dist/legion.js.
     (cd "$SRC/packages/pi-envoy" && bun run build >/dev/null)
     cp "$SRC/packages/pi-envoy/dist/envoy.js" "$SRC/packages/pi-envoy/dist/legion.js" "$PKG/dist/"
+    rm -rf "$PKG/dist/skills"
+    cp -r "$SRC/skills" "$PKG/dist/skills"
     BUILD_COMMIT=$(jj -R "$SRC" log -r @ --no-graph -T commit_id 2>/dev/null || echo unknown)
   else
     # A released build, exactly as `bun add @sjawhar/pi-legion-envoy@<version>` would install it.
