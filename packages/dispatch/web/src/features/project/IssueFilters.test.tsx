@@ -356,8 +356,8 @@ test("collapses a saved filter disclosure when no filters are active", async () 
 
 // The saved preference is the only owner of the open state: the strip reads it when it mounts
 // and when identity resolves, never because the filter count moved. The List folding a
-// `?status=` into the count is the one way that count rises on a strip already up, and it used
-// to reopen one the reader had left closed.
+// `?status=` into the count is the one way that count rises on a strip already up, so it is the
+// case that would reopen one the reader left closed.
 test("the List and Board toggle leaves a closed strip closed; the reader still opens it", async () => {
   window.localStorage.clear();
   const { getMyState, listIssues, tree, view } = renderStrip(
