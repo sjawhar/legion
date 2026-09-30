@@ -135,7 +135,7 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     );
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
     await page.screenshot({
-      path: testInfo.outputPath(`issue-tab-chord-${testInfo.project.name}.png`),
+      path: testInfo.outputPath(`issue-tab-conversation-${testInfo.project.name}.png`),
     });
 
     for (const [key, tab] of [
