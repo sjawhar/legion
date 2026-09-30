@@ -237,7 +237,7 @@ leans on `External links:`, and the label row is the one that never depends on h
    step 4 gives (which follows the design gate policy):
 
    ```text
-   dispatch_comment({ issue: "<KEY>", body: "Legion took this issue: it was the highest-priority open issue nobody else was working on. Assigned to <login>, who will get this tree's questions and its design approval. To stop Legion, move the issue to backlog; taking the legion label off does not stop a tree that has started." })
+   dispatch_comment({ issue: "<KEY>", body: "Legion took this issue: it was the highest-priority open issue nobody else was working on. Assigned to <login>, who will get this tree's questions and its design approval. To stop Legion, move the issue to backlog. To keep Legion off it for good, also take the legion label off; taking the label off alone does not stop a tree that has started." })
    ```
 
 The daemon admits each root when Dispatch's event reaches it; the next `legion state --json`
