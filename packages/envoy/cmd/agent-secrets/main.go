@@ -57,6 +57,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
 // Exit codes for the "request" and NAME...-- <command> forms: 75 (EX_TEMPFAIL) and 77
@@ -80,6 +81,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage())
+		return 0
+	case "--version":
+		fmt.Fprintf(stdout, "agent-secrets %s\n", buildversion.String())
 		return 0
 	case "keygen":
 		return cmdKeygen(args[1:], stdout, stderr)
@@ -127,6 +131,7 @@ func usage() string {
   agent-secrets launcher login-status
   agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
   agent-secrets identity
+  agent-secrets --version
   agent-secrets renew
   agent-secrets request NAME... [--reason TEXT] [--json]
   agent-secrets status <request_id> [--json]
@@ -568,9 +573,10 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // "pending"/"denied"/"expired" and for "" (login never run) — the same distinction the doctor
 // and installer checks in ~/.dotfiles need and, before this verb existed, had no side-effect-free
 // way to make (AGENTC-834). An issued login whose credential the broker later refused reads
-// "expired". The state is the most recent login's: a re-login that was denied, expired or is still
-// pending reads that way even while the credential an earlier login installed is still held. Every
-// state but "issued" says on stderr what to do about it.
+// "expired", the word the dotfiles launcher gate matches, and its stderr line says the broker
+// refused it and why that can happen. The state is the most recent login's: a re-login that was
+// denied, expired or is still pending reads that way even while the credential an earlier login
+// installed is still held. Every state but "issued" says on stderr what to do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
@@ -598,6 +604,12 @@ func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: a machine login is waiting for approval (code %s)\n", resp.Code)
 	case "none":
 		fmt.Fprintln(stderr, "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login")
+	case "expired":
+		if resp.LoginRefused {
+			fmt.Fprintln(stderr, "agent-secrets launcher login-status: the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login")
+			break
+		}
+		fmt.Fprintln(stderr, "agent-secrets launcher login-status: the last machine login expired before it was approved; run: agent-secrets launcher login")
 	default:
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: the last machine login is %s; run: agent-secrets launcher login\n", state)
 	}

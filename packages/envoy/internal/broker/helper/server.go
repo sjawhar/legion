@@ -175,10 +175,14 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 // not wait at all: a launcher's `register --wait N` then costs nothing on a helper that was never
 // logged in, or whose credential the broker has refused once. An expired credential stays held
 // until a call is refused, so the first register after it expires still waits the full N. A
-// session the helper cannot enroll for want of a credential, read after any wait, gets Code
-// NO_CREDENTIAL and that reason in Error, so a launcher can say what the session will do.
+// session the helper cannot enroll for want of a credential gets Code NO_CREDENTIAL and that reason
+// in Error, so a launcher can say what the session will do. The credential is read once, before
+// the wait, and that one reading decides both: an unenrolled session's reply says NO_CREDENTIAL
+// exactly when the wait was skipped for want of a credential, whatever a login or a refusal
+// changed meanwhile.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
-	if wait > 0 && s.Broker.HasCredential() {
+	credential := s.Broker.HasCredential()
+	if wait > 0 && credential {
 		select {
 		case <-sess.ready:
 		case <-time.After(wait):
@@ -186,7 +190,7 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		}
 	}
 	resp := Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: sess.State(), Error: sess.LastError()}
-	if resp.EnrollmentID == "" && !s.Broker.HasCredential() {
+	if resp.EnrollmentID == "" && !credential {
 		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
 	return resp
@@ -307,10 +311,11 @@ func (s *Server) login(ctx context.Context) Response {
 }
 
 // loginStatus reports the current (or most recently settled) machine login; an empty
-// LoginState means none has ever run.
+// LoginState means none has ever run, and LoginRefused marks an "expired" that is a credential
+// the broker refused rather than a login nobody approved.
 func (s *Server) loginStatus() Response {
 	ls := s.Broker.LoginStatus()
-	return Response{OK: true, Code: ls.Code, LoginState: ls.State}
+	return Response{OK: true, Code: ls.Code, LoginState: ls.State, LoginRefused: ls.Refused}
 }
 
 // enrollBox registers a box's key as kind box — a pass-through broker call requiring no
@@ -455,12 +460,16 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session, priorID string) 
 
 // renewLoop renews at a third of the lease until the session ends (false) or the broker
 // refuses the proof (true: the caller enrolls again). A refused renew means the lease has
-// lapsed; the broker's idempotent-enroll conflict path can otherwise keep answering the same
-// dead enrollment id forever (its root cause is in the base branch, handled separately), so the
-// lapsed id is explicitly revoked — retried with backoff until it succeeds or ctx ends, never
+// lapsed, so the session stops counting as enrolled at once (markLapsed): while the lapsed id is
+// being revoked, sign answers as for any session still enrolling rather than signing proofs the
+// broker refuses. The broker's idempotent-enroll conflict path can otherwise keep answering the
+// same dead enrollment id forever (its root cause is in the base branch, handled separately), so
+// the lapsed id is explicitly revoked — retried with backoff until it succeeds or ctx ends, never
 // giving up after a fixed number of tries the way retire's revoke does, since returning early
 // here would leave the session stuck re-enrolling onto a broker that keeps handing back the
-// same dead id — before the enrollment is cleared and enrollLoop is told to enroll fresh.
+// same dead id — before enrollLoop is told to enroll fresh. A session that ends while that
+// revoke is still retrying hands the lapsed id to the same bounded, independent revoke
+// enrollLoop's priorID path uses, since retire revokes only a live enrollment.
 func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) bool {
 	for {
 		interval := max(s.MinRenew, time.Until(lease)/3)
@@ -474,12 +483,15 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 		next, err := s.Broker.Renew(ctx, sess)
 		var be *BrokerError
 		if errors.As(err, &be) && be.Status == http.StatusUnauthorized {
-			id := sess.EnrollmentID()
+			id := sess.markLapsed()
 			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID, "code", be.Code, "enrollment_id", id)
 			if !s.revokeLapsed(ctx, sess, id) {
+				if ctx.Err() == nil {
+					go s.revoke(ctx, id)
+				}
 				return false
 			}
-			sess.clearEnrollment()
+			sess.clearLapsed()
 			return true
 		}
 		if err != nil {
@@ -495,12 +507,23 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 // retried indefinitely rather than a fixed number of times — giving up would hand the dead id
 // straight back to the broker's idempotent-enroll conflict path, which can keep answering it
 // forever — and, like enrollLoop's, woken by a login, since a revoke needs the credential too.
-// Returns false only when the session ended or ctx was canceled first.
+// One refusal is final rather than retried: 403 OPERATOR_MISMATCH, when the enrollment was made
+// under another operator's launcher credential (a helper logged back in as someone else). This
+// credential can never revoke it, and it cannot block the fresh enrollment either, since the
+// broker's conflict is keyed on the launcher credential; so the revoke counts as done, and the old
+// enrollment ends with its own lease. Returns false only when the session ended or ctx was
+// canceled first.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
 	return retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
 	}, func() error {
-		return s.Broker.Revoke(ctx, id)
+		err := s.Broker.Revoke(ctx, id)
+		var be *BrokerError
+		if errors.As(err, &be) && be.Status == http.StatusForbidden && be.Code == "OPERATOR_MISMATCH" {
+			s.Log.Warn("the lapsed enrollment belongs to another operator's launcher credential; leaving it to its lease", "runtime_id", sess.RuntimeID, "enrollment_id", id)
+			return nil
+		}
+		return err
 	})
 }
 

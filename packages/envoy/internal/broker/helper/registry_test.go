@@ -100,8 +100,17 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	default:
 		t.Fatal("setEnrolled must close ready")
 	}
-	sess.clearEnrollment()
-	if sess.State() != "enrolling" {
-		t.Fatal("a refused renew puts the session back to enrolling")
+	if id := sess.markLapsed(); id != "enr-2" {
+		t.Fatalf("markLapsed returns the lapsed id: %q", id)
+	}
+	if sess.State() != "enrolling" || sess.EnrollmentID() != "" {
+		t.Fatal("a refused renew puts the session back to enrolling at once")
+	}
+	if got := sess.recordedEnrollmentID(); got != "enr-2" {
+		t.Fatalf("the record keeps the lapsed id until its revoke: %q", got)
+	}
+	sess.clearLapsed()
+	if got := sess.recordedEnrollmentID(); got != "" {
+		t.Fatalf("a revoked lapsed id leaves the record: %q", got)
 	}
 }

@@ -28,6 +28,7 @@ type Session struct {
 
 	mu           sync.Mutex
 	enrollmentID string
+	lapsedID     string // a refused renew's enrollment, until its revoke succeeds (markLapsed)
 	lastError    string
 	ready        chan struct{} // closed on the first successful enrollment
 	stop         chan struct{} // closed when the session is removed
@@ -85,12 +86,34 @@ func (s *Session) setError(msg string) {
 	s.lastError = msg
 }
 
-// clearEnrollment is what a refused renew does: the broker no longer knows this enrollment
-// (its lease lapsed while the broker was unreachable), so the session enrolls again.
-func (s *Session) clearEnrollment() {
+// markLapsed is what a refused renew does: the broker no longer honours this enrollment (its lease
+// lapsed while the broker was unreachable), so the session stops counting as enrolled at once —
+// sign and sign-request answer as for any session still enrolling — and enrolls again once the
+// lapsed id is revoked. The id stays on the session's record until clearLapsed, so a helper
+// restart in between still revokes it (Recover's priorID). Returns the lapsed id.
+func (s *Session) markLapsed() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.enrollmentID = ""
+	s.lapsedID, s.enrollmentID = s.enrollmentID, ""
+	return s.lapsedID
+}
+
+// clearLapsed forgets the lapsed id once its revoke is done.
+func (s *Session) clearLapsed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lapsedID = ""
+}
+
+// recordedEnrollmentID is the enrollment a restart must revoke: the live one, else one a refused
+// renew left that is not revoked yet.
+func (s *Session) recordedEnrollmentID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.enrollmentID != "" {
+		return s.enrollmentID
+	}
+	return s.lapsedID
 }
 
 func (s *Session) Info() SessionInfo {
@@ -188,7 +211,7 @@ func (r *Registry) Save() error {
 	defer r.saveMu.Unlock()
 	recs := make([]Record, 0)
 	for _, s := range r.List() {
-		recs = append(recs, Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.EnrollmentID()})
+		recs = append(recs, Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.recordedEnrollmentID()})
 	}
 	data, err := json.MarshalIndent(recs, "", "  ")
 	if err != nil {

@@ -1399,10 +1399,20 @@ credential, from every restart until the operator logs the machine in, enrolls n
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
 with the same not-logged-in notice naming `agent-secrets launcher login`. The login that installs
 a credential wakes every registered session's enrollment retry, so those sessions reach the broker
-within about a second of it rather than when a backoff of up to a minute comes round.
+within about a second of it rather than when a backoff of up to a minute comes round. A session
+whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, while the
+helper revokes the lapsed id, and its record keeps that id until the revoke lands, so a restart
+meanwhile still revokes it; a revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under
+another operator's launcher credential) is final, and the session enrolls afresh.
 `agent-secrets launcher login-status`, which the helper answers, exits 0 only for an issued login
-whose credential the helper still holds; once the broker refuses it (401 `LAUNCHER_INVALID`,
-expired or revoked) the login reads `expired`.
+whose credential the helper still holds. Once the broker refuses that credential (401
+`LAUNCHER_INVALID`, which it answers for an expired or revoked credential and for any launcher
+proof it cannot verify, such as clock skew or an `AGENT_SECRETS_URL` that is not the broker's
+public URL), the login reads `expired`, the word the dotfiles launcher gate matches, and stderr
+says the broker refused it. `agent-secrets --version` and `agent-secrets-helper --version` print
+the release tag the release job stamps in (`internal/buildversion`), `devel` for any other build,
+and the helper's startup line (`agent-secrets-helper listening`) carries the same version and
+whether it holds a launcher credential.
 `register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles
 launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that
 login-status says `issued`, once the pinned release carries that answer and the helper has
@@ -1636,7 +1646,8 @@ Postgres or network) and runs in CI's `envoy-go` job.
 `bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
 backend auto-strips exactly one leading directory, so the installed tree still ends up
 `bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
-`bin/...` top level would itself be the directory mise strips. Bundled into the same
-per-arch release artifact as the existing `legion-envoy-<arch>.tar.gz` (envoy-listener
-alone). This is the release a host installs both binaries from (AGENTC-834's dotfiles Plan B).
+`bin/...` top level would itself be the directory mise strips. The release job builds them, once
+it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
+build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone). This is the release a
+host installs both binaries from (AGENTC-834's dotfiles Plan B).
 

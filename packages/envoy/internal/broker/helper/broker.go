@@ -25,7 +25,7 @@ import (
 
 // noCredentialMsg is the exact instruction returned whenever the helper has no machine
 // credential to authenticate the launcher routes with: never having logged in, and having had
-// its credential cleared by a broker 401 LAUNCHER_INVALID (expired or revoked). It never
+// its credential cleared by a broker 401 LAUNCHER_INVALID (clearOnInvalid). It never
 // auto-relogins; a login is a human ceremony.
 const noCredentialMsg = "no machine credential; run: agent-secrets launcher login"
 
@@ -42,9 +42,12 @@ type machineCredential struct {
 // loginState is a machine login in flight or settled: the human-facing confirmation code, the
 // opaque id the helper polls the broker with, and its current state. "expired" is both a pending
 // login nobody approved in time and an issued one whose credential the broker has since refused
-// (expired or revoked; clearOnInvalid): either way the helper holds no credential from it.
+// (clearOnInvalid; Refused says it was the second): either way the helper holds no credential
+// from it. The token stays "expired" for the second too, since the dotfiles launcher gate
+// matches the state words.
 type loginState struct {
 	Code, PendingID, State string // State: pending|issued|denied|expired
+	Refused                bool   // State is "expired" because the broker refused its issued credential
 }
 
 // Broker is the helper's view of the secrets broker: the launcher routes (Enroll, Revoke)
@@ -169,9 +172,10 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 }
 
 // LoginStatus reports the current (or most recently settled) machine login; the zero value means
-// none has ever run. A login whose credential clearOnInvalid has since cleared reads "expired":
-// the credential is the one source of whether an issued login still holds, and only
-// clearOnInvalid ever clears it (pollLogin installs the credential before it records "issued").
+// none has ever run. A login whose credential clearOnInvalid has since cleared reads "expired",
+// with Refused set: the credential is the one source of whether an issued login still holds, and
+// only clearOnInvalid ever clears it (pollLogin installs the credential before it records
+// "issued").
 func (b *Broker) LoginStatus() loginState {
 	ls := b.login.Load()
 	if ls == nil {
@@ -179,7 +183,7 @@ func (b *Broker) LoginStatus() loginState {
 	}
 	out := *ls
 	if out.State == "issued" && b.cred.Load() == nil {
-		out.State = "expired"
+		out.State, out.Refused = "expired", true
 	}
 	return out
 }
@@ -285,11 +289,14 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 }
 
 // clearOnInvalid clears the machine credential and reports it missing whenever err is the
-// broker's 401 LAUNCHER_INVALID — an expired or revoked credential. It never auto-relogins. cred
-// is the credential the refused call was signed with, and only that one is cleared: a refusal
-// that arrives after another login has installed a new credential leaves the new one alone. With
-// the credential gone, LoginStatus reads the login that issued it as "expired", so login-status —
-// the probe every launcher decides on — stops reporting a credential the helper no longer holds.
+// broker's 401 LAUNCHER_INVALID. The broker answers that for any launcher proof it rejects: an
+// expired or revoked credential, and also a proof it cannot verify, such as one signed outside
+// its clock-skew window or for a URL other than its own (an AGENT_SECRETS_URL that does not match
+// the broker's public URL). It never auto-relogins. cred is the credential the refused call was
+// signed with, and only that one is cleared: a refusal that arrives after another login has
+// installed a new credential leaves the new one alone. With the credential gone, LoginStatus
+// reads the login that issued it as "expired" and refused, so login-status — the probe every
+// launcher decides on — stops reporting a credential the helper no longer holds.
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
