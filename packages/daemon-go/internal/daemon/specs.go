@@ -18,9 +18,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// roleTopicPrefix is the Envoy subject a role token is reached on (notify.RoleTopicPrefix).
-const roleTopicPrefix = notify.RoleTopicPrefix
-
 var _ supervise.Specs = specs{}
 
 // specs builds the part of every launch the claim does not carry. An operator may retain a
@@ -120,7 +117,7 @@ func addressingFragment(project string, c supervise.Claim) (string, error) {
 	}
 	return fmt.Sprintf("Legion addressing: your role topic is `%s%s`; the architect that owns your issue is `%s%s`; "+
 		"the project's controller is `%s%s`; a sibling role on your issue is your topic with the trailing `-<role>` replaced.",
-		roleTopicPrefix, c.Token, roleTopicPrefix, architect, roleTopicPrefix, claim.ControllerToken(project)), nil
+		notify.RoleTopicPrefix, c.Token, notify.RoleTopicPrefix, architect, notify.RoleTopicPrefix, claim.ControllerToken(project)), nil
 }
 
 // designGateFragment is the sentence a tree's root architect is told after its addressing: this

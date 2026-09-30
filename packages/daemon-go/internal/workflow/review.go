@@ -75,7 +75,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		if err != nil {
 			return intake.Result{}, err
 		}
-		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), reviewRound(*issue, reviewer, &prior), byChecks)
+		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), byChecks)
 		return intake.Result{}, err
 	}
 	if !classify.RedSendsBack(*pr) {
@@ -105,7 +105,8 @@ func redAt(pr record.PullRequest) string {
 // within the minute the stuck notice, the architect's request and the reviewer's review take. Its
 // two costs: a GitHub clock more than answerSkew ahead makes a review submitted before the
 // completion read as the reviewer's answer, and tell again; an answer submitted within answerSkew
-// of the completion reads as delivered late, and tells only when the round's stuck cause changes.
+// of the completion reads as delivered late, and tells only when the round's stuck cause or head
+// changes (stuckAs).
 const answerSkew = 10 * time.Second
 
 // reviewersAnswer says whether fact is the reviewer's answer to a round it completed undecided: a
@@ -140,7 +141,7 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	// comment written after a decision but delivered before it cannot make the decision look old.
 	state := strings.ToLower(fact.State)
 	if state != "changes_requested" && state != "approved" {
-		_, err := e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), before, by)
+		_, err := e.settleRound(ctx, tx, *issue, reviewer, pr, before, by)
 		return intake.Result{}, err
 	}
 	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id
@@ -176,7 +177,7 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err := e.store.PutPhase(ctx, tx, reviewer); err != nil {
 		return intake.Result{}, err
 	}
-	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), before, by)
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, before, by)
 	return intake.Result{}, err
 }
 
@@ -293,12 +294,14 @@ func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest
 // settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and
 // pr its pull request as the fact left them), and says whether it moved the issue. An ended round
 // moves on, its request for changes counting a round; a red code head sends the work back to
-// implementing; a stuck round is told to the architect unless it was stuck the same way (stuckAs)
-// before the fact, by being the fact that wrote the notice: the reviewer's completion and answer
-// pass an empty before, so each that leaves the round stuck is told. The issue stays in reviewing
-// and the architect asks the reviewer, at the notice's topic, for the decision. Linger holds a
-// member of a closed tree where it stood (record.TreeLingers).
-func (e *Engine) settleRound(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest, r, before round, by string) (bool, error) {
+// implementing; a stuck round is told to the architect, in a notice whose summary is by, the fact
+// that wrote it - unless the round was already stuck the same way (stuckAs) before that fact,
+// which is before. The reviewer's completion and answer pass an empty before, so each that leaves
+// the round stuck is told. The issue stays in reviewing and the architect asks the reviewer, at the
+// notice's topic, for the decision. Linger holds a member of a closed tree where it stood
+// (record.TreeLingers).
+func (e *Engine) settleRound(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest, before round, by string) (bool, error) {
+	r := reviewRound(issue, row, pr)
 	switch r.outcome {
 	case roundRejected:
 		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {

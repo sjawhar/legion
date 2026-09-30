@@ -313,7 +313,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
 	case phase.Reviewing:
-		_, err := e.settleRound(ctx, tx, *issue, row, pr, reviewRound(*issue, row, pr), round{}, byCompletion)
+		_, err := e.settleRound(ctx, tx, *issue, row, pr, round{}, byCompletion)
 		return intake.Result{}, err
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
@@ -450,7 +450,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil {
 		return intake.Result{}, err
 	}
-	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), reviewRound(*issue, reviewer, &prior), byPush)
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), byPush)
 	return intake.Result{}, err
 }
 
@@ -605,7 +605,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 		}
 		// The retry tells nothing of a stuck round: passed as its own before, it is stuck the same way.
 		r := reviewRound(*issue, reviewer, pr)
-		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, r, ""); err != nil || moved {
+		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, ""); err != nil || moved {
 			return intake.Result{}, err
 		}
 		if r.outcome == roundStuck {

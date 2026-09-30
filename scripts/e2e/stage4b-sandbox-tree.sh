@@ -1548,7 +1548,8 @@ until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_numb
 until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
 # At the completion, before the architect can have asked anything: no approval yet, and the round
 # still open.
-[ -z "$(review_app_reviews '.state == "APPROVED"' id)" ] || fail "the reviewer approved pull request #$pr_number before anyone asked it for the round's decision"
+early_approvals=$(review_app_reviews '.state == "APPROVED"' id) || fail "read the reviews on pull request #$pr_number"
+[ -z "$early_approvals" ] || fail "the reviewer approved pull request #$pr_number before anyone asked it for the round's decision"
 issue_phase "$tree1" reviewing >/dev/null || fail "$tree1 left reviewing on a round no review decided"
 until_true 300 "the review-stuck notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle review-stuck "$tree1")"
 stuck=$(notice_line "$tree1" architect "$(notice_needle review-stuck "$tree1")" | head -1 || true)
