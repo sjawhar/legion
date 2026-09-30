@@ -79,8 +79,9 @@ func (e *ErrInvalidAskBlock) Error() string { return e.Reason.Error() }
 func (e *ErrInvalidAskBlock) Unwrap() error { return e.Reason }
 
 // SettlementActor writes what a document's settlement decides on its own: the retraction of an
-// ask whose block left the document. Crediting the room's last editor instead would put a
-// deletion nobody made in their name.
+// ask whose block left the document, and the retraction of a stale approval ask when a
+// settlement knows no writer of its version (RetractStaleApprovalAsks). Crediting the room's
+// last editor instead would put a deletion nobody made in their name.
 var SettlementActor = model.Actor{Kind: "system", ID: "document-settlement"}
 
 // SettlementRetractionReason opens the reason of every retraction settlement writes, followed by
@@ -91,7 +92,9 @@ const SettlementRetractionReason = "removed from the document in version"
 // left the document, which returning the block undoes. A retraction a person or a session wrote
 // is their decision and stands, however the document moves. Retractions written before
 // settlement began naming itself carry only its reason, so that prefix still counts - which is
-// why resolveAsk refuses a caller reason that begins with it.
+// why resolveAsk refuses a caller reason that begins with it. It applies only to block asks,
+// the rows loadAskBlocks reads, which is why an approval ask retracted as SettlementActor is
+// never restored.
 func settlementRetracted(ask model.Ask) bool {
 	if ask.State != "resolved" || ask.Resolution == nil || ask.Resolution.Kind != "retracted" {
 		return false
