@@ -323,7 +323,7 @@ func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string)
 	if answer.Secret == "" {
 		return "", "", fmt.Errorf("%s%s answered with no secret", daemonURL, route)
 	}
-	if answer.DesignGate != config.DesignGateRootIssues && answer.DesignGate != config.DesignGateOff {
+	if !answer.DesignGate.Valid() {
 		return "", "", fmt.Errorf("%s%s answered design gate policy %q, not 'root-issues' or 'off'; upgrade the daemon to this legion's release", daemonURL, route, answer.DesignGate)
 	}
 	return answer.Secret, answer.DesignGate, nil
