@@ -1,15 +1,19 @@
 package testbin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -55,11 +59,16 @@ func nativesCache(omp string) (string, error) {
 // binary's content, so another pin or another build of one version gets its own. The first process
 // to ask fills it under an exclusive lock on its own lock file, so of the test binaries that ask at
 // once (`go test ./...` runs packages together, and checkouts on one machine share the cache) one
-// runs omp and the rest wait and find it filled. omp extracts into a staging HOME whose natives
-// directory is then renamed into place whole, so a directory that exists is complete, and a staging
-// directory the lock's holder finds is a dead filler's, which it removes.
+// runs omp and the rest wait and find it filled. omp extracts into a staging HOME, and its natives
+// directory is renamed into place whole once it holds every file the binary embeds at its embedded
+// size, so a directory that exists is complete. A staging directory the lock's holder finds is a
+// dead filler's, which it removes.
+//
+// omp writes the embedded files one after another, and when a later write fails (a full disk) it
+// loads one it did write and still exits 0; a cache missing the other would have every later HOME
+// extract it. The check against the embedded list is what refuses that fill.
 func fillNativesCache(root, omp string) (string, error) {
-	digest, err := contentDigest(omp)
+	digest, embedded, err := readBinary(omp)
 	if err != nil {
 		return "", err
 	}
@@ -103,18 +112,28 @@ func fillNativesCache(root, omp string) (string, error) {
 		return "", fmt.Errorf("%s config get under the fresh HOME %s: %w\n%s", omp, home, err, out)
 	}
 	natives := filepath.Join(home, ".omp", "natives")
-	files := 0
+	extracted := map[string]int64{}
 	if err := filepath.WalkDir(natives, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
 		}
-		files++
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		extracted[entry.Name()] = info.Size()
 		return os.Chmod(path, 0o500)
 	}); err != nil {
 		return "", fmt.Errorf("the natives %s extracted: %w", omp, err)
 	}
-	if files == 0 {
-		return "", fmt.Errorf("%s extracted no natives under %s", omp, natives)
+	for _, name := range slices.Sorted(maps.Keys(embedded)) {
+		size, ok := extracted[name]
+		if !ok {
+			return "", fmt.Errorf("%s embeds %s, but its extraction under %s lacks it (a write failed, as on a full disk), so nothing is cached", omp, name, natives)
+		}
+		if size != embedded[name] {
+			return "", fmt.Errorf("%s embeds %s at %d bytes, but extracted it at %d under %s, so nothing is cached", omp, name, embedded[name], size, natives)
+		}
 	}
 	if err := os.Rename(natives, cache); err != nil {
 		return "", err
@@ -122,17 +141,59 @@ func fillNativesCache(root, omp string) (string, error) {
 	return cache, nil
 }
 
-func contentDigest(path string) (string, error) {
+// embeddedNative is one native file omp embeds, as pi-natives' scripts/embed-native.ts writes each
+// into the compiled binary: `{ variant: "modern", filename: "pi_natives.linux-x64-modern.node",
+// size: 185671184 },`. The scan finds each by its marker with bytes.Index, since a regexp over the
+// whole binary takes seconds.
+var (
+	embeddedMarker = []byte(`filename: "pi_natives.`)
+	embeddedNative = regexp.MustCompile(`^filename: "(pi_natives\.[^"/]+)", size: ([0-9]+)`)
+)
+
+// readBinary returns the digest that names omp's cache and the native files omp embeds, each with
+// its size: what a complete extraction holds. A binary that lists none is refused, since then no
+// extraction could be told from a partial one.
+func readBinary(path string) (string, map[string]int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+	info, err := file.Stat()
+	if err != nil {
+		return "", nil, err
 	}
-	return hex.EncodeToString(hash.Sum(nil)[:16]), nil
+	data, err := syscall.Mmap(int(file.Fd()), 0, int(info.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return "", nil, fmt.Errorf("map %s: %w", path, err)
+	}
+	defer func() { _ = syscall.Munmap(data) }()
+	embedded := map[string]int64{}
+	for rest := data; ; {
+		at := bytes.Index(rest, embeddedMarker)
+		if at < 0 {
+			break
+		}
+		match := embeddedNative.FindSubmatch(rest[at:min(len(rest), at+256)])
+		rest = rest[at+len(embeddedMarker):]
+		if match == nil {
+			continue
+		}
+		name := string(match[1])
+		size, err := strconv.ParseInt(string(match[2]), 10, 64)
+		if err != nil {
+			return "", nil, fmt.Errorf("%s lists %s at size %q: %w", path, name, match[2], err)
+		}
+		if listed, ok := embedded[name]; ok && listed != size {
+			return "", nil, fmt.Errorf("%s lists %s at %d bytes and at %d", path, name, listed, size)
+		}
+		embedded[name] = size
+	}
+	if len(embedded) == 0 {
+		return "", nil, fmt.Errorf("%s lists no embedded natives (%s), so a fill could not tell a complete extraction from a partial one", path, embeddedNative)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:16]), embedded, nil
 }
 
 // linkTree makes each directory under source at destination and hardlinks each file into it.

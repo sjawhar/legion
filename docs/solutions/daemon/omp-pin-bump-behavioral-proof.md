@@ -47,8 +47,9 @@ legitimate bump, and defends no behavior.
 
 The Go tests run the binary under a fresh HOME per case, and each HOME's natives (about 355 MiB at
 18.2.9) are hardlinks to one copy per binary, which the first run on a machine extracts into
-`~/.cache/legion/test-omp-natives/<digest of the binary>/` (`testbin.OMPHome`). A bump therefore
-adds one such directory; the old pin's can be removed once no checkout on the machine still tests it.
+`$XDG_CACHE_HOME/legion/test-omp-natives/<digest of the binary>/` (`~/.cache` when XDG_CACHE_HOME
+is unset; `testbin.OMPHome`). A bump therefore adds one such directory; the old pin's can be removed
+once no checkout on the machine still tests it.
 
 ## The proof set
 
