@@ -1538,9 +1538,13 @@ wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
 # A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
-# The daemon leaves the issue in reviewing and tells the architect, naming the head; the architect,
-# on its own, asks the reviewer for the decision over Envoy, and the reviewer's approval ends the
-# round. The proof asks the reviewer nothing more, and counts only messages the architect sent.
+# The daemon leaves the issue in reviewing and tells the architect, naming the head. The proof's
+# instructions hold every agent until a targeted message gives its next operation, so the driver
+# then tells the architect only to handle that notice as its role says, naming no topic, head or
+# decision: the architect takes those from the notice, asks the reviewer for the decision over
+# Envoy, and the reviewer's approval ends the round. The proof asks the reviewer nothing more, and
+# counts only messages the architect sent. An architect acting on the notice unprompted, as it must
+# where no driver holds it, is not what this checkpoint proves (LEGION-413).
 asked_before=$(architect_messages "$tree1" reviewer)
 send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is APPROVE."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
@@ -1565,10 +1569,16 @@ pr_commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].
 grep -qx -- "$stuck_head" <<<"$pr_commits" || fail "the review-stuck notice names $stuck_head, which is no commit of pull request #$pr_number"
 grep -qF -- "the reviewer's completion" <<<"$stuck" || fail "the review-stuck notice was not written by the reviewer's completion: $stuck"
 note "the reviewer commented and completed; $tree1 stayed in reviewing and its architect was told review-stuck naming $stuck_head (kept in $evidence/notice-review-stuck.jsonl)"
+# An ask the architect made before the driver's message is counted too, and noted: the round's end
+# is what the checkpoint requires, whoever prompted the ask.
+asked_unprompted=$(architect_messages "$tree1" reviewer)
+send_agent "$tree1" architect "Stage 4b proof review-stuck operation: handle the daemon's review-stuck notice on $tree1 now, exactly as your role says to handle a review-stuck notice."
 architect_asked() { [ "$(architect_messages "$tree1" reviewer)" -gt "$asked_before" ]; }
-until_true 900 "$tree1's architect to ask the reviewer for the round's decision" architect_asked
+until_true 900 "$tree1's architect, sent the review-stuck operation, to ask the reviewer for the round's decision" architect_asked
+notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" architect)" >"$evidence/architect-ask.jsonl"
+[ "$asked_unprompted" -le "$asked_before" ] || note "the architect asked the reviewer before the driver's message"
 until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
-note "the architect asked the reviewer over Envoy, and the reviewer's approval of the head ended the round"
+note "the architect asked the reviewer over Envoy (kept in $evidence/architect-ask.jsonl), and the reviewer's approval of the head ended the round"
 until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
 if issue_phase "$tree1" retro >/dev/null; then
   wait_for_worker "$tree1" implementer
