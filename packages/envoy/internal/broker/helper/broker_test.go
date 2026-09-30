@@ -52,12 +52,9 @@ const failAlways = 1 << 30
 // stuck retrying with backoff can be observed and torn down mid-retry. revokeAttempts counts
 // every DELETE this fake received, whether it failed or actually deleted the row, independent of
 // revokeFailFirst, so a test can poll for exactly when an attempt has been answered instead of
-// guessing with a raw sleep. renewFail forces the next N renew attempts to answer 503 (a
-// transient broker outage) without touching
-// the lease at all, so a test can let real time pass the lease's own expiry while renews are
-// failing for an unrelated reason. revokeForbidden answers a DELETE of each id it names with 403
-// OPERATOR_MISMATCH, as the broker does for an enrollment made under another operator's
-// launcher credential.
+// guessing with a raw sleep. revokeForbidden answers a DELETE of each id it names with 403
+// OPERATOR_MISMATCH, as the broker does for an enrollment made under another operator's launcher
+// credential.
 //
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
 // claim instead of a bearer token (AGENTC-834 Task 1): enrollUnauthorizedNext simulates an
@@ -80,7 +77,6 @@ type fakeBroker struct {
 	renews           int
 	conflicts        int           // 409 ALREADY_ENROLLED answers from the runtime_id-keyed conflict path
 	failFirst        int           // 503 this many enroll calls first
-	renewFail        int           // 503 this many renew calls first, lease untouched
 	revokeFirstDelay time.Duration // sleep this long before the first DELETE actually removes its row
 	revokeFailFirst  int           // 503 this many DELETE calls first, row untouched (an unreachable broker)
 	revokeAttempts   int           // every DELETE this fake received, failed or not
@@ -223,11 +219,6 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		id := r.PathValue("id")
-		if f.renewFail > 0 {
-			f.renewFail--
-			writeJSON(w, 503, map[string]string{"code": "DATABASE", "error": "postgres unreachable"})
-			return
-		}
 		if f.refuseRenewNext > 0 {
 			f.refuseRenewNext--
 			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
