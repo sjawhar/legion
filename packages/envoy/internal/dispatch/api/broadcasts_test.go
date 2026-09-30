@@ -344,8 +344,8 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 	}
 }
 
-// awaitBroadcastDeliveries reads the broadcast back until every recipient carries an attempt:
-// delivery runs behind the create response, so a test that asserts on attempts waits for it.
+// awaitBroadcastDeliveries reads the broadcast back until no recipient's attempt is pending:
+// delivery runs behind the create response, so a test that asserts on settled attempts waits for it.
 func awaitBroadcastDeliveries(t *testing.T, handler http.Handler, id string) broadcastResponse {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

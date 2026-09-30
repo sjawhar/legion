@@ -1228,12 +1228,13 @@ reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. The send answer
 as the messages are committed and delivers behind the request, four recipients at a time, each
 worker on its own `store.WithTransactionTracking` context derived from the server's lifetime
 (the pool's one-connection guard is per context, and a request's context would strand every
-recipient after the one in flight when a tab closes or a deploy shuts the server down). A
-recipient therefore starts with no attempt, and one still carrying none was not sent to.
+recipient after the one in flight when a tab closes or a deploy shuts the server down). Each
+recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its
+message, which a delivery worker then claims and settles.
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
 `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the
 order the send named them; all three routes are human-only, like the one-session route they are
-from.
+built from.
 
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no
@@ -1576,4 +1577,14 @@ tombstone-on-absence behavior, and listens on the port its own `cmd/broker` bind
 (`BROKER_LISTEN_ADDR=127.0.0.1:0`; AGENTC-833), so concurrent instances can never collide on a
 shared port either. `dev-broker.test.sh` proves both kinds of isolation with fakes (no real
 Postgres or network) and runs in CI's `envoy-go` job.
+
+`.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
+`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of
+`agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
+`bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
+backend auto-strips exactly one leading directory, so the installed tree still ends up
+`bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
+`bin/...` top level would itself be the directory mise strips. Bundled into the same
+per-arch release artifact as the existing `legion-envoy-<arch>.tar.gz` (envoy-listener
+alone). This is the release a host installs both binaries from (AGENTC-834's dotfiles Plan B).
 

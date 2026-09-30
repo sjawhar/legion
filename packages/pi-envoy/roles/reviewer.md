@@ -25,7 +25,7 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`.
 
 ## Workspace restrictions
 
-Do not make unrelated history. Push your own commits: after your handoff commit, push the issue branch as `skill://legion-worker` shows.
+Do not make unrelated history. Push your own commits: after your handoff commit, push the issue branch as `skill://legion-worker` shows. Under the Go daemon, push with `legion push` from bash instead: it runs that procedure and decides whether the push skips CI.
 
 ## Final review gate
 

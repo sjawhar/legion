@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -117,6 +118,7 @@ func fakeHandoffJJ(t *testing.T, commit string) string {
 case " $* " in
 *" diff "*) ;;
 *" log "*) printf '%s' "` + commit + `" ;;
+*" remote list "*) echo "origin https://github.com/acme/widgets.git" ;;
 *) echo "unexpected jj $*" >&2; exit 2 ;;
 esac
 `
@@ -138,7 +140,7 @@ func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 	t.Helper()
 	bodies := &[]map[string]any{}
 	state := api.State{Issues: map[string]api.Issue{
-		"THIS-1":  {Key: "THIS-1", Generation: 1, Phase: p},
+		"THIS-1":  {Key: "THIS-1", Generation: 1, Phase: p, PullRequest: &api.PullRequestView{Number: 42, Head: "c0de"}},
 		"OTHER-2": {Key: "OTHER-2", Generation: 1, Phase: phase.Merging},
 	}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +148,8 @@ func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 		case r.Method == http.MethodGet && r.URL.Path == "/legion/v1/state":
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(state)
+		case r.Method == http.MethodPost && r.URL.Path == "/legion/v1/gh-token":
+			_, _ = w.Write([]byte(`{"token":"installation-token","appLogin":"legion-implementer[bot]"}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/legion/v1/handoff/complete":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -171,7 +175,44 @@ func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 	// tests pass would depend on the shell that ran them.
 	t.Setenv("JJ_USER", "")
 	t.Setenv("JJ_EMAIL", "")
+	readyGitHub(t, `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`, `{"context":"legacy","state":"success"}`, "clean")
 	return bodies
+}
+
+// readyGitHub serves acme/widgets#42 to a merger's READY check: head c0de on main, whose ruleset
+// requires the check "ci" and whose branch protection requires the status "legacy", reporting the
+// given check run and commit status on the head (either may be empty) and the pull request's
+// mergeable_state, plus the token route of the daemon the check redeems its grant at.
+func readyGitHub(t *testing.T, checkRun, status, mergeableState string) {
+	t.Helper()
+	repo := "/repos/acme/widgets"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case repo + "/pulls/42":
+			_, _ = w.Write([]byte(`{"head":{"sha":"c0de0000000000000000000000000000000000ff"},"base":{"ref":"main"},"mergeable_state":"` + mergeableState + `"}`))
+		case repo + "/rules/branches/main":
+			_, _ = w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`))
+		case repo + "/branches/main":
+			_, _ = w.Write([]byte(`{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`))
+		case repo + "/commits/c0de0000000000000000000000000000000000ff/check-runs":
+			runs := "[]"
+			if checkRun != "" {
+				runs = "[" + checkRun + "]"
+			}
+			_, _ = w.Write([]byte(`{"total_count":` + strconv.Itoa(strings.Count(runs, `"name"`)) + `,"check_runs":` + runs + `}`))
+		case repo + "/commits/c0de0000000000000000000000000000000000ff/status":
+			statuses := "[]"
+			if status != "" {
+				statuses = "[" + status + "]"
+			}
+			_, _ = w.Write([]byte(`{"statuses":` + statuses + `}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("LEGION_GITHUB_API_URL", server.URL)
 }
 
 // `legion handoff complete` resolves the committed handoff with the jj the daemon resolved at boot
@@ -611,6 +652,130 @@ func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
 			}
 			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "legion-implementer[bot]") || !strings.Contains(errb.String(), "jj new") {
 				t.Fatalf("handoff complete on the implementer's commit = %d, daemon read %v, stderr %q; want a refusal naming the author and jj new, before any request", code, *bodies, errb.String())
+			}
+		})
+	}
+}
+
+// A merger's READY names a head a human merges, which GitHub merges only once every check the base
+// branch requires has succeeded there. A head whose push skipped CI when it should not have reports
+// none of them, so the completion refuses READY naming the head and the check, and nothing reaches
+// the daemon; a required check still running, or one that failed, is refused the same way.
+//
+// A pull request that conflicts with its base (mergeable_state "dirty") gets no pull_request run,
+// so a required check with no result on its head is refused naming the conflict rather than a
+// skipped push. The conflict changes only that text, never which heads are refused: every row is
+// posted or refused by its checks alone, whatever its mergeable_state, and a conflicting head
+// whose required checks all succeeded is posted.
+func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testing.T) {
+	const (
+		ciGreen      = `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`
+		ciSkipped    = `{"id":1,"name":"ci","status":"completed","conclusion":"skipped"}`
+		ciRunning    = `{"id":1,"name":"ci","status":"in_progress","conclusion":null}`
+		legacyGreen  = `{"context":"legacy","state":"success"}`
+		legacyFailed = `{"context":"legacy","state":"failure"}`
+		skippedPush  = `: its push may have skipped CI`
+		conflict     = `: the pull request conflicts with main, and GitHub starts no pull_request CI`
+	)
+	for _, tc := range []struct {
+		name, checkRun, status, mergeableState, refusal string
+	}{
+		{"every required check green", ciGreen, legacyGreen, "clean", ""},
+		{"a required check that ended skipped counts", ciSkipped, legacyGreen, "clean", ""},
+		{"every required check green on a conflicting pull request", ciGreen, legacyGreen, "dirty", ""},
+		{"a head whose push skipped CI", "", "", "blocked", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + skippedPush},
+		{"a head whose mergeability GitHub has not computed", "", "", "unknown", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + skippedPush},
+		{"a head of a conflicting pull request", "", "", "dirty", `head c0de00000000 of pull request #42 has no result for the required check "ci"` + conflict},
+		{"a conflicting pull request missing one required check", ciGreen, "", "dirty", `head c0de00000000 of pull request #42 has no result for the required check "legacy"` + conflict},
+		{"a required check still running", ciRunning, legacyGreen, "blocked", `the required check "ci" is still running on head c0de00000000`},
+		{"a required check still running on a conflicting pull request", ciRunning, legacyGreen, "dirty", `the required check "ci" is still running on head c0de00000000`},
+		{"a required status that failed", ciGreen, legacyFailed, "blocked", `the required check "legacy" ended failure on head c0de00000000`},
+		{"a required status that failed on a conflicting pull request", ciGreen, legacyFailed, "dirty", `the required check "legacy" ended failure on head c0de00000000`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			t.Setenv("LEGION_ROLE", "merger")
+			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			bodies := handoffDaemon(t, phase.Merging)
+			readyGitHub(t, tc.checkRun, tc.status, tc.mergeableState)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
+			if tc.refusal == "" {
+				if code != 0 || len(*bodies) != 1 {
+					t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted", code, *bodies, errb.String())
+				}
+				return
+			}
+			if code != 1 || len(*bodies) != 0 {
+				t.Fatalf("READY = %d, daemon read %v, stderr %q; want it refused and nothing posted", code, *bodies, errb.String())
+			}
+			if !strings.Contains(errb.String(), "READY refused: "+tc.refusal) {
+				t.Fatalf("READY refused with stderr %q; want the refusal to name %q", errb.String(), tc.refusal)
+			}
+		})
+	}
+}
+
+// A private repository whose plan has no rulesets answers the rulesets read 403, "make this
+// repository public to enable this feature" (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md).
+// It can define no ruleset, so none requires a check there, and READY rests on the branch's
+// protection alone: posted when that requires nothing, refused when it requires a check the head
+// lacks. Only that answer means no rulesets: a rulesets read that fails otherwise (another 403,
+// such as a token that lost access, or a server error) leaves the required checks unknown, and
+// READY is refused naming the read.
+func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
+	const planAnswer = `{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}`
+	unprotected := `{"name":"main","protected":false}`
+	for _, tc := range []struct {
+		name, branch string
+		rulesStatus  int
+		rulesBody    string
+		posted       bool
+		refusal      string
+	}{
+		{"and no branch protection", unprotected, http.StatusForbidden, planAnswer, true, ""},
+		{"and branch protection requiring a check the head lacks", `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`, http.StatusForbidden, planAnswer, false, `has no result for the required check "legacy"`},
+		{"but the read is refused for another reason", unprotected, http.StatusForbidden, `{"message":"Resource not accessible by integration","status":"403"}`, false, "GET /rules/branches/main with 403"},
+		{"but the read fails", unprotected, http.StatusInternalServerError, `{"message":"Server Error"}`, false, "GET /rules/branches/main with 500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := "/repos/acme/widgets"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case repo + "/pulls/42":
+					_, _ = w.Write([]byte(`{"head":{"sha":"c0de0000000000000000000000000000000000ff"},"base":{"ref":"main"}}`))
+				case repo + "/rules/branches/main":
+					w.WriteHeader(tc.rulesStatus)
+					_, _ = w.Write([]byte(tc.rulesBody))
+				case repo + "/branches/main":
+					_, _ = w.Write([]byte(tc.branch))
+				case repo + "/commits/c0de0000000000000000000000000000000000ff/check-runs":
+					_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
+				case repo + "/commits/c0de0000000000000000000000000000000000ff/status":
+					_, _ = w.Write([]byte(`{"statuses":[]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			workspace := t.TempDir()
+			t.Setenv("LEGION_ROLE", "merger")
+			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			bodies := handoffDaemon(t, phase.Merging)
+			t.Setenv("LEGION_GITHUB_API_URL", server.URL)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
+			if tc.posted {
+				// A base branch requiring no check has nothing to refuse, and READY says so rather
+				// than reading like a head whose every required check was read and passed.
+				if code != 0 || len(*bodies) != 1 || !strings.Contains(out.String(), `no check is required on "main" of acme/widgets`) {
+					t.Fatalf("READY = %d, daemon read %v, stdout %q, stderr %q; want it posted, saying it read no checks", code, *bodies, out.String(), errb.String())
+				}
+				return
+			}
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), tc.refusal) {
+				t.Fatalf("READY = %d, daemon read %v, stderr %q; want a refusal naming %q", code, *bodies, errb.String(), tc.refusal)
 			}
 		})
 	}
