@@ -14,10 +14,11 @@ import (
 )
 
 // A slot the waiting line does not refill is the controller's to fill: it picks the next root to
-// hand to Legion. Admission wakes it once per fact, on the controller topic alone, naming the
-// first root whose slot it released, whether the tree finished or a human took the root out of the
-// workflow, live or found at boot. A slot the waiting line refilled wakes nobody
-// (TestApplyFactReleasesSlotWhenEngineCompletesPhaseAndPromotesHead pins that).
+// hand to Legion. Admission wakes a registered controller once per fact, on the controller topic
+// alone, naming the first root whose slot it released, whether the tree finished or a human took
+// the root out of the workflow, live or found at boot. A slot the waiting line refilled wakes
+// nobody (TestApplyFactReleasesSlotWhenEngineCompletesPhaseAndPromotesHead pins that), and with
+// no controller registered nobody is woken (the walk wakes' rule, controller_wake_test.go).
 func TestAReleasedSlotNoWaitingRootTakesWakesTheController(t *testing.T) {
 	slotFree := func(issue string) []effect {
 		return []effect{{kind: record.OutboxKindControllerNotice, issue: issue, payload: record.ControllerNotice{Kind: record.SlotFreeNotice}}}
@@ -25,6 +26,7 @@ func TestAReleasedSlotNoWaitingRootTakesWakesTheController(t *testing.T) {
 	t.Run("a finished tree", func(t *testing.T) {
 		pool := migratedPool(t)
 		admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		registerController(t, pool)
 		seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 
 		apply(t, pool, admission, "phase-done", intake.DispatchIssue{Key: "LEGION-ACTIVE", Seq: 2, Type: "issue.updated", Status: "in_progress", Title: "active", Rank: "A", HandedOver: handed}, engineStub{store: record.NewStore(), done: "LEGION-ACTIVE"})
@@ -34,6 +36,7 @@ func TestAReleasedSlotNoWaitingRootTakesWakesTheController(t *testing.T) {
 	t.Run("two roots a human parked, in one fact", func(t *testing.T) {
 		pool := migratedPool(t)
 		admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		registerController(t, pool)
 		seedSlotted(t, pool, "LEGION-FIRST", "A")
 		seedSlotted(t, pool, "LEGION-SECOND", "B")
 		seedSlotted(t, pool, "LEGION-KEPT", "C")
@@ -48,6 +51,7 @@ func TestAReleasedSlotNoWaitingRootTakesWakesTheController(t *testing.T) {
 	t.Run("a boot that finds a parked root", func(t *testing.T) {
 		pool := migratedPool(t)
 		admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		registerController(t, pool)
 		seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 
 		reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-ACTIVE", Title: "LEGION-ACTIVE", Status: "icebox", Rank: "A", LastSeq: 2, HandedOver: true}}, 1, 1, true)

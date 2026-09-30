@@ -44,9 +44,7 @@ func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testbin.OMPHome(t, omp, home)
 	if out, err := exec.Command("git", "init", "--quiet", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}

@@ -6,8 +6,7 @@ export function filterPicker(page: Page, picker: "Labels" | "Status"): Locator {
 }
 
 /** Toggles one option in an expanded strip's `Labels` or `Status` multi-select, then closes the
- *  popover with Escape so it never covers the control the test drives next. (Toggling the last
- *  active filter off collapses the strip, which already unmounts the popover.) */
+ *  popover with Escape so it never covers the control the test drives next. */
 export async function pickFilterOption(
   page: Page,
   picker: "Labels" | "Status",
@@ -18,8 +17,6 @@ export async function pickFilterOption(
     await trigger.click();
   }
   await page.getByRole("option", { exact: true, name: option }).click();
-  if ((await page.getByRole("listbox").count()) > 0) {
-    await page.keyboard.press("Escape");
-  }
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("listbox")).toHaveCount(0);
 }
