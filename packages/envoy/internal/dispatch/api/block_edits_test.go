@@ -1252,6 +1252,37 @@ func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
 	}
 }
 
+// Goldmark pads a header narrower than its delimiter row with the rest of the table, so an insert
+// of a one-cell header over 500 columns and 500 one-cell rows, 7,513 bytes adding 249,999 cells, is
+// refused before those cells are built, and the document is left as it was.
+func TestDocumentEditsRefuseANarrowHeaderTableBeforeItsCells(t *testing.T) {
+	const maximumAllocation = 64 << 20
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Narrow header padding", "Before.\n")
+	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	markdown := "| header |\n" + strings.Repeat("| --- ", 500) + "|\n" + strings.Repeat("| body |\n", 500)
+
+	runtime.GC()
+	var beforeAlloc, afterAlloc runtime.MemStats
+	runtime.ReadMemStats(&beforeAlloc)
+	refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": markdown}},
+	}, "alice")
+	runtime.ReadMemStats(&afterAlloc)
+	allocated := afterAlloc.TotalAlloc - beforeAlloc.TotalAlloc
+	t.Logf("allocated=%d", allocated)
+	body := refused.Body.String()
+	if refused.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, `field \"markdown\"`) || !strings.Contains(body, "limit 10000") {
+		t.Fatalf("narrow header insert: status=%d body=%s, want 400 INVALID_OP on markdown naming the limit", refused.Code, body)
+	}
+	if allocated > maximumAllocation {
+		t.Fatalf("allocated %d bytes, want at most %d", allocated, maximumAllocation)
+	}
+	if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {
+		t.Fatalf("refused edit changed document = %q, want %q", after, before)
+	}
+}
+
 func tablePaddingInsert(width int) string {
 	return strings.Repeat("| header ", width) + "|\n" +
 		strings.Repeat("| --- ", width) + "|\n" +

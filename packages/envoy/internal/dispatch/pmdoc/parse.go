@@ -87,9 +87,9 @@ func Parse(markdown string) (*Node, error) {
 	return parseStamped(markdown, NewTablePaddingBudget())
 }
 
-// parseRendering is Parse of markdown the renderer wrote, a read-back, whose short rows are the
-// tree's: its padding spends a budget of its own (readBackPaddingBudget).
-func parseRendering(markdown string) (*Node, error) {
+// ParseRendering is Parse of markdown the renderer wrote, a read-back, whose short rows are the
+// tree's: its padding spends a budget of its own (readBackPaddingBudget), not a caller write's.
+func ParseRendering(markdown string) (*Node, error) {
 	return parseStamped(markdown, readBackPaddingBudget())
 }
 
@@ -336,7 +336,7 @@ func BlockReadError(block *Node) error {
 	if err != nil {
 		return err
 	}
-	_, err = parseRendering(markdown)
+	_, err = ParseRendering(markdown)
 	return err
 }
 
@@ -353,7 +353,7 @@ func BlockShapeError(block *Node) error {
 	if err != nil {
 		return err
 	}
-	back, err := parseRendering(markdown)
+	back, err := ParseRendering(markdown)
 	if err != nil {
 		return err
 	}
@@ -840,7 +840,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 					soft = !hard
 				}
 			}
-			appendText(&children, value, active)
+			children = appendTextPiece(children, value, active)
 			if hard {
 				children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
 			}
@@ -849,13 +849,13 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				// white-space: break-spaces would show a literal newline as a line break. An
 				// image's alt text keeps its line feed, which that parser reads as written.
 				if insideImage(current) {
-					appendText(&children, "\n", active)
+					children = appendTextPiece(children, "\n", active)
 				} else {
-					appendText(&children, " ", active)
+					children = appendTextPiece(children, " ", active)
 				}
 			}
 		case *ast.String:
-			appendText(&children, parseTextValue(current.Value, active), active)
+			children = appendTextPiece(children, parseTextValue(current.Value, active), active)
 		case *ast.Emphasis:
 			var marks []Mark
 			if current.Level >= 2 {
@@ -868,17 +868,17 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *ast.CodeSpan:
 			if value, ok := multilineCodeSpanText(current, source); ok {
-				appendText(&children, value, append(append([]Mark(nil), active...), Mark{Type: "inlineCode"}))
+				children = appendTextPiece(children, value, append(append([]Mark(nil), active...), Mark{Type: "inlineCode"}))
 				continue
 			}
 			content, err := within(current, Mark{Type: "inlineCode"})
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *ast.Link:
 			href := string(current.Destination)
 			if tableCell {
@@ -888,15 +888,15 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *ast.AutoLink:
-			appendText(&children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
+			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {
 				return nil, nil, err
 			}
-			appendInline(&children, content)
+			children = append(children, content...)
 		case *extensionast.TaskCheckBox:
 			continue
 		case *ast.Image:
@@ -945,7 +945,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			return nil, nil, fmt.Errorf("%w: unsupported markdown inline %s", ErrSchema, child.Kind())
 		}
 	}
-	return children, ended, nil
+	return joinTexts(children), ended, nil
 }
 
 func unescapeMarkdownText(value []byte) string {
@@ -971,20 +971,65 @@ func appendInline(target *[]*Node, nodes []*Node) {
 	}
 }
 
+// appendText adds value under marks to target, joined to target's last node where that is text
+// under the same marks.
 func appendText(target *[]*Node, value string, marks []Mark) {
-	if value == "" {
+	node := textNode(value, marks)
+	if node == nil {
 		return
 	}
-	marks = append([]Mark(nil), marks...)
-	sortMarks(marks)
 	if len(*target) > 0 {
 		last := (*target)[len(*target)-1]
-		if last.Type == "text" && marksEqual(last.Marks, marks) {
+		if last.Type == "text" && marksEqual(last.Marks, node.Marks) {
 			last.Text += value
 			return
 		}
 	}
-	*target = append(*target, &Node{Type: "text", Text: value, Marks: marks})
+	*target = append(*target, node)
+}
+
+// appendTextPiece is nodes with value under marks as a text node after them, not yet joined to
+// the text before it (joinTexts).
+func appendTextPiece(nodes []*Node, value string, marks []Mark) []*Node {
+	if node := textNode(value, marks); node != nil {
+		return append(nodes, node)
+	}
+	return nodes
+}
+
+// textNode is value as a text node under a sorted copy of marks, or nil for no text.
+func textNode(value string, marks []Mark) *Node {
+	if value == "" {
+		return nil
+	}
+	marks = append([]Mark(nil), marks...)
+	sortMarks(marks)
+	return &Node{Type: "text", Text: value, Marks: marks}
+}
+
+// joinTexts is nodes with each run of text nodes under the same marks written as one, as
+// appendText joins them. A paragraph's lines are its pieces, so they are joined once, where adding
+// each to the text before it copied that text again for every line.
+func joinTexts(nodes []*Node) []*Node {
+	out := nodes[:0]
+	for index := 0; index < len(nodes); {
+		node, end := nodes[index], index+1
+		if node.Type == "text" {
+			for end < len(nodes) && nodes[end].Type == "text" && marksEqual(nodes[end].Marks, node.Marks) {
+				end++
+			}
+		}
+		if end > index+1 {
+			var text strings.Builder
+			for _, piece := range nodes[index:end] {
+				text.WriteString(piece.Text)
+			}
+			node = &Node{Type: "text", Text: text.String(), Marks: node.Marks}
+		}
+		out = append(out, node)
+		index = end
+	}
+	return out
 }
 
 func titleOrNil(title []byte) any {

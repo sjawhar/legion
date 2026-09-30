@@ -33,13 +33,13 @@ func ReadBack(doc *Node) (*Node, error) {
 }
 
 // readBack is what doc's markdown, its tables' spans adding at most spanCells cells (render),
-// reads back as (parseRendering).
+// reads back as (ParseRendering).
 func readBack(doc *Node, spanCells int) (*Node, error) {
 	r, err := render(doc, spanCells)
 	if err != nil {
 		return nil, err
 	}
-	return parseRendering(r.b.String())
+	return ParseRendering(r.b.String())
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before
@@ -142,7 +142,7 @@ func RefuseMisreadDocument(doc *Node) error {
 // back otherwise does so in both, and NewMisread's filter of misreads before already held, which
 // keys on the block id, sets it aside either way. Spanless, a render writes no more than the cells
 // the tables hold, and its parse pads the rows a span leaves short on the read-back's own budget
-// (parseRendering).
+// (ParseRendering).
 func RefuseMisreadWrite(before, after *Node) error {
 	return refuseMisread(newMisread(before, after, 0))
 }

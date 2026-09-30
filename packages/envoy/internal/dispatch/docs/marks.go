@@ -317,12 +317,10 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return updateErr
 			})
 		}
-		// The replacement's markdown and the tables its splice cuts are this write's to pad.
-		budget := pmdoc.NewTablePaddingBudget()
 		// A reject is not checked: it removes the text a browser insert added, which gives back
 		// the document the insert started from.
 		if !accept {
-			next, err := rejectedInsert(tree, id, budget)
+			next, err := rejectedInsert(tree, id)
 			if err != nil {
 				return err
 			}
@@ -333,6 +331,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// stored so when the suggestion is created, but one created before that holds its text as
 		// sent.
 		with := pmdoc.LineFeeds(replaceWith)
+		// The replacement's markdown and the tables its splice cuts are this accept's to pad.
+		budget := pmdoc.NewTablePaddingBudget()
 		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node

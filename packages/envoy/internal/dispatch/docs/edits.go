@@ -487,7 +487,7 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 				}
 			}
 		}
-		next, err := applyOperationWithTablePaddingBudget(tree, op, budget)
+		next, err := applyOperation(tree, op, budget)
 		if err != nil {
 			return editBatch{}, stampOperation(index, err)
 		}
@@ -758,14 +758,9 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 	}
 }
 
-// applyOperation applies op to tree as a write of its own.
-func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
-	return applyOperationWithTablePaddingBudget(tree, op, pmdoc.NewTablePaddingBudget())
-}
-
-// applyOperationWithTablePaddingBudget is applyOperation padding the tables and table rows op
-// writes on budget, its batch's.
-func applyOperationWithTablePaddingBudget(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
+// applyOperation applies op to tree, padding the tables and table rows it writes on budget, its
+// batch's.
+func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddingBudget) (*pmdoc.Node, error) {
 	// Every text an operation writes - a replace's with, an insert's markdown, whether it becomes
 	// blocks or table rows, and a retype's attributes - reaches the document with line feeds
 	// alone (pmdoc.LineFeeds), before any check below reads it.

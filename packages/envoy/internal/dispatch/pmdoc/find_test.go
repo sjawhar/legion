@@ -785,27 +785,32 @@ func TestMarkRangeSupportsCodeBlocksAndMultipleBlocks(t *testing.T) {
 }
 
 // A quote is matched by its text, and the cells a table's short rows are padded with hold none, so
-// a quote's table is read as markdown only while its rows need no padding: a quote of a table whose
-// 99-cell header holds `**bold**` over 99 one-cell rows is not the text of a paragraph reading
-// `A **bold** word.`, and matching it pads no cell. Each operation of an edit batch resolves its
-// quotes, so a quote padded for each would cost the batch as many cells as it has operations.
+// a quote's table is read as markdown only while its rows need no padding: neither a quote of a
+// table whose 99-cell header holds `**bold**` over 99 one-cell rows, nor one whose one-cell header
+// holding it stands over a two-column delimiter row, is the text of a paragraph reading
+// `A **bold** word.`, and matching either pads no cell. Each operation of an edit batch resolves
+// its quotes, so a quote padded for each would cost the batch as many cells as it has operations.
 func TestFindQuoteReadsNoTablePaddingInAQuote(t *testing.T) {
 	doc, err := Parse("A **bold** word.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	quote := "| **bold** " + strings.Repeat("|  ", 98) + "|\n" + strings.Repeat("| --- ", 99) + "|\n" + strings.Repeat("| |\n", 99)
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	_, err = FindQuote(doc, quote, nil, nil)
-	runtime.ReadMemStats(&after)
-	allocated := after.TotalAlloc - before.TotalAlloc
-	t.Logf("allocated=%d", allocated)
-	if !errors.Is(err, ErrTargetNotFound) {
-		t.Errorf("FindQuote(a short-rowed table quote) = %v, want ErrTargetNotFound", err)
-	}
-	if allocated > 4<<20 {
-		t.Errorf("FindQuote allocated %d bytes, want at most %d", allocated, 4<<20)
+	for _, quote := range []string{
+		"| **bold** " + strings.Repeat("|  ", 98) + "|\n" + strings.Repeat("| --- ", 99) + "|\n" + strings.Repeat("| |\n", 99),
+		"| **bold** |\n| --- | --- |\n| |\n",
+	} {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err = FindQuote(doc, quote, nil, nil)
+		runtime.ReadMemStats(&after)
+		allocated := after.TotalAlloc - before.TotalAlloc
+		t.Logf("allocated=%d", allocated)
+		if !errors.Is(err, ErrTargetNotFound) {
+			t.Errorf("FindQuote(%q) = %v, want ErrTargetNotFound", quote, err)
+		}
+		if allocated > 4<<20 {
+			t.Errorf("FindQuote(%q) allocated %d bytes, want at most %d", quote, allocated, 4<<20)
+		}
 	}
 }

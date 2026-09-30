@@ -386,7 +386,7 @@ func TestParseRejectsExcessiveTablePaddingBeforeAllocation(t *testing.T) {
 				if !errors.Is(err, ErrSchema) {
 					t.Errorf("parse error = %v, want ErrSchema", err)
 				} else {
-					for _, want := range []string{"table 1", "writes", "header implies", "limit 10000"} {
+					for _, want := range []string{"table 1", "writes", "the table's width", "limit 10000"} {
 						if !strings.Contains(err.Error(), want) {
 							t.Errorf("parse error = %q, want it to name %q", err, want)
 						}
@@ -405,6 +405,32 @@ func TestParseRejectsTablePaddingBudgetAcrossTables(t *testing.T) {
 	_, err := Parse(markdown)
 	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "table 3") {
 		t.Fatalf("Parse() error = %v, want ErrSchema naming table 3", err)
+	}
+}
+
+// A paragraph's text is its lines and the soft breaks between them, and each run under one set of
+// marks is joined once: a 40,000-byte paragraph of 20,000 lines reads as one text node of its
+// lines joined by spaces, at about a kibibyte a line, where joining each line to the text before
+// it copied that text again for every line.
+func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
+	const lines = 20_000
+	markdown := strings.Repeat("x\n", lines)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	doc, err := Parse(markdown)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("allocated=%d", allocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paragraph := doc.Children[0]
+	if want := strings.Repeat("x ", lines-1) + "x"; len(paragraph.Children) != 1 || paragraph.Children[0].Text != want {
+		t.Errorf("paragraph children = %d, first text %d bytes, want one text node of %d bytes", len(paragraph.Children), len(paragraph.Children[0].Text), len(want))
+	}
+	if allocated > 64<<20 {
+		t.Errorf("allocated %d bytes, want at most %d", allocated, 64<<20)
 	}
 }
 

@@ -193,7 +193,9 @@ func padsLikeTheBrowser(tree *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockA
 // acceptSpliceRefusal words the refusal of an accept whose replacement Splice cannot fit, naming
 // what the person accepting can do: an inline replacement running into an ask or callout from the
 // text before it would join the two and leave the ask or callout empty; a replacement no level of
-// the document can hold where the suggestion sits; and any other join the document cannot hold.
+// the document can hold where the suggestion sits; tables the splice cuts that padding back to
+// their width would pad past the write's limit (pmdoc.ErrTablePadding); and any other join the
+// document cannot hold.
 func acceptSpliceRefusal(err error) error {
 	switch {
 	case errors.Is(err, pmdoc.ErrJoinEmptiesTypedBlock):
@@ -202,6 +204,9 @@ func acceptSpliceRefusal(err error) error {
 	case errors.Is(err, pmdoc.ErrReplacementDoesNotFit):
 		return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +
 			"(a table cell's whole text, for one, can only be replaced by inline text)"}
+	case errors.Is(err, pmdoc.ErrTablePadding):
+		return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf("padding the tables the suggestion cuts back to their "+
+			"width would pad past the limit (%v); reject the suggestion, or suggest a change inside one table row", err)}
 	case errors.Is(err, pmdoc.ErrSchema):
 		return &ErrInvalidOp{Field: "anchor", Reason: fmt.Sprintf("the suggestion runs across blocks that replacing it "+
 			"would join, which the document cannot hold together (%v); reject the suggestion, or suggest a change inside one block", err)}

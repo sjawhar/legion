@@ -267,7 +267,7 @@ func TestApplyOperationRetypesAParagraphInPlace(t *testing.T) {
 	}
 	blockID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
 
-	retyped, err := applyOperation(tree, model.EditOp{
+	retyped, err := applyAlone(tree, model.EditOp{
 		Op:         "retype",
 		Block:      blockID,
 		Type:       "ask",
@@ -301,7 +301,7 @@ func TestApplyOperationLabelsInvalidRetypeFields(t *testing.T) {
 		{name: "invalid attributes", op: model.EditOp{Op: "retype", Block: blockID, Type: "ask", Attributes: map[string]any{"urgency": "now"}}, field: "attributes"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := applyOperation(tree, test.op)
+			_, err := applyAlone(tree, test.op)
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != test.field {
 				t.Fatalf("retype error = %v, want invalid %s", err, test.field)
@@ -412,7 +412,7 @@ func TestApplyOperationRefusesTableRowsBeforeAHeaderCell(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = applyOperation(tree, model.EditOp{Op: "insert", Before: "a", Markdown: test.markdown})
+		_, err = applyAlone(tree, model.EditOp{Op: "insert", Before: "a", Markdown: test.markdown})
 		var invalid *ErrInvalidOp
 		if !errors.As(err, &invalid) || invalid.Field != "markdown" {
 			t.Fatalf("insert %q before a header cell: %v, want an invalid op on markdown", test.markdown, err)
@@ -425,7 +425,7 @@ func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{
+	next, err := applyAlone(tree, model.EditOp{
 		Op:       "insert",
 		After:    "A10",
 		Markdown: "Inserted paragraph",
@@ -564,7 +564,7 @@ func TestApplyOperationInsertsParagraphAfterParagraphContainingAnchor(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{
+	next, err := applyAlone(tree, model.EditOp{
 		Op:       "insert",
 		After:    "anchor",
 		Markdown: "Inserted paragraph",
@@ -587,7 +587,7 @@ func TestApplyOperationInsertsInlineMarkdownAsOwnParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{
+	next, err := applyAlone(tree, model.EditOp{
 		Op:       "insert",
 		After:    "anchor",
 		Markdown: " **bold**",
@@ -610,7 +610,7 @@ func TestApplyOperationExtendsTableAfterCellAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{
+	next, err := applyAlone(tree, model.EditOp{
 		Op:       "insert",
 		After:    "A10",
 		Markdown: "| A11 | new |",
@@ -637,7 +637,7 @@ func TestApplyOperationRejectsFindTargetSpanningTextblocks(t *testing.T) {
 		{Op: "replace", Find: "one two", With: "changed"},
 		{Op: "delete", Find: "one two"},
 	} {
-		_, err := applyOperation(tree, op)
+		_, err := applyAlone(tree, op)
 		if !errors.Is(err, pmdoc.ErrTargetSpansBlocks) {
 			t.Fatalf("%s spanning textblocks error = %v, want ErrTargetSpansBlocks", op.Op, err)
 		}
@@ -670,7 +670,7 @@ func TestApplyOperationMatchesPlainTextInsideInlineCodeAndLinks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err := applyOperation(tree, model.EditOp{
+			next, err := applyAlone(tree, model.EditOp{
 				Op:   "replace",
 				Find: test.anchor,
 				With: "updated",
@@ -731,10 +731,10 @@ func TestApplyOperationDeletesABlockByID(t *testing.T) {
 	if markdown != "# Title\n\nAfter.\n" {
 		t.Fatalf("after block deletes = %q", markdown)
 	}
-	if _, err := applyOperation(tree, model.EditOp{Op: "delete", Block: "missing"}); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+	if _, err := applyAlone(tree, model.EditOp{Op: "delete", Block: "missing"}); !errors.Is(err, pmdoc.ErrTargetNotFound) {
 		t.Fatalf("unknown block error = %v, want ErrTargetNotFound", err)
 	}
-	_, err = applyOperation(tree, model.EditOp{Op: "delete"})
+	_, err = applyAlone(tree, model.EditOp{Op: "delete"})
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "find or block" {
 		t.Fatalf("delete without a target error = %v, want invalid find or block", err)
@@ -855,7 +855,7 @@ func TestApplyOperationDeleteThatEmptiesATypedBlockNamesTheSchemaRule(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = applyOperation(tree, model.EditOp{Op: "delete", Find: "Which transport?"})
+	_, err = applyAlone(tree, model.EditOp{Op: "delete", Find: "Which transport?"})
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "find" || !strings.Contains(invalid.Reason, "typed block \"ask\"") {
 		t.Fatalf("delete of an ask's only paragraph error = %v, want invalid find naming the ask content rule", err)
@@ -868,13 +868,13 @@ func TestApplyOperationDeleteOfABulletWithOtherContentNamesTheItemBlock(t *testi
 		t.Fatal(err)
 	}
 	itemID, _ := tree.Children[0].Children[0].Attrs[pmdoc.BlockIDAttr].(string)
-	_, err = applyOperation(tree, model.EditOp{Op: "delete", Find: "Parent"})
+	_, err = applyAlone(tree, model.EditOp{Op: "delete", Find: "Parent"})
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "find" || !strings.Contains(invalid.Reason, `delete {block:"`+itemID+`"}`) {
 		t.Fatalf("delete of a bullet with other content error = %v, want invalid find naming delete {block:%q}", err, itemID)
 	}
 	// The named escape hatch removes the item with its content.
-	next, err := applyOperation(tree, model.EditOp{Op: "delete", Block: itemID})
+	next, err := applyAlone(tree, model.EditOp{Op: "delete", Block: itemID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +926,7 @@ func TestApplyOperationMovesABlockToAnAnchor(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			next, err := applyOperation(tree, test.op)
+			next, err := applyAlone(tree, test.op)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -958,14 +958,14 @@ func TestApplyOperationMoveRejectsMalformedAndSelfAnchoredMoves(t *testing.T) {
 		{name: "anchored to itself", op: model.EditOp{Op: "move", Block: "decision", Before: "block:decision"}, field: "before"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := applyOperation(tree, test.op)
+			_, err := applyAlone(tree, test.op)
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != test.field {
 				t.Fatalf("move error = %v, want invalid %s", err, test.field)
 			}
 		})
 	}
-	if _, err := applyOperation(tree, model.EditOp{Op: "move", Block: "missing", After: "After."}); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+	if _, err := applyAlone(tree, model.EditOp{Op: "move", Block: "missing", After: "After."}); !errors.Is(err, pmdoc.ErrTargetNotFound) {
 		t.Fatalf("unknown block error = %v, want ErrTargetNotFound", err)
 	}
 }
@@ -975,7 +975,7 @@ func TestApplyOperationRetypesATypedBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{Op: "retype", Block: "decision", Type: "callout", Attributes: map[string]any{"kind": "warning"}})
+	next, err := applyAlone(tree, model.EditOp{Op: "retype", Block: "decision", Type: "callout", Attributes: map[string]any{"kind": "warning"}})
 	if err != nil {
 		t.Fatalf("retype ask block: %v", err)
 	}
@@ -992,7 +992,7 @@ func TestApplyOperationRetypesATypedBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	headingID, _ := heading.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
-	_, err = applyOperation(heading, model.EditOp{Op: "retype", Block: headingID, Type: "callout"})
+	_, err = applyAlone(heading, model.EditOp{Op: "retype", Block: headingID, Type: "callout"})
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "block" {
 		t.Fatalf("retype heading error = %v, want invalid block", err)
@@ -1015,7 +1015,7 @@ func TestApplyOperationReplaceInsideATextblockIsInline(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1061,7 +1061,7 @@ func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1103,7 +1103,7 @@ func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1153,7 +1153,7 @@ func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != "with" {
 				t.Fatalf("replace with %q = %v, want invalid with rather than a silent deletion", test.with, err)
@@ -1182,7 +1182,7 @@ func TestApplyOperationReplaceRejectsABlockMarkerAfterAHardBreak(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != "with" {
 				t.Fatalf("replace with %q = %v, want invalid with rather than a silent continuation line", test.with, err)
@@ -1222,7 +1222,7 @@ func TestApplyOperationReplaceKeepsAHardBreakThatOpensNoBlock(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			if err != nil {
 				t.Fatalf("replace with %q: %v", test.with, err)
 			}
@@ -1258,7 +1258,7 @@ func TestApplyOperationReplaceWithNothingStillDeletesTheMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "this", With: ""})
+	next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "this", With: ""})
 	if err != nil {
 		t.Fatalf("empty replacement: %v", err)
 	}
@@ -1336,7 +1336,7 @@ func TestApplyOperationReplaceRefusesHTMLThatOpensABlockWhereItLands(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != "with" {
 				t.Fatalf("replace = %v, want invalid with", err)
@@ -1378,7 +1378,7 @@ func TestApplyOperationReplaceKeepsHTMLThatOpensNoBlockWhereItLands(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			tree, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			tree, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			if err != nil {
 				t.Fatalf("replace: %v", err)
 			}
@@ -1445,7 +1445,7 @@ func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != "with" {
 				t.Fatalf("replace = %v, want invalid with", err)
@@ -1480,7 +1480,7 @@ func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1516,7 +1516,7 @@ func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: with})
+				_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: with})
 				var invalid *ErrInvalidOp
 				refused := errors.As(err, &invalid) && invalid.Field == "with"
 				if refused != test.refused || (!refused && err != nil) {
@@ -1543,7 +1543,7 @@ func TestApplyOperationReplaceDropsWhitespaceAtATextblocksEdges(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			out, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1577,7 +1577,7 @@ func TestApplyOperationReplaceEscapesBlockMarkersAfterAHardBreak(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tree, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: with})
+			tree, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: with})
 			if err != nil {
 				t.Fatalf("replace: %v", err)
 			}
@@ -1609,7 +1609,7 @@ func TestApplyOperationReplaceKeepsAHardBreakAfterATrailingBackslash(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	tree, err = applyOperation(tree, model.EditOp{
+	tree, err = applyAlone(tree, model.EditOp{
 		Op: "replace", Find: "Body.", With: "Ends in a backslash \\\\  \nnext line",
 	})
 	if err != nil {
@@ -1655,7 +1655,7 @@ func TestApplyOperationReplaceKeepsALinkWhoseTextHasABracket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tree, err = applyOperation(tree, model.EditOp{
+	tree, err = applyAlone(tree, model.EditOp{
 		Op: "replace", Find: "Body.", With: `[a\]b](https://x.test)`,
 	})
 	if err != nil {
@@ -1682,7 +1682,7 @@ func TestApplyOperationReplaceKeepsAMarkAroundTextEndingInABackslash(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	tree, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: `**a\\** tail`})
+	tree, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: `**a\\** tail`})
 	if err != nil {
 		t.Fatalf("replace: %v", err)
 	}
@@ -1736,7 +1736,7 @@ func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != "with" {
 				t.Fatalf("replace error = %v, want invalid with", err)
@@ -1812,7 +1812,7 @@ func TestApplyOperationReplaceKeepsOneHeadingMarkerOnARename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{
+	next, err := applyAlone(tree, model.EditOp{
 		Op:   "replace",
 		Find: "## New since we talked (2026-09-24)",
 		With: "## New since we talked (2026-09-24) - SUPERSEDED, kept as record",
@@ -1849,7 +1849,7 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != "with" {
 				t.Fatalf("replace with %q = %v, want invalid with", test.with, err)
@@ -1860,7 +1860,7 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 			// The escape the refusal offers is its one actionable remedy, so it has to be the
 			// caller's own text: accepted when fed back, and rendering the prose they wrote.
 			suggestion := backtickedSuggestion(t, invalid.Reason)
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: suggestion})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: suggestion})
 			if err != nil {
 				t.Fatalf("the suggested escape %q was refused: %v", suggestion, err)
 			}
@@ -1910,7 +1910,7 @@ func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 			if err != nil {
 				t.Fatalf("retitle heading: %v", err)
 			}
@@ -1941,7 +1941,7 @@ func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+		_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 		var invalid *ErrInvalidOp
 		if !errors.As(err, &invalid) {
 			t.Fatalf("replace %q in %q = %v, want invalid with", test.find, test.markdown, err)
@@ -1998,7 +1998,7 @@ func TestApplyOperationReplaceKeepsAMarkerTheRendererDoesNotRepeatLiteral(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 			if err != nil {
 				t.Fatalf("replace with %q: %v", test.with, err)
 			}
@@ -2020,7 +2020,7 @@ func TestApplyOperationHeadingAnchorMissNamesTheAnchorAndNearestHeadings(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = applyOperation(tree, model.EditOp{
+	_, err = applyAlone(tree, model.EditOp{
 		Op:       "insert",
 		Markdown: "Intro.",
 		After:    "heading:New since we talked (2026-09-24)",
@@ -2075,7 +2075,7 @@ func TestApplyOperationRefusesAFindWithAnUnbalancedInlineMark(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, find := range []string{"**SUPERSEDED by the", "and the `rest"} {
-		_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
+		_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
 		var invalid *ErrInvalidOp
 		if !errors.As(err, &invalid) || invalid.Field != "find" {
 			t.Fatalf("unbalanced find %q = %v, want invalid find", find, err)
@@ -2094,7 +2094,7 @@ func TestApplyOperationUnbalancedMarkKeepsNearestBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Closest **unmatched", With: "x"})
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Closest **unmatched", With: "x"})
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "find" {
 		t.Fatalf("unbalanced find = %v, want invalid find", err)
@@ -2135,7 +2135,7 @@ func TestApplyOperationInsertWithACrossBlockQuoteAnchorNamesTheQuote(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = applyOperation(tree, model.EditOp{Op: "insert", Markdown: "x", After: "Alpha Body."})
+	_, err = applyAlone(tree, model.EditOp{Op: "insert", Markdown: "x", After: "Alpha Body."})
 	var spans *ErrQuoteSpansBlocks
 	if !errors.As(err, &spans) || spans.Quote != "Alpha Body." {
 		t.Fatalf("cross-block insert anchor = %v, want the anchor named", err)
@@ -2150,7 +2150,7 @@ func TestApplyOperationOutOfRangeOccurrenceNamesTheQuoteAndMatchCount(t *testing
 		t.Fatal(err)
 	}
 	occurrence := 5
-	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Alpha block.", With: "x", Occurrence: &occurrence})
+	_, err = applyAlone(tree, model.EditOp{Op: "replace", Find: "Alpha block.", With: "x", Occurrence: &occurrence})
 	var missing *ErrQuoteNotFound
 	if !errors.As(err, &missing) || missing.Quote != "Alpha block." || missing.Matches != 2 {
 		t.Fatalf("out-of-range occurrence = %v, want the quote and match count named", err)
@@ -2334,7 +2334,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 				}
 				return true
 			})
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
 			if err != nil {
 				t.Fatalf("replace with nothing = %v, want the paragraph emptied", err)
 			}
@@ -2354,7 +2354,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
+	next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
 	if err != nil {
 		t.Fatalf("replace leaving \"---\" = %v, want the text stored escaped", err)
 	}
@@ -2379,7 +2379,7 @@ func TestApplyOperationEmptyingACalloutInAFootnoteKeepsTheCallout(t *testing.T) 
 		t.Fatal(err)
 	}
 	pmdoc.EnsureBlockIDs(tree)
-	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+	next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
 	if err != nil {
 		t.Fatalf("emptying the callout's paragraph = %v, want it taken", err)
 	}
@@ -2419,7 +2419,7 @@ func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
 				t.Fatal(err)
 			}
 			pmdoc.EnsureBlockIDs(tree)
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			if err != nil {
 				t.Fatalf("replace with %q = %v, want it taken", test.with, err)
 			}
@@ -2463,11 +2463,11 @@ func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *test
 				t.Fatal(err)
 			}
 			pmdoc.EnsureBlockIDs(tree)
-			emptied, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+			emptied, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
 			if err != nil {
 				t.Fatalf("emptying the first paragraph = %v", err)
 			}
-			next, err := applyOperation(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
+			next, err := applyAlone(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
 			if err != nil {
 				t.Fatalf("replace with %q beside an emptied paragraph = %v, want it stored escaped", test.with, err)
 			}
@@ -2524,7 +2524,7 @@ func TestApplyOperationReplaceStoresBlockSyntaxEscaped(t *testing.T) {
 				t.Fatal(err)
 			}
 			pmdoc.EnsureBlockIDs(tree)
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			next, err := applyAlone(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
 			if err != nil {
 				t.Fatalf("replace with %q = %v, want it stored escaped", test.with, err)
 			}
@@ -2565,7 +2565,7 @@ func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 				t.Fatal(err)
 			}
 			pmdoc.EnsureBlockIDs(tree)
-			next, err := applyOperation(tree, test.op)
+			next, err := applyAlone(tree, test.op)
 			if err != nil {
 				t.Fatalf("insert %q = %v", test.op.Markdown, err)
 			}
@@ -2582,7 +2582,7 @@ func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 			t.Fatal(err)
 		}
 		pmdoc.EnsureBlockIDs(tree)
-		next, err := applyOperation(tree, model.EditOp{Op: "insert", Before: "start", Markdown: markdown})
+		next, err := applyAlone(tree, model.EditOp{Op: "insert", Before: "start", Markdown: markdown})
 		if err != nil {
 			t.Fatalf("insert %q at the start = %v", markdown, err)
 		}
@@ -2630,4 +2630,9 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// applyAlone applies op to tree as a write of its own, on a budget of its own.
+func applyAlone(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
+	return applyOperation(tree, op, pmdoc.NewTablePaddingBudget())
 }

@@ -344,8 +344,8 @@ A caller resolved by header identity without a stored GitHub token receives
 
 `POST /api/v1/artifacts/{id}/edits` accepts an `ops` array. Quote targets resolve against the
 document's plain text rather than Markdown source: inline-code and link text match without their
-syntax, and a table-cell target is its cell text. A quote holding a table whose rows are shorter
-than its header is matched as the text it is.
+syntax, and a table-cell target is its cell text. A quote holding a table with a row shorter than
+its delimiter row, the header included, is matched as the text it is.
 
 | Operation | Required fields | Behavior |
 | --- | --- | --- |
