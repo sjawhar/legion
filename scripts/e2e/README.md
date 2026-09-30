@@ -595,9 +595,11 @@ before it, arms the design gate (`gates.design: root-issues`) and files tree 1 a
 admitted root's architect requests approval on its own. Tree 1's document leaves one choice (where
 the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `spec-posted` waits up
 to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
-It then fails unless the architect asked that choice as a decision block, and its approval request
-at the approved version carries a summary after `Approve spec.md (version N)?` and was made after
-every decision block was settled; it keeps the issue's asks as `<issue>-asks.json`.
+It then fails unless the architect asked that choice as a decision block, its approval request at
+the approved version carries a summary after `Approve spec.md (version N)?`, and no approval request
+on the spec, retracted ones included, was made while a decision block was open
+([`lib/approvals-while-blocks-open.jq`](lib/approvals-while-blocks-open.jq), tested by
+`bun test scripts/e2e/lib`); it keeps the issue's asks as `<issue>-asks.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.

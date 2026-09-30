@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
+  sends `summary` and quotes the question the server returned in its result (LEGION-387).
+
 ### Added
 
 - Added the shared nine-tool native Dispatch client, typed results, and per-issue event subscription details.

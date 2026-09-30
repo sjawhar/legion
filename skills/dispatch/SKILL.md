@@ -36,7 +36,7 @@ after `skill://dispatch/` is relative to this skill's base directory.
 
 For a major design change the design conversation happens in Dispatch, in the spec: write it
 early, while it is still a draft with real alternatives, and put each open question in it as an
-`:::ask` block right after the text that discusses it, beside the options and trade-offs it depends
+`:::ask` block at the end of the section that discusses it, beside the options and trade-offs it depends
 on ([Writing a spec](#writing-a-spec), [Decision blocks](#decision-blocks)). The human answers in
 place and the document grows into the record. A finished spec dropped after a chat-only design is
 not that conversation, and neither is a compressed standalone ask, disconnected from the design and
@@ -78,7 +78,7 @@ evidence for it, in plain words: what goes wrong, for whom, and the counts or ca
 It grows in place as the conversation goes. It is the issue's one primary document: extend it with
 a new version that keeps the human's own text, never a second "spec" artifact beside it.
 
-- **Each open question is a decision block** right after the text that discusses it, carrying the
+- **Each open question is a decision block** at the end of the section that discusses it, carrying the
   options, what each costs, and your recommendation ([Decision blocks](#decision-blocks)). Because
   it is an ask, it reaches the human's Inbox, and the answer lands next to its context. Never
   gather questions into a list or an "open questions" section, and never ask one as a standalone
@@ -171,7 +171,7 @@ lines start with the issue key; standalone project-document hit lines start with
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
 The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
 merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
-the new issue a title that names what differs where you can, and open its spec's Summary with the
+the new issue a title that names what differs where you can, and open its spec with the
 distinction from the named issue, citing it (`dispatch://KEY`), for whoever reads the next pairing.
 
 ### Symptom versus cause

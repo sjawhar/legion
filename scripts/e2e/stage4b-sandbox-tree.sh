@@ -1453,9 +1453,7 @@ if [ -n "$design_gate" ]; then
     "Where the file goes is the human's choice, and nobody has made it yet: under \`smoke/\` at the repository root, or under \`docs/smoke/\`." "" \
     "## Scope" "" \
     "A review of the pull request may ask for one more line appended to that same file; that is in scope. Nothing else changes.")
-  tree1=$(dispatch_human POST issues "$(jq -cn --arg project "$project" --arg spec "$gate_spec" \
-    --arg title "Stage 4b design gate tree 1: the spec's decision blocks, then approval ($work)" \
-    '{project:$project,title:$title,labels:["legion"],spec:$spec,force:true}')" | jq -er .key)
+  tree1=$(new_issue "Stage 4b design gate tree 1: the spec's decision blocks, then approval ($work)" "" "$gate_spec")
   set_status "$tree1" todo
   until_true 300 "tree 1 admitted" sh -c \
     "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$tree1' '.admission.active == [\$a]'"
@@ -1494,10 +1492,11 @@ gate_open() {
 }
 # drive_gated_spec ISSUE waits, up to 12 hours, for a human to answer the spec's decision blocks and
 # approve the version the architect asked about, then checks what the architect did: it asked the
-# document's open choice as a decision block, and its approval request at the approved version
-# carries a summary after "Approve <name> (version N)?" and came after every block was settled.
+# document's open choice as a decision block, its approval request at the approved version carries
+# a summary after "Approve <name> (version N)?", and no approval request it made on the spec,
+# retracted ones included, came while a decision block was open (lib/approvals-while-blocks-open.jq).
 drive_gated_spec() {
-  local issue=$1 artifact approved asks request open_at_request blocks
+  local issue=$1 artifact approved asks request early blocks
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
   until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
@@ -1510,14 +1509,8 @@ drive_gated_spec() {
   [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
   jq -e '.question | test("^Approve .+ \\(version [0-9]+\\)\\? \\S")' <<<"$request" >/dev/null ||
     fail "$issue: the approval request carries no summary: $(jq -r .question <<<"$request")"
-  # Dispatch writes fractional seconds of varying length, so times compare as whole seconds.
-  open_at_request=$(jq -c --arg artifact "$artifact" --arg at "$(jq -r .created_at <<<"$request")" '
-    def t: if . == null then infinite else sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 end;
-    ($at | t) as $requested
-    | [.[] | select(.kind == "question" and .block_id != null and (.block_artifact.id // $artifact) == $artifact)
-        | select((.created_at | t) < $requested and ((.answer.at // .resolution.at) | t) > $requested)
-        | .question]' <<<"$asks")
-  [ "$open_at_request" = "[]" ] || fail "$issue: approval was requested while decision blocks were open: $open_at_request"
+  early=$(jq -c --arg artifact "$artifact" -f "$root/scripts/e2e/lib/approvals-while-blocks-open.jq" <<<"$asks")
+  [ "$early" = "[]" ] || fail "$issue: approval was requested while decision blocks were open: $early"
   blocks=$(jq '[.[] | select(.kind == "question" and .block_id != null)] | length' <<<"$asks")
   [ "$blocks" -gt 0 ] || fail "$issue: the spec's open choice was never asked as a decision block ($evidence/$issue-asks.json)"
   note "$issue: $blocks decision blocks, each settled before approval was requested"

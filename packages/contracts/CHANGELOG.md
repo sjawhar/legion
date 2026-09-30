@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
+  the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
+  `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing
+  headings.
+
 ### Added
 
 - Added `claimHolds(claim, titles)` and its `ClaimHolding` answer (`holds`, `lapsed`, `unknown`):

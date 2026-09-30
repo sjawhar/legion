@@ -25,7 +25,7 @@ The last line of your system prompt, "Design gate policy", says whether this pro
 root design gate. When it says `gates.design: root-issues`, apply the gate in the skill before any
 Legion-role spawn: extend the issue's own primary document in place as the root specification
 (never post a second "spec" artifact — that replaces the human's document), put each open question
-in it as a decision block after the section that discusses it, and once every block is answered
+in it as a decision block at the end of the section that discusses it, and once every block is answered
 and folded into the text, request approval with `dispatch_request_approval` and a `summary` of
 what the tree will do that the human hasn't already agreed to. Register the gate with the document
 id and version that call returned, and park. Do not spawn while waiting for `design-approved`.

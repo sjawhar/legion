@@ -69,13 +69,15 @@ dispatch_human() {
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
 }
-# new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
-# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and smoke_spec
-# as its primary document: the proof gives its architect no instruction, so what the tree is for
-# comes from the issue itself. A child carries neither, since it runs under its root's tree.
+# new_issue TITLE [PARENT] [SPEC] creates an issue in the run's project and prints its key. A root
+# carries the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and SPEC
+# as its primary document, smoke_spec when SPEC is unset or empty: the proof gives its architect no
+# instruction, so what the tree is for comes from the issue itself. A child carries neither, since
+# it runs under its root's tree.
 new_issue() {
-  local title=$1 parent=${2:-} payload
-  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$(smoke_spec)" \
+  local title=$1 parent=${2:-} spec=${3:-} payload
+  [ -n "$spec" ] || spec=$(smoke_spec)
+  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$spec" \
     'if $parent == "" then {project:$project,title:$title,labels:["legion"],spec:$spec,force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
   dispatch_human POST issues "$payload" | jq -er .key
 }

@@ -88,8 +88,8 @@ clear is a `dispatch_ask`.
 The issue's primary document **is** the root specification. Extend it in place, as
 [Writing a spec](../dispatch/SKILL.md#writing-a-spec) says: a new version that keeps the human's
 own text and grows the design (the adoption or decomposition and its waves, how each outcome is
-proven, and the integration test), with each open question a decision block right after the text
-that discusses it. Never post a second "spec" artifact beside it (`dispatch_artifact` with the
+proven, and the integration test), with each open question a decision block at the end of the
+section that discusses it. Never post a second "spec" artifact beside it (`dispatch_artifact` with the
 primary document's name replaces the human's document; do not do that).
 The design gate runs only when the "Design gate policy" line at the end of your system prompt
 says `gates.design: root-issues`. When it says `gates.design: off`, write the spec and continue
