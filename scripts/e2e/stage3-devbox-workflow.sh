@@ -96,7 +96,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -124,6 +124,11 @@ cleanup() {
     printf "the run's scratch workspace is %s\n" "$work" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
+  # A failed run in which the key command left an agent without a key is no verdict on the change.
+  # A bare exit in a trap would keep the status the trap began with.
+  if [ "$status" = 1 ] && [ -f "$evidence/model-gateway/hawk-token" ]; then
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" "$evidence/model-gateway" >&2 || exit "$?"
+  fi
   return 0
 }
 trap cleanup EXIT

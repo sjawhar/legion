@@ -14,8 +14,12 @@
 # Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
 #   <dir>/hawk-token      the key command the profile names: hawk-token, run with the caller's
 #                         HOME, session bus address and XDG base directories for that one command
-#   <dir>/hawk-token.log  one line per invocation, one per mint, and hawk-token's own stderr
+#   <dir>/hawk-token.log  one line per invocation, one per mint, one per call it served no key,
+#                         and hawk-token's own stderr
+#   <dir>/hawk-token.unserved   one line per call it served no key and why, read by
+#                         lib/model-gateway-unserved.sh; absent while every call has been served
 #   <cache-dir>/hawk-token.key   the minted key, 0600, kept until shortly before it expires
+#   <cache-dir>/hawk-token.key.lock   the lock one call holds while it mints
 #   the profile's agent/models.yml and agent/config.yml (see the heredocs below)
 #
 # A pane cannot run hawk-token itself. Its XDG base directories are the daemon's own, under
@@ -106,6 +110,10 @@ done
 hawk_token=$(command -v hawk-token) ||
   fail "hawk-token is not on PATH: it mints the gateway key from the operator's hawk login"
 hawk_token=$(realpath -- "$hawk_token")
+# One call mints at a time under flock, and a call gives up before Oh My Pi kills it under timeout;
+# both are named by path in the key command, which runs on a pane's PATH.
+flock=$(command -v flock) || fail "flock is not on PATH: the key command holds a lock while it mints"
+timeout=$(command -v timeout) || fail "timeout is not on PATH: the key command bounds its mint by it"
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] ||
   fail "DBUS_SESSION_BUS_ADDRESS is unset: hawk-token reads the hawk login from the keyring over the session bus"
 # The helper names the variable in its own refusal.
@@ -147,34 +155,112 @@ done
 # So the key is minted once and kept, 0600, until 300 seconds before its JWT exp (for 300 seconds
 # when it has none), and every call in that window gets it. A key the gateway refuses early is not
 # re-minted: the proof's model turns fail, loudly.
+#
+# One call mints at a time. A wave of agents that starts as the kept key expires calls at once, and
+# when each minted its own, four of five mints on a loaded devbox ran past hawk-token's 9000 ms
+# budget and their agents started with no key. So a call that finds no kept key takes the lock
+# beside the cache and looks again, minting only when the key is still missing; the rest wait on
+# the lock and serve the key it kept.
+#
+# Oh My Pi kills a `!command` 10 s after starting it, and a killed call records nothing, so a call
+# gives up at deadline_ms, waiting or minting. Each call that gets no key appends one line to the
+# unserved record: time, caller pid, caller working directory, reason and detail, tab-separated.
+# The reason is timeout when the call ran out of time (its own deadline, or hawk-token's budget)
+# and failed when the mint ended without a key before then (lib/model-gateway-unserved.sh). A
+# caller whose environment names MODEL_GATEWAY_UNSERVED_FILE gets its line there too, so a harness
+# that gives each agent its own file can read one run's verdict from that run's own directory.
 EOF
   printf 'log=%q\n' "$log"
   printf 'cache=%q\n' "$cache_dir/hawk-token.key"
+  printf 'record=%q\n' "$dest/hawk-token.unserved"
+  printf 'flock=%q\n' "$flock"
+  printf 'timeout=%q\n' "$timeout"
   words=$(printf '%q ' "${unsets[@]}" "${sets[@]}" "$hawk_token")
   printf 'command=(%s)\n' "${words% }"
   cat <<'EOF'
 margin=300
 window=300
+deadline_ms=9500
 set -o pipefail
 umask 077
-now=$(date +%s)
-printf '%s invoked by pid %s\n' "$(date -u +%FT%TZ)" "$PPID" >>"$log"
-if [ -s "$cache" ]; then
+# The call's clock starts with its process, which is when Oh My Pi started the command (/bin/sh
+# execs this file): on a loaded devbox bash took 580 ms to reach its first line. The clock is read
+# without a fork, since each fork there costs tens of milliseconds more.
+read -r stat </proc/self/stat
+read -r -a fields <<<"${stat##*) }"
+read -r uptime _ </proc/uptime
+# uptime has two decimals; starttime, the 20th field after the name, is in USER_HZ ticks (100/s).
+started_us=$((${EPOCHREALTIME/[.,]/} - (${uptime/./}0 - ${fields[19]}0) * 1000))
+left_ms() { left=$((deadline_ms - (${EPOCHREALTIME/[.,]/} - started_us) / 1000)); }
+TZ=UTC printf '%(%FT%TZ)T invoked by pid %s\n' -1 "$PPID" >>"$log"
+# serve_kept ends the call with the kept key while the key is inside its window.
+serve_kept() {
+  local kept_until key
+  [ -s "$cache" ] || return 0
   read -r kept_until key <"$cache"
-  if [ "$now" -lt "$kept_until" ]; then
-    printf '%s\n' "$key"
-    exit 0
-  fi
+  [ "$EPOCHSECONDS" -lt "$kept_until" ] || return 0
+  printf '%s\n' "$key"
+  exit 0
+}
+# unserved REASON DETAIL records that this call gets no key, and ends it.
+unserved() {
+  local at line detail=${2//[$'\t\n']/ }
+  TZ=UTC printf -v at '%(%FT%TZ)T' -1
+  printf -v line '%s\t%s\t%s\t%s\t%s' "$at" "$PPID" "${PWD//[$'\t\n']/ }" "$1" "$detail"
+  printf '%s\n' "$line" >>"$record"
+  [ -z "${MODEL_GATEWAY_UNSERVED_FILE:-}" ] || printf '%s\n' "$line" >>"$MODEL_GATEWAY_UNSERVED_FILE"
+  printf '%s no key for pid %s (%s): %s\n' "$at" "$PPID" "$1" "$detail" >>"$log"
+  exit 1
+}
+# PWD names the directory Oh My Pi ran the call in, physically.
+cd -P . || exit
+serve_kept
+exec {lock}>>"$cache.lock"
+left_ms
+if [ "$left" -le 0 ]; then
+  unserved timeout "reached the lock after $((deadline_ms - left)) ms, past the call's $deadline_ms ms"
 fi
-key=$(/usr/bin/env "${command[@]}" 2>>"$log") || exit
+printf -v wait_s '%d.%03d' $((left / 1000)) $((left % 1000))
+if ! "$flock" -w "$wait_s" "$lock"; then
+  left_ms
+  unserved timeout "waited $((deadline_ms - left)) ms for another call's mint, past the call's $deadline_ms ms"
+fi
+# The call that held the lock may have kept a key while this one waited.
+serve_kept
+left_ms
+[ "$left" -gt 0 ] || unserved timeout "waited $((deadline_ms - left)) ms for another call's mint and took the lock with none of the call's $deadline_ms ms left"
+printf -v mint_s '%d.%03d' $((left / 1000)) $((left % 1000))
+# Only the call holding the lock writes err. The lock is this call's alone: hawk-token starts a
+# detached refresh that would hold it for minutes.
+err=$cache.err
+status=0
+key=$("$timeout" --kill-after=0.2 "$mint_s" /usr/bin/env "${command[@]}" 2>"$err" {lock}>&-) || status=$?
+mapfile -t errlines <"$err"
+[ "${#errlines[@]}" = 0 ] || printf '%s\n' "${errlines[@]}" >>"$log"
+if [ "$status" != 0 ] || [ -z "$key" ]; then
+  left_ms
+  if [ "$status" = 124 ] || [ "$left" -le 0 ]; then
+    unserved timeout "the mint ran past the call's $deadline_ms ms and was stopped (exit $status)"
+  fi
+  # hawk-token's own line names its budget when it gives up: in <spent> ms of a <budget> ms budget.
+  why=
+  for line in "${errlines[@]}"; do
+    if [[ $line =~ in\ ([0-9]+)\ ms\ of\ a\ ([0-9]+)\ ms\ budget ]] && ((BASH_REMATCH[1] >= BASH_REMATCH[2])); then
+      unserved timeout "$line"
+    fi
+    [[ ! $line =~ [^[:space:]] ]] || why=$line
+  done
+  unserved failed "hawk-token exited $status without a key: ${why:-no output}"
+fi
 payload=${key#*.}
 payload=${payload%%.*}
 payload=$(printf '%s' "$payload" | tr '_-' '/+')
 while [ $((${#payload} % 4)) != 0 ]; do payload+='='; done
 exp=$(printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r '.exp // empty | numbers | floor' 2>/dev/null) || exp=
-if [ -n "$exp" ]; then kept_until=$((exp - margin)); else kept_until=$((now + window)); fi
+if [ -n "$exp" ]; then kept_until=$((exp - margin)); else kept_until=$((EPOCHSECONDS + window)); fi
 printf '%s %s\n' "$kept_until" "$key" >"$cache.tmp" && mv -f "$cache.tmp" "$cache"
-printf '%s minted a key for pid %s, kept until %s\n' "$(date -u +%FT%TZ)" "$PPID" "$(date -u -d "@$kept_until" +%FT%TZ)" >>"$log"
+left_ms
+TZ=UTC printf '%(%FT%TZ)T minted a key for pid %s in %s ms, kept until %(%FT%TZ)T\n' -1 "$PPID" "$((deadline_ms - left))" "$kept_until" >>"$log"
 printf '%s\n' "$key"
 EOF
 } >"$key_command"
@@ -184,10 +270,14 @@ chmod 0700 "$key_command"
 status=0
 key=$("$key_command") || status=$?
 if [ "$status" != 0 ] || ! [[ "$key" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
-  why=$(grep -v -e '^[0-9TZ:-]* invoked by pid' -e '^[0-9TZ:-]* minted a key for pid' "$log" | grep -v '^[[:space:]]*$' | tail -1 || true)
+  why=$(grep -v -e '^[0-9TZ:-]* invoked by pid' -e '^[0-9TZ:-]* minted a key for pid' -e '^[0-9TZ:-]* no key for pid' "$log" | grep -v '^[[:space:]]*$' | tail -1 || true)
   unset key
   if grep -qi keyring "$log"; then
     fail "the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the unlock-keyring skill) and rerun. hawk-token: $why"
+  fi
+  # The key command's own verdict, timeout or failed, names hawk-token's line with it.
+  if [ -s "$dest/hawk-token.unserved" ]; then
+    fail "$key_command got no gateway key: $(tail -1 "$dest/hawk-token.unserved" | cut -f4-5 --output-delimiter=': ') (log: $log)"
   fi
   fail "$key_command (hawk-token) exited $status without a gateway key; hawk-token: ${why:-no output} (log: $log)"
 fi
