@@ -833,18 +833,18 @@ the width are blank loses nothing and is read at the table's width. A bare-row i
 (`InsertTableRows`) decides in three steps. First, its fragment, less its blank lines at either
 end, must have every line yield a cell and an unescaped `|` (a lone `|` yields no cell, and a line
 whose only pipe is `\|` has no separator), with no line delimiter-shaped (cells of three hyphens
-or more, `tableDelimiterRow`). Each line is trimmed there as goldmark trims a row (space, tab,
-carriage return), so `|` then U+00A0 is a row whose cell holds it. Second, `parseTableRows` parses
-such a fragment under a header it writes at the target table's width, and what that parse refuses
-is refused: a wide row of the table under that header is `markWideRows`' refusal answered as
-`TABLE_WIDTH`, and anything else keeps its own refusal, `INVALID_OP` on `markdown` (a line
-`markBlockRows` refuses, such as indented code or `2. | a | b |`, however many cells it holds,
-since the refusal walk reads that before the width, or a table the fragment makes itself). Third,
-when that parse refuses nothing and reads one table holding every line, those rows are inserted.
-Every other fragment goes to the block path whole, which reads it as a document of its own and
-writes whatever blocks that reading makes, paragraphs or a table of its own (a line of hyphens,
-one or more a cell, is a delimiter row there), or refuses them, so its answer can differ from an
-upload of the same lines under the target.
+or more, `tableDelimiterRow`). Each line is trimmed there as goldmark trims a row (`rowSpace`:
+space, tab, line feed, carriage return), so `|` then U+00A0 is a row whose cell holds it. Second,
+`parseTableRows` parses such a fragment under a header it writes at the target table's width, and
+what that parse refuses is refused: a wide row of the table under that header is `markWideRows`'
+refusal answered as `TABLE_WIDTH`, and anything else keeps its own refusal, `INVALID_OP` on
+`markdown` (a line `markBlockRows` refuses, such as indented code or `2. | a | b |`, however many
+cells it holds, since the refusal walk reads that before the width, or a table the fragment makes
+itself). Third, when that parse refuses nothing and reads one table holding every line, those rows
+are inserted. Every other fragment goes to the block path whole, which reads it as a document of
+its own and writes whatever blocks that reading makes, paragraphs or a table of its own (a line of
+hyphens, one or more a cell, is a delimiter row there), or refuses them, so its answer can differ
+from an upload of the same lines under the target.
 Goldmark also drops a row's closing `|` whatever stands before it, where that parser reads one
 after an odd run of backslashes as the last cell's text, so that pipe is put back in the cell
 (`keepEscapedClosingPipes`). The renderer writes a cell's pipe `\|` and the header as wide as the

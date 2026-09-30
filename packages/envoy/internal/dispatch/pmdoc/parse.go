@@ -424,7 +424,7 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 	// form feed or a space outside ASCII is a cell's text; and the first row's indentation decides
 	// whether it is a row at all (markBlockRows), as on every other line.
 	lines := strings.Split(markdown, "\n")
-	blank := func(line string) bool { return strings.Trim(line, " \t\r") == "" }
+	blank := func(line string) bool { return strings.Trim(line, rowSpace) == "" }
 	start, end := 0, len(markdown)
 	for len(lines) > 0 && blank(lines[0]) {
 		start += len(lines[0]) + 1
@@ -473,11 +473,14 @@ func syntheticTableHeader(width int) string {
 	return "| " + strings.Join(headers, " | ") + " |\n| " + strings.Join(delimiters, " | ") + " |\n"
 }
 
-// tableRowCells splits a fragment line into cells, trimming only what goldmark's table transformer
-// trims from a row (space, tab and carriage return), so a space outside ASCII, a vertical tab or a
-// form feed is a cell's text here as it is to the parse.
+// rowSpace is what goldmark's table transformer trims from a row and its cells (util.IsSpace: tab,
+// line feed, carriage return, space). A vertical tab, a form feed or a space outside ASCII is a
+// cell's text to it, so the bare-row line check trims no more.
+const rowSpace = " \t\n\r"
+
+// tableRowCells splits a fragment line into cells, trimmed of rowSpace alone.
 func tableRowCells(line string) ([]string, bool) {
-	line = strings.Trim(line, " \t\r")
+	line = strings.Trim(line, rowSpace)
 	if line == "" {
 		return nil, false
 	}
@@ -515,7 +518,7 @@ func tableRowCells(line string) ([]string, bool) {
 
 func tableDelimiterRow(cells []string) bool {
 	for _, cell := range cells {
-		value := strings.Trim(cell, " \t\r")
+		value := strings.Trim(cell, rowSpace)
 		value = strings.TrimPrefix(value, ":")
 		value = strings.TrimSuffix(value, ":")
 		if len(value) < 3 || strings.Trim(value, "-") != "" {

@@ -61,10 +61,10 @@
   `|` then U+00A0 is a row holding it, as an upload reads it, where it was a lone `|` that sent the
   fragment to blocks. A line the parser refuses as another block (indented code, `2. | a | b |`)
   is refused as an upload refuses it, `INVALID_OP` on `markdown`, however many cells it holds and
-  wherever it stands. A fragment
-  that goes to the block path was refused as `TABLE_WIDTH` wherever the old count met a line too
-  wide before whatever sends the fragment there, as with `- | a | b |` (counted as three cells) or
-  `| A11 | x | y |` then a lone `|` under two columns; it is now written as the blocks it reads as.
+  wherever it stands. A fragment that goes to the block path was refused as `TABLE_WIDTH` wherever
+  the old count met a line too wide before whatever sends the fragment there, as with
+  `- | a | b |` (counted as three cells), or `| A11 | x | y |` then a lone `|` or a line whose only
+  pipe is `\|` under two columns; it is now written as the blocks it reads as.
   The route also tries a fragment as rows before it reads it as a document of its own, so rows
   that reading refused, such as `[x]: |`, which it took for a link reference definition, are
   inserted as the rows an upload reads. Versions written before 2026-09-19 hold rows with text

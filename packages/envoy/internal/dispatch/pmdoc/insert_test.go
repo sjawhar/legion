@@ -150,6 +150,13 @@ func TestTableRowInsertAnswersAsTheDocumentWrite(t *testing.T) {
 		{row: "| A11 | new |\v", refusal: ErrTableWidth},
 		{row: "| A11 | new |\f", refusal: ErrTableWidth},
 		{row: "\f| A11 | new |", refusal: ErrTableWidth},
+		// Beside a lone `|` or a line of hyphen cells, such a space is a cell too: the line yields a
+		// cell and an unescaped `|`, and is not delimiter-shaped, so the fragment is rows alone.
+		{row: "| A11 | x |\n\u00a0|", stored: "| A11 | x |\n| \u00a0 |  |"},
+		{row: "| A11 | x | y |\n\u00a0|", refusal: ErrTableWidth},
+		{row: "| A11 | x | y |\n|\f", refusal: ErrTableWidth},
+		{row: "| --- | --- |\u00a0", refusal: ErrTableWidth},
+		{row: "| \u00a0--- | --- |", stored: "| \u00a0--- | --- |"},
 		// The first row's indentation is read as any row's: three spaces are nothing, four or a tab
 		// open indented code, which the browser editor's parser reads after the table.
 		{row: "   | A11 | new |", stored: "| A11 | new |"},
