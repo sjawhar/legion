@@ -98,6 +98,7 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			home := filepath.Join(dir, "home")
+			testbin.OMPHome(t, omp, home)
 			agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
 			mkdir(t, agent)
 			for name, content := range map[string]string{"models.yml": models, "config.yml": "modelRoles:\n" + testCase.roles + testCase.config} {
@@ -177,6 +178,7 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 	omp := testbin.OMP(t)
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
+	testbin.OMPHome(t, omp, home)
 	agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
 	mkdir(t, agent)
 	for name, content := range map[string]string{
