@@ -100,3 +100,25 @@ Cleanup (`tmux kill-session`, `rm -rf` the temp dir) runs in an exit trap on
 every exit path, so a failed run leaves nothing behind either. Both smokes run
 their tmux on a private socket in their temp dir, so the kill can end only the
 session the smoke started; on the shared default server it could end anyone's.
+
+## skill-scenarios/rig.sh
+
+Replays skill scenarios on real agents, to compare two versions of a skill. Each label is one
+checkout's packed plugin in an isolated Oh My Pi home (`rig.sh profile <label> <checkout>`); each
+run is one fresh `omp -p` agent given one task a skill rule governs, scored afterwards from what the
+stand-ins and the scratch Dispatch recorded (`rig.sh score`). `rig.sh live-read <label> <skill>...`
+has one session read every file of a skill and reports whether each arrived whole.
+
+```bash
+cd packages/pi-envoy/scripts/skill-scenarios
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout>
+./rig.sh services up            # scratch Dispatch (the e2e harness's Go server), Postgres, NATS, listener
+./rig.sh batch ask-on-message 5 head base
+./rig.sh batch tester-proof 5 head base
+./rig.sh score
+./rig.sh services down
+```
+
+The scenarios, their pass rules and every input are in the script's header (`./rig.sh` with no
+arguments prints it). It needs the model gateway and Docker; every port it binds is in
+27000-27999, and nothing it runs reaches production Dispatch, GitHub, Envoy or NATS.
