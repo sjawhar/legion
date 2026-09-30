@@ -12,18 +12,18 @@ answered, costs that human the time to notice it and splits the history across t
 ## Search before you act
 
 Before you plan, file an issue, ask, post a finding or start work, search Dispatch. Every word of
-the query must match, so search with a short phrase: two to four distinctive words from the bug as
-a user would report it, or from the question you are about to ask. Never paste a draft.
+the query must match, so each word you add can only lose hits: search with two or three words, the
+thing and what is wrong with it, as a user would name them. Never paste a draft.
 
 ```ts
 dispatch_search({ query: "broadcast send order" })
 dispatch_search({ query: "reviewer threads OR review comments" })
 ```
 
-Try two or three wordings (the component's name, the symptom, the fix) before you conclude that
-nothing exists. Open every hit that could be yours with `dispatch_read`, then its parent (the
-`child_of` row under `Links:`); the parent's children and the issue's `Components:` line show
-where the rest of that work lives.
+When a query finds nothing, drop a word before you add one. Try two or three wordings (the
+component's name, the symptom, the fix) before you conclude that nothing exists. Open every hit
+that could be yours with `dispatch_read`, then its parent (the `child_of` row under `Links:`); the
+parent's children and the issue's `Components:` line show where the rest of that work lives.
 
 ## What to do with what you find
 
