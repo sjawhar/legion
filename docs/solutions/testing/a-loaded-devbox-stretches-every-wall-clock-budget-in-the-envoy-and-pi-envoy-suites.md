@@ -35,7 +35,9 @@ took that extra work out of the budget. The lock probe was different: it was mis
 This change raises no test budget; #1264 replaced the compaction waits' 5 s, and #1482 the
 shutdown tests' 1 s, with a one-minute drain. The one timeout that changed is the documented dispatch checks recipe,
 whose `-timeout 60s` could not fit `internal/dispatch/api` (71 s on CI) and now uses go test's
-default.
+default. One wait rose later, on purpose: #1603 raised the purge-grant test's seeding requests
+from a 1 s JetStream wait to the listener's 10 s, because the 1 s bound was only ever meant for the
+purge the grant refuses, which the server never answers (below).
 
 ## What each budget actually covered
 
@@ -76,14 +78,17 @@ default.
 - **A read of a container's log covered Docker's log copy.** The NATS server writes a trace line
   as it handles a request, and Docker copies the container's output into its log a moment later,
   so the purge-grant test's read, taken as soon as the purge answered, missed the line in 14 of
-  36 loaded runs; an instrumented copy saw the line arrive 8-300 ms after such a read. The test
-  now waits for the line with testcontainers' `wait.ForLog`, bounded at 5 s, as `testnats` waits
-  for NATS' reload line.
+  36 loaded runs; an instrumented copy saw the line arrive 8-300 ms after such a read. After the
+  pass the test now publishes a sentinel on the same connection and waits for the sentinel's trace
+  line with testcontainers' `wait.ForLog`, bounded at 5 s, as `testnats` waits for NATS' reload
+  line. The server traces a connection's operations in the order it reads them, so once the
+  sentinel's line is in the log, every earlier line from that connection is too.
 - **A one-second JetStream wait meant for a refused purge covered seeding.** The same test bounded
   its whole JetStream context at a second so that a purge the grant refuses, which the server
   never answers, would not hold it for 10 s; seeding the bucket through that context timed out
-  under load. Only the refused purge now runs on the bounded context. nats.go's `PurgeStream`
-  ignores a per-call wait, so the bound has to be the context's.
+  under load. Seeding and every other answered request now wait the listener's 10 s, and only the
+  refused purge runs on a 1 s context. nats.go's `PurgeStream` ignores a per-call wait, so the
+  bound has to be the context's.
 - **Bun's 5 s per-test timeout covered `jj` processes.** At first it was six `jj git init` runs, one
   per role. The per-role tests now share one workspace. A test that checks jj config still runs
   four jj processes, `jj git init` among them. When bun times a test out it kills the test's
