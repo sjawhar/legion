@@ -274,8 +274,9 @@ func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
 }
 
 // An operator's suspend of an agent in a turn is held for the turn's end (supervise.ErrSuspendHeld),
-// so the turn is not cut off: the route answers 202 with the claim still working, and the claim is
-// suspended once its turn ends.
+// so the turn is not cut off: the route answers 202 with the claim still working, the claims list
+// shows the suspension held — what `legion claims suspend` waits on — and the claim is suspended
+// once its turn ends, the list then showing no hold.
 func TestTheOperatorsSuspendOfAnAgentInATurnWaitsForTheTurnToEnd(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
@@ -300,14 +301,27 @@ func TestTheOperatorsSuspendOfAnAgentInATurnWaitsForTheTurnToEnd(t *testing.T) {
 	}
 	var got OperatorClaim
 	decodeInto(t, recorder, &got)
-	if got.State != string(supervise.StateWorking) || len(h.runtime.CallsOf("Suspend")) != 0 {
-		t.Fatalf("suspend mid-turn answered %+v with %d suspensions, want the claim still working and none yet", got, len(h.runtime.CallsOf("Suspend")))
+	if got.State != string(supervise.StateWorking) || !got.SuspensionHeld || len(h.runtime.CallsOf("Suspend")) != 0 {
+		t.Fatalf("suspend mid-turn answered %+v with %d suspensions, want the claim still working, its suspension held, none yet", got, len(h.runtime.CallsOf("Suspend")))
+	}
+	listed := func() OperatorClaim {
+		t.Helper()
+		recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+		var list OperatorClaims
+		decodeInto(t, recorder, &list)
+		if recorder.Code != http.StatusOK || len(list.Claims) != 1 {
+			t.Fatalf("list = %d %+v, want the one claim", recorder.Code, list.Claims)
+		}
+		return list.Claims[0]
+	}
+	if seen := listed(); seen.State != string(supervise.StateWorking) || !seen.SuspensionHeld {
+		t.Fatalf("while the turn runs the list shows %+v, want the claim working with its suspension held", seen)
 	}
 	if err := machine.Handle(h.ctx, supervise.StreamTurnEnd{Claim: architectToken}); err != nil {
 		t.Fatalf("end the turn: %v", err)
 	}
-	if state := machine.Claim().State; state != supervise.StateSuspended || len(h.runtime.CallsOf("Suspend")) != 1 {
-		t.Fatalf("after the turn the architect is %s with %d suspensions, want suspended once", state, len(h.runtime.CallsOf("Suspend")))
+	if seen := listed(); seen.State != string(supervise.StateSuspended) || seen.SuspensionHeld || len(h.runtime.CallsOf("Suspend")) != 1 {
+		t.Fatalf("after the turn the list shows %+v with %d suspensions, want it suspended once and no hold", seen, len(h.runtime.CallsOf("Suspend")))
 	}
 }
 

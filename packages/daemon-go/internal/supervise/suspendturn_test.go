@@ -164,11 +164,12 @@ func TestAProcessThatDiesWhileItsSuspensionWaitsIsSuspendedNotRelaunched(t *test
 	h.wantCalls("Suspend", 1)
 }
 
-// A prompt retirement while a suspension is held ends in that suspension, as a death does: the claim
-// is suspended rather than relaunched, and charged nothing — here the retirement would be its last,
-// which would fail it. The prompt was on its way when a turn began, and the agent refuses it at the
-// prompt-failure limit.
-func TestAPromptRetirementWhileASuspensionIsHeldSuspendsTheClaimChargingNothing(t *testing.T) {
+// A prompt retirement while a suspension is held is that suspension's stop: the process is alive,
+// so a stop the runtime refuses leaves the claim working and still holding the suspension, retried
+// at the probe interval, rather than marked suspended over a process that still runs. Nothing is
+// charged — here the retirement would be the claim's last, which would fail it. The prompt was on
+// its way when a turn began, and the agent refuses it at the prompt-failure limit.
+func TestAPromptRetirementWhileASuspensionIsHeldRunsTheHeldStop(t *testing.T) {
 	h := newBareHarness(t)
 	h.deps.Limits = Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1}
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
@@ -189,12 +190,20 @@ func TestAPromptRetirementWhileASuspensionIsHeldSuspendsTheClaimChargingNothing(
 	if err := h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
+	h.rt.FailSuspend(errBoom)
 
 	gated.release <- struct{}{}
 	h.m.Wait()
 
-	h.wantState(StateSuspended)
+	h.wantState(StateWorking)
+	if c := h.claim(); !c.SuspensionHeld || c.Locator == nil {
+		t.Fatalf("after the refused stop the claim is %+v, want its process kept and the suspension still held", c)
+	}
 	h.wantCalls("Suspend", 1)
+	h.rt.FailSuspend(nil)
+	h.advance(testProbe)
+	h.wantState(StateSuspended)
+	h.wantCalls("Suspend", 2)
 	h.wantCalls("Resume", 0)
 	h.wantBudgets(Budgets{})
 }

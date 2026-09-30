@@ -240,7 +240,8 @@ func (c *claimsCall) awaitSuspended(ctx context.Context, op operator, token legi
 				fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
 				return nil, false
 			}
-			return suspended, true
+			// One line, as the daemon's own answers are.
+			return append(suspended, '\n'), true
 		case supervise.StateFailed, supervise.StateRetired:
 			fmt.Fprintf(c.stderr, "%s: %s is %s, so it will not be suspended\n", c.name, token, seen.State)
 			return nil, false

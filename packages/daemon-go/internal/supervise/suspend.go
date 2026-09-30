@@ -39,8 +39,8 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //     so the stop timeout bounds the wait only while the runtime can stop the process. A claim
 //     whose turn ended stays idle meanwhile and is handed nothing (sendPending); a turn it starts
 //     anyway is cut off at the next try.
-//   - A process that ends first — found dead, or retired after its prompts failed — leaves the
-//     claim suspended, charged nothing (endHeld).
+//   - A process that dies first leaves the claim suspended, charged nothing (endHeld). A prompt
+//     retirement meanwhile is the held stop itself (suspendHeld), charged nothing.
 //   - A start run against the claim drops it (StartedBy), and every other end of the process drops
 //     it with the process (letGo).
 //   - It lives in memory only. A restart forgets it, so whoever holds the request asks again: the
@@ -135,11 +135,10 @@ func (m *Machine) dropHeld() {
 	m.disarm(TimerSuspend)
 }
 
-// endHeld is the claim's process ending while a suspension is held — found dead, or retired after
-// its prompts failed. Nothing is left to hold the suspension for, so the claim is suspended rather
-// than relaunched, and nothing is charged: its caller asks before it charges anything. A runtime
-// that cannot stop the process is logged and the claim is suspended all the same, as a failed claim
-// is (fail).
+// endHeld is the claim's process found dead while a suspension is held. Nothing is left to hold the
+// suspension for, so the claim is suspended rather than relaunched, and nothing is charged: died
+// asks before it charges anything. A runtime that cannot stop the dead process is logged and the
+// claim is suspended all the same, as a failed claim is (fail).
 func (m *Machine) endHeld(ctx context.Context) error {
 	request := *m.held
 	m.dropHeld()

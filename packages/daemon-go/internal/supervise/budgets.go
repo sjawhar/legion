@@ -69,7 +69,7 @@ func (m *Machine) chargeDeath() bool {
 // session kept — and the same session relaunched, or, once retirements run out too, the claim
 // fails with its prompt count left at the limit. A suspension that fails charges nothing: the next
 // failure reaches the limit again and retries the retirement. A retirement while a suspension is
-// held leaves the claim suspended instead, charged nothing (endHeld).
+// held is that suspension's stop instead, charged nothing (suspendHeld).
 func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 	failures := m.claim.Budgets.PromptFailures + 1
 	if failures < m.deps.Limits.PromptFailures {
@@ -79,7 +79,7 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 		return m.persist(ctx)
 	}
 	if m.held != nil {
-		return m.endHeld(ctx)
+		return m.suspendHeld(ctx)
 	}
 	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)

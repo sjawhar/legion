@@ -71,12 +71,14 @@ func operatorTokenFile(t *testing.T) string {
 	return path
 }
 
-// suspendAgainst runs `legion claims suspend` of architectClaim against port, waiting up to wait.
-func suspendAgainst(t *testing.T, port, wait string) (int, string, string) {
+// suspendAgainst runs `legion claims suspend` of architectClaim against port, waiting up to wait,
+// with any extra flags.
+func suspendAgainst(t *testing.T, port, wait string, extra ...string) (int, string, string) {
 	t.Helper()
 	var out, errb bytes.Buffer
-	code := run(context.Background(), []string{"legion", "claims", "suspend", "--port", port,
-		"--operator-token-file", operatorTokenFile(t), "--claim", string(architectClaim), "--wait", wait}, &out, &errb)
+	args := append([]string{"legion", "claims", "suspend", "--port", port,
+		"--operator-token-file", operatorTokenFile(t), "--claim", string(architectClaim), "--wait", wait}, extra...)
+	code := run(context.Background(), args, &out, &errb)
 	return code, out.String(), errb.String()
 }
 
@@ -95,6 +97,22 @@ func TestClaimsSuspendWaitsForASuspensionHeldForTheTurn(t *testing.T) {
 	}
 	if got := lists(); got != 3 {
 		t.Fatalf("the command listed the claims %d times, want until the third answer said suspended", got)
+	}
+}
+
+// Under --json the claim a held suspension ended with prints as one JSON line, as every other
+// --json answer does.
+func TestClaimsSuspendJSONPrintsTheSuspendedClaimAsOneLine(t *testing.T) {
+	port, _ := heldSuspendDaemon(t, heldWorking, suspended)
+
+	code, out, errb := suspendAgainst(t, port, "10s", "--json")
+
+	if code != 0 || errb != "" {
+		t.Fatalf("suspend exited %d; stderr %q", code, errb)
+	}
+	var got api.OperatorClaim
+	if err := json.Unmarshal([]byte(out), &got); err != nil || got.State != "suspended" || !strings.HasSuffix(out, "}\n") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("suspend --json printed %q (%v), want the suspended claim as one JSON line", out, err)
 	}
 }
 
