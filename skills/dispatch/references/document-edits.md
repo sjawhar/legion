@@ -49,9 +49,9 @@ row of three hyphens or more a cell, is parsed as rows of that table. What that 
 table's width as `TABLE_WIDTH` (blank cells there are dropped), a line the table cannot hold as a row (indented code, `2. | a | b |`)
 as `INVALID_OP`. When it refuses nothing and reads every line as a row, the rows are inserted, short ones padded. Any other fragment is
 read on its own as blocks, which are inserted after the table or refused as such blocks would be: a whole table you paste there, its
-delimiter row three hyphens or more a cell, becomes a second table, while one whose delimiter cells hold one or two hyphens (`| - |`)
-passes the first step, so its header and delimiter rows are inserted as rows of the table, or refused as `TABLE_WIDTH` where it is
-wider than the table. Deleting
+delimiter row three hyphens or more a cell, becomes a second table, while one with any delimiter cell of one or two hyphens (`| - |`,
+`| --- | - |`) passes the first step, so its header and delimiter rows are inserted as rows of the table, or refused as `TABLE_WIDTH`
+where it is wider than the table. Deleting
 a cell's quoted text removes only that text. `delete_row` / `delete_column` instead mutate their named table in place, keeping the
 table's block id. A row index includes the header: row `0` is the header and its deletion promotes the first body row. The last body
 row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is
