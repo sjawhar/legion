@@ -166,7 +166,8 @@ func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool, spanCe
 // parser reads only as the browser editor's parser does (browserOnlyShape).
 func holdsBrowserOnlyShape(markdown []byte) bool {
 	_, rest, unclosed := parseFrontmatterBlock(markdown)
-	return browserOnlyShape(blockReader.parse(markdown[rest:], unclosed)) != ""
+	root, err := blockReader.parse(markdown[rest:], unclosed, readBackPaddingBudget())
+	return err == nil && browserOnlyShape(root) != ""
 }
 
 // holdsAContainerTheBrowserDrops reports whether doc holds, at its top level, a block the browser

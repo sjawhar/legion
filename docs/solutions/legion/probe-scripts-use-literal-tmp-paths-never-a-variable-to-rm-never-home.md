@@ -1,8 +1,8 @@
 ---
-title: "Probe scripts use literal /tmp paths, never pass a variable to rm, and never reference $HOME: the pane guard's word list pushes probes into files, and a file is where an edit can leave a cleanup line behind"
+title: "Probe scripts use literal /tmp paths, never pass a variable to rm, and never reference $HOME: the jj operation-log rule's word list pushes probes into files, and a file is where an edit can leave a cleanup line behind"
 category: legion
 tags:
-  - pane-guard
+  - pane-rules
   - probe
   - bash
   - rm
@@ -32,20 +32,19 @@ it. The script ran without the edited tail being re-read.
 
 ## Why the probe was a file at all
 
-The pi-envoy pane guard refuses any `bash`/`eval` command whose text mentions `jj` together with
-`abandon`, `undo`, `restore`, or `revert` — including inside a quoted string, a heredoc, a commit
-message, or a `--data` argument. The LEGION-84 setting is named `git.abandon-unreachable-commits`,
-so every probe of it, every handoff JSON naming it, and every commit subject about it had to go
-through a file written with the `write` tool. That is the guard working as designed: it protects
-the shared jj operation log
+The pi-envoy extension's jj operation-log rule refuses any `bash`/`eval` command whose text
+mentions `jj` together with `abandon` or `undo`, or with `restore` or `revert` under `op` or
+`operation` (`jj op restore`; a file-level `jj restore <paths>` stays allowed). It reads a quoted
+string, a heredoc, a commit message, and a `--data` argument too. The LEGION-84 setting is named
+`git.abandon-unreachable-commits`, so every probe of it, every handoff JSON naming it, and every
+commit subject about it had to go through a file written with the `write` tool. That is the rule
+working as designed: it protects the shared jj operation log
 (`docs/solutions/legion/shell-command-gates-derive-from-bash-word-splitting-not-example-forms.md`).
-It also meant a probe's destructive lines lived in a file the guard never saw, edited by line
-number, run by name. A file is exactly where a stale line survives an edit. Since LEGION-121 the
-extension reads the scripts a command runs (`bash <file>`, `sh -c`, `source`, a script run by
-path, python/node/bun scripts) and refuses a destructive command whose target resolves outside
-`$LEGION_WORKSPACE` and a `/tmp` directory of the pane's own (`docs/deployment.md`, "The pane
-guard"); the incident's script is refused whole. The rules below still stand: the guard cannot
-read a path decided only at run time.
+It also meant a probe's destructive lines lived in a file the rule never saw, edited by line
+number, run by name. A file is exactly where a stale line survives an edit. From LEGION-121 until
+2026-09-29 the extension also read the scripts a command ran and refused a destructive command
+whose target resolved outside `$LEGION_WORKSPACE` and `/tmp`; that check was removed on
+2026-09-29, so nothing but the rules below keeps a probe inside its own scratch.
 
 ## The rules (the architect's standing orders since the incident)
 

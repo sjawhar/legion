@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1187,4 +1188,103 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 	if text.Markdown != want {
 		t.Fatalf("cascaded table batch changed document = %q, want %q", text.Markdown, want)
 	}
+}
+
+func TestDocumentEditsRefuseCumulativeTablePadding(t *testing.T) {
+	const maximumAllocation = 128 << 20
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Cumulative table padding", "Before.\n")
+	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	ops := make([]map[string]string, 12)
+	for index := range ops {
+		ops[index] = map[string]string{"op": "insert", "after": "end", "markdown": tablePaddingInsert(100)}
+	}
+
+	runtime.GC()
+	var beforeAlloc, afterAlloc runtime.MemStats
+	runtime.ReadMemStats(&beforeAlloc)
+	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": ops,
+	}, "alice")
+	body := rejected.Body.String()
+	runtime.ReadMemStats(&afterAlloc)
+	allocated := afterAlloc.TotalAlloc - beforeAlloc.TotalAlloc
+	t.Logf("allocated=%d", allocated)
+	if allocated > maximumAllocation {
+		t.Fatalf("allocated %d bytes, want at most %d", allocated, maximumAllocation)
+	}
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) ||
+		!strings.Contains(body, `field \"markdown\"`) || !strings.Contains(body, "table ") || !strings.Contains(body, "limit 10000") {
+		t.Fatalf("cumulative table padding edit: status=%d body=%s", rejected.Code, body)
+	}
+	if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {
+		t.Fatalf("refused edit changed document = %q, want %q", after, before)
+	}
+}
+
+// A batch that deletes a table row under a document precondition runs three times - against the
+// anchors, to verify them, and to apply - so each run reads its markdown once, with a budget of its
+// own: a row deletion beside an insert whose table adds 4,160 cells, under the limit, is stored,
+// and the refusal of a larger one names the table the request wrote and the cells it adds.
+func TestDocumentEditsChargeAConditionalBatchItsPaddingOnce(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Conditional table padding", "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n")
+	var tableID string
+	for _, block := range decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice")) {
+		if block.Type == "table" {
+			tableID = block.ID
+		}
+	}
+	edit := func(width int) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]any{
+				{"op": "delete_row", "block": tableID, "index": 2},
+				{"op": "insert", "after": "end", "markdown": tablePaddingInsert(width)},
+			},
+			"precondition": map[string]string{"document": readDocumentPrecondition(t, handler, issue.PrimaryArtifactID).Token},
+		}, "alice")
+	}
+	if refused := edit(101); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), "table 1 writes 202 cells") || !strings.Contains(refused.Body.String(), "would add 10100 cells (limit 10000)") {
+		t.Fatalf("conditional batch padding 10,100 cells: status=%d body=%s, want table 1 refused at 10,100 cells", refused.Code, refused.Body.String())
+	}
+	if stored := edit(65); stored.Code != http.StatusOK {
+		t.Fatalf("conditional batch padding 4,160 cells: status=%d body=%s, want it stored", stored.Code, stored.Body.String())
+	}
+}
+
+// Goldmark pads a header narrower than its delimiter row with the rest of the table, so an insert
+// of a one-cell header over 500 columns and 500 one-cell rows, 7,513 bytes adding 249,999 cells, is
+// refused before those cells are built, and the document is left as it was.
+func TestDocumentEditsRefuseANarrowHeaderTableBeforeItsCells(t *testing.T) {
+	const maximumAllocation = 64 << 20
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Narrow header padding", "Before.\n")
+	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	markdown := "| header |\n" + strings.Repeat("| --- ", 500) + "|\n" + strings.Repeat("| body |\n", 500)
+
+	runtime.GC()
+	var beforeAlloc, afterAlloc runtime.MemStats
+	runtime.ReadMemStats(&beforeAlloc)
+	refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": markdown}},
+	}, "alice")
+	runtime.ReadMemStats(&afterAlloc)
+	allocated := afterAlloc.TotalAlloc - beforeAlloc.TotalAlloc
+	t.Logf("allocated=%d", allocated)
+	body := refused.Body.String()
+	if refused.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, `field \"markdown\"`) || !strings.Contains(body, "limit 10000") {
+		t.Fatalf("narrow header insert: status=%d body=%s, want 400 INVALID_OP on markdown naming the limit", refused.Code, body)
+	}
+	if allocated > maximumAllocation {
+		t.Fatalf("allocated %d bytes, want at most %d", allocated, maximumAllocation)
+	}
+	if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {
+		t.Fatalf("refused edit changed document = %q, want %q", after, before)
+	}
+}
+
+func tablePaddingInsert(width int) string {
+	return strings.Repeat("| header ", width) + "|\n" +
+		strings.Repeat("| --- ", width) + "|\n" +
+		strings.Repeat("| body |\n", width)
 }

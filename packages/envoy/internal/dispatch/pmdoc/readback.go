@@ -33,13 +33,13 @@ func ReadBack(doc *Node) (*Node, error) {
 }
 
 // readBack is what doc's markdown, its tables' spans adding at most spanCells cells (render),
-// reads back as.
+// reads back as (ParseRendering).
 func readBack(doc *Node, spanCells int) (*Node, error) {
 	r, err := render(doc, spanCells)
 	if err != nil {
 		return nil, err
 	}
-	return Parse(r.b.String())
+	return ParseRendering(r.b.String())
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before
@@ -52,8 +52,10 @@ func readBack(doc *Node, spanCells int) (*Node, error) {
 // another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
 // parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
 // or not after parses: the checks that read each changed block alone still refuse one the write
-// leaves unreadable. Only a refusal (ErrSchema) reading either back is a verdict; any other error,
-// a panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
+// leaves unreadable. A before whose read-back would pad more cells than a read-back's budget is no
+// such document, and is the verdict: its markdown reads, so a write into it is refused rather than
+// stored unjudged. Only a refusal (ErrSchema) reading either back is a verdict; any other error, a
+// panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
 func NewMisread(before, after *Node) (string, error) {
 	return newMisread(before, after, maxSpanCells)
 }
@@ -72,6 +74,9 @@ func newMisread(before, after *Node, spanCells int) (string, error) {
 	backBefore, beforeErr := readBack(before, spanCells)
 	if beforeErr != nil && !errors.Is(beforeErr, ErrSchema) {
 		return "", beforeErr
+	}
+	if errors.Is(beforeErr, ErrTablePadding) {
+		return beforeErr.Error(), nil
 	}
 	if beforeErr != nil {
 		return "", nil
@@ -135,8 +140,9 @@ func RefuseMisreadDocument(doc *Node) error {
 // markdown, which carries no span, between document-level blocks, so it changes no table, and every
 // table reads back the same way before and after it under the same block ids: a table that reads
 // back otherwise does so in both, and NewMisread's filter of misreads before already held, which
-// keys on the block id, sets it aside either way. Spanless, a read-back costs no more than the
-// cells the tables hold.
+// keys on the block id, sets it aside either way. Spanless, a render writes no more than the cells
+// the tables hold, and its parse pads the rows a span leaves short on the read-back's own budget
+// (ParseRendering).
 func RefuseMisreadWrite(before, after *Node) error {
 	return refuseMisread(newMisread(before, after, 0))
 }

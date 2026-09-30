@@ -60,8 +60,8 @@ fingerprints are unchanged; a test-only fix leaves them so.
   *empty* handoff commit; fold the real write into it with
   `jj squash --into <that change> .legion/implement.json` and push sideways rather than stacking a
   second commit.
-- **The pane guard reads every word of a bash command.** A commit message or a `legion gh` PR body
-  that names `jj` beside a word on the guard's list (the LEGION-84 key contains `abandon`) is
-  refused with the operation-log warning. Say "the per-repo keep-unreachable-commits setting"
-  instead of the key, keep `jj` out of the sentence, or pass the text in a file. The `legion`
-  tool's `summary` is not shell text; the guard never reads it.
+- **The jj operation-log rule reads every word of a bash command.** A commit message or a
+  `legion gh` PR body that names `jj` beside a word on the rule's list (the LEGION-84 key contains
+  `abandon`) is refused with the operation-log warning. Say "the per-repo keep-unreachable-commits
+  setting" instead of the key, keep `jj` out of the sentence, or pass the text in a file. The
+  `legion` tool's `summary` is not shell text; the rule never reads it.
