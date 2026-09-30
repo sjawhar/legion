@@ -117,17 +117,12 @@ LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout
 ./rig.sh score
 ```
 
-The scenarios, their pass rules and every input are in the script's header (`./rig.sh` with no
-arguments prints it). It needs the model gateway and Docker. Its bounded waits, port picks and
-process stops are [`scripts/e2e/lib/rig.sh`](../../../scripts/e2e/README.md#librigsh)'s; Docker
-assigns the containers' ports, and the kernel assigns each daemon stand-in's. Its agents run on the
-work directory's own tmux server (`<work>/tmux.sock`), and every container and session name carries
-the work directory's digest, so two rigs on one box never touch each other's. Each run's `TMPDIR`
-is its own, but an agent can still write the machine's `/tmp`, which every run shares and the rig
-does not clean; each tester-proof run's PR number is therefore 1000 plus its index in the batch and
-its heads are dated from the batch's start plus that index, so no two runs of a batch share either,
-and the score requires its `E2E (tester)` line to name one of its heads. A batch stops its runs,
-agents and services when it exits, INT and TERM included. Nothing it runs reaches production
-Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's `DISPATCH_*`, `ENVOY_*` or
-`NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or `E2E_AGENT_TOKEN` is
-set.
+The scenarios and every input are in the script's header (`./rig.sh` with no arguments prints it),
+and each scenario's scoring rule is on the `score.ts` function that scores it. It needs the model
+gateway and Docker. Its bounded waits, port picks and process stops are
+[`scripts/e2e/lib/rig.sh`](../../../scripts/e2e/README.md#librigsh)'s. Nothing it runs reaches
+production Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's `DISPATCH_*`,
+`ENVOY_*` or `NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or
+`E2E_AGENT_TOKEN` is set. That is the environment only: an agent reads the whole filesystem, the
+other label's checkout included, so `score.ts` does not score a run that read outside its own
+label.

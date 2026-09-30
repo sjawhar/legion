@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
 // Stand-in for `gh`, and for every `legion` subcommand that talks to GitHub, on a skill scenario's
 // PATH. Each call is recorded to $SKILL_SCENARIO_RUN/calls.jsonl (argv, the contents of any file or
-// stdin it hands GitHub a body through, and its exit status), then answered from the first route in
-// $SKILL_SCENARIO_RUN/fixtures.json whose regex matches "<as> <argv...>". A call no route matches
-// answers `gh: Not Found (HTTP 404)` and exits 1. Nothing is sent anywhere. `--json a,b` picks
-// fields and `--jq`/`-q` runs jq, as gh does. A pull request body edit (`gh pr edit --body`,
-// `--body-file`, or a PATCH through `gh api`) is kept: every route answering with an object that
-// has a `body` then answers with the new one, as GitHub's next read would.
+// stdin it hands GitHub a body through, its exit status, and the pull request body it kept, if
+// any), then answered from the first route in $SKILL_SCENARIO_RUN/fixtures.json whose regex matches
+// "<as> <argv...>". A call no route matches answers `gh: Not Found (HTTP 404)` and exits 1. Nothing
+// is sent anywhere. `--json a,b` picks fields and `--jq`/`-q` runs jq, as gh does. A pull request
+// body edit (`gh pr edit --body`, `--body-file`, or a PATCH through `gh api`) is kept: every route
+// answering with an object that has a `body` then answers with the new one, as GitHub's next read
+// would, and the call's record carries it as `body`.
 //   gh-standin.ts <gh|legion> <args...>
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { z } from "zod";
@@ -50,6 +51,8 @@ const prPatch =
   /(^|\s)(-X|--method)\s?PATCH(\s|$)/.test(args.join(" ")) &&
   args.some((arg) => /^\/?repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(arg));
 let body: string | undefined;
+/** The body this call left the pull request with, once the routes serve it. */
+let kept: string | undefined;
 for (let index = 0; index < args.length; index += 1) {
   const arg = args[index] ?? "";
   const next = args[index + 1];
@@ -88,7 +91,7 @@ const route = routes.find((candidate) => new RegExp(candidate.match, "s").test(j
 function exit(status: number): never {
   appendFileSync(
     `${run}/calls.jsonl`,
-    `${JSON.stringify({ at, as, argv: args, files, stdin, route: route?.match ?? null, exit: status })}\n`
+    `${JSON.stringify({ at, as, argv: args, files, stdin, route: route?.match ?? null, body: kept, exit: status })}\n`
   );
   process.exit(status);
 }
@@ -103,6 +106,7 @@ if (body !== undefined) {
       : candidate
   );
   writeFileSync(`${run}/fixtures.json`, JSON.stringify({ ...fixtures, routes: edited }));
+  kept = body;
 }
 let output: unknown = route.stdout ?? "";
 const jsonIndex = args.indexOf("--json");

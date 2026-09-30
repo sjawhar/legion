@@ -56,6 +56,10 @@
   deployment instructions never override: no deferrals, bringing the base in only on a real
   conflict or a retarget, the implementer's own proof on a production-like surface before the
   merge, and the implementer's production check after it.
+- The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
+  `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
+  `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found
+  them in the implement handoff it read or in the CLI's refusal of its write.
 - The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
   in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
   threshold, where the 75 KB single file used to reach agents with its middle cut out.

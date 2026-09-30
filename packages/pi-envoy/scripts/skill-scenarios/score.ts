@@ -7,24 +7,25 @@
 //     count less its trailing newline, whether the result spilled to an artifact, and so whether
 //     the file arrived whole; then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
-//     One row per run, then pass counts per scenario and label. Each ask-on-message ask is printed
-//     whole, since the pass rule is read by a person: the automatic flags only point at it. A run
-//     the rig failed (no `exit=` line in its out.txt, or a record missing or malformed) is a rig
-//     error: printed with its reason and left out of the pass counts.
+//     One row per run, then counts per scenario and label, and a legend saying what each count
+//     is. Each scenario's rule is on the function that scores it: askOnMessage, testerProof. A run
+//     the rig could not score is a rig error, printed with its reason and left out of the counts
+//     (unscored, below).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describePhaseHandoffWriteProblems } from "@legion/contracts";
 import { z } from "zod";
 
-/** An Oh My Pi session transcript line: a tool call starting, or a tool's result. */
+/** An Oh My Pi session transcript line: a message, a tool call starting, or a tool's result. */
 const SessionEntry = z.looseObject({
   type: z.string().optional(),
   customType: z.string().optional(),
+  timestamp: z.string().optional(),
   data: z
     .looseObject({
       toolName: z.string().optional(),
       toolCallId: z.string().optional(),
-      args: z.looseObject({ path: z.string().optional() }).optional(),
+      args: z.looseObject({ path: z.string().optional() }).nullish(),
     })
     .optional(),
   message: z
@@ -55,7 +56,8 @@ const IssueEvents = z.array(
 );
 /** `GET /api/v1/issues/{key}/messages/{id}`: the message and its replies. */
 const MessageRead = z.looseObject({ message: z.looseObject({ body: z.string() }) });
-/** One line gh-standin.ts or legion-standin.sh records: when the call started, and its exit. */
+/** One line gh-standin.ts or legion-standin.sh records: when the call started, its exit, and (a gh
+ * call that edited the pull request's body) the body the stand-in kept and serves from then on. */
 const Call = z.looseObject({
   at: z.string(),
   as: z.string(),
@@ -63,6 +65,7 @@ const Call = z.looseObject({
   exit: z.number(),
   stdin: z.string().optional(),
   files: z.record(z.string(), z.string()).optional(),
+  body: z.string().optional(),
 });
 /** rig.sh's worker_fixture: the tester's world, `head` the PR's head and `code` the commit under it. */
 const World = z.object({
@@ -72,6 +75,13 @@ const World = z.object({
   branch: z.string(),
   head: z.string(),
   code: z.string(),
+});
+/** The tester's handoff, past the CLI's write rules, as far as the score reads it. */
+const TestHandoff = z.looseObject({
+  phase: z.literal("test"),
+  implementerProof: z.looseObject({ verdict: z.string() }),
+  failures: z.array(z.unknown()).optional(),
+  proof: z.array(z.looseObject({ headSha: z.string() })).optional(),
 });
 
 function lines(file: string): string[] {
@@ -100,16 +110,23 @@ function session(runDir: string): SessionEntry[] {
     : undefined;
   return file ? parsed(path.join(dir, file), SessionEntry) : [];
 }
+/** Every tool call the session started, in order: its tool, its arguments as JSON, and when. */
+function toolCalls(entries: SessionEntry[]) {
+  return entries
+    .filter((entry) => entry.type === "custom" && entry.customType === "tool_execution_start")
+    .map((entry) => ({
+      id: entry.data?.toolCallId ?? "",
+      tool: entry.data?.toolName ?? "",
+      path: entry.data?.args?.path ?? "",
+      args: JSON.stringify(entry.data?.args ?? null),
+      at: entry.timestamp ?? "",
+    }));
+}
 /** Every `read` call the session started, in order. */
 function readCalls(entries: SessionEntry[]): { id: string; target: string }[] {
-  return entries
-    .filter(
-      (entry) =>
-        entry.type === "custom" &&
-        entry.customType === "tool_execution_start" &&
-        entry.data?.toolName === "read"
-    )
-    .map((entry) => ({ id: entry.data?.toolCallId ?? "", target: entry.data?.args?.path ?? "" }));
+  return toolCalls(entries)
+    .filter((call) => call.tool === "read")
+    .map((call) => ({ id: call.id, target: call.path }));
 }
 
 function liveRead(runDir: string, skillsDir: string, logsDir: string) {
@@ -168,6 +185,14 @@ interface Row {
   notes: string;
 }
 
+/** ask-on-message: the dispatch skill's rule is that the ask carries the plan and its options in
+ * its own text and never points at the message in prose. A person judges that, reading each ask,
+ * which is printed whole under its run's row. The count flags a run whose every ask shares at least
+ * four distinctive words (terms) with the message, offers at least two options, and matches no
+ * POINTER phrase. It checks nothing more: the notes show what else the agent wrote on the issue
+ * (`otherWrites`) and whether each question gives a recommendation (`recommends`), which the
+ * dispatch skill also asks for, and the count leaves both out. `ref`: the agent read
+ * skill://dispatch. */
 function askOnMessage(runDir: string, run: string, label: string): Row {
   const asks = json(path.join(runDir, "asks.json"), IssueAsks);
   // Anything else the agent wrote on the issue; seed.ts writes as the session `dispatch-owner`.
@@ -183,7 +208,7 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
     const carried = [...terms(all)].filter((word) => wanted.has(word));
     const pointer = POINTER.exec(all)?.[0];
     const pass = carried.length >= 4 && options.length >= 2 && pointer === undefined;
-    return { question, options, carried, pointer, pass };
+    return { question, options, carried, pointer, pass, recommends: /\brecommend/i.test(question) };
   });
   const pass = verdicts.length > 0 && verdicts.every((verdict) => verdict.pass);
   const skillReads = readCalls(session(runDir))
@@ -195,7 +220,7 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
     `asks=${asks.length}`,
     ...verdicts.map(
       (v, i) =>
-        `ask${i + 1}: carried=${v.carried.length}[${v.carried.join(",")}] options=${v.options.length} pointer=${JSON.stringify(v.pointer ?? null)}`
+        `ask${i + 1}: carried=${v.carried.length}[${v.carried.join(",")}] options=${v.options.length} pointer=${JSON.stringify(v.pointer ?? null)} recommends=${v.recommends} chars=${v.question.length}`
     ),
     `otherWrites=[${other.join(", ")}]`,
     `reads=[${skillReads.join(",")}]`,
@@ -208,20 +233,34 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
   return { run, scenario: "ask-on-message", label, pass, ref, notes: notes.join(" ") };
 }
 
-/** The tester's handoff as the next phase reads it: `.legion/test.json` at a pushed commit, which
- * must pass the handoff CLI's own write rules and carry a proof of its own. */
-function pushedProof(remote: string, sha: string): string[] {
-  const shown = Bun.spawnSync(["git", "-C", remote, "show", `${sha}:.legion/test.json`]);
-  if (shown.exitCode !== 0) return [`${sha} has no .legion/test.json`];
-  const handoff: unknown = JSON.parse(shown.stdout.toString());
-  const problems = describePhaseHandoffWriteProblems(handoff);
-  if (problems.length > 0) return problems;
-  const { phase, proof } = handoff as { phase?: unknown; proof?: unknown };
-  if (phase !== "test") return [`phase is ${JSON.stringify(phase)}, not "test"`];
-  return Array.isArray(proof) && proof.length > 0 ? [] : ["no proof of the tester's own"];
+/** A commit this run can name: the PR's head, or one its tester pushed. A seven-or-more-digit
+ * prefix counts. The implementer's code commit does not, since the fixture's own `E2E
+ * (implementer)` line names it. */
+function namesOwnCommit(text: string, commits: string[]): boolean {
+  return [...text.matchAll(/\b[0-9a-f]{7,40}\b/g)].some(([sha]) =>
+    commits.some((commit) => commit.startsWith(sha))
+  );
 }
 
-function testerProof(runDir: string, run: string, label: string): Row {
+/** tester-proof: the legion-worker skill's rule for a tester whose predecessor's proof holds.
+ * worker_fixture writes the implement handoff through the handoff CLI, so it is valid, and its
+ * proof reproduces, so the skill's answer is `verified` with a proof of the tester's own (a handoff
+ * that failed validation would read as missing, and the answer would be `rejected`). A run passes
+ * when all of these hold:
+ *   1. a tool call runs `bun … greet.ts` before the first accepted `handoff write --phase test`:
+ *      the tester drove the CLI;
+ *   2. that write comes before the first push carrying .legion/test.json, which comes before an
+ *      accepted `handoff complete`;
+ *   3. the branch as the tester completed it (its last push before the completion) changes nothing
+ *      under the PR's head but .legion/test.json, which passes the handoff CLI's write rules and
+ *      has phase `test`, `implementerProof.verdict` `verified`, no failures, and a proof whose
+ *      every `headSha` names a commit of this run's own (namesOwnCommit);
+ *   4. the PR body the gh stand-in kept last has an `E2E (tester)` line, up to the next field, that
+ *      names a commit of this run's own.
+ * A line naming another run's PR head instead is two runs meeting in the shared /tmp, where agents
+ * draft the body whatever TMPDIR says: a rig error, thrown, not a failure.
+ * `ref`: the agent read skill://legion-worker/references/pr-body.md, where the line is defined. */
+function testerProof(runDir: string, run: string, label: string, heads: string[]): Row {
   const world = json(path.join(runDir, "world.json"), World);
   const calls = parsed(path.join(runDir, "calls.jsonl"), Call);
   const handoffs = calls.filter((c) => c.as === "legion" && c.argv[0] === "handoff");
@@ -230,50 +269,67 @@ function testerProof(runDir: string, run: string, label: string): Row {
   const write = writes.find((c) => c.exit === 0);
   const refused = writes.filter((c) => c.exit !== 0).length;
   const complete = handoffs.find((c) => c.argv[1] === "complete" && c.exit === 0);
-  /** Everything a gh call handed GitHub: its argv, its stdin, and each file it read a body from. */
-  const sent = (c: z.infer<typeof Call>) =>
-    [c.argv.join(" "), c.stdin ?? "", ...Object.values(c.files ?? {})].join("\n");
-  const edits = calls.filter(
-    (c) =>
-      c.as === "gh" &&
-      c.exit === 0 &&
-      new RegExp(`^pr edit|^api .*pulls/${world.pr}`).test(c.argv.join(" ")) &&
-      sent(c).includes("E2E (tester)")
-  );
-  const edit = edits[0];
-  // The PR is left with the last edit's body. Its E2E (tester) line, up to the next field, names a
-  // head of this run's own; one that names neither is a wrong head or another run's line, as when
-  // two concurrent agents write the body to one scratch file in the shared /tmp.
-  const last = edits.at(-1);
-  const testerLine =
-    /\*\*E2E \(tester\):\*\*[\s\S]*?(?=\n\*\*|$)/.exec(last ? sent(last) : "")?.[0] ?? "";
-  const ownHead = [...testerLine.matchAll(/\b[0-9a-f]{7,40}\b/g)].some(
-    ([sha]) => world.head.startsWith(sha) || world.code.startsWith(sha)
-  );
   const remote = path.join(runDir, "remote.git");
+  const git = (...args: string[]) => Bun.spawnSync(["git", "-C", remote, ...args]);
   const pushes = lines(path.join(runDir, "pushes.log"))
     .map((line) => {
       const [at = "", ref = "", , sha = ""] = line.split(" ");
       return { at, ref, sha };
     })
     .filter((p) => p.ref === `refs/heads/${world.branch}`);
-  const push = pushes.find(
-    (p) =>
-      Bun.spawnSync(["git", "-C", remote, "cat-file", "-e", `${p.sha}:.legion/test.json`])
-        .exitCode === 0
+  const own = [world.head, ...pushes.map((p) => p.sha)];
+  const entries = session(runDir);
+  const drove = toolCalls(entries).find((call) =>
+    /\bbun\s+(?:run\s+)?\S*greet\.ts\b/.test(call.args)
   );
-  // The branch as the next phase finds it: its tip when the tester completed, else its last push.
-  const tip = pushes.filter((p) => complete === undefined || p.at < complete.at).at(-1);
-  const problems = tip === undefined ? ["nothing pushed"] : pushedProof(remote, tip.sha);
-  const proof = problems.length === 0;
+  const ran = drove !== undefined && write !== undefined && drove.at < write.at;
+  const push = pushes.find(
+    (p) => git("cat-file", "-e", `${p.sha}:.legion/test.json`).exitCode === 0
+  );
   const ordered =
     write !== undefined &&
     push !== undefined &&
     complete !== undefined &&
     write.at < push.at &&
     push.at < complete.at;
-  const pass = ordered && proof && ownHead;
-  const opened = readCalls(session(runDir)).map((call) => call.target);
+  const tip = pushes.filter((p) => complete === undefined || p.at < complete.at).at(-1);
+  const problems: string[] = [];
+  if (tip === undefined) problems.push("nothing pushed");
+  else {
+    const changed = git("diff", "--name-only", world.head, tip.sha).stdout.toString().trim();
+    if (changed !== ".legion/test.json") problems.push(`the push changed [${changed.split("\n")}]`);
+    const shown = git("show", `${tip.sha}:.legion/test.json`);
+    const handoff: unknown = shown.exitCode === 0 ? JSON.parse(shown.stdout.toString()) : undefined;
+    const written =
+      handoff === undefined ? ["no .legion/test.json"] : describePhaseHandoffWriteProblems(handoff);
+    problems.push(...written);
+    const read = TestHandoff.safeParse(handoff);
+    if (written.length === 0 && !read.success)
+      problems.push(`not a test handoff: ${read.error.message}`);
+    if (read.success) {
+      const { implementerProof, failures = [], proof = [] } = read.data;
+      if (implementerProof.verdict !== "verified")
+        problems.push(`implementerProof.verdict is ${implementerProof.verdict}`);
+      if (failures.length > 0) problems.push(`${failures.length} failures`);
+      if (proof.length === 0) problems.push("no proof of the tester's own");
+      for (const [i, entry] of proof.entries())
+        if (!namesOwnCommit(entry.headSha, own))
+          problems.push(`proof.${i}.headSha ${entry.headSha} is not this run's`);
+    }
+  }
+  const proof = problems.length === 0;
+  const bodies = calls.filter((c) => c.as === "gh" && c.exit === 0 && c.body !== undefined);
+  const edit = bodies.find((c) => c.body?.includes("E2E (tester)"));
+  const testerLine =
+    /\*\*E2E \(tester\):\*\*[\s\S]*?(?=\n\*\*|$)/.exec(bodies.at(-1)?.body ?? "")?.[0] ?? "";
+  const ownHead = namesOwnCommit(testerLine, own);
+  const foreign = heads.filter((head) => head !== world.head);
+  if (!ownHead && namesOwnCommit(testerLine, foreign))
+    throw new Error(
+      `its PR body carries another run's E2E (tester) line: ${testerLine.slice(0, 160)}`
+    );
+  const pass = ran && ordered && proof && ownHead;
+  const opened = readCalls(entries).map((call) => call.target);
   const ref = opened.some((target) =>
     target.includes("skill://legion-worker/references/pr-body.md")
   );
@@ -281,7 +337,7 @@ function testerProof(runDir: string, run: string, label: string): Row {
     .filter((target) => target.includes("legion-worker"))
     .map((target) => target.replace("skill://legion-worker", "") || "/");
   const notes = [
-    `write=${write !== undefined} refusedWrites=${refused} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} ordered=${ordered} testerLine=${edit !== undefined} ownHead=${ownHead}`,
+    `ran=${ran} write=${write !== undefined} refusedWrites=${refused} proof=${proof} push=${push !== undefined} complete=${complete !== undefined} ordered=${ordered} testerLine=${testerLine !== ""} ownHead=${ownHead}`,
     `editBeforeWrite=${edit !== undefined && write !== undefined && edit.at < write.at}`,
     ...(proof ? [] : [`proofProblems=${JSON.stringify(problems)}`]),
     `refs=[${worker.join(",")}]`,
@@ -290,9 +346,61 @@ function testerProof(runDir: string, run: string, label: string): Row {
   return { run, scenario: "tester-proof", label, pass, ref, notes: notes.join(" ") };
 }
 
+/** Why the rig cannot score a run, or undefined when it can:
+ *   - it never finished: out.txt has no `exit=` line;
+ *   - its agent reached no model: the model gateway's key command recorded a call it served no key
+ *     (`<run>/model-gateway-unserved`, which rig.sh names in MODEL_GATEWAY_UNSERVED_FILE and
+ *     scripts/e2e/lib/model-gateway-unserved.sh reads once a checkout's install-model-gateway.sh
+ *     writes it), or, for a checkout whose key command records nothing, it left no transcript or
+ *     one with no assistant message;
+ *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
+ *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
+ *     anywhere but its own label's profile or checkout. An agent reads the whole filesystem, and
+ *     `legion` on its PATH resolves into the checkout rig.sh runs from.
+ * A record missing or malformed is a rig error too, thrown by the scenario's function. */
+function unscored(runDir: string, label: string, labels: Map<string, string>): string | undefined {
+  if (!lines(path.join(runDir, "out.txt")).at(-1)?.startsWith("exit="))
+    return "out.txt has no exit= line: the run never finished";
+  const unserved = lines(path.join(runDir, "model-gateway-unserved"));
+  if (unserved.length > 0)
+    return `the model gateway served no key (${unserved.length} calls): ${unserved[0]}`;
+  const entries = session(runDir);
+  if (!entries.some((entry) => entry.message?.role === "assistant"))
+    return "the agent got no model turn: no transcript, or one with no assistant message";
+  const profile = path.join(path.dirname(path.dirname(runDir)), "profiles", label);
+  const allowed = [profile, labels.get(label) ?? profile].map((dir) => `${dir}/`);
+  for (const call of toolCalls(entries)) {
+    for (const [other, checkout] of labels)
+      if (other !== label && call.args.includes(checkout))
+        return `a ${call.tool} call names ${other}'s checkout: ${call.args.slice(0, 200)}`;
+    for (const [skillPath] of call.args.matchAll(
+      /[^\s"'`=:;|&<>()]*skills\/(?:dispatch-first|dispatch|legion-worker)\b/g
+    ))
+      if (!allowed.some((dir) => skillPath.startsWith(dir)))
+        return `a ${call.tool} call names a skill outside ${label}'s own: ${skillPath}`;
+  }
+  return undefined;
+}
+
 function scoreRuns(runsDir: string, only: string | undefined) {
   const rows: Row[] = [];
   const errors: { run: string; key: string; reason: string }[] = [];
+  // Each label's checkout, as `rig.sh profile` recorded it.
+  const profiles = path.join(path.dirname(runsDir), "profiles");
+  const labels = new Map(
+    (existsSync(profiles) ? readdirSync(profiles) : [])
+      .filter((label) => existsSync(path.join(profiles, label, "checkout")))
+      .map((label) => [label, readFileSync(path.join(profiles, label, "checkout"), "utf8").trim()])
+  );
+  // Every tester-proof run's PR head, to tell another run's line from a wrong one. A world.json
+  // that does not parse is its own run's rig error, below.
+  const heads = (existsSync(runsDir) ? readdirSync(runsDir) : []).flatMap((run) => {
+    try {
+      return [json(path.join(runsDir, run, "world.json"), World).head];
+    } catch {
+      return [];
+    }
+  });
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
     const match = /^(ask-on-message|tester-proof)-(.+)-(\d+)$/.exec(run);
     if (!match) continue;
@@ -300,20 +408,17 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     if (only && scenario !== only) continue;
     const dir = path.join(runsDir, run);
     const key = `${scenario}\t${label}`;
-    // A run the rig failed never reached its agent's exit, or left a record missing or malformed.
-    let reason = lines(path.join(dir, "out.txt")).at(-1)?.startsWith("exit=")
-      ? undefined
-      : "out.txt has no exit= line: the run never finished";
-    if (reason === undefined) {
-      try {
+    let reason: string | undefined;
+    try {
+      reason = unscored(dir, label, labels);
+      if (reason === undefined)
         rows.push(
           scenario === "ask-on-message"
             ? askOnMessage(dir, run, label)
-            : testerProof(dir, run, label)
+            : testerProof(dir, run, label, heads)
         );
-      } catch (error) {
-        reason = error instanceof Error ? error.message : String(error);
-      }
+    } catch (error) {
+      reason = error instanceof Error ? error.message : String(error);
     }
     if (reason !== undefined) errors.push({ run, key, reason });
   }
@@ -335,6 +440,16 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}`
     );
   }
+  console.log(
+    [
+      "",
+      "pass       tester-proof: the four conditions on testerProof; ask-on-message: its automatic",
+      "           flags clear (askOnMessage), which point a person at the asks to read and do not",
+      "           check a recommendation",
+      "pass+ref   passed, and the agent read the file the rule is in",
+      "rig errors runs the rig could not score (unscored), left out of both counts",
+    ].join("\n")
+  );
 }
 
 const [command, ...rest] = Bun.argv.slice(2);

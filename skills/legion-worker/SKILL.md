@@ -333,7 +333,9 @@ with. With `--data` omitted, `legion handoff write` reads the JSON object from s
 
 `handoff_write` validates the payload against the phase's schema before writing: an
 implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
-carries no `proof` of its own, exits 1 naming the field and writes nothing.
+carries no `proof` of its own, exits 1 naming the field and writes nothing. Each `proof` entry, in
+either phase, is an object of six non-empty strings: `criterion` (the acceptance line it proves),
+`surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
 
 Then verify the durable artifact exists:
 

@@ -8,25 +8,20 @@
 #   rig.sh batch     <scenario> <runs> <label>...  starts the scratch services, runs 1..<runs> per
 #                                                  label (SKILL_SCENARIOS_PARALLEL at once), and
 #                                                  stops the services
-#   rig.sh score     [<scenario>]                  one row per run, then pass counts per label
+#   rig.sh score     [<scenario>]                  one row per run, then counts per label
 #
 # A batch runs each run as `rig.sh run <scenario> <label> <n> <index> <start>`, which needs that
 # batch's services: <index> is the run's place in the batch and <start> the batch's start in epoch
 # seconds. One run on its own is `rig.sh batch <scenario> 1 <label>`.
 #
-# Scenarios:
+# Scenarios (each one's scoring rule is on the score.ts function that scores it):
 #   ask-on-message  A plain session (no Legion role) is told to ask Sami whether to go ahead with a
-#                   plan an owner session posted in a Dispatch message. The dispatch skill's rule:
-#                   the ask carries the plan and its options itself and never points at the message
-#                   in prose. Each run seeds its own issue, attached table and message.
+#                   plan an owner session posted in a Dispatch message; each run seeds its own
+#                   issue, attached table and message (seed.ts). Scored by askOnMessage.
 #   tester-proof    A tester phase worker, booted by the Legion extension against a daemon stand-in,
-#                   is told the implementer has finished. The legion-worker skill's rule, as scored:
-#                   the PR body is left with an `E2E (tester)` line naming this run's head (written
-#                   at any point), and a `handoff write --phase test` the CLI accepts comes before
-#                   the first push carrying .legion/test.json, which comes before an accepted
-#                   `handoff complete`; the test.json the branch holds at that completion is a
-#                   valid test handoff with a proof. GitHub is a recording stand-in and the remote
-#                   a local bare repository.
+#                   is told the implementer has finished; its world is worker_fixture's, with GitHub
+#                   a recording stand-in and the remote a local bare repository. Scored by
+#                   testerProof.
 #
 # A batch's services are the e2e harness's real Go Dispatch server
 # (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded and read back
@@ -41,20 +36,21 @@
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run may take (default 1500)
 #
-# Each run's agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), under the label's own
-# HOME and profile (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), in the tmux
-# session skill-scenarios-<digest>-<run> on the work directory's own tmux server
-# (<work>/tmux.sock), <run> being <scenario>-<label>-<n>, with `env -i` and only the variables its
-# pane file names, TMPDIR its run's own. The pane shows nothing: omp's output goes to
-# <work>/runs/<run>/out.txt, and the agent's transcript, which grows as it works, to the .jsonl
-# under <work>/runs/<run>/sessions. A `gh` stand-in is first on every run's PATH, so no run reaches
-# GitHub. Every container and tmux session a work directory starts carries its digest in its name.
-# An agent can still write the machine's /tmp, which every run shares and nothing here cleans: two
-# runs can meet in a scratch file there, so each tester-proof run's PR number is 1000 plus its
-# index in the batch and its heads are dated from the batch's start plus that index, and the score
-# reads its E2E (tester) line for this run's head. An exit, INT or TERM stops what the command
-# started: a batch its runs, their agents and its services; a run or a live read its agent and
-# daemon stand-in; and either one every process those left (scan_run_processes).
+# Each run:
+#   - Its agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), under the label's own
+#     HOME and profile (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), with
+#     `env -i` and only the variables its pane file names (base_env).
+#   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
+#     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n>. The pane shows nothing: omp's
+#     output goes to <work>/runs/<run>/out.txt, and the transcript, which grows as the agent works,
+#     to the .jsonl under <work>/runs/<run>/sessions.
+#   - A `gh` stand-in is first on its PATH, so it never reaches GitHub. Every container and tmux
+#     session a work directory starts carries the directory's digest in its name.
+#   - Its agent can still read the whole filesystem, including the other label's checkout and the
+#     checkout this script runs from (its `legion` resolves there), and write the machine's /tmp,
+#     which nothing here cleans. score.ts does not score a run that read outside its own label
+#     (unscored), and worker_fixture keeps two runs of a batch apart in /tmp.
+#   - An exit stops what its command started (on_exit, stop_run, stop_batch).
 set -euo pipefail
 # Nothing the rig starts inherits a service endpoint or credential from the caller: a Legion pane
 # exports ENVOY_URL, DISPATCH_URL and their token files, a developer's shell can hold NATS
@@ -69,7 +65,7 @@ root=$(cd "$here/../../../.." && pwd -P)
 work=${SKILL_SCENARIOS_WORK:-${TMPDIR:-/tmp}/skill-scenarios}
 work=$(realpath -m -- "$work")
 
-# The tester-proof world (worker_fixture below). Each run also has a PR number and heads of its own.
+# The tester-proof world (worker_fixture below).
 worker_key=LWEVAL-1
 worker_repo=example/widgets
 
@@ -104,24 +100,26 @@ label_dir() {
   printf '%s\n' "$work/profiles/$1"
 }
 
-# The label's checkout, pin and profile name, recorded by `profile`.
+# The label's checkout, pin and profile name, recorded by `profile`, as the globals P (the label's
+# directory), co, pin and profile that every command and helper below reads.
 load_label() {
   P=$(label_dir "$1")
   [ -f "$P/ready" ] || fail "no profile for label $1: run \`rig.sh profile $1 <checkout>\` first"
   co=$(<"$P/checkout")
   pin=$(<"$P/pin")
-  profile=skills-$1
+  profile=$(<"$P/profile")
 }
 
 cmd_profile() {
   [ $# = 2 ] || fail "usage: rig.sh profile <label> <checkout>"
-  local label=$1 P co
+  local label=$1 P co profile=skills-$1
   P=$(label_dir "$label")
   [ ! -e "$P" ] || fail "$P exists; remove it to rebuild label $label"
   co=$(cd "$2" && pwd -P)
   [ -f "$co/scripts/e2e/lib/install-plugin-profile.sh" ] || fail "$co is not a Legion checkout"
   mkdir -p "$P"
   printf '%s\n' "$co" >"$P/checkout"
+  printf '%s\n' "$profile" >"$P/profile"
   # What the label runs: the checkout's working-copy commit and a digest of its skills tree, the
   # files the packed plugin stages into dist/skills, listed in byte order (LC_ALL=C) so the digest
   # is the same in every locale.
@@ -135,19 +133,19 @@ cmd_profile() {
     source "$co/scripts/e2e/lib/omp-home.sh"
     make_omp_home "$P/home"
   )
-  bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --profile "skills-$label" --home "$P/home" --dest "$P/plugin" >"$P/install.log" 2>&1 ||
+  bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$P/home" --dest "$P/plugin" >"$P/install.log" 2>&1 ||
     fail "install-plugin-profile.sh failed; see $P/install.log"
-  bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "skills-$label" --home "$P/home" --dest "$P/key" --cache-dir "$P/cache" >>"$P/install.log" 2>&1 ||
+  bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --cache-dir "$P/cache" >>"$P/install.log" 2>&1 ||
     fail "install-model-gateway.sh failed; see $P/install.log"
   bun "$co/packages/daemon/src/daemon/omp-pin.ts" >"$P/pin"
   touch "$P/ready"
   cat "$P/built-from"
 }
 
-# Writes the variables every agent gets to <file>: the label's home and profile, the run's
-# stand-ins first on PATH, its own TMPDIR, and nothing else from the caller's environment.
+# Writes the variables every agent gets to $R/pane.env: the label's home and profile, the run's
+# stand-ins first on PATH, its own TMPDIR, where the model gateway's key command records a call it
+# serves no key (score.ts's unscored reads it), and nothing else from the caller's environment.
 base_env() {
-  local R=$1
   mkdir -p "$R/tmp"
   {
     echo "HOME=$P/home"
@@ -159,13 +157,13 @@ base_env() {
     echo "PI_NOTIFICATIONS=off"
     echo "PI_NO_TITLE=1"
     echo "SKILL_SCENARIO_RUN=$R"
+    echo "MODEL_GATEWAY_UNSERVED_FILE=$R/model-gateway-unserved"
     echo "PATH=$R/bin:$PATH"
   } >"$R/pane.env"
 }
 
 # The run's `gh`: the stand-in, which records the call and answers from $R/fixtures.json.
 gh_standin() {
-  local R=$1
   mkdir -p "$R/bin"
   printf '#!/bin/sh\nexec bun %q gh "$@"\n' "$here/gh-standin.ts" >"$R/bin/gh"
   chmod +x "$R/bin/gh"
@@ -177,8 +175,8 @@ gh_standin() {
 # and waits for it to exit or time out. A timeout is the run's result (`exit=timeout`), not a rig
 # failure, so this wait is not an until_true.
 launch() {
-  local R=$1 system=
-  session=$tag-$2
+  local system=
+  session=$tag-$1
   [ ! -f "$R/system-args" ] || system=" $(<"$R/system-args")"
   cat >"$R/launch.sh" <<EOF
 #!/usr/bin/env bash
@@ -199,76 +197,50 @@ EOF
   tmux kill-session -t "=$session" 2>/dev/null || true
 }
 
-# scan_run_processes DIR PID... prints the pid of every process a run left: each whose environment
-# names a run at or under DIR in SKILL_SCENARIO_RUN, which an agent gets from its pane file and
-# every command it runs inherits, and each that descends, through /proc's parent links as they stand
-# now, from one of those or from one of the PIDs, which reaches a child started with the variable
-# stripped while its parent lives. A PID counts only while its parent is this shell or the work
-# directory's tmux server, so a pid another process reused is never followed. A process that merely
-# works under DIR, such as a developer's shell watching a run, is none of these, and another user's
-# environment cannot be read.
-# shellcheck disable=SC2329 # stop_run_processes, which the exit traps run, runs it
-scan_run_processes() {
-  local dir=$1 server p pid stat rest var child candidates=()
-  local -A parent=() children=() seen=()
-  local queue=()
-  shift
-  server=$(tmux display-message -p '#{pid}' 2>/dev/null || true)
-  for p in /proc/[0-9]*; do
-    pid=${p#/proc/}
-    { read -r stat <"$p/stat"; } 2>/dev/null || continue
-    # Field 2, the command name, is in parentheses and may hold spaces; the parent pid is the second
-    # field after the closing parenthesis.
-    rest=${stat##*) }
-    rest=${rest#* }
-    parent[$pid]=${rest%% *}
-    children[${parent[$pid]}]+=" $pid"
-  done
-  # One grep narrows the environments to those holding the text anywhere; each is then read
-  # variable by variable.
-  mapfile -t candidates < <(grep -lzsF -e "SKILL_SCENARIO_RUN=$dir" /proc/[0-9]*/environ || true)
-  for p in "${candidates[@]}"; do
+# run_env_pids DIR prints each process whose environment names a run at or under DIR in
+# SKILL_SCENARIO_RUN, which an agent gets from its pane file and every command it runs inherits.
+# It finds what stop_tree cannot reach from the pids a command recorded: a process that left their
+# tree, such as a `setsid -f` child. A process that merely works under DIR, such as a developer's
+# shell watching a run, has no such variable, and another user's environment cannot be read. One
+# grep narrows the environments to those holding the text anywhere; each is then read variable by
+# variable.
+# shellcheck disable=SC2329 # stop_env_processes, which the exit traps run, runs it
+run_env_pids() {
+  local p var
+  for p in $(grep -lzsF -e "SKILL_SCENARIO_RUN=$1" /proc/[0-9]*/environ || true); do
     {
       while IFS= read -r -d '' var; do
-        case $var in "SKILL_SCENARIO_RUN=$dir" | "SKILL_SCENARIO_RUN=$dir"/*) queue+=("${p//[!0-9]/}") && break ;; esac
+        case $var in "SKILL_SCENARIO_RUN=$1" | "SKILL_SCENARIO_RUN=$1"/*) echo "${p//[!0-9]/}" && break ;; esac
       done <"$p"
     } 2>/dev/null || true
   done
-  for pid in "$@"; do
-    [ -n "$pid" ] && [ -n "${parent[$pid]:-}" ] || continue
-    [ "${parent[$pid]}" = "$$" ] || [ "${parent[$pid]}" = "$server" ] && queue+=("$pid")
-  done
-  while [ ${#queue[@]} -gt 0 ]; do
-    pid=${queue[-1]}
-    unset 'queue[-1]'
-    [ -z "${seen[$pid]:-}" ] || continue
-    seen[$pid]=1
-    for child in ${children[$pid]:-}; do queue+=("$child"); done
-  done
-  for pid in "${!seen[@]}"; do
-    [ "$pid" = "$$" ] || [ "$pid" = "$BASHPID" ] || printf '%s\n' "$pid"
-  done
 }
 
-# stop_run_processes DIR PID... freezes every process scan_run_processes finds, scans again to take
-# in a child one of them forked before it froze, and SIGKILLs them all.
+# stop_env_processes DIR stops, with stop_tree, each process run_env_pids DIR finds and everything
+# under it, a child that dropped the variable included; the parent stop_tree checks is the one the
+# process has now, read a moment after the list.
 # shellcheck disable=SC2329 # the exit traps run it
-stop_run_processes() {
-  local pids=()
-  mapfile -t pids < <(scan_run_processes "$@")
-  [ ${#pids[@]} -gt 0 ] || return 0
-  kill -STOP "${pids[@]}" 2>/dev/null || true
-  mapfile -t pids < <(scan_run_processes "$@")
-  kill -KILL "${pids[@]}" 2>/dev/null || true
+stop_env_processes() {
+  local pid
+  for pid in $(run_env_pids "$1"); do stop_tree "$pid" "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"; done
 }
 
-# A run's or a live read's exit: its agent's session and its daemon stand-in, with every process
-# either left.
+# stop_panes SESSION stops, with stop_tree, each pane process of SESSION on the work directory's
+# tmux server and everything under it, while the server is still its parent.
+# shellcheck disable=SC2329 # the exit traps run it
+stop_panes() {
+  local server pid
+  server=$(tmux display-message -p '#{pid}' 2>/dev/null) || return 0
+  for pid in $(tmux list-panes -s -t "=$1" -F '#{pane_pid}' 2>/dev/null || true); do stop_tree "$pid" "$server"; done
+}
+
+# A run's or a live read's exit: its daemon stand-in, its agent's session, and every process that
+# carries its SKILL_SCENARIO_RUN.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_run() {
-  local panes=()
-  [ -z "$session" ] || mapfile -t panes < <(tmux list-panes -s -t "=$session" -F '#{pane_pid}' 2>/dev/null || true)
-  [ -z "$R" ] || stop_run_processes "$R" "$daemon_pid" "${panes[@]}"
+  stop_tree "$daemon_pid"
+  [ -z "$session" ] || stop_panes "$session"
+  [ -z "$R" ] || stop_env_processes "$R"
   [ -z "$session" ] || tmux kill-session -t "=$session" 2>/dev/null || true
 }
 
@@ -298,11 +270,11 @@ cmd_live_read() {
     done
   done
   printf 'Call the read tool once for each of these paths, in this order, one call at a time, and nothing else: %s. Then reply with the single word DONE.\n' "${paths[*]}" >"$R/prompt.txt"
-  base_env "$R"
-  gh_standin "$R"
+  base_env
+  gh_standin
   # No Dispatch, and an Envoy address nothing listens on: the session reads files and nothing else.
   echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
-  launch "$R" "live-read-${P##*/}"
+  launch "live-read-${P##*/}"
   bun "$here/score.ts" live-read "$R" "$co/skills" "$P/home/.omp/profiles/$profile/logs"
 }
 
@@ -390,21 +362,21 @@ services_down() {
 }
 
 run_ask_on_message() {
-  local R=$1 name=$2 issue message dispatch_port
+  local name=$1 issue message dispatch_port
   dispatch_port=$(<"$work/services/dispatch-port")
   (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" ask-on-message "$R/fixture.json") \
     >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   issue=$(jq -r .issue "$R/fixture.json")
   message=$(jq -r .message "$R/fixture.json")
-  base_env "$R"
-  gh_standin "$R"
+  base_env
+  gh_standin
   # Dispatch as the agent's own, with no Envoy (an address nothing listens on) and no NATS: a plain
   # session outside Legion.
   grep '^DISPATCH_' "$services_env" >>"$R/pane.env"
   echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
   printf 'On Dispatch issue %s, the Dispatch owner session posted its plan for the rest of the work in this message: dispatch://%s/message/%s. Open an ask on %s asking Sami whether to go ahead with that plan. Do nothing else.\n' \
     "$issue" "$issue" "$message" "$issue" >"$R/prompt.txt"
-  launch "$R" "$name"
+  launch "$name"
   # What the agent left on Dispatch, and the message it was asked about, for the score.
   (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" capture "$R/fixture.json" "$R") \
     >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
@@ -413,11 +385,12 @@ run_ask_on_message() {
 # The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the
 # issue workspace cloned from it, the implementer's commit and handoff on legion/<key>, the PR the
 # gh stand-in serves, and the architect's assignment. The fixture's content is the same in every
-# run; the PR number is 1000 plus the run's index in its batch and the commits are dated <index>
-# seconds after the batch's start, so no two runs of a batch share a PR number or a head, and each
-# batch's heads carry its own start time.
+# run; the PR number is 1000 plus <index>, the run's index in its batch, and the commits are dated
+# <index> seconds after <start>, the batch's start, so no two runs of a batch share a PR number or
+# a head (two runs can meet in a scratch file in the shared /tmp), and each batch's heads carry its
+# own start time.
 worker_fixture() {
-  local R=$1 index=$2 start=$3 src C1 C2 body when worker_pr worker_pr_url
+  local index=$1 start=$2 src C1 C2 body when worker_pr worker_pr_url
   worker_pr=$((1000 + index))
   worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
   when="@$((start + index)) +0000"
@@ -466,9 +439,14 @@ EOF
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
   mkdir -p "$src/.legion"
-  jq -n --arg head "$C1" '{schemaVersion:1, phase:"implement", filesChanged:["greet.ts","greet.test.ts"],
-    proof:[{surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", head:$head,
-      negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}' >"$src/.legion/implement.json"
+  # The handoff CLI writes the implement handoff, so it is one the ledger reads, and the fixture
+  # fails here if a schema change makes it one the CLI refuses.
+  bun "$root/packages/daemon/src/cli/index.ts" handoff write --phase implement --workspace "$src" --data "$(
+    jq -cn --arg head "$C1" '{filesChanged:["greet.ts","greet.test.ts"],
+      proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
+        surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
+        negativeControl:"bun greet.ts → exit 2, usage: greet.ts <name> on stderr"}]}'
+  )"
   g add -A && g commit -qm "legion: implement handoff ($worker_key)"
   C2=$(g rev-parse HEAD)
   g push -q "$R/remote.git" "legion/$worker_key"
@@ -522,8 +500,8 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 }
 
 run_tester_proof() {
-  local R=$1 name=$2 n=$3 index=$4 start=$5 state project port
-  worker_fixture "$R" "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  local name=$1 n=$2 index=$3 start=$4 state project port
+  worker_fixture "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
   # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
@@ -539,7 +517,7 @@ run_tester_proof() {
   start_process daemon bun "$here/../grant-rig/daemon-standin.ts" 0 "$R/daemon.log" "$state/secrets/boot" "$project" "$worker_key" tester
   await_start daemon "$daemon_pid" 0 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
   port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
-  base_env "$R"
+  base_env
   # The pane the daemon would give the tester, over the base every agent gets: worker.env and
   # system-args.
   bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co/packages/pi-envoy/roles"
@@ -552,8 +530,8 @@ run_tester_proof() {
     echo "JJ_CONFIG=$R/jj.toml"
     echo "GH_REPO=$worker_repo"
   } >"$R/pane.env"
-  gh_standin "$R"
-  launch "$R" "$name"
+  gh_standin
+  launch "$name"
 }
 
 cmd_run() {
@@ -571,26 +549,24 @@ cmd_run() {
   mkdir -p "$R/bin" "$R/sessions" "$R/cwd" "$R/logs"
   cp "$P/built-from" "$R/built-from"
   case $scenario in
-  ask-on-message) run_ask_on_message "$R" "$name" ;;
-  tester-proof) run_tester_proof "$R" "$name" "$n" "$index" "$start" ;;
+  ask-on-message) run_ask_on_message "$name" ;;
+  tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
   *) fail "unknown scenario $scenario" ;;
   esac
   echo "$name: $(tail -n 1 "$R/out.txt")"
 }
 
 # A batch's exit: its runs (each run's shell, daemon stand-in and fixture commands), the agents they
-# started, every process any of them left, and the services.
+# started, every process that carries a run's SKILL_SCENARIO_RUN, and the services.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_batch() {
-  local s sessions=() panes=()
+  local s sessions=()
+  stop_tree "${runs_pid:-}"
   for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null || true); do
     case $s in "$tag-$batch_scenario"-*) sessions+=("$s") ;; esac
   done
-  for s in "${sessions[@]}"; do
-    mapfile -t -O "${#panes[@]}" panes < <(tmux list-panes -s -t "=$s" -F '#{pane_pid}' 2>/dev/null || true)
-  done
-  stop_run_processes "$work/runs" "${runs_pid:-}" "${listener_pid:-}" "${dispatch_pid:-}" "${panes[@]}"
-  for s in "${sessions[@]}"; do tmux kill-session -t "=$s" 2>/dev/null || true; done
+  for s in "${sessions[@]}"; do stop_panes "$s"; done
+  stop_env_processes "$work/runs"
   services_down
 }
 
