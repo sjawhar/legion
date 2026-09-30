@@ -68,9 +68,8 @@ func (m *Machine) chargeDeath() bool {
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the
 // session kept — and the same session relaunched, or, once retirements run out too, the claim
 // fails with its prompt count left at the limit. A suspension that fails charges nothing: the next
-// failure reaches the limit again and retries the retirement. A retirement while a suspension
-// waits for the agent's turn (suspendAfterTurn) has already stopped the process that suspension
-// waited to stop, so the claim stays suspended rather than relaunched.
+// failure reaches the limit again and retries the retirement. A retirement while a suspension is
+// held leaves the claim suspended instead, charged nothing (endHeld).
 func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 	failures := m.claim.Budgets.PromptFailures + 1
 	if failures < m.deps.Limits.PromptFailures {
@@ -79,7 +78,9 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 			"limit", m.deps.Limits.PromptFailures)
 		return m.persist(ctx)
 	}
-	deferred := m.deferred
+	if m.held != nil {
+		return m.endHeld(ctx)
+	}
 	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)
 	}
@@ -92,8 +93,5 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 		return m.fail(ctx, "prompt retirements ran out")
 	}
 	m.claim.Budgets.PromptFailures = 0
-	if deferred != nil {
-		return m.suspendedFor(ctx, *deferred)
-	}
 	return m.launch(ctx)
 }

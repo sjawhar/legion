@@ -133,12 +133,11 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				if row.Attempts == 0 {
 					r.log.Info("outbox notice waits for its architect", "row", row.ID, "issue", row.Issue, "error", err)
 				}
-			} else if errors.Is(err, supervise.ErrSuspendWaits) {
-				// A suspension held for its agent's turn runs when the turn ends, or at the stop
-				// timeout; the row is asked again on its backoff and finishes once the claim is
-				// suspended, so a daemon restarted meanwhile asks for it again.
+			} else if errors.Is(err, supervise.ErrSuspendHeld) {
+				// A suspension held for its agent's turn (supervise's holdSuspension) is a wait: the
+				// row is asked again on its backoff and finishes once the claim is suspended.
 				if row.Attempts == 0 {
-					r.log.Info("outbox suspend waits for its agent's turn to end", "row", row.ID, "issue", row.Issue, "error", err)
+					r.log.Info("outbox suspend is held for its agent's turn to end", "row", row.ID, "issue", row.Issue, "error", err)
 				}
 			} else if errors.Is(err, supervise.ErrDeliveryPending) {
 				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
@@ -538,9 +537,6 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too. The
 		// phase is read before the suspend acts, not in one transaction with it: a transition
 		// committing in between costs one suspend, which that transition's own start then resumes.
-		// A worker in a turn — the one that reported its phase — has the suspension held for the
-		// turn's end (supervise.ErrSuspendWaits): the row is asked again until the claim is
-		// suspended, and a start run meanwhile drops the held suspension and outdates this row.
 		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last, nil) {
 			r.log.Info("outbox suspend no longer acts: its role's phase is back, or a newer start superseded it; finished without acting",
 				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)

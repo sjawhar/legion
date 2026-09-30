@@ -134,7 +134,7 @@ func TestSuspendingAClaimThatRunsNothingIsDone(t *testing.T) {
 // A worker reports its phase complete from a tool call inside its turn, and the transition that
 // records the report suspends it. The suspend row waits for that turn to end rather than stopping
 // the worker in the middle of the call (LEGION-283): it is retried while the claim answers that the
-// suspension waits, and finished once the turn's end has suspended the worker.
+// suspension is held, and finished once the turn's end has suspended the worker.
 func TestAPhaseCompletionsSuspendWaitsForTheWorkersTurnToEnd(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()

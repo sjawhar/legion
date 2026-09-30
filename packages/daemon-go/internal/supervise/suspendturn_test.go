@@ -1,10 +1,13 @@
 package supervise
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -20,8 +23,8 @@ func TestASuspensionArrivingMidTurnWaitsForTheTurnToEnd(t *testing.T) {
 	loc := h.locator()
 
 	for range 2 {
-		if err := h.handle(RequestSuspend{Claim: testToken, Reason: "LEGION-209 left implementing"}); !errors.Is(err, ErrSuspendWaits) {
-			t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+		if err := h.handle(RequestSuspend{Claim: testToken, Reason: "LEGION-209 left implementing"}); !errors.Is(err, ErrSuspendHeld) {
+			t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 		}
 		h.wantState(StateWorking)
 		h.wantCalls("Suspend", 0)
@@ -53,13 +56,13 @@ func TestASuspensionArrivingMidTurnWaitsForTheTurnToEnd(t *testing.T) {
 func TestASuspensionWhoseTurnNeverEndsStopsTheProcessAtTheStopTimeout(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 
 	h.advance(testStop - time.Second)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("the repeated suspend returned %v, want ErrSuspendWaits", err)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the repeated suspend returned %v, want ErrSuspendHeld", err)
 	}
 	h.wantState(StateWorking)
 	h.wantCalls("Suspend", 0)
@@ -93,8 +96,8 @@ func TestAHeldSuspensionWhoseStopFailsIsTriedAgainUntilItLands(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.reach(StateWorking)
-			if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-				t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+			if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+				t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 			}
 			h.rt.FailSuspend(errBoom)
 
@@ -114,14 +117,14 @@ func TestAHeldSuspensionWhoseStopFailsIsTriedAgainUntilItLands(t *testing.T) {
 	}
 }
 
-// A start run against the claim while its suspension waits hands it work again: the suspension it
+// A start run against the claim while its suspension is held hands it work again: the suspension it
 // supersedes neither runs at the turn's end nor at the stop timeout, as the outbox finishes a
 // suspend older than the newest start without acting (workflow.StopActs).
 func TestAStartRunAgainstTheClaimDropsTheSuspensionWaitingForItsTurn(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 
 	if err := h.m.StartedBy(h.ctx, 42); err != nil {
@@ -134,15 +137,15 @@ func TestAStartRunAgainstTheClaimDropsTheSuspensionWaitingForItsTurn(t *testing.
 	h.wantCalls("Suspend", 0)
 }
 
-// A process that dies while its suspension waits has nothing left to wait for: the claim is
+// A process that dies while its suspension is held has nothing left to wait for: the claim is
 // suspended, not relaunched, and the death is charged nowhere. The turn's task goes back to waiting
 // as a death leaves it, so a task of no phase goes on the resume.
 func TestAProcessThatDiesWhileItsSuspensionWaitsIsSuspendedNotRelaunched(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
 	loc := h.locator()
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 
 	h.observe(runtime.Gone)
@@ -161,12 +164,13 @@ func TestAProcessThatDiesWhileItsSuspensionWaitsIsSuspendedNotRelaunched(t *test
 	h.wantCalls("Suspend", 1)
 }
 
-// A prompt retirement while a suspension waits for the agent's turn has already stopped the process
-// the suspension waited to stop: the claim stays suspended rather than relaunched. The prompt here
-// was on its way when a turn began, and the agent refuses it at the prompt-failure limit.
-func TestAPromptRetirementWhileASuspensionWaitsLeavesTheClaimSuspended(t *testing.T) {
+// A prompt retirement while a suspension is held ends in that suspension, as a death does: the claim
+// is suspended rather than relaunched, and charged nothing — here the retirement would be its last,
+// which would fail it. The prompt was on its way when a turn began, and the agent refuses it at the
+// prompt-failure limit.
+func TestAPromptRetirementWhileASuspensionIsHeldSuspendsTheClaimChargingNothing(t *testing.T) {
 	h := newBareHarness(t)
-	h.deps.Limits = Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 2}
+	h.deps.Limits = Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1}
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
 		t.Fatal(err)
 	}
@@ -182,8 +186,8 @@ func TestAPromptRetirementWhileASuspensionWaitsLeavesTheClaimSuspended(t *testin
 	if err := h.m.Handle(h.ctx, StreamTurnStart{Claim: testToken}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+	if err := h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 
 	gated.release <- struct{}{}
@@ -192,7 +196,49 @@ func TestAPromptRetirementWhileASuspensionWaitsLeavesTheClaimSuspended(t *testin
 	h.wantState(StateSuspended)
 	h.wantCalls("Suspend", 1)
 	h.wantCalls("Resume", 0)
-	h.wantBudgets(Budgets{PromptRetires: 1})
+	h.wantBudgets(Budgets{})
+}
+
+// Only a held suspension lets a row end in suspended without naming that state. A row that
+// suspends a claim holding none — idle with a phase's task waiting, whose suspension would retire
+// that task, or ready — is reported, not let through silently; the same row ending a held
+// suspension passes.
+func TestOnlyAHeldSuspensionLetsARowEndSuspendedWithoutNamingIt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   ClaimState
+		prepare func(h *harness)
+		refused bool
+	}{
+		{"an idle claim holding none", StateIdle, func(h *harness) {
+			h.must(RequestDeliver{Claim: testToken, Task: "the next task", Phase: phase.Testing, Generation: 7})
+		}, true},
+		{"a ready claim", StateReady, func(*harness) {}, true},
+		{"a working claim holding one", StateWorking, func(h *harness) {
+			if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+				h.t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(tc.state)
+			tc.prepare(h)
+			k := key{tc.state, onObservation}
+			saved := table[k]
+			t.Cleanup(func() { table[k] = saved })
+			table[k] = rule{name: "a rogue row", to: saved.to, act: func(m *Machine, ctx context.Context, _ Event) error {
+				return m.suspendNow(ctx, RequestSuspend{Claim: testToken})
+			}}
+
+			err := h.handle(RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Alive, At: h.clock.Now()}})
+
+			if refused := err != nil && strings.Contains(err.Error(), "a rogue row"); refused != tc.refused {
+				t.Fatalf("the rogue suspension returned %v, want refused = %v", err, tc.refused)
+			}
+			h.wantState(StateSuspended)
+		})
+	}
 }
 
 // A daemon restart forgets the wait, and the request asked again (the outbox's row is retried until
@@ -201,13 +247,13 @@ func TestAPromptRetirementWhileASuspensionWaitsLeavesTheClaimSuspended(t *testin
 func TestASuspensionAskedAgainAfterARestartRunsWhenTheShimFindsTheTurnOver(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 	h.restart()
 	h.wantState(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("suspend after the restart returned %v, want ErrSuspendWaits", err)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend after the restart returned %v, want ErrSuspendHeld", err)
 	}
 
 	h.conn.SetStreaming(false)

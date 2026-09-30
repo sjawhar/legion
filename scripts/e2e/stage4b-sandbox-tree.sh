@@ -1606,8 +1606,8 @@ pass
 begin completion-closed
 # Each phase worker of tree 1 is suspended as its phase ends — the planner, the implementer
 # (implementing, and retro when it ran), the tester and the reviewer — and the workflow suspends a
-# worker as it records the completion the worker reports from inside its turn. The suspension waits
-# for that turn to end (LEGION-283), so each saved session answers every handoff_complete call,
+# worker as it records the completion the worker reports from inside its turn. The suspension is
+# held until that turn ends (LEGION-283), so each saved session answers every handoff_complete call,
 # reports each assignment once, and records the phase stall `closed` after the call that
 # succeeded: the 4b.13b acceptance's stall check (completion_verdict), which a suspension inside the
 # call fails. The planner, never resumed, is the case the 4b.13b acceptance saw; the implementer is

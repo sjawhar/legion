@@ -273,9 +273,9 @@ func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
 	}, nil), http.StatusForbidden, claim.InvalidSecret.Message)
 }
 
-// An operator's suspend of an agent in a turn is accepted and held for the turn's end
-// (supervise.ErrSuspendWaits), so the turn is not cut off: the route answers 202 with the claim
-// still working, and the claim is suspended once its turn ends.
+// An operator's suspend of an agent in a turn is held for the turn's end (supervise.ErrSuspendHeld),
+// so the turn is not cut off: the route answers 202 with the claim still working, and the claim is
+// suspended once its turn ends.
 func TestTheOperatorsSuspendOfAnAgentInATurnWaitsForTheTurnToEnd(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())

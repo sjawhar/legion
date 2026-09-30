@@ -110,9 +110,7 @@ extension no longer sets it after the claim registers. On a pane a daemon at 4 l
 at 5 refuses every bash command and every call Oh My Pi serves with `gh`, answering
 `LEGION_GRANT_FILE is not set on this pane: …`. Restarting the daemon at 5 does not clear it, since
 a restarted daemon re-adopts a live pane without relaunching it; relaunching the pane does (under
-the Go daemon, `legion claims suspend` and then `legion claims resume` on its claim; a suspend of an
-agent in a turn answers 202 and runs once the turn ends, so the resume follows the claim's
-`suspended`).
+the Go daemon, `legion claims suspend` and then `legion claims resume` on its claim).
 Contract 6 adds `phase` to a claim's pending delivery on `/legion/v1/state` — the issue phase the
 task was queued for, absent for a task of no phase — and `unrecorded` as the `phase` and `status`
 the state route reads for an issue the workflow does not record, where an operator's claim exists

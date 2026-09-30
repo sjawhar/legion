@@ -16,28 +16,40 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 )
 
-// heldSuspendDaemon answers the suspend of architectClaim 202 with the claim still working — a
-// suspension held for the agent's turn — and each later list with the next of states, the last
-// repeated.
-func heldSuspendDaemon(t *testing.T, states ...string) (port string, lists func() int) {
+// seenClaim is one answer the list gives about architectClaim: its state, and whether the daemon
+// holds its suspension.
+type seenClaim struct {
+	state string
+	held  bool
+}
+
+var (
+	heldWorking = seenClaim{"working", true}
+	suspended   = seenClaim{"suspended", false}
+)
+
+// heldSuspendDaemon answers the suspend of architectClaim 202 with the claim working and its
+// suspension held, and each later list with the next of answers, the last repeated.
+func heldSuspendDaemon(t *testing.T, answers ...seenClaim) (port string, lists func() int) {
 	t.Helper()
 	var mu sync.Mutex
 	served := 0
-	claimIn := func(state string) api.OperatorClaim {
-		return api.OperatorClaim{Token: architectClaim, Tree: "LEGION-208", Issue: "LEGION-208", Role: "architect", State: state, Generation: 1}
+	claimAs := func(seen seenClaim) api.OperatorClaim {
+		return api.OperatorClaim{Token: architectClaim, Tree: "LEGION-208", Issue: "LEGION-208", Role: "architect",
+			State: seen.state, Generation: 1, SuspensionHeld: seen.held}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == claimsRoute+"/"+string(architectClaim)+"/suspend":
 			w.WriteHeader(http.StatusAccepted)
-			_ = json.NewEncoder(w).Encode(claimIn("working"))
+			_ = json.NewEncoder(w).Encode(claimAs(heldWorking))
 		case r.Method == http.MethodGet && r.URL.Path == claimsRoute:
 			mu.Lock()
-			state := states[min(served, len(states)-1)]
+			seen := answers[min(served, len(answers)-1)]
 			served++
 			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(api.OperatorClaims{Claims: []api.OperatorClaim{claimIn(state)}})
+			_ = json.NewEncoder(w).Encode(api.OperatorClaims{Claims: []api.OperatorClaim{claimAs(seen)}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -59,37 +71,74 @@ func operatorTokenFile(t *testing.T) string {
 	return path
 }
 
+// suspendAgainst runs `legion claims suspend` of architectClaim against port, waiting up to wait.
+func suspendAgainst(t *testing.T, port, wait string) (int, string, string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "claims", "suspend", "--port", port,
+		"--operator-token-file", operatorTokenFile(t), "--claim", string(architectClaim), "--wait", wait}, &out, &errb)
+	return code, out.String(), errb.String()
+}
+
 // A suspend the daemon holds for the agent's turn (202) is waited out: the command polls the
 // claims until the claim is suspended and prints it so, exiting 0.
 func TestClaimsSuspendWaitsForASuspensionHeldForTheTurn(t *testing.T) {
-	port, lists := heldSuspendDaemon(t, "working", "working", "suspended")
-	var out, errb bytes.Buffer
-	code := run(context.Background(), []string{"legion", "claims", "suspend", "--port", port,
-		"--operator-token-file", operatorTokenFile(t), "--claim", string(architectClaim), "--wait", "10s"}, &out, &errb)
+	port, lists := heldSuspendDaemon(t, heldWorking, heldWorking, suspended)
 
-	if code != 0 || errb.Len() != 0 {
-		t.Fatalf("suspend exited %d; stderr %q", code, errb.String())
+	code, out, errb := suspendAgainst(t, port, "10s")
+
+	if code != 0 || errb != "" {
+		t.Fatalf("suspend exited %d; stderr %q", code, errb)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 suspended 1\n"; out.String() != want {
-		t.Fatalf("suspend printed %q, want %q", out.String(), want)
+	if want := "legion-legion-legion-208-architect architect LEGION-208 suspended 1\n"; out != want {
+		t.Fatalf("suspend printed %q, want %q", out, want)
 	}
 	if got := lists(); got != 3 {
 		t.Fatalf("the command listed the claims %d times, want until the third answer said suspended", got)
 	}
 }
 
-// A suspension that never lands within --wait fails the command, naming the state the claim was
-// last seen in.
-func TestClaimsSuspendFailsWhenTheHeldSuspensionNeverLands(t *testing.T) {
-	port, _ := heldSuspendDaemon(t, "working")
-	var out, errb bytes.Buffer
-	code := run(context.Background(), []string{"legion", "claims", "suspend", "--port", port,
-		"--operator-token-file", operatorTokenFile(t), "--claim", string(architectClaim), "--wait", "1s"}, &out, &errb)
+// Every other end stops the poll at once, exiting 1 and saying what happened: the claim failed or
+// retired, or the daemon holds its suspension no longer — a start dropped it — rather than waiting
+// out --wait.
+func TestClaimsSuspendStopsAtEveryOtherEnd(t *testing.T) {
+	for _, tc := range []struct {
+		seen seenClaim
+		want string
+	}{
+		{seenClaim{"failed", false}, "is failed, so it will not be suspended"},
+		{seenClaim{"retired", false}, "is retired, so it will not be suspended"},
+		{seenClaim{"idle", false}, "no longer holds the suspension of legion-legion-legion-208-architect, which is idle: a start run against the claim dropped it"},
+	} {
+		t.Run(tc.seen.state, func(t *testing.T) {
+			port, lists := heldSuspendDaemon(t, heldWorking, tc.seen)
 
-	if code != 1 || out.Len() != 0 {
-		t.Fatalf("suspend exited %d printing %q, want 1 and nothing printed", code, out.String())
+			code, out, errb := suspendAgainst(t, port, "1h")
+
+			if code != 1 || out != "" {
+				t.Fatalf("suspend exited %d printing %q, want 1 and nothing printed", code, out)
+			}
+			if !strings.Contains(errb, tc.want) {
+				t.Fatalf("suspend said %q, want %q", errb, tc.want)
+			}
+			if got := lists(); got != 2 {
+				t.Fatalf("the command listed the claims %d times, want it to stop at the second answer", got)
+			}
+		})
 	}
-	if msg := errb.String(); !strings.Contains(msg, "still working after 1s") {
-		t.Fatalf("suspend said %q, want it to name the last state it saw and the wait", msg)
+}
+
+// A suspension still held when --wait runs out fails the command, naming the claim's state and why
+// a held suspension can outlast the stop timeout.
+func TestClaimsSuspendFailsWhenTheHeldSuspensionOutlastsTheWait(t *testing.T) {
+	port, _ := heldSuspendDaemon(t, heldWorking)
+
+	code, out, errb := suspendAgainst(t, port, "1s")
+
+	if code != 1 || out != "" {
+		t.Fatalf("suspend exited %d printing %q, want 1 and nothing printed", code, out)
+	}
+	if want := "is still working after 1s, its suspension held"; !strings.Contains(errb, want) {
+		t.Fatalf("suspend said %q, want %q", errb, want)
 	}
 }

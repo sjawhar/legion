@@ -449,8 +449,8 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			request := RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing"}
 			if state != StateWorking {
 				h.must(request)
-			} else if err := h.handle(request); !errors.Is(err, ErrSuspendWaits) {
-				t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+			} else if err := h.handle(request); !errors.Is(err, ErrSuspendHeld) {
+				t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 			} else {
 				h.must(StreamTurnEnd{Claim: testToken})
 			}

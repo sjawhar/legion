@@ -122,8 +122,8 @@ func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
 		h.relaunched()
 		h.must(StreamTurnStart{Claim: testToken})
 	}
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendWaits) {
-		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendWaits", err)
+	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 	h.advance(testStop)
 	h.wantState(StateSuspended)
