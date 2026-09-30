@@ -17,11 +17,14 @@ events and sends them to the current Claude Code session as supported
   merging with it; Claude Code reads only `.claude-plugin/plugin.json`, so it still launches the
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
   unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
-- `hooks/hooks.json` runs `dist/open-asks-hook.js` on every `SessionStart` (startup, resume, clear,
-  compact, fork). It records the current session id for the channel server and puts the session's
-  open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
+- `hooks/hooks.json` runs `dist/session-hook.js open-asks` on every `SessionStart` (startup,
+  resume, clear, compact, fork). It records the current session id for the channel server and puts
+  the session's open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
   `unavailable: <reason>` when Dispatch cannot be reached; nothing when Dispatch is not
-  configured).
+  configured). With Dispatch configured, `dist/session-hook.js dispatch-first` puts the
+  `dispatch-first` skill into the context of each new session (startup, clear, compact) and of each
+  subagent (`SubagentStart`), as a hook entry of its own so neither output crowds the other past
+  Claude Code's 10,000-character hook limit.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe` or a successful Dispatch mutation. It renders every envelope with
   the shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
@@ -118,7 +121,7 @@ The marketplace installs this package's git tree into Claude Code's plugin cache
 `node_modules`: `workspace:*` dependencies cannot resolve there, and Claude Code skips its automatic
 dependency install because the package has no lockfile of its own (the monorepo's lives at the
 root). So the two executables ship as committed single-file Bun bundles, `dist/envoy-channel.js`
-and `dist/open-asks-hook.js`, with every dependency inlined (`@legion/contracts`,
+and `dist/session-hook.js`, with every dependency inlined (`@legion/contracts`,
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod`, `ky`; the package version is
 inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one version).
 

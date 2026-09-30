@@ -1,5 +1,5 @@
 {
-  "description": "Envoy: summarise this session's open Dispatch asks when a session starts, and load the dispatch-first skill when Dispatch is configured.",
+  "description": "Envoy: summarise this session's open Dispatch asks when a session starts, and load the dispatch-first skill into each session and subagent when Dispatch is configured.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "bun",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/open-asks-hook.js"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/session-hook.js", "open-asks"],
             "timeout": 10
           }
         ]
@@ -19,7 +19,19 @@
           {
             "type": "command",
             "command": "bun",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/dispatch-first-hook.js"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/session-hook.js", "dispatch-first"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/session-hook.js", "dispatch-first"],
             "timeout": 10
           }
         ]

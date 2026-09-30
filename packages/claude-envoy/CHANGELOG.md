@@ -4,12 +4,18 @@
 
 ### Added
 
-- With Dispatch configured, every Claude Code session carries the `dispatch-first` skill: a new
-  SessionStart hook (`hooks/dispatch-first-hook.ts`, matcher `startup|clear|compact`) puts it into
-  the model's context as `additionalContext`, a command of its own so the open-asks summary cannot
-  push it past Claude Code's 10,000-character hook limit (LEGION-386). The plugin ships the skill as
-  a third symlink, `skills/dispatch-first`, and the hook reads it from `${CLAUDE_PLUGIN_ROOT}` at
-  run time; an install without it fails the hook naming the file.
+- With Dispatch configured, every Claude Code session and subagent carries the `dispatch-first`
+  skill (LEGION-386): the hook command puts it into the model's context as `additionalContext` on
+  `SessionStart` (matcher `startup|clear|compact`) and on every `SubagentStart`, each a hook entry
+  of its own so the open-asks summary cannot push it past Claude Code's 10,000-character hook
+  limit. The plugin ships the skill as a third symlink, `skills/dispatch-first`, and the hook reads
+  it from `${CLAUDE_PLUGIN_ROOT}` at run time; an install without it fails the hook naming the
+  file.
+
+### Changed
+
+- The two hook commands are one bundle, `dist/session-hook.js` (`hooks/session-hook.ts`), whose
+  argument picks the mode: `open-asks` or `dispatch-first`. `dist/open-asks-hook.js` is gone.
 
 ## [0.4.0]
 

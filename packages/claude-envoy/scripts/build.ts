@@ -14,8 +14,7 @@ const packageRoot = resolve(import.meta.dir, "..")
 /** Output name -> source entrypoint, relative to the package root. */
 export const BUNDLE_ENTRYPOINTS = {
   "envoy-channel": "bin/envoy-channel.ts",
-  "dispatch-first-hook": "hooks/dispatch-first-hook.ts",
-  "open-asks-hook": "hooks/open-asks-hook.ts",
+  "session-hook": "hooks/session-hook.ts",
 } as const
 
 export async function buildBundles(outdir: string): Promise<void> {

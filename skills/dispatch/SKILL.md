@@ -18,7 +18,8 @@ longer exist.
 ## Where the detail lives
 
 This file is the workflow. The detail for a step is in a reference file: open it when you reach
-that step, not before.
+that step, not before. On a host with no `skill://` scheme (Claude Code, OpenCode), a link's path
+after `skill://dispatch/` is relative to this skill's base directory.
 
 | When you are about to | Read |
 | --- | --- |
@@ -143,7 +144,7 @@ See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-yo
 Every session works on an issue or project document. Legion pre-fills `issue` from `LEGION_ISSUE`: use a native issue key such as
 `LEGION-3`, an external `owner/repo#n` reference, or a bare positive number (resolved against the cwd repository). Otherwise pass
 exactly one owner to every owner-scoped tool: `issue` for an issue, or `project` and `artifact` for an unlinked project document (see
-[References](#references) for the resulting ref shape). An external issue reference addresses the existing Dispatch issue linked to
+[Reference forms](skill://dispatch/references/reading.md) for the resulting ref shape). An external issue reference addresses the existing Dispatch issue linked to
 that GitHub issue or pull request. Only `dispatch_issue` with `external` creates a native issue; if no issue is linked, call
 `dispatch_issue({ external: "owner/repo#n", project: "<project>", title: "<title>" })` before addressing it.
 
@@ -157,24 +158,16 @@ follow [Writing a spec](#writing-a-spec).
 
 ## Search first
 
-Before you plan, file an issue, start a design document, ask, or post a finding, search:
+`skill://dispatch-first`, which every session with Dispatch carries, says how to search before
+you plan, start a design document, file an issue, ask, post a finding or start work, and what to
+do with each hit. What it leaves out:
 ```ts
 dispatch_search({ query, project?, limit? })
 ```
-Every word of the query must match, so each word you add can only lose hits: search with two or
-three words, the thing and what is wrong with it, as a user would name them, and when a query finds
-nothing, drop a word before you add one. Try two or three wordings (the component, the symptom, the
-fix) before concluding nothing exists. Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`.
-It returns the best `limit` hits (20 by default, 50 at most) across issues, documents, comments,
-asks, and messages. Issue-owned hit lines start with the issue key; standalone project-document hit
-lines start with `dispatch://PROJECT/artifact/<slug>`, followed by the absolute link.
-
-Open each hit that could be yours with `dispatch_read`, then its parent (the `child_of` row under
-`Links:`); the parent's children and the issue's `Components:` line show where the rest of the
-work lives. Work already tracked gets your finding on its issue, never a second issue. A question
-an answered ask settles gets that ask cited (`dispatch://KEY/ask/<id>`), never asked again. A
-duplicate you meet is closed with a `reason` naming the survivor, or, when it carries the `legion`
-label or someone else's claim, commented on naming the survivor. Cite the hit you build on
+Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. It returns the best `limit` hits (20
+by default, 50 at most) across issues, documents, comments, asks, and messages. Issue-owned hit
+lines start with the issue key; standalone project-document hit lines start with
+`dispatch://PROJECT/artifact/<slug>`, followed by the absolute link. Cite the hit you build on
 (`dispatch://KEY` or the document reference), or state "no prior issue" in the spec.
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
@@ -333,6 +326,8 @@ that follow from it:
 the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
 they must read to decide belongs in the spec in the first place — see [Artifacts](#artifacts).
 
+### When you need a human
+
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
 **Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17). A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
@@ -365,7 +360,7 @@ dispatch_issue_update({ issue: "CORE-14", components: { mode: "inherit" } })    
 
 No native Dispatch tool lists component ids. Read the configured model with `GET /api/v1/projects/{key}/architecture` and use each non-external `components[].id`; when its source repository is your checkout, those ids are the file names under `.dispatch/architecture/` (`web.md` → `web`). An id absent from the model, or an `external` component, is refused with `COMPONENTS_INPUT`.
 
-Use `mode: "none"` with a concrete reason only when the work is genuinely non-architectural (for example hiring, process, or operations work). A closed issue can be classified without reopening. Change code and its architecture description (`.dispatch/architecture/<id>.md`) in the same review.
+Use `mode: "none"` with a concrete reason only when the work is genuinely non-architectural (for example hiring, process, or operations work). A closed issue can be classified without reopening. Change code and its architecture description (`.dispatch/architecture/<id>.md`) in the same review. When the model you read is behind your checkout, `dispatch_architecture_sync` imports it now ([Syncing a project's architecture model](skill://dispatch/references/issues.md)).
 
 ## Close what you opened
 
@@ -489,5 +484,8 @@ rejoining a thread, and the topic to subscribe to, are in
 [Asks after they open](skill://dispatch/references/asks.md).
 
 ## References
+
+The `dispatch://` form for each kind of node, and what it resolves to, is under
+[Reference forms](skill://dispatch/references/reading.md).
 
 **Every reference is a link, never an unlinked mention.** If you name a thing that has an address, link it: another issue, ask, comment, spec, or message (the `dispatch://` forms in [Reading back](skill://dispatch/references/reading.md)), an artifact (`dispatch://KEY/artifact/<slug>`), an eval (its viewer URL), a Slack message (its permalink), a Drive file (its share link). Bare phrases like "see this eval", "his 09-04 run", "the comment above", or "per the spec" with no link are banned: they make the reader hunt for what you already had in hand, and nothing can be traversed from them. Linking every reference is what makes a body both consumable and navigable. If a thing genuinely has no linkable address, say so; otherwise the link is not optional.

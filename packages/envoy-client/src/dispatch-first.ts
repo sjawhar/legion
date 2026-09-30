@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { messageFor } from "./errors";
 
 /**
- * Opens the dispatch-first skill as a host puts it into a session's context. Nothing else
- * carries it, so a request that already holds the injected skill is recognised by this tag
- * alone; the skill's own words would also match a `read skill://dispatch-first` result.
+ * Opens the dispatch-first skill as a host puts it into a session's context. A host that checks
+ * for a copy already inserted reads only the position it inserts at: this literal also sits in
+ * this module, the built bundles and anything that quotes them, which a session may read.
  */
 export const DISPATCH_FIRST_MARKER = "<dispatch-first-skill>";
 
