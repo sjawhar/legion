@@ -6,6 +6,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
+  SEARCH_QUERY_MAX,
   SPEC_SECTIONS,
 } from "./dispatch-tools";
 import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
@@ -203,6 +204,16 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ query: "a" }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 51 }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 50, project: "LEGION" }).success).toBe(true);
+  });
+
+  test("dispatch_search accepts a query at the limit and refuses one character over by name", () => {
+    const schema = schemaFor("dispatch_search");
+
+    expect(schema.safeParse({ query: "x".repeat(SEARCH_QUERY_MAX) }).success).toBe(true);
+    const over = schema.safeParse({ query: "x".repeat(SEARCH_QUERY_MAX + 1) });
+    expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+      `is 1 characters over the ${SEARCH_QUERY_MAX}-character limit (${SEARCH_QUERY_MAX + 1}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage`,
+    ]);
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {

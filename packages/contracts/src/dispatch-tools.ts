@@ -181,6 +181,22 @@ export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 /** Longest ask question the Dispatch server accepts, in characters. */
 export const ASK_QUESTION_MAX = 800;
 
+/**
+ * Longest `dispatch_search` query the Dispatch server accepts (`GET /api/v1/search`'s `q`, after
+ * trimming), in characters (UTF-16 units, JavaScript's `length`). The query travels in the URL,
+ * so the limit comes from what the URL can carry: an AWS Application Load Balancer refuses a
+ * request line over its fixed 16 K quota with `414 Request-URI Too Large` (measured 2026-09-30 on
+ * the deployed one: a 16,369-byte path and query answered, 16,370 bytes refused), while the
+ * server's own `http.Server` reads about 1 MiB (Go's default `MaxHeaderBytes`). Percent-encoding
+ * costs at most 9 bytes per character (a three-byte UTF-8 character becomes `%XX%XX%XX`), so
+ * 1,000 characters stay under 9,000 bytes: the request fits under 16 K with room for the path and
+ * the other parameters, whatever the query is written in. A search is a few words; every word
+ * must match, so a pasted passage finds nothing anyway. Generated into Go as
+ * `contracts.SearchQueryMax`, which the server enforces, so the tool's refusal and the server's
+ * are one number.
+ */
+export const SEARCH_QUERY_MAX = 1000;
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -908,8 +924,12 @@ export const dispatchToolSpecs = [
       'Websearch syntax: "quoted phrase", -excluded, OR.',
     arguments: (z) => ({
       query: z
-        .string({ min: 2 })
-        .describe("Keyword, phrase, or websearch expression; at least 2 characters."),
+        .string({
+          min: 2,
+          max: SEARCH_QUERY_MAX,
+          maxHint: "search with a short phrase of a few words, not a passage",
+        })
+        .describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z.string().describe("Optional project key to search within.").optional(),
       limit: z
         .number({ int: true, min: 1, max: 50 })

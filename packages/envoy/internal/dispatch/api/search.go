@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -88,6 +89,13 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	searchText := strings.TrimSpace(query.Get("q"))
 	if utf8.RuneCountInString(searchText) < 2 {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "q must be at least 2 characters")
+		return
+	}
+	// Counted in UTF-16 units, as dispatch_search counts before it sends anything; the limit keeps
+	// the URL under the load balancer's request-line quota (contracts.SearchQueryMax).
+	if length := len16(searchText); length > contracts.SearchQueryMax {
+		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
+		writeError(w, "SEARCH_QUERY_TOO_LONG", tooLong.status, tooLong.message+"; search with a short phrase of a few words, not a passage")
 		return
 	}
 
