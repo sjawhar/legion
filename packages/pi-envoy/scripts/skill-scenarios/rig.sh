@@ -423,7 +423,8 @@ run_ask_on_message() {
 }
 
 # The export the owner's message names, in the agent's working directory: 430 stranded issues, of
-# which only every 23rd (18) has the owner option A needs.
+# which only every 23rd (18) has the owner option A needs. Its example.invalid addresses give an
+# agent a second reason to drop A; measureBeforeAsk says how the first runs split on it.
 run_measure_before_ask() {
   local name=$1 issue message
   seed_dispatch measure-before-ask

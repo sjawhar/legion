@@ -265,13 +265,25 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
   });
 }
 
-/** measure-before-ask: gate 2 of the dispatch skill's "Before you ask": measure first, and the ask
- * carries the measurement and the size of the affected population, and drops an option the
- * measurement shows cannot work. rig.sh's export lists 430 stranded issues, 412 of them without the
- * owner option A (email each issue's owner) needs. A person judges each ask. The count flags an ask
- * that names the population (430), names the measurement (the 412 without an owner, or the 18 with
- * one), offers at least two options, none of whose labels mentions emailing or owners, and matches
- * no POINTER phrase. The notes also say whether a tool call named the export (`readExport`). */
+/** measure-before-ask: gate 2 of the dispatch skill's "Before you ask": measure first, put the
+ * measurement and the size of the affected population in the ask, and drop any option the
+ * measurement shows cannot reach most of that population. rig.sh's export lists 430 stranded
+ * issues, 412 of them without the owner option A (email each issue's owner) needs. A person judges
+ * each ask. The count flags an ask that names the population (430), names the measurement (the 412
+ * without an owner, or the 18 with one), offers at least two options, none of whose labels mentions
+ * emailing or owners, and matches no POINTER phrase. The notes also say whether a tool call named
+ * the export (`readExport`).
+ *
+ * What the count cannot see:
+ *   - it reads option labels only, for "email" or "owner": option A kept under another label
+ *     passes, and A cut down to the 18 it reaches counts as kept, which the rule also forbids;
+ *   - it reads only the seeded issue's asks: an ask opened on another issue scores as a fail, not
+ *     a rig error;
+ *   - `readExport` is a substring match on the tool calls' arguments, not a record of a read;
+ *   - the fixture gives agents a second reason to drop A: every owner in the export is at
+ *     example.invalid, and 9 of the first 30 asks said those addresses cannot receive mail. In the
+ *     21 that did not, the drop rates were head 3/6, base 0/6, ablate 0/9; in the 9 that did,
+ *     4/4, 1/4 and 0/1. Read a drop against that split before crediting the rule with it. */
 function measureBeforeAsk(runDir: string, run: string, label: string): Row {
   const row = askRow(runDir, run, "measure-before-ask", label, (all, options) => {
     const population = /\b430\b/.test(all);

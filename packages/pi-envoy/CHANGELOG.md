@@ -52,17 +52,19 @@
 
 - The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
   quote or attribution that came with it; every rule, command and example stays, and a decision
-  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the five rules
+  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules
   deployment instructions never override: no deferrals, bringing the base in only on a real
-  conflict or a retarget, the implementer's own proof on a production-like surface before the
-  merge, that proof re-run at the head an applied simplify pass leaves final, and the
-  implementer's production check after the merge.
+  conflict or a retarget, the implementer's own proof on a production-like surface at the head
+  that merges (an applied simplify head included), and the implementer's production check after
+  the merge.
 - The `dispatch` skill's gate 2 states as instructions what only its deleted story implied: put
   the measurement and the size of the affected population in the ask, and drop any option the
   measurement shows cannot reach most of that population (LEGION-386). On the skill scenario rig,
   with the rule's first wording ("drops an option the measurement shows cannot work"), an agent
   asked which of three options to take, where an export shows one reaches 18 of 430, left it out
-  in 7 of 10 runs, against 1 of 10 with the story and 0 of 10 with gate 2's sentences deleted.
+  in 7 of 10 runs, against 1 of 10 with the story and 0 of 10 with gate 2's sentences deleted; in
+  the runs whose ask did not also note that the export's owner addresses cannot receive mail, 3
+  of 6 against 0 of 6 and 0 of 9.
 - The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
   `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
   `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found
