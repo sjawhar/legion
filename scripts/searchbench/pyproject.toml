@@ -1,0 +1,30 @@
+[project]
+name = "searchbench"
+version = "0.1.0"
+description = "Dispatch search benchmark: keyword, dense, hybrid and reranked retrieval over an exported corpus"
+requires-python = ">=3.12"
+dependencies = [
+  "boto3>=1.40",
+  "numpy>=2",
+  "psycopg[binary]>=3.2",
+  "pgvector>=0.4",
+]
+
+[dependency-groups]
+# Local open-weight models (system G). CPU-only torch keeps the install small.
+local = [
+  "torch>=2.6",
+  "transformers>=4.51",
+  "sentence-transformers>=4.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
