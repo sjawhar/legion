@@ -43,6 +43,12 @@ export function IssueFilters({
     ...filters.activeFilters,
   ];
   const noIdentityFiltersExpanded = labels.length > 0;
+  // The strip re-reads its saved open state when the filter count changes only while it is
+  // closed: that is how filters arriving from a link open it. While it is open the count changes
+  // because the user is filtering in it, and a re-read would collapse it the moment the last
+  // filter goes (clearing the search box), taking the control they are typing in with it. So it
+  // stays open until they close it or leave the project (`ProjectPage` keys the strip by it).
+  const [refreshOn, setRefreshOn] = useState(activeFilterCount);
   const [filtersExpanded, setFiltersExpanded] = useUserPreference(
     "project.issue-filters",
     (stored) => activeFilterCount > 0 && stored !== "collapsed",
@@ -50,11 +56,14 @@ export function IssueFilters({
     {
       failed: noIdentityFiltersExpanded,
       pending: noIdentityFiltersExpanded,
-      refreshOn: activeFilterCount,
+      refreshOn,
     }
   );
   const [openPicker, setOpenPicker] = useState<"labels" | "status" | undefined>(undefined);
 
+  useEffect(() => {
+    if (!filtersExpanded) setRefreshOn(activeFilterCount);
+  }, [activeFilterCount, filtersExpanded]);
   useEffect(() => {
     if (!filtersExpanded) setOpenPicker(undefined);
   }, [filtersExpanded]);
@@ -84,7 +93,13 @@ export function IssueFilters({
           Filters · {activeFilterCount} active
         </button>
         {activeFilters.map(({ label, remove }) => (
-          <Chip aria-label={`Remove ${label} filter`} key={label} onClick={remove} removable>
+          <Chip
+            aria-label={`Remove ${label} filter`}
+            key={label}
+            onClick={remove}
+            removable
+            title={label}
+          >
             {label}
           </Chip>
         ))}
