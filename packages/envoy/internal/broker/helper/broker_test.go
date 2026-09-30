@@ -107,6 +107,9 @@ type fakeBroker struct {
 	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
 	// session enrolling for exactly as long as it needs.
 	enrollGate chan struct{}
+	// renewGate, when set, holds every renew until the test closes it, so a test can let a lease
+	// genuinely pass before the renew that meets it arrives.
+	renewGate chan struct{}
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -211,6 +214,12 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		w.WriteHeader(404)
 	})
 	mux.HandleFunc("POST /v1/enrollments/{id}/renew", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		gate := f.renewGate
+		f.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		id := r.PathValue("id")
