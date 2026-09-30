@@ -106,10 +106,17 @@ func TestAnApprovalWaitsForGreenChecksAfterTheReviewerCompletes(t *testing.T) {
 
 func seedReview(t *testing.T, pool *pgxpool.Pool, verdict string) {
 	t.Helper()
+	seedReviewOf(t, pool, "head", verdict)
+}
+
+// seedReviewOf seeds LEGION-208 in reviewing, its pull request's head at head with verdict
+// settled on it, and its reviewer's round not yet completed.
+func seedReviewOf(t *testing.T, pool *pgxpool.Pool, head, verdict string) {
+	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: verdict})
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: verdict})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 }
@@ -523,4 +530,183 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A round ends only on a review that decides it: an APPROVE of the head or a REQUEST_CHANGES. A
+// reviewer that completes its round with none - it submitted a COMMENT, a review in any other
+// state, or no review at all - leaves the issue in reviewing with nothing on its way to end it, so
+// its architect is told, naming the head, and told again each time the reviewer (the review App)
+// submits another review that decides nothing. A reply on a review thread is a review GitHub gives
+// no body, not a submitted one, and it tells nothing; nor does anyone else's comment, which changes
+// nothing about the round. A review that arrives before the reviewer completes tells nobody: the
+// completion is still to come. A deciding review from the same round still ends it, as always.
+func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
+	const reviewApp = "legion-reviewer[bot]"
+	for _, tc := range []struct {
+		name     string
+		before   []string
+		after    []intake.PullRequestReview
+		told     int
+		decision string
+		want     phase.Phase
+	}{
+		{name: "a COMMENT, then the reviewer completes", before: []string{"commented"}, told: 1, decision: "approved", want: phase.Retro},
+		{name: "no review at all", told: 1, decision: "approved", want: phase.Retro},
+		{name: "a dismissed review, then the reviewer completes", before: []string{"dismissed"}, told: 1, decision: "changes_requested", want: phase.Implementing},
+		{name: "the reviewer completes, then its COMMENT", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp, Body: "one more thought"}},
+			told: 2, decision: "changes_requested", want: phase.Implementing},
+		{name: "the reviewer completes, then its reply on a review thread", after: []intake.PullRequestReview{{State: "commented", Author: reviewApp}},
+			told: 1, decision: "approved", want: phase.Retro},
+		{name: "the reviewer completes, then another account's COMMENT", after: []intake.PullRequestReview{{State: "commented", Author: "a-human", Body: "a thought"}},
+			told: 1, decision: "approved", want: phase.Retro},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "c0ffee", "green")
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			engine.cfg.ReviewAppLogin = reviewApp
+			apply := applyFacts(t, pool, engine)
+			review := func(id string, review intake.PullRequestReview) {
+				t.Helper()
+				review.Repo, review.Number, review.CommitID = "sjawhar/legion", 42, "c0ffee"
+				apply(id, review)
+			}
+			for i, state := range tc.before {
+				review(fmt.Sprintf("before-%d", i), intake.PullRequestReview{State: state, Author: reviewApp, Body: "the " + state + " review"})
+				if got := reviewStuckNotices(t, pool); len(got) != 0 {
+					t.Fatalf("a %s review before the reviewer completed told the architect %+v, want nothing", state, got)
+				}
+			}
+			if result := apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer,
+				Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}); result.Refusal != nil {
+				t.Fatalf("the reviewer's completion was refused: %+v", result.Refusal)
+			}
+			for i, after := range tc.after {
+				review(fmt.Sprintf("after-%d", i), after)
+			}
+			if got := issuePhase(t, pool); got != phase.Reviewing {
+				t.Fatalf("the issue is in %s, want reviewing: nothing decided the round", got)
+			}
+			told := reviewStuckNotices(t, pool)
+			if len(told) != tc.told {
+				t.Fatalf("the architect was told %d times (%+v), want %d", len(told), told, tc.told)
+			}
+			for _, notice := range told {
+				if notice.Role != claim.RoleReviewer || notice.Phase != phase.Reviewing || !strings.Contains(notice.Reason, "c0ffee") {
+					t.Fatalf("notice %+v, want the reviewer's reviewing round, naming head c0ffee", notice)
+				}
+			}
+			review("decides", intake.PullRequestReview{State: tc.decision, Author: reviewApp, Body: "the decision"})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the %s review the issue is in %s, want %s", tc.decision, got, tc.want)
+			}
+			if got := reviewStuckNotices(t, pool); len(got) != tc.told {
+				t.Fatalf("the deciding review told the architect again: %+v", got)
+			}
+		})
+	}
+}
+
+// An approval ends the round only while it approves the head's code and the head's checks are
+// green. One that cannot - CI settled red at the head, which in reviewing the reviewer's round
+// decides, or a push since the approved head may have changed code - leaves the round as stuck as
+// no review at all, so the architect is told, once, when the round becomes stuck. A round whose
+// checks are still running waits for them and tells nobody.
+func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
+	approve := func(head string) intake.Fact {
+		return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: head, Body: "approved"}
+	}
+	requestChanges := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head-2", Body: "fix the checks"}
+	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}
+	sync := intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"}
+	push := func(paths string) intake.Fact {
+		unforced, whole := "false", "false"
+		return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "head", After: "head-2",
+			ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: "legion-reviewer[bot]"}
+	}
+	settle := func(head, verdict string, generation int64) intake.Fact {
+		failing := []string{}
+		if verdict == "red" {
+			failing = []string{"lint"}
+		}
+		return intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head, CheckRuns: []record.AttemptRun{{Name: "lint", ID: generation}},
+			Generation: generation, Snapshot: fmt.Sprintf("%s-%s-%d", verdict, head, generation), Verdict: verdict, Failing: failing}
+	}
+	for _, tc := range []struct {
+		name    string
+		verdict string
+		steps   []intake.Fact
+		// told is what the one notice's reason names; empty, the architect is told nothing.
+		told []string
+		then intake.Fact
+		want phase.Phase
+	}{
+		{name: "CI settles red on the reviewer's handoff head after it completes",
+			steps: []intake.Fact{approve("head"), sync, push(".legion/review.json"), complete, settle("head-2", "red", 2), settle("head-2", "red", 3)},
+			told:  []string{"head-2", "lint"}, then: requestChanges, want: phase.Implementing},
+		{name: "a push since the approved head changed code", verdict: "green",
+			steps: []intake.Fact{approve("head"), sync, push(".legion/review.json\nsrc/widget.go"), settle("head-2", "green", 2), complete},
+			told:  []string{"head-2"}, then: approve("head-2"), want: phase.Retro},
+		{name: "the approved head's checks are still running",
+			steps: []intake.Fact{approve("head"), complete},
+			then:  settle("head", "green", 2), want: phase.Retro},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", tc.verdict)
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			for i, fact := range tc.steps {
+				if result := apply(fmt.Sprintf("step-%d", i), fact); result.Refusal != nil {
+					t.Fatalf("step %d (%T) was refused: %+v", i, fact, result.Refusal)
+				}
+			}
+			if got := issuePhase(t, pool); got != phase.Reviewing {
+				t.Fatalf("the issue is in %s, want reviewing", got)
+			}
+			told := reviewStuckNotices(t, pool)
+			if len(tc.told) == 0 && len(told) != 0 {
+				t.Fatalf("the architect was told %+v, want nothing while the checks run", told)
+			}
+			if len(tc.told) != 0 {
+				if len(told) != 1 {
+					t.Fatalf("the architect was told %d times (%+v), want once", len(told), told)
+				}
+				for _, want := range tc.told {
+					if !strings.Contains(told[0].Reason, want) {
+						t.Fatalf("the notice's reason %q does not name %q", told[0].Reason, want)
+					}
+				}
+			}
+			apply("then", tc.then)
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("the issue is in %s, want %s", got, tc.want)
+			}
+			if got := reviewStuckNotices(t, pool); len(got) != len(told) {
+				t.Fatalf("the round's end told the architect again: %+v", got)
+			}
+		})
+	}
+}
+
+// reviewStuckNotices is every review-stuck notice the outbox holds, in order.
+func reviewStuckNotices(t *testing.T, pool *pgxpool.Pool) []record.Notice {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), `select coalesce(payload->>'role', ''), coalesce(payload->>'phase', ''), coalesce(payload->>'reason', '')
+		from outbox where kind = 'notice' and payload->>'kind' = 'review-stuck' order by id`)
+	if err != nil {
+		t.Fatalf("read review-stuck notices: %v", err)
+	}
+	defer rows.Close()
+	notices := []record.Notice{}
+	for rows.Next() {
+		notice := record.Notice{Kind: "review-stuck"}
+		if err := rows.Scan(&notice.Role, &notice.Phase, &notice.Reason); err != nil {
+			t.Fatalf("scan review-stuck notice: %v", err)
+		}
+		notices = append(notices, notice)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate review-stuck notices: %v", err)
+	}
+	return notices
 }

@@ -22,12 +22,14 @@ import (
 // issue back to implementing (classify.RedSendsBack), from testing or reviewing, the phases whose
 // TriggerChecksRed rows the table has. The implementer's task and the architect's checks-red
 // notice name the failing checks, and the implementer's next push is a counted fix attempt, as any
-// new head on a red verdict is (classify.AdvancePullRequestHead).
+// new head on a red verdict is (classify.AdvancePullRequestHead). A settlement that leaves a
+// completed round stuck, where it was not stuck so before, tells the architect (tellStuckReview).
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
+	prior := *pr
 	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
 	// that stands for the head can be of the code head it replaced, arriving after it. A
 	// settlement is for the commit it names, never the head by default.
@@ -69,16 +71,24 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, nil
 	}
 	ended, err := e.advanceReview(ctx, tx, *issue, pr)
-	if err != nil || ended || !classify.RedSendsBack(*pr) {
+	if err != nil || ended {
 		return intake.Result{}, err
 	}
-	// A red that names no failing check (classify.EffectiveOutcome keeps the verdict when nothing
-	// names one) says so plainly rather than ending in an empty list.
+	if !classify.RedSendsBack(*pr) {
+		return intake.Result{}, e.tellStuckReviewSince(ctx, tx, *issue, &prior, pr)
+	}
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, redAt(*pr))
+}
+
+// redAt is what the red verdict standing for the pull request's head says: the head, and the checks
+// failing there. A red that names no failing check (classify.EffectiveOutcome keeps the verdict
+// when nothing names one) says so plainly rather than ending in an empty list.
+func redAt(pr record.PullRequest) string {
 	reason := "CI is red at " + pr.HeadSHA
 	if failing := append(append([]string(nil), pr.Failing...), pr.FailingStatuses...); len(failing) > 0 {
 		reason += ": " + strings.Join(failing, ", ")
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
+	return reason
 }
 
 func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestReview) (intake.Result, error) {
@@ -90,11 +100,24 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
+	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	// A review the reviewer submitted (the review App's, with a body) is its own act, and every one
+	// that leaves a round it completed stuck is told: it may be the answer to the architect's request
+	// for a decision. GitHub records each reply on a review thread as a review with no body, which
+	// answers nothing; such a reply, and anyone else's review, tells only when it changes why the
+	// round is stuck.
+	before := ""
+	if !e.byReviewApp(fact.Author) || fact.Body == "" {
+		before = stuckReview(*issue, reviewer, pr)
+	}
 	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
 	// comment written after a decision but delivered before it cannot make the decision look old.
 	state := strings.ToLower(fact.State)
 	if state != "changes_requested" && state != "approved" {
-		return intake.Result{}, nil
+		return intake.Result{}, e.tellStuckReview(ctx, tx, *issue, reviewer, pr, before)
 	}
 	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id
 	// (record.ReviewOrder). Among reviews that all carry a time and arrive before the round ends,
@@ -125,16 +148,15 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if issue.Phase != phase.Reviewing && !held {
 		return intake.Result{}, nil
 	}
-	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil {
+	reviewer.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID}
+	if err := e.store.PutPhase(ctx, tx, reviewer); err != nil {
 		return intake.Result{}, err
 	}
-	row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID}
-	if err := e.store.PutPhase(ctx, tx, row); err != nil {
+	ended, err := e.advanceReview(ctx, tx, *issue, pr)
+	if err != nil || ended {
 		return intake.Result{}, err
 	}
-	_, err = e.advanceReview(ctx, tx, *issue, pr)
-	return intake.Result{}, err
+	return intake.Result{}, e.tellStuckReview(ctx, tx, *issue, reviewer, pr, before)
 }
 
 // advanceReview ends a review once both of its halves are in, and says whether it did: the
@@ -144,7 +166,8 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 // asks about in turn. A review whose reviewer never completes is not ended by the decision alone:
 // the reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
 // phase-stall check), and past that the issue stays in reviewing, as a tester's that never
-// completes stays in testing.
+// completes stays in testing. A round its reviewer completed that no decision ends stays in
+// reviewing too, and its architect is told (tellStuckReview).
 func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
 	// Only a round in reviewing ends: one held from reviewing ends after the retry restores it.
 	if issue.Phase != phase.Reviewing {
@@ -170,6 +193,69 @@ func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issu
 		return true, e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")
 	}
 	return false, nil
+}
+
+// stuckReview says why issue's review round stays open with nothing on its way that would end it,
+// its reviewer (row) having completed it: no review decided it (a COMMENT decides nothing, and
+// neither does a review in any state but approved or changes_requested), or its approval cannot end
+// it, CI being red at the head, which in reviewing only the round decides (classify.RedSendsBack),
+// or the head carrying code the approved head does not (classify.ApprovalStands). It is "" for an
+// issue not in reviewing, a round still owed its reviewer's completion, one that ends
+// (advanceReview), and one waiting on the head's checks or on a head a push that may change code is
+// bringing. The reason names the head, since the decision the round needs is of the head.
+func stuckReview(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) string {
+	if issue.Phase != phase.Reviewing || row.HandoffCommit == "" || pr == nil {
+		return ""
+	}
+	if row.Decision == nil {
+		return fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES ends the round, and a COMMENT decides nothing",
+			pr.Number, pr.HeadSHA)
+	}
+	if row.Decision.State != "approved" {
+		return ""
+	}
+	switch classify.HeadVerdict(*pr) {
+	case "red":
+		return fmt.Sprintf("the reviewer approved %s on pull request #%d, but %s; a red at the reviewer's own head is its round's to decide, with a REQUEST_CHANGES naming the failing checks",
+			row.Decision.Head, pr.Number, redAt(*pr))
+	case "green":
+		if classify.ApprovalStands(*pr, row.Decision.Head) || classify.CodeOnItsWay(*pr) {
+			return ""
+		}
+		return fmt.Sprintf("the reviewer approved %s on pull request #%d, which does not approve head %s: a push since may have changed code, so only an APPROVE of %s or a REQUEST_CHANGES ends the round",
+			row.Decision.Head, pr.Number, pr.HeadSHA, pr.HeadSHA)
+	}
+	return ""
+}
+
+// tellStuckReview tells issue's architect that its review round is stuck (stuckReview, with row
+// the reviewer's and pr the pull request as the fact left them), unless it was stuck for the same
+// reason, before, when the fact arrived: the reviewer's own completion or review passes "", since
+// each of its acts that leaves the round stuck is told. The issue stays in reviewing; the architect
+// asks the reviewer for the decision. Linger holds a member of a closed tree where it stood
+// (record.TreeLingers), so nothing is told of it.
+func (e *Engine) tellStuckReview(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest, before string) error {
+	reason := stuckReview(issue, row, pr)
+	if reason == "" || reason == before {
+		return nil
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return err
+	}
+	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: "review-stuck", Role: claim.RoleReviewer, Phase: phase.Reviewing, Reason: reason})
+}
+
+// tellStuckReviewSince is tellStuckReview for a fact that is not the reviewer's own and that moved
+// the pull request from prior to pr: it tells only when the fact changed why the round is stuck.
+func (e *Engine) tellStuckReviewSince(ctx context.Context, tx pgx.Tx, issue record.Issue, prior, pr *record.PullRequest) error {
+	if issue.Phase != phase.Reviewing {
+		return nil
+	}
+	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return err
+	}
+	return e.tellStuckReview(ctx, tx, issue, row, pr, stuckReview(issue, row, prior))
 }
 
 func (e *Engine) recordRound(ctx context.Context, tx pgx.Tx, issue string) error {

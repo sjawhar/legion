@@ -30,7 +30,8 @@ type Config struct {
 	MergeQueueRole string
 	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
-	// by it is never a fix attempt, and a red on its red tests is planned. Empty matches no push.
+	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits is the
+	// reviewer's own (tellStuckReview). Empty matches no one.
 	ReviewAppLogin string
 }
 
@@ -64,6 +65,12 @@ func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 }
 
 func (e *Engine) now() time.Time { return e.cfg.Clock().UTC() }
+
+// byReviewApp says whether login is the review App's bot (Config.ReviewAppLogin). With no login
+// configured, it is no one's.
+func (e *Engine) byReviewApp(login string) bool {
+	return e.cfg.ReviewAppLogin != "" && login == e.cfg.ReviewAppLogin
+}
 
 // Apply changes workflow-owned phase state for one durable intake fact. It never performs I/O;
 // every externally visible consequence is an outbox row committed with the record change.
@@ -306,8 +313,11 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
 	case phase.Reviewing:
-		_, err := e.advanceReview(ctx, tx, *issue, pr)
-		return intake.Result{}, err
+		ended, err := e.advanceReview(ctx, tx, *issue, pr)
+		if err != nil || ended {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.tellStuckReview(ctx, tx, *issue, row, pr, "")
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
 	case phase.ProductionCheck:
@@ -424,7 +434,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
 	*pr = classify.ApplyPush(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
 		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
-		ByReviewApp: e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin,
+		ByReviewApp: e.byReviewApp(fact.Pusher),
 		// A push that does not say it was not forced - a listener that predates the field - is
 		// read as forced: its changed paths cannot then be trusted to describe the head it replaced.
 		Forced: fact.Forced == nil || *fact.Forced != "false"})
