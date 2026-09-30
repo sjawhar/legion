@@ -9,16 +9,25 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 // CheckEmbedsEveryFile reports an error unless embedded holds, in dir, every entry the directory
 // dir holds on disk, read from the test's working directory, the store's package directory.
-// pgmigrate.Load refuses a file named any other way than a migration, but only a file it is
-// given: a //go:embed pattern naming a directory without all: leaves out every name beginning
-// with _ or ., so a migration named _0054_x.up.sql would go unembedded and unapplied, with no
-// error, while its file sits in the tree.
+//
+// This is where the stores' embed rule is stated. pgmigrate.Load refuses a file named any other way
+// than a migration, but only a file it is given, and a //go:embed pattern can leave an entry out
+// without an error. A directory pattern without all: drops every name beginning with _ or ., so
+// both stores embed all:migrations; beyond that, no directive embeds a symlink, a version-control
+// name (.git, .hg, .svn, .bzr), an empty directory, a file that is not regular (a FIFO, socket or
+// device), or a hidden name Go's module paths refuse (one holding a colon, for instance), all:
+// included. A migration file left out would go unapplied while it sits in the tree, and an empty
+// directory, which holds nothing to apply, is still an entry Load never judges. On today's tree the
+// all: prefix changes nothing, since neither directory holds a _ or . name. This check fails for
+// each of those causes and names it: a _ or . name, a symlink, a version-control name, an empty
+// directory, and a file that is not regular, falling back to the store's pattern for anything else.
 func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 	onDisk, err := os.ReadDir(dir)
 	if err != nil {
@@ -28,17 +37,28 @@ func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 	if err != nil {
 		return fmt.Errorf("list embedded %s: %w", dir, err)
 	}
-	names := func(entries []fs.DirEntry) []string {
-		out := make([]string, len(entries))
-		for i, entry := range entries {
-			out[i] = entry.Name()
-		}
-		return out
+	embeddedNames := make([]string, len(inBinary))
+	for i, entry := range inBinary {
+		embeddedNames[i] = entry.Name()
 	}
-	for _, name := range names(onDisk) {
-		if !slices.Contains(names(inBinary), name) {
-			return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
+	for _, entry := range onDisk {
+		name := entry.Name()
+		if slices.Contains(embeddedNames, name) {
+			continue
 		}
+		switch {
+		case entry.Type()&fs.ModeSymlink != 0:
+			return fmt.Errorf("%s/%s is a symlink, which no //go:embed directive embeds, so no runner would see it; replace it with the file it points to, or remove it (an editor's lock file, such as Emacs's .#<file>, is one)", dir, name)
+		case slices.Contains([]string{".git", ".hg", ".svn", ".bzr"}, name):
+			return fmt.Errorf("%s/%s is a version-control name, which no //go:embed directive embeds, all: included; remove it", dir, name)
+		case entry.IsDir():
+			return fmt.Errorf("%s/%s is a directory holding nothing //go:embed can carry, such as an empty one, and a migrations directory holds files alone; remove it", dir, name)
+		case !entry.Type().IsRegular():
+			return fmt.Errorf("%s/%s is not a regular file (a FIFO, socket or device), which no //go:embed directive embeds; remove it", dir, name)
+		case strings.HasPrefix(name, "_") || strings.HasPrefix(name, "."):
+			return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:, or rename it if all: is already there, since Go's module paths refuse some names (one holding a colon, for instance)", dir, name)
+		}
+		return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; check the store's //go:embed pattern", dir, name)
 	}
 	return nil
 }

@@ -167,6 +167,10 @@ type watch struct {
 	// wait and err are written by the watch's goroutine alone and read by stop once it has ended.
 	wait *LockWait
 	err  error
+	// heldBack is true exactly when the latest reading observed was held back: an empty reading of
+	// the recorded wait, taken just after a reading that was not held back.
+	// Only the watch's goroutine touches it.
+	heldBack bool
 }
 
 func startWatch(ctx context.Context, config *pgx.ConnConfig, pid uint32) *watch {
@@ -211,21 +215,37 @@ func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
 		err := conn.QueryRow(ctx, lockWaitQuery, pid).Scan(&wait.LockType, &wait.Mode, &wait.Object, &wait.Holders)
 		switch {
 		case err == nil:
-			// pg_locks and pg_blocking_pids read the lock table in separate passes, so a reading
-			// taken as the cancellation dequeues the migration can list its ungranted lock with no
-			// blocker. It does not replace a reading of the same lock that named its holders.
-			if len(wait.Holders) == 0 && w.wait != nil && len(w.wait.Holders) > 0 &&
-				w.wait.Mode == wait.Mode && w.wait.Object == wait.Object {
-				continue
-			}
-			w.wait = &wait
+			w.observe(&wait)
 		case errors.Is(err, pgx.ErrNoRows):
-			// Not waiting at this reading; an earlier wait the migration got past stays recorded,
-			// since only a later one it did not get past would replace it.
+			w.observe(nil)
 		case ctx.Err() == nil:
+			// A failed read says nothing about the wait, so it is not observed at all: it neither
+			// holds a reading back nor ends a run of empty ones. Do not call observe here, even with
+			// nil: [named, empty, failed read, empty] would then name a holder that has left.
 			w.err = err
 			closeConn()
 		}
+	}
+}
+
+// observe records one reading of what the migration waits for; wait is nil when it was not
+// waiting at that reading. pg_locks and pg_blocking_pids read the lock table in separate passes, so
+// one reading taken as the cancellation dequeues the migration can list its ungranted lock with no
+// blocker: an empty reading of the recorded wait's lock is held back rather than replacing it. A
+// second empty reading in a row does replace it, since a holder that has left - or one
+// pg_blocking_pids cannot name, such as a prepared transaction, which it reports as pid 0 - must
+// not stay named.
+func (w *watch) observe(wait *LockWait) {
+	if wait == nil {
+		// Not waiting at this reading: an earlier wait the migration got past stays recorded, since
+		// only a later one it did not get past would replace it, and a later wait starts afresh.
+		w.heldBack = false
+		return
+	}
+	sameLock := w.wait != nil && w.wait.Mode == wait.Mode && w.wait.Object == wait.Object
+	w.heldBack = len(wait.Holders) == 0 && sameLock && !w.heldBack
+	if !w.heldBack {
+		w.wait = wait
 	}
 }
 
