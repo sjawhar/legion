@@ -11,12 +11,13 @@ import (
 )
 
 // imageEnv are the variables the worker image's final stage sets (packages/daemon/docker/
-// worker.Dockerfile, ENV), which every container inherits: HOME and OMP_PROFILE place Oh My Pi's
+// worker.Dockerfile, ENV), which every container inherits: COREPACK_DEFAULT_TO_LATEST=0 keeps the
+// corepack shims on the pnpm and yarn their corepack ships; HOME and OMP_PROFILE place Oh My Pi's
 // profile, whose sessions directory a pod mounts from the tree volume; LEGION_OMP_PATH is the Oh
 // My Pi the image probe proves the workers run; LEGION_ROLE_PROMPTS_DIR the role prompts it reads;
 // and PATH, which the runtime sets as well. TestImageEnvIsWhatTheWorkerImageSets holds the list to
 // the Dockerfile.
-var imageEnv = []string{"HOME", "LEGION_OMP_PATH", "LEGION_ROLE_PROMPTS_DIR", "OMP_PROFILE", "PATH"}
+var imageEnv = []string{"COREPACK_DEFAULT_TO_LATEST", "HOME", "LEGION_OMP_PATH", "LEGION_ROLE_PROMPTS_DIR", "OMP_PROFILE", "PATH"}
 
 // setter is who sets a variable a worker's Oh My Pi starts with, and whether the operator's pod
 // env may set it too: the pod baseline yields to the operator's own value, and the operator's

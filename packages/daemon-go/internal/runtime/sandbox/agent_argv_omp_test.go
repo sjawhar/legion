@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/testomp"
+	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
 // importMarker is a module whose top-level code writes name into the test's marker directory, so
@@ -27,7 +27,7 @@ func importMarker(name string) string {
 // extension. The control drops --no-extensions and keeps the plugin root, and imports all four:
 // without it, a missing marker could mean a fixture Oh My Pi never looks at.
 func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
-	omp := testomp.Binary(t)
+	omp := testbin.OMP(t)
 	dir := t.TempDir()
 	plugin, repo, home := filepath.Join(dir, "plugin"), filepath.Join(dir, "repo"), filepath.Join(dir, "home")
 	for path, content := range map[string]string{
