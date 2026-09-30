@@ -59,13 +59,14 @@
   the merge.
 - The `dispatch` skill's gate 2 states as instructions what only its deleted story implied: put
   the measurement and the size of the affected population in the ask, and when the measurement
-  shows an option cannot repair most of that population and another option can, drop it rather
-  than offer it cut down to the part it reaches (LEGION-386). On the skill scenario rig,
-  with the rule's first wording ("drops an option the measurement shows cannot work"), an agent
-  asked which of three options to take, where an export shows one reaches 18 of 430, left it out
-  in 7 of 10 runs, against 1 of 10 with the story and 0 of 10 with gate 2's sentences deleted; in
-  the runs whose ask did not also note that the export's owner addresses cannot receive mail, 3
-  of 6 against 0 of 6 and 0 of 9.
+  shows one fix cannot repair most of that population and another fix can, drop the first rather
+  than offer it cut down to the part it reaches; an option not to act, such as a permission ask's
+  Hold, is not a fix and stays (LEGION-386). On the skill scenario rig, an agent asked which of
+  three options to take, where an export shows one reaches 18 of 430, left it out in 7 of 10 runs
+  with the rule's first wording ("drops an option the measurement shows cannot work"), against 1
+  of 10 with the story and 0 of 10 with gate 2's sentences deleted; and in 5 of 5 runs with the
+  next wording ("an option cannot repair most … and another option can"). This final wording,
+  which speaks of fixes and keeps an option not to act, is unmeasured.
 - The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
   `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
   `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found

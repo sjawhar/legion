@@ -223,9 +223,10 @@ Every `dispatch_ask` passes four gates first:
    Measure before you write: how many are affected, whether anything reaches the path, what the
    current state already is. The measurement decides whether a human is needed at all, and when
    one is, it turns a research request he cannot answer into a decision he can. Put the
-   measurement and the size of the affected population in the ask. When the measurement shows an
-   option cannot repair most of that population and another option can, drop it, rather than
-   offering it cut down to the part it reaches.
+   measurement and the size of the affected population in the ask. When the measurement shows one
+   fix cannot repair most of that population and another fix can, drop the first, rather than
+   offering it cut down to the part it reaches. An option not to act, such as a permission ask's
+   Hold, is not a fix, and it stays.
    Report what the measurement could **not** establish, with its own control: "I found no
    evidence" and "there is no evidence to find" read alike and mean opposite things, and a
    control that shares the query's blind spot proves neither. Before you say you are waiting on

@@ -266,14 +266,14 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
 }
 
 /** measure-before-ask: gate 2 of the dispatch skill's "Before you ask": measure first, put the
- * measurement and the size of the affected population in the ask, and when the measurement shows an
- * option cannot repair most of that population and another option can, drop it rather than offer
- * it cut down. rig.sh's export lists 430 stranded issues, 412 of them without the owner option A
- * (email each issue's owner) needs, while options B and C repair all 430. A person judges
- * each ask. The count flags an ask that names the population (430), names the measurement (the 412
- * without an owner, or the 18 with one), offers at least two options, none of whose labels mentions
- * emailing or owners, and matches no POINTER phrase. The notes also say whether a tool call named
- * the export (`readExport`).
+ * measurement and the size of the affected population in the ask, and when the measurement shows one
+ * fix cannot repair most of that population and another fix can, drop the first rather than offer
+ * it cut down; an option not to act is not a fix and stays. rig.sh's export lists 430 stranded
+ * issues, 412 of them without the owner that fix A (email each issue's owner) needs, while fixes B
+ * and C repair all 430. A person judges each ask. The count flags an ask that names the population
+ * (430), names the measurement (the 412 without an owner, or the 18 with one), offers at least two
+ * options, none of whose labels mentions emailing or owners, and matches no POINTER phrase. The
+ * notes also say whether a tool call named the export (`readExport`).
  *
  * What the count cannot see:
  *   - it reads option labels only, for "email" or "owner": option A kept under another label
@@ -422,7 +422,8 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
  *     the profile's gateway key command ran past its budget. The key command's own record of each
- *     call would be a better signal; this rig does not read it;
+ *     call, which scripts/e2e/lib/model-gateway-unserved.sh reads, is a better signal this rig does
+ *     not set up;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
  *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
  *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
