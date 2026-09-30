@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Tests for `security-report.sh`: one case per decision rule of the report-only window (R2–R10),
-# the window itself (R1, R11, R12, the window not yet started), and the ways a read can fail
-# (R13, R14, a server error).
+# the window itself (R1, R11, R12, the window not yet started), the ways a read can fail (R13, R14,
+# a server error, an artifact missing, expired or not in its producer's shape), and paging.
 #
 # `gh` is a stub on PATH (the dotfiles scripts/tests/test_docs_pr_gate.py pattern): it logs its
-# argv to $STUB_LOG and answers each GitHub API path from the fixture files a case writes under
-# its own directory. A fixture named FILE.403 makes that read a 403, FILE.500 a server error.
+# argv to $STUB_LOG, which the paging case reads, and answers each GitHub API path from the
+# fixture files a case writes under its own directory (FILE for a list's first page, FILE.pageN
+# for page N). A fixture named FILE.403 makes that read a 403, FILE.500 a server error.
 # Artifacts are real zips built with `zip`, as `gh api …/artifacts/<id>/zip` returns them, and
 # their contents are the producers' own output: each zizmor-findings.json is
 # .github/scripts/zizmor-findings.sh run over zizmor 1.30.1's findings
@@ -39,7 +40,7 @@ d=$STUB_DIR
 page=1
 case "$path" in *[?\&]page=*) page=$(sed -E 's/.*[?&]page=([0-9]+).*/\1/' <<<"$path") ;; esac
 not_found() { echo '{"message":"Not Found","status":"404"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-# serve FILE EMPTY: FILE for page 1, EMPTY for later pages or when FILE is absent.
+# serve FILE EMPTY: FILE for page 1, FILE.pageN for page N, EMPTY for a page with no such file.
 serve() {
   if [ -e "$1.403" ]; then
     echo '{"message":"Resource not accessible by integration","status":"403"}'
@@ -47,7 +48,9 @@ serve() {
     exit 1
   fi
   if [ -e "$1.500" ]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
-  if [ "$page" = 1 ] && [ -e "$1" ]; then cat "$1"; else printf '%s\n' "$2"; fi
+  local file="$1"
+  if [ "$page" != 1 ]; then file="$1.page$page"; fi
+  if [ -e "$file" ]; then cat "$file"; else printf '%s\n' "$2"; fi
 }
 id_in() { sed -E "s|.*/$1/([0-9]+).*|\\1|" <<<"$path"; }
 case "$path" in
@@ -288,6 +291,7 @@ add_report 1001 "$(security_report "$(zizmor_findings "$pool")" clean)"
 run_report
 check "exits 1" "$(is "$rc" 1)"
 check "holds zizmor on main's count" "$(has "DECISION: HOLD zizmor — 8 findings on main (fix each, or ignore it with a reason: workflows in .github/zizmor.yml, composite actions inline)")"
+check "asks for no required check while zizmor holds (rule 5)" "$(lacks "NEXT: ask a repository admin")"
 
 echo "=== R3. rule 1b: precision 0.80 over 5 dispositions promotes ==="
 setup r3 "15 days ago"
@@ -300,6 +304,8 @@ check "exits 1 (the window closed while report_only is true)" "$(is "$rc" 1)"
 check "precision 0.80 (4 fixed / 1 ignored)" "$(has "precision 0.80 (4 fixed / 1 ignored)")"
 check "promotes zizmor" "$(has "DECISION: PROMOTE zizmor")"
 check "not on rule 1a alone" "$(lacks "DECISION: PROMOTE zizmor (rule 1a alone)")"
+check "asks for the required check once zizmor promotes (rule 5)" \
+  "$(has "NEXT: ask a repository admin to require the check \`security\` (rule 5)")"
 check "a PR row counts its dispositions" "$(has "| #12 | 2011 | 2012 | 2 | 1 | 1 | 0 |")"
 check "promotes the dependencies with no tool error (rule 2)" "$(has "DECISION: PROMOTE dependencies")"
 
@@ -464,6 +470,40 @@ run_report
 check "a zizmor tool error on main's newest run: its row reads the tool error" \
   "$(has "| 1001 | schedule | $(sha 1001 | cut -c1-7) | -/- | 0/0 | 0/0 | yes |")"
 check "and rule 1a reads the run before it" "$(has "zizmor on main: 0 findings (run 1000, push)")"
+
+echo "=== paging: a list is read to its short page, and merged pull requests stop at the window ==="
+setup paging "15 days ago"
+# 101 dependency tool-error markers inside the window: a full first page and one on the second.
+# markers FIRST COUNT: COUNT markers of runs FIRST… created 5 days ago, as one page of the listing.
+markers() {
+  jq -n --argjson first "$1" --argjson count "$2" --arg created "$(iso '5 days ago')" '{total_count: 101,
+    artifacts: [range($first; $first + $count) | {id: (50000 + .), name: "dependencies-tool-error",
+      expired: false, created_at: $created, workflow_run: {id: (60000 + .), head_branch: "main", head_sha: "0"}}]}'
+}
+markers 0 100 > "$d/markers-dependencies-tool-error.json"
+markers 100 1 > "$d/markers-dependencies-tool-error.json.page2"
+# Closed pull requests, newest update first: 100 closed unmerged inside the window, then #700
+# merged inside it followed by 99 last updated before the window opened.
+# closed FIRST COUNT UPDATED MERGED: COUNT pull requests #FIRST… updated at UPDATED, merged at MERGED.
+closed() {
+  jq -n --argjson first "$1" --argjson count "$2" --arg updated "$3" --argjson merged "$4" '[range($first; $first + $count)
+    | {number: ., head: {ref: "branch-\(.)", sha: "0"}, created_at: $updated, updated_at: $updated, merged_at: $merged}]'
+}
+closed 1 100 "$(iso '3 days ago')" null > "$d/pulls.json"
+jq -s add <(closed 700 1 "$(iso '4 days ago')" "\"$(iso '4 days ago')\"") \
+  <(closed 800 99 "$(iso '20 days ago')" "\"$(iso '20 days ago')\"") > "$d/pulls.json.page2"
+run_report
+requested() { grep -cF -- "$1" "$d/calls.log" || true; }
+check "every tool-error marker is counted, the second page's too" \
+  "$(has "## Dependency scanner tool errors in the window: 101")"
+check "the marker listing's second page is read" "$(is "$(requested "name=dependencies-tool-error&per_page=100&page=2")" 1)"
+check "and its short second page ends it: no third page" \
+  "$(is "$(requested "name=dependencies-tool-error&per_page=100&page=3")" 0)"
+check "the pull request merged on the second page is counted" "$(has "no new findings: #700")"
+check "one merged before the window is not" "$(lacks "#800")"
+check "the closed pull requests' second page is read" "$(is "$(requested "pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100&page=2")" 1)"
+check "a page ending before the window ends the listing: no third page" \
+  "$(is "$(requested "pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100&page=3")" 0)"
 
 echo "=== R9. rule 3: a fixed CodeQL alert adds the pull_request trigger ==="
 setup r9 "15 days ago"

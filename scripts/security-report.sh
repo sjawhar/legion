@@ -82,7 +82,9 @@ import subprocess
 import sys
 import zipfile
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from itertools import takewhile
 from urllib.parse import quote
 
 USAGE = "usage: security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]"
@@ -102,28 +104,33 @@ def fail(message, code=2):
     sys.exit(code)
 
 
-args = sys.argv[1:]
-repo, window_days, decision = "sjawhar/legion", 14, "none"
-while args:
-    flag = args.pop(0)
-    if flag in ("-h", "--help"):
-        print(USAGE)
-        sys.exit(0)
-    if flag not in ("--repo", "--window-days", "--decision") or not args:
-        fail(f"unexpected argument {flag!r}\n{USAGE}")
-    value = args.pop(0)
-    if flag == "--repo":
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
-            fail(f"--repo takes owner/repo, not {value!r}")
-        repo = value
-    elif flag == "--window-days":
-        if not value.isdigit() or int(value) < 1:
-            fail(f"--window-days takes a positive number of days, not {value!r}")
-        window_days = int(value)
-    else:
-        if value not in ("force", "none"):
-            fail(f"--decision takes force or none, not {value!r}")
-        decision = value
+def parse_args(args):
+    """(repo, window days, decision) from the command line."""
+    repo, window_days, decision = "sjawhar/legion", 14, "none"
+    while args:
+        flag = args.pop(0)
+        if flag in ("-h", "--help"):
+            print(USAGE)
+            sys.exit(0)
+        if flag not in ("--repo", "--window-days", "--decision") or not args:
+            fail(f"unexpected argument {flag!r}\n{USAGE}")
+        value = args.pop(0)
+        if flag == "--repo":
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+                fail(f"--repo takes owner/repo, not {value!r}")
+            repo = value
+        elif flag == "--window-days":
+            if not value.isdigit() or int(value) < 1:
+                fail(f"--window-days takes a positive number of days, not {value!r}")
+            window_days = int(value)
+        else:
+            if value not in ("force", "none"):
+                fail(f"--decision takes force or none, not {value!r}")
+            decision = value
+    return repo, window_days, decision
+
+
+repo, window_days, decision = parse_args(sys.argv[1:])
 
 
 class Forbidden(Exception):
@@ -253,286 +260,368 @@ def zizmor_findings(artifact):
 
 
 # --- the workflow, the flag, the window ---------------------------------------------------------
-security = next(
-    (w for w in paged(f"repos/{repo}/actions/workflows", "workflows")
-     if w.get("path") == ".github/workflows/security.yaml" or w.get("name") == "Security"),
-    None,
-)
-if security is None:
-    print(f"no Security workflow on {repo}")
-    sys.exit(2)
-
-try:
-    flag = gh(f"repos/{repo}/contents/.github/security-window.json?ref=main")
-except NotFound:
-    fail(f"{repo} has a Security workflow but no .github/security-window.json on main")
-report_only = json.loads(base64.b64decode(flag["content"]))["report_only"]
-if not isinstance(report_only, bool):
-    fail(f".github/security-window.json on main says report_only: {report_only!r}, not true or false")
-
-print(f"# Security report for {repo}")
-print()
-print(f"report_only: {str(report_only).lower()}")
-
-runs_path = f"repos/{repo}/actions/workflows/{security['id']}/runs"
-main_runs = [
-    run for run in paged(f"{runs_path}?branch=main", "workflow_runs")
-    if run.get("head_branch") == "main" and run.get("event") in ("push", "schedule", "workflow_dispatch")
-]
-pushes = [run for run in main_runs if run["event"] == "push"]
-if not pushes:
-    print("window has not started: the Security workflow has no push run on main yet")
-    sys.exit(0)
-start = min(when(run["created_at"]) for run in pushes)
-end = start + timedelta(days=window_days)
-now = datetime.now(timezone.utc)
-closed = now >= end
+def security_workflow():
+    return next((w for w in paged(f"repos/{repo}/actions/workflows", "workflows")
+                 if w.get("path") == ".github/workflows/security.yaml" or w.get("name") == "Security"), None)
 
 
-def in_window(stamp):
-    moment = when(stamp)
-    return moment is not None and start <= moment < end
+def report_only_flag():
+    """report_only from .github/security-window.json on main."""
+    try:
+        flag = gh(f"repos/{repo}/contents/.github/security-window.json?ref=main")
+    except NotFound:
+        fail(f"{repo} has a Security workflow but no .github/security-window.json on main")
+    report_only = json.loads(base64.b64decode(flag["content"]))["report_only"]
+    if not isinstance(report_only, bool):
+        fail(f".github/security-window.json on main says report_only: {report_only!r}, not true or false")
+    return report_only
 
 
-print(f"window: {start:%Y-%m-%dT%H:%M:%SZ} to {end:%Y-%m-%dT%H:%M:%SZ} "
-      f"({'window closed' if closed else 'window closes'} {end:%Y-%m-%d})")
+class Window:
+    """window_days from the Security workflow's first push run on main."""
 
-# --- runs on main --------------------------------------------------------------------------------
-completed = sorted((run for run in main_runs if run.get("status") == "completed"
-                    and run.get("conclusion") not in ("cancelled", "skipped")),
-                   key=lambda run: run["created_at"])
-rows = [run for run in completed if run["event"] != "push" and when(run["created_at"]) >= start]
-newest_push = [run for run in completed if run["event"] == "push"][-1:]
-rows = sorted(rows + newest_push, key=lambda run: run["created_at"])
+    def __init__(self, start):
+        self.start, self.end = start, start + timedelta(days=window_days)
+        self.closed = datetime.now(timezone.utc) >= self.end
 
-print()
-print("## Runs on main")
-print()
-print("| run | event | head | zizmor head/new | osv total/with-fix | govulncheck reachable/informational | tool error |")
-print("| --- | --- | --- | --- | --- | --- | --- |")
-for run in rows:
-    found = security_report(run["id"])
-    print(f"| {run['id']} | {run['event']} | {run['head_sha'][:7]} | {pair(found['zizmor'], 'head_count', 'new_count')} "
-          f"| {pair(found['osv'], 'total', 'with_fix')} | {pair(found['govulncheck'], 'reachable', 'informational')} "
-          f"| {'yes' if found['tool_error'] else 'no'} |")
+    def holds(self, stamp):
+        moment = when(stamp)
+        return moment is not None and self.start <= moment < self.end
 
-# Rule 1a reads the newest completed main run with a zizmor result, looking back ten runs at most:
-# a longer run of tool errors is itself the answer (no result on main).
-main_head_count = None
-for run in list(reversed(completed))[:10]:
-    zizmor = security_report(run["id"])["zizmor"]
-    if zizmor is not None:
-        main_head_count = zizmor["head_count"]
-        print()
-        print(f"zizmor on main: {main_head_count} findings (run {run['id']}, {run['event']})")
-        break
+
+# --- runs on main (rule 1a) ----------------------------------------------------------------------
+def completed(runs):
+    return sorted((run for run in runs if run.get("status") == "completed"
+                   and run.get("conclusion") not in ("cancelled", "skipped")), key=lambda run: run["created_at"])
+
+
+def print_main_runs(done, window):
+    """A row for every scheduled and dispatched run since the window opened, and main's newest push."""
+    rows = [run for run in done if run["event"] != "push" and when(run["created_at"]) >= window.start]
+    rows += [run for run in done if run["event"] == "push"][-1:]
+    print()
+    print("## Runs on main")
+    print()
+    print("| run | event | head | zizmor head/new | osv total/with-fix | govulncheck reachable/informational | tool error |")
+    print("| --- | --- | --- | --- | --- | --- | --- |")
+    for run in sorted(rows, key=lambda run: run["created_at"]):
+        found = security_report(run["id"])
+        print(f"| {run['id']} | {run['event']} | {run['head_sha'][:7]} | {pair(found['zizmor'], 'head_count', 'new_count')} "
+              f"| {pair(found['osv'], 'total', 'with_fix')} | {pair(found['govulncheck'], 'reachable', 'informational')} "
+              f"| {'yes' if found['tool_error'] else 'no'} |")
+
+
+def zizmor_on_main(done):
+    """Rule 1a: the head_count of the newest completed main run with a zizmor result, looking back ten
+    runs at most, or None: a longer run of tool errors is itself the answer (no result on main)."""
+    for run in list(reversed(done))[:10]:
+        zizmor = security_report(run["id"])["zizmor"]
+        if zizmor is not None:
+            print()
+            print(f"zizmor on main: {zizmor['head_count']} findings (run {run['id']}, {run['event']})")
+            return zizmor["head_count"]
+    return None
+
 
 # --- tool errors (rule 2) ------------------------------------------------------------------------
-tool_error_markers = list(paged(f"repos/{repo}/actions/artifacts?name=dependencies-tool-error", "artifacts"))
-tool_error_runs = sorted({m["workflow_run"]["id"] for m in tool_error_markers if in_window(m["created_at"])})
-print()
-print(f"## Dependency scanner tool errors in the window: {len(tool_error_runs)}")
-for marker in sorted((m for m in tool_error_markers if in_window(m["created_at"])), key=lambda m: m["created_at"]):
-    run = marker["workflow_run"]
-    print(f"- run {run['id']} ({run.get('head_branch')}@{(run.get('head_sha') or '')[:7]}, {marker['created_at']})")
+def dependency_tool_errors(window):
+    """Rule 2: how many runs inside the window marked a dependency scanner tool error."""
+    markers = sorted((m for m in paged(f"repos/{repo}/actions/artifacts?name=dependencies-tool-error", "artifacts")
+                      if window.holds(m["created_at"])), key=lambda m: m["created_at"])
+    runs = {marker["workflow_run"]["id"] for marker in markers}
+    print()
+    print(f"## Dependency scanner tool errors in the window: {len(runs)}")
+    for marker in markers:
+        run = marker["workflow_run"]
+        print(f"- run {run['id']} ({run.get('head_branch')}@{(run.get('head_sha') or '')[:7]}, {marker['created_at']})")
+    return len(runs)
+
 
 # --- merged pull requests (rule 1b) --------------------------------------------------------------
-merged, page = [], 1
-while True:
-    batch = gh(f"repos/{repo}/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100&page={page}")
-    merged += [pr for pr in batch if pr.get("merged_at") and in_window(pr["merged_at"])]
-    if len(batch) < 100 or when(batch[-1]["updated_at"]) < start:
-        break
-    page += 1
-merged.sort(key=lambda pr: pr["number"])
+@dataclass
+class Dispositions:
+    """How the merged pull requests' new₀ findings ended: a row per pull request, (number, first run,
+    last run, len(new₀), Counter of outcomes), and the outcomes per audit."""
+    rows: list = field(default_factory=list)
+    per_audit: defaultdict = field(default_factory=lambda: defaultdict(Counter))
 
-new_markers = list(paged(f"repos/{repo}/actions/artifacts?name=zizmor-new", "artifacts"))
-zizmor_error_run_ids = {m["workflow_run"]["id"]
-                        for m in paged(f"repos/{repo}/actions/artifacts?name=zizmor-tool-error", "artifacts")}
+    @property
+    def totals(self):
+        return sum((row[-1] for row in self.rows), Counter())
+
+    @property
+    def count(self):
+        """Fixed and ignored findings: the dispositions precision is taken over."""
+        return self.totals["fixed"] + self.totals["ignored"]
+
+    @property
+    def precision(self):
+        return self.totals["fixed"] / self.count if self.count else None
+
+
+def merged_pull_requests(window):
+    """The pull requests merged into main inside the window, by number. The listing runs newest update
+    first and a pull request is updated no earlier than its merge, so it stops at the first one last
+    updated before the window opened."""
+    closed = paged(f"repos/{repo}/pulls?state=closed&base=main&sort=updated&direction=desc")
+    recent = takewhile(lambda pr: when(pr["updated_at"]) >= window.start, closed)
+    return sorted((pr for pr in recent if pr.get("merged_at") and window.holds(pr["merged_at"])),
+                  key=lambda pr: pr["number"])
 
 
 def belongs(pr, branch, stamp):
     return branch == pr["head"]["ref"] and when(pr["created_at"]) <= when(stamp) <= when(pr["merged_at"])
 
 
-totals = Counter()
-per_audit = defaultdict(Counter)
-nothing_new, pr_rows = [], []
-for pr in merged:
-    markers = {m["workflow_run"]["id"]: m for m in new_markers
-               if belongs(pr, m["workflow_run"].get("head_branch"), m["created_at"])}
-    if not markers:
-        nothing_new.append(pr)
-        continue
-    runs = sorted(
+def pull_request_runs(pr, runs_path, zizmor_error_run_ids):
+    """The pull request's completed pull_request runs with a zizmor result, oldest first."""
+    return sorted(
         (run for run in paged(f"{runs_path}?event=pull_request&branch={quote(pr['head']['ref'], safe='')}", "workflow_runs")
          if run.get("event") == "pull_request" and run.get("status") == "completed"
          and run.get("conclusion") not in ("cancelled", "skipped") and run["id"] not in zizmor_error_run_ids
          and belongs(pr, run.get("head_branch"), run["created_at"])),
         key=lambda run: run["created_at"],
     )
-    if not runs or runs[0]["id"] not in markers:
-        nothing_new.append(pr)
-        continue
-    first, last = runs[0], runs[-1]
-    first_findings = zizmor_findings(markers[first["id"]])
-    new0 = first_findings["new"] if first_findings else []
-    if not new0:
-        fail(f"run {first['id']}'s zizmor-new marker lists no new finding; "
-             "the Security workflow uploads it only for new findings")
-    final = zizmor_findings(run_artifact(last["id"], "zizmor-findings"))
-    if final is None:
-        fail(f"run {last['id']}'s zizmor-findings records a tool error, but the run has no zizmor-tool-error marker")
+
+
+def outcomes(new0, final):
+    """(finding, outcome) for each new₀ finding against the last run's findings, as multisets."""
     ignored = Counter(found["fingerprint"] for found in final["ignored"])
     remaining = Counter(found["fingerprint"] for found in final["new"])
-    counts = Counter()
     for found in new0:
-        if ignored[found["fingerprint"]] > 0:
-            ignored[found["fingerprint"]] -= 1
-            outcome = "ignored"
-        elif remaining[found["fingerprint"]] > 0:
-            remaining[found["fingerprint"]] -= 1
-            outcome = "merged with findings"
+        fingerprint = found["fingerprint"]
+        if ignored[fingerprint] > 0:
+            ignored[fingerprint] -= 1
+            yield found, "ignored"
+        elif remaining[fingerprint] > 0:
+            remaining[fingerprint] -= 1
+            yield found, "merged with findings"
         else:
-            outcome = "fixed"
-        counts[outcome] += 1
-        per_audit[found["ident"]][outcome] += 1
-    totals.update(counts)
-    pr_rows.append((pr["number"], first["id"], last["id"], len(new0), counts))
+            yield found, "fixed"
 
-print()
-print("## Merged pull requests in the window")
-print()
-print("| pr | first run | last run | new | fixed | ignored | merged with findings |")
-print("| --- | --- | --- | --- | --- | --- | --- |")
-for number, first_id, last_id, new_count, counts in pr_rows:
-    print(f"| #{number} | {first_id} | {last_id} | {new_count} | {counts['fixed']} | {counts['ignored']} "
-          f"| {counts['merged with findings']} |")
-if nothing_new:
+
+def merged_findings(window, runs_path):
+    """Rule 1b: the dispositions of the new₀ findings of the pull requests merged inside the window."""
+    new_markers = list(paged(f"repos/{repo}/actions/artifacts?name=zizmor-new", "artifacts"))
+    zizmor_error_run_ids = {m["workflow_run"]["id"]
+                            for m in paged(f"repos/{repo}/actions/artifacts?name=zizmor-tool-error", "artifacts")}
+    tally, nothing_new = Dispositions(), []
+    for pr in merged_pull_requests(window):
+        markers = {m["workflow_run"]["id"]: m for m in new_markers
+                   if belongs(pr, m["workflow_run"].get("head_branch"), m["created_at"])}
+        runs = pull_request_runs(pr, runs_path, zizmor_error_run_ids) if markers else []
+        if not runs or runs[0]["id"] not in markers:
+            nothing_new.append(pr["number"])
+            continue
+        first, last = runs[0], runs[-1]
+        first_findings = zizmor_findings(markers[first["id"]])
+        if first_findings is None or not first_findings["new"]:
+            fail(f"run {first['id']}'s zizmor-new marker lists no new finding; "
+                 "the Security workflow uploads it only for new findings")
+        final = zizmor_findings(run_artifact(last["id"], "zizmor-findings"))
+        if final is None:
+            fail(f"run {last['id']}'s zizmor-findings records a tool error, but the run has no zizmor-tool-error marker")
+        counts = Counter()
+        for found, outcome in outcomes(first_findings["new"], final):
+            counts[outcome] += 1
+            tally.per_audit[found["ident"]][outcome] += 1
+        tally.rows.append((pr["number"], first["id"], last["id"], len(first_findings["new"]), counts))
+
     print()
-    print("no new findings: " + ", ".join(f"#{pr['number']}" for pr in nothing_new))
+    print("## Merged pull requests in the window")
+    print()
+    print("| pr | first run | last run | new | fixed | ignored | merged with findings |")
+    print("| --- | --- | --- | --- | --- | --- | --- |")
+    for number, first_id, last_id, new_count, counts in tally.rows:
+        print(f"| #{number} | {first_id} | {last_id} | {new_count} | {counts['fixed']} | {counts['ignored']} "
+              f"| {counts['merged with findings']} |")
+    if nothing_new:
+        print()
+        print("no new findings: " + ", ".join(f"#{number}" for number in nothing_new))
+    print()
+    if tally.count >= MIN_DISPOSITIONS:
+        print(f"precision {tally.precision:.2f} ({tally.totals['fixed']} fixed / {tally.totals['ignored']} ignored)")
+    else:
+        print(f"precision undecided ({tally.count} of {MIN_DISPOSITIONS} dispositions)")
+    for ident, counts in sorted(tally.per_audit.items()):
+        if counts["ignored"] >= KILL_AT:
+            print(f"KILL: {ident} (ignored {counts['ignored']}×, fixed {counts['fixed']}×) — "
+                  f"workflows: rules.{ident}.ignore in .github/zizmor.yml; composite actions: inline comment")
+    return tally
 
-dispositions = totals["fixed"] + totals["ignored"]
-precision = totals["fixed"] / dispositions if dispositions else None
-print()
-if dispositions >= MIN_DISPOSITIONS:
-    print(f"precision {precision:.2f} ({totals['fixed']} fixed / {totals['ignored']} ignored)")
-else:
-    print(f"precision undecided ({dispositions} of {MIN_DISPOSITIONS} dispositions)")
-for ident in sorted(per_audit):
-    if per_audit[ident]["ignored"] >= KILL_AT:
-        print(f"KILL: {ident} (ignored {per_audit[ident]['ignored']}×, fixed {per_audit[ident]['fixed']}×) — "
-              f"workflows: rules.{ident}.ignore in .github/zizmor.yml; composite actions: inline comment")
 
 # --- CodeQL (rule 3) -----------------------------------------------------------------------------
-print()
-print("## CodeQL")
-print()
-codeql_fixed = None
-try:
-    # The newest hundred analyses on main: every push adds one per language, so their categories
-    # are the languages CodeQL currently analyses.
-    categories = sorted({a.get("category") or "(none)" for a in
-                         gh(f"repos/{repo}/code-scanning/analyses?tool_name=CodeQL&ref=refs/heads/main&per_page=100")})
-    print(f"CodeQL analyses on main: {len(categories)}" + (f" ({', '.join(categories)})" if categories else ""))
-except Forbidden:
-    print(f"CodeQL analyses on main: {CODEQL_BLOCKED}")
-except NotFound:
-    print("CodeQL analyses on main: 0")
-try:
-    alerts = list(paged(f"repos/{repo}/code-scanning/alerts?tool_name=CodeQL"))
-    codeql_fixed = sum(1 for a in alerts if a.get("state") == "fixed" and in_window(a.get("fixed_at")))
+def codeql_fixed_in_window(window):
+    """Rule 3: how many CodeQL alerts reached fixed inside the window, None when the caller may not
+    read them."""
+    print()
+    print("## CodeQL")
+    print()
+    try:
+        # The newest hundred analyses on main: every push adds one per language, so their categories
+        # are the languages CodeQL currently analyses.
+        categories = sorted({a.get("category") or "(none)" for a in
+                             gh(f"repos/{repo}/code-scanning/analyses?tool_name=CodeQL&ref=refs/heads/main&per_page=100")})
+        print(f"CodeQL analyses on main: {len(categories)}" + (f" ({', '.join(categories)})" if categories else ""))
+    except Forbidden:
+        print(f"CodeQL analyses on main: {CODEQL_BLOCKED}")
+    except NotFound:
+        print("CodeQL analyses on main: 0")
+    try:
+        alerts = list(paged(f"repos/{repo}/code-scanning/alerts?tool_name=CodeQL"))
+    except Forbidden:
+        print(f"CodeQL alerts: {CODEQL_BLOCKED}")
+        return None
+    except NotFound:
+        print("CodeQL alerts: none (no CodeQL analysis on this repository)")
+        return 0
+    fixed = sum(1 for a in alerts if a.get("state") == "fixed" and window.holds(a.get("fixed_at")))
     tally = Counter((a["rule"].get("id"), a["rule"].get("security_severity_level") or a["rule"].get("severity"),
                      a.get("state")) for a in alerts)
-    print(f"CodeQL alerts: {len(alerts)}; fixed inside the window: {codeql_fixed}")
+    print(f"CodeQL alerts: {len(alerts)}; fixed inside the window: {fixed}")
     if tally:
         print()
         print("| rule | severity | state | alerts |")
         print("| --- | --- | --- | --- |")
         for (rule, severity, state), count in sorted(tally.items(), key=lambda item: tuple(map(str, item[0]))):
             print(f"| {rule} | {dash(severity)} | {state} | {count} |")
-except Forbidden:
-    print(f"CodeQL alerts: {CODEQL_BLOCKED}")
-except NotFound:
-    codeql_fixed = 0
-    print("CodeQL alerts: none (no CodeQL analysis on this repository)")
+    return fixed
+
 
 # --- secret scanning -----------------------------------------------------------------------------
-print()
-print("## Secret scanning")
-print()
-try:
-    states = Counter(a.get("state") for a in paged(f"repos/{repo}/secret-scanning/alerts"))
-    print(f"secret-scanning alerts: {states['open']} open, {sum(states.values()) - states['open']} resolved")
-except Forbidden:
-    print(f"secret-scanning alerts: {SECRET_BLOCKED}")
-except NotFound:
-    print("secret-scanning alerts: secret scanning is not enabled")
+def print_secret_scanning():
+    print()
+    print("## Secret scanning")
+    print()
+    try:
+        states = Counter(a.get("state") for a in paged(f"repos/{repo}/secret-scanning/alerts"))
+        print(f"secret-scanning alerts: {states['open']} open, {sum(states.values()) - states['open']} resolved")
+    except Forbidden:
+        print(f"secret-scanning alerts: {SECRET_BLOCKED}")
+    except NotFound:
+        print("secret-scanning alerts: secret scanning is not enabled")
+
 
 # --- review threads (rule 4) ---------------------------------------------------------------------
-comments = list(paged(f"repos/{repo}/pulls/comments?sort=created&direction=asc&since={start:%Y-%m-%dT%H:%M:%SZ}"))
-replies = defaultdict(list)
-for comment in comments:
-    if comment.get("in_reply_to_id"):
-        replies[comment["in_reply_to_id"]].append(comment)
-threads = defaultdict(Counter)
-for comment in comments:
-    tag = SECURITY_TAG.match(comment.get("body") or "")
-    if comment.get("in_reply_to_id") or not tag or not in_window(comment["created_at"]):
-        continue
-    accepted = [r for r in sorted(replies[comment["id"]], key=lambda r: r["created_at"])
-                if (r.get("body") or "").startswith("Accepted:")]
-    verdict = accepted[-1]["body"] if accepted else ""
-    if verdict.startswith("Accepted: fixed"):
-        threads[tag.group(1)]["fixed"] += 1
-    elif verdict.startswith("Accepted: not a defect"):
-        threads[tag.group(1)]["not a defect"] += 1
-    else:
-        threads[tag.group(1)]["open"] += 1
-print()
-print("## Security review threads")
-print()
-if not threads:
-    print("no Security[<tag>]: review threads in the window")
-for tag in sorted(threads):
-    counts = threads[tag]
-    verdict = "NARROW" if counts["not a defect"] >= NARROW_AT and counts["fixed"] == 0 else "keep"
-    print(f"{verdict}: {tag} row ({counts['not a defect']} not a defect, {counts['fixed']} fixed"
-          + (f", {counts['open']} unanswered" if counts["open"] else "") + ")")
+def narrowed(counts):
+    """Rule 4: a rubric row with NARROW_AT or more not-a-defect threads and none fixed."""
+    return counts["not a defect"] >= NARROW_AT and counts["fixed"] == 0
+
+
+def review_threads(window):
+    """Rule 4: {tag: Counter of fixed, not a defect and open} over the Security[<tag>]: review threads
+    opened inside the window, each by its newest `Accepted:` reply."""
+    comments = list(paged(f"repos/{repo}/pulls/comments?sort=created&direction=asc"
+                          f"&since={window.start:%Y-%m-%dT%H:%M:%SZ}"))
+    replies = defaultdict(list)
+    for comment in comments:
+        if comment.get("in_reply_to_id"):
+            replies[comment["in_reply_to_id"]].append(comment)
+    threads = defaultdict(Counter)
+    for comment in comments:
+        tag = SECURITY_TAG.match(comment.get("body") or "")
+        if comment.get("in_reply_to_id") or not tag or not window.holds(comment["created_at"]):
+            continue
+        accepted = [r for r in sorted(replies[comment["id"]], key=lambda r: r["created_at"])
+                    if (r.get("body") or "").startswith("Accepted:")]
+        reply = accepted[-1]["body"] if accepted else ""
+        if reply.startswith("Accepted: fixed"):
+            threads[tag.group(1)]["fixed"] += 1
+        elif reply.startswith("Accepted: not a defect"):
+            threads[tag.group(1)]["not a defect"] += 1
+        else:
+            threads[tag.group(1)]["open"] += 1
+    print()
+    print("## Security review threads")
+    print()
+    if not threads:
+        print("no Security[<tag>]: review threads in the window")
+    for tag, counts in sorted(threads.items()):
+        print(f"{'NARROW' if narrowed(counts) else 'keep'}: {tag} row ({counts['not a defect']} not a defect, "
+              f"{counts['fixed']} fixed" + (f", {counts['open']} unanswered" if counts["open"] else "") + ")")
+    return threads
+
 
 # --- the decision --------------------------------------------------------------------------------
-forced = decision == "force"
-if not (forced or (closed and report_only)):
-    sys.exit(0)
-print()
-print("## Decision" + (" (FORCED)" if forced else ""))
-print()
-if forced:
-    print("FORCED: --decision force printed this block before the window closed" if not closed
-          else "FORCED: --decision force")
-if main_head_count is None:
-    zizmor_line = "HOLD zizmor — no zizmor result in main's newest ten runs (tool errors)"
-elif main_head_count > 0:
-    zizmor_line = (f"HOLD zizmor — {main_head_count} findings on main (fix each, or ignore it with a reason: "
-                   "workflows in .github/zizmor.yml, composite actions inline)")
-elif dispositions < MIN_DISPOSITIONS:
-    zizmor_line = "PROMOTE zizmor (rule 1a alone)"
-elif precision >= PRECISION_BAR:
-    zizmor_line = "PROMOTE zizmor"
-else:
-    zizmor_line = f"HOLD zizmor — precision {precision:.2f} is below {PRECISION_BAR} over {dispositions} dispositions"
-print(f"DECISION: {zizmor_line}")
-if zizmor_line.startswith("PROMOTE"):
-    print("NEXT: ask a repository admin to require the check `security` (rule 5)")
-print("DECISION: " + (f"HOLD dependencies — {len(tool_error_runs)} tool errors in the window" if tool_error_runs
-                      else "PROMOTE dependencies"))
-if codeql_fixed is None:
-    print(f"DECISION: codeql: {CODEQL_BLOCKED}")
-elif codeql_fixed:
-    print(f"DECISION: PROMOTE codeql pull_request trigger ({codeql_fixed} fixed alert{'s' if codeql_fixed > 1 else ''})")
-else:
-    print("DECISION: HOLD codeql — no CodeQL alert on main reached fixed inside the window; stay main-only")
-narrowed = [tag for tag in sorted(threads) if threads[tag]["not a defect"] >= NARROW_AT and threads[tag]["fixed"] == 0]
-print("DECISION: " + (f"NARROW the rubric rows {', '.join(narrowed)}" if narrowed else "keep every rubric row"))
-sys.exit(1 if report_only else 0)
+def zizmor_decision(main_count, dispositions):
+    """Rule 1: (whether zizmor is promoted, its DECISION line)."""
+    if main_count is None:
+        return False, "HOLD zizmor — no zizmor result in main's newest ten runs (tool errors)"
+    if main_count > 0:
+        return False, (f"HOLD zizmor — {main_count} findings on main (fix each, or ignore it with a reason: "
+                       "workflows in .github/zizmor.yml, composite actions inline)")
+    if dispositions.count < MIN_DISPOSITIONS:
+        return True, "PROMOTE zizmor (rule 1a alone)"
+    if dispositions.precision >= PRECISION_BAR:
+        return True, "PROMOTE zizmor"
+    return False, (f"HOLD zizmor — precision {dispositions.precision:.2f} is below {PRECISION_BAR} "
+                   f"over {dispositions.count} dispositions")
+
+
+def decide(main_count, dispositions, tool_error_runs, codeql_fixed, threads):
+    """The DECISION lines from each rule's value, with rule 5's NEXT when rule 1 promotes zizmor."""
+    promote_zizmor, zizmor_line = zizmor_decision(main_count, dispositions)
+    lines = [f"DECISION: {zizmor_line}"]
+    if promote_zizmor:
+        lines.append("NEXT: ask a repository admin to require the check `security` (rule 5)")
+    lines.append(f"DECISION: HOLD dependencies — {tool_error_runs} tool errors in the window" if tool_error_runs
+                 else "DECISION: PROMOTE dependencies")
+    if codeql_fixed is None:
+        lines.append(f"DECISION: codeql: {CODEQL_BLOCKED}")
+    elif codeql_fixed:
+        lines.append(f"DECISION: PROMOTE codeql pull_request trigger "
+                     f"({codeql_fixed} fixed alert{'s' if codeql_fixed > 1 else ''})")
+    else:
+        lines.append("DECISION: HOLD codeql — no CodeQL alert on main reached fixed inside the window; stay main-only")
+    narrow = [tag for tag, counts in sorted(threads.items()) if narrowed(counts)]
+    lines.append(f"DECISION: NARROW the rubric rows {', '.join(narrow)}" if narrow
+                 else "DECISION: keep every rubric row")
+    return lines
+
+
+def main():
+    security = security_workflow()
+    if security is None:
+        print(f"no Security workflow on {repo}")
+        sys.exit(2)
+    report_only = report_only_flag()
+    print(f"# Security report for {repo}")
+    print()
+    print(f"report_only: {str(report_only).lower()}")
+
+    runs_path = f"repos/{repo}/actions/workflows/{security['id']}/runs"
+    runs = [run for run in paged(f"{runs_path}?branch=main", "workflow_runs")
+            if run.get("head_branch") == "main" and run.get("event") in ("push", "schedule", "workflow_dispatch")]
+    pushes = [run for run in runs if run["event"] == "push"]
+    if not pushes:
+        print("window has not started: the Security workflow has no push run on main yet")
+        sys.exit(0)
+    window = Window(min(when(run["created_at"]) for run in pushes))
+    print(f"window: {window.start:%Y-%m-%dT%H:%M:%SZ} to {window.end:%Y-%m-%dT%H:%M:%SZ} "
+          f"({'window closed' if window.closed else 'window closes'} {window.end:%Y-%m-%d})")
+
+    done = completed(runs)
+    print_main_runs(done, window)
+    main_count = zizmor_on_main(done)
+    tool_error_runs = dependency_tool_errors(window)
+    dispositions = merged_findings(window, runs_path)
+    codeql_fixed = codeql_fixed_in_window(window)
+    print_secret_scanning()
+    threads = review_threads(window)
+
+    forced = decision == "force"
+    if not (forced or (window.closed and report_only)):
+        sys.exit(0)
+    print()
+    print("## Decision" + (" (FORCED)" if forced else ""))
+    print()
+    if forced:
+        print("FORCED: --decision force" if window.closed
+              else "FORCED: --decision force printed this block before the window closed")
+    for line in decide(main_count, dispositions, tool_error_runs, codeql_fixed, threads):
+        print(line)
+    sys.exit(1 if report_only else 0)
+
+
+main()
 PY
