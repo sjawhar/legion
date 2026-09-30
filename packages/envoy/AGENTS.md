@@ -1578,3 +1578,13 @@ tombstone-on-absence behavior, and listens on the port its own `cmd/broker` bind
 shared port either. `dev-broker.test.sh` proves both kinds of isolation with fakes (no real
 Postgres or network) and runs in CI's `envoy-go` job.
 
+`.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
+`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of
+`agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
+`bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
+backend auto-strips exactly one leading directory, so the installed tree still ends up
+`bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
+`bin/...` top level would itself be the directory mise strips. Bundled into the same
+per-arch release artifact as the existing `legion-envoy-<arch>.tar.gz` (envoy-listener
+alone). This is the release a host installs both binaries from (AGENTC-834's dotfiles Plan B).
+
