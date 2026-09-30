@@ -55,7 +55,7 @@ On the same non-blocking pipe, `await Bun.write(Bun.stdout, text)` writes 4096 b
 `EAGAIN`, then another thread writes the whole text again from its first byte (strace:
 `write(1, …, 20001) = 4096`, `write(1, …, 15905) = -1 EAGAIN`, then from a second thread
 `write(1, …, 20001) = -1 EAGAIN`) and the promise never settles: the script hung for as long as it
-was watched with its reader draining the pipe. Had that second write landed, the reader would have
+was watched with its reader draining the pipe. Had that second write succeeded, the reader would have
 received the first 4096 bytes twice.
 
 ## Fix
@@ -89,5 +89,5 @@ there, blocked, and delivers everything once the reader drains.
 
 ## Related
 
-- `docs/solutions/testing/a-loaded-devbox-stretches-every-wall-clock-budget-in-the-envoy-and-pi-envoy-suites.md`
-  — the load that exposed this; here the budget was the pipe, not a timer.
+- `docs/solutions/testing/a-loaded-devbox-stretches-every-wall-clock-budget-in-the-envoy-and-pi-envoy-suites.md`:
+  the load that exposed this. Here the budget was the pipe, not a timer.
