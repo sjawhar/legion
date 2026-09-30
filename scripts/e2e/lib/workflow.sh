@@ -201,14 +201,19 @@ drive_gate() {
 # it has passed. The probe is GraphQL's viewer, which answers an App installation token with the
 # App's bot login, where REST's GET /user refuses one (403, "Resource not accessible by
 # integration"). GH_REPO names the owner the shim routes by, as each write's own repository does.
+# A refusal carries what gh wrote to stderr, joined into its one line: an agent session that
+# inherited a personal GH_TOKEN still reaches the user's account, and the shim says so there.
 proof_human_login='sjawhar-agent[bot]'
 proof_human=
 require_proof_human() {
-  local login
+  local login status=0 said
   login=$(GH_REPO="$repo" gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>"$work/proof-human.err") ||
-    fail "the devbox gh could not say which account it acts as for $repo: $(tr '\n' ' ' <"$work/proof-human.err")"
+    status=$?
+  said=$(<"$work/proof-human.err")
+  said=${said//$'\n'/ }
+  [ "$status" = 0 ] || fail "the devbox gh could not say which account it acts as for $repo: $said"
   [ "$login" = "$proof_human_login" ] ||
-    fail "the devbox gh acts as ${login:-no account} for $repo, not the proof human $proof_human_login: start the run from an agent session (an Oh My Pi session's bash tool, whose OMP_SESSION_ID the dotfiles gh shim routes to the App), never a plain shell"
+    fail "the devbox gh acts as ${login:-no account} for $repo, not the proof human $proof_human_login: start the run from an agent session (an Oh My Pi session's bash tool, whose OMP_SESSION_ID the dotfiles gh shim routes to the App), never a plain shell${said:+; gh said on stderr: $said}"
   proof_human=$login
   note "the proof human: the devbox gh acts as $login for $repo"
 }

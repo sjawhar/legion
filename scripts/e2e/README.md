@@ -247,8 +247,10 @@ user's own login. `prerequisites` therefore proves the account before the run's 
 GitHub ([`require_proof_human`](#libworkflowsh)): it asks `gh` for GraphQL's `viewer` against the
 smoke repository, which an App installation token answers with the App's bot login (REST's
 `GET /user` refuses one: 403, "Resource not accessible by integration"), and unless that is
-`sjawhar-agent[bot]` it exits 1 with one `FAIL prerequisites` line naming the account it found and
-saying to start the run from an agent session. The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
+`sjawhar-agent[bot]` it exits 1 with one `FAIL prerequisites` line naming the account it found,
+saying to start the run from an agent session, and carrying whatever `gh` wrote to stderr (the shim
+names an inherited `GH_TOKEN` there, which takes even an agent session's call to that token's
+owner). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
 `GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier. The agents'
 model is Anthropic through the Hawk model gateway, the route every devbox agent session uses:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes the isolated profile there in
@@ -1266,9 +1268,10 @@ none, since it runs under its root's tree.
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to
 GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox
 `gh` which account it acts as, through GraphQL's `viewer` with `GH_REPO` naming `repo` (the owner
-the dotfiles shim routes by), and fails the check naming that account unless it is
-`sjawhar-agent[bot]`. `close_unpassed_run_pull_requests`, the `EXIT` trap's part, makes no `gh` call
-in a run that never passed it.
+the dotfiles shim routes by), and fails the check naming that account, with `gh`'s stderr joined
+into the same line, unless it is `sjawhar-agent[bot]`. `close_unpassed_run_pull_requests`, the
+`EXIT` trap's part, makes no `gh` call in a run that never passed it. `lib/proof-human.test.ts`
+drives both against a fake `gh` (`bun test scripts/e2e/lib`, which CI runs).
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own
