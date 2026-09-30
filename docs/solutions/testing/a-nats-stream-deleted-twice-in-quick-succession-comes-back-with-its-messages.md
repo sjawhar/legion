@@ -30,8 +30,8 @@ The `internal/session` tests share one NATS container, and each test used to del
 `TestSessionList_CacheOnlyAfterNATSShutdown` listed `ses_wt`, a key
 `TestSessionPut_WriteThroughVisibleImmediately` wrote two tests earlier, and passed on a re-run.
 The warm-up lines of that run show the "fresh" buckets holding other tests' keys and delete
-markers (`entries=1 delete_markers=2` in `TestSessionDelete_WriteThroughRemovesImmediately`, which
-writes one key and deletes it).
+markers: by log order, `TestSessionDelete_WriteThroughRemovesImmediately`, which writes one key and
+deletes it, logged `entries=1 delete_markers=2`.
 
 ## Cause
 
