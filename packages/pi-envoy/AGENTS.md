@@ -320,6 +320,21 @@ comment anchor. A question about a document is written as an `ask` block through
 directive, not as an issue-level `dispatch_ask`. The extension passes the host tool AbortSignal to every
 Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 
+With Dispatch configured, a `context` handler (`src/dispatch-first.ts`) puts the `dispatch-first`
+skill into every provider request as a user message after any leading `compactionSummary`
+messages: top-level sessions, Legion panes and `task` subagents alike. Oh My Pi keeps nothing a
+`context` handler returns, so the insert runs on each request rather than once; its text is read
+once at module load (a package without `dist/skills/dispatch-first/SKILL.md` fails to load naming
+it) and it carries no id, so its bytes repeat on every request. Only the insertion position is
+checked for a copy already there (a second copy of the extension inserts at the same place): a
+tool result, delivered message or reply that quotes `DISPATCH_FIRST_MARKER` is conversation and
+never switches the skill off. Oh My Pi marks the inserted message per-call, so on Anthropic its
+15-turn decimation cache anchors are not placed behind it; an 18-turn session measured against
+the model gateway read the same cache on every request as a session without it, plus the skill's
+own tokens (LEGION-386 PR #1584). `src/dispatch-first.test.ts` holds the insertion rules, and
+`extensions/dispatch-first-omp.test.ts` checks turn 1, turn 2, after a compaction, and without
+Dispatch on the real binary.
+
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
 nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first
 window. It runs only for a session the stop could actually nudge — the host awaits this handler, so

@@ -241,7 +241,11 @@ server, the Go daemon; stage 2 and the other local rigs unset every variable bel
 users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
-anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
+anyway). The shim routes `gh` to that App only from the operator's own Oh My Pi session, so the run
+starts there: a plain shell's `gh`, a tmux window's included, is the user's own login, a Legion
+pane's is one of Legion's Apps, and a personal `GH_TOKEN` in the environment makes any session's
+`gh` that token's owner. `prerequisites` refuses to start, before the run's first write to GitHub,
+unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
 `GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier. The agents'
 model is Anthropic through the Hawk model gateway, the route every devbox agent session uses:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes the isolated profile there in
@@ -349,10 +353,13 @@ transcripts too, and fails unless they hold the same turns, sessions and subagen
 scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
 root, which frees its admission slot as its sign-off would), `restart` also skips the held worker,
 and the credential and idle-read checks read `STAGE3_PR` (default: the newest smoke pull request).
-`STAGE3_UNTIL=rework` is the other development aid: it drives the first issue through its three
-review rounds, the per-round handoff checks, and the final review, then skips every later scenario.
-Such a run skips the status-actor check, which needs the first issue's whole history, ends
-`stage 3 e2e: development run from <step> finished (not the proof)` (or `until rework`), and is
+`STAGE3_UNTIL` is the other development aid. `STAGE3_UNTIL=prerequisites` stops once
+`prerequisites` has passed (the tools, the inputs, the proof human, the smoke repository read and
+the model route), before the rig starts anything, and removes the scratch work directory.
+`STAGE3_UNTIL=rework` drives the first issue through its three review rounds, the per-round handoff
+checks, and the final review, then skips every later scenario. Such a run skips the status-actor
+check, which needs the first issue's whole history, ends
+`stage 3 e2e: development run from <step> finished (not the proof)` (or `until <step>`), and is
 never cited as the proof; only a full run is.
 
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
@@ -385,8 +392,10 @@ ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_N
 **Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
 stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
 required inputs and the same model route and proof human as
-[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), but creates no Docker container: the daemon
-and Dispatch take their own databases in the running Postgres container `ACCEPT_PG_CONTAINER` names
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), so it too runs from the operator's own Oh My
+Pi session and refuses to start in `prerequisites` when `gh` acts as anyone but `sjawhar-agent[bot]`. It creates
+no Docker container: the daemon and Dispatch take their own databases in the running Postgres
+container `ACCEPT_PG_CONTAINER` names
 (user `postgres`, password `ci`), and NATS is the native `ACCEPT_NATS_BIN`. Real agents drive the
 task's surfaces through it: a Go prompt part a restart rewrites, the refused root stops, the pane's
 refusal of `legion handoff complete` from a shell in every pane kind, park and re-run, the
@@ -628,7 +637,11 @@ the run that owns it. A signal to the whole process group does not stop the remo
   claim, so the workflow reads its status writes as a human's.
 - **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, and tree 1's pull request, which
   the proof human merges. The teardown closes any pull request the run left open, such as one from a
-  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`.
+  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. Every one of
+  these writes is Stage 3's proof human's: the devbox `gh`, and for the fixture push the git
+  credential helper the same routing installs. So the driver runs from the operator's own Oh My Pi
+  session, and `prerequisites` refuses to start, before it takes the lock, when `gh` acts as anyone
+  but `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)).
 - **Namespace `legion`**: the run's Sandboxes, pods, Secrets and PVCs, its control pods, and its
   copy of the operator fixture's ConfigMap, `legion-operator-route-legsmoke`, all labelled
   `legsmoke`. [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown and
@@ -666,7 +679,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 
 | checkpoint | what it holds |
 | :--- | :--- |
-| `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
+| `prerequisites` | the tools, the restricted context and the image by digest; the devbox `gh` acts as the proof human, `sjawhar-agent[bot]`; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
@@ -684,7 +697,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
-| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3 is held by one of its planner claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its planner's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's delete, registration, death and charge; a deleted pod that is still starting can register, and even take its task, before it is stopped. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
+| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
 | `node-release` | tree 1's Sandboxes stay Suspended, its volume Bound, and no pod of the run is left on its node: after the pool's consolidation the node is gone, or, when a pod of another project (a production daemon running beside the run) is on it, Pending or Running, the node stays; the note says which, and a timeout lists what the node still held |
@@ -856,11 +869,67 @@ both sides, when a binary:
 The stamp does not hash a changed tree, so an edit made after the build to a tree that was already
 changed goes unseen. Every caller runs the helper right after its build.
 
+## lib/pack-plugin.sh
+
+Packs this checkout's `@sjawhar/pi-legion-envoy` the way the release packs it, and prints the
+tarball's path: what `npm pack` ships (`package.json` `files`: `dist/` with the two bundles and
+`prepack.sh`'s `dist/skills`, `agents/`, and the packed manifest). Every script that installs a
+branch-built plugin packs through it: [`lib/install-plugin-profile.sh`](#libinstall-plugin-profilesh),
+which `controller-start-tmux.sh`, `stage2-tmux-supervision.sh`, `stage3-devbox-workflow.sh`,
+`stage3-4b13b-acceptance.sh` and `stage4b-sandbox-tree.sh` call, and the grant rig's branch mode
+(`packages/pi-envoy/scripts/grant-rig/setup.sh`). The worker image packs on its own, as the release
+does: `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN` rewrites `omp.extensions` with `jq`
+and runs `bun pm pack`, and `prepack.sh` refuses to pack any other `omp.extensions`, which holds all
+of them to the same manifest.
+
+```sh
+bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
+tarball=$(scripts/e2e/lib/pack-plugin.sh "$work/pack")
+```
+
+`<out dir>` is created when missing, and refused inside the checkout (jj would snapshot the tarball)
+or when it already holds a `.tgz`. Stdout is exactly one line, the tarball's path; every step's own
+output goes to stderr.
+
+The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
+because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
+`node_modules`:
+
+1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
+   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
+   in "Point extensions at the packed bundles");
+2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
+   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
+3. `bun pm pack --destination <out dir>`, whose `prepack` builds `dist/` (the release's "Pack
+   extension" step, `packages/pi-envoy/scripts/prepack.sh`); the bundles inline `package.json`, so
+   they are built while it names the packed bundles, as the release builds them;
+4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
+   manifest").
+
+Each step cites its source by what it runs, never by line number: the lines move with every edit
+above them. The release's version bump (its "Set release version" step) is not a step: the tarball
+carries the checkout's own version. The saved manifest is written to the run's `mktemp -d`
+directory, never beside `package.json`, so an interrupted run strands no `tmp.json` in the checkout.
+
+The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
+way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
+dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
+itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
+`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
+the checkout.
+
+Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
+itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
+has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
+rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
+jj snapshots the rewritten `package.json`. Two stage proofs in one checkout, or a stage proof and the
+grant rig, can pack at the same time, and the lock takes them in turn.
+
 ## lib/install-plugin-profile.sh
 
 Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
-release packs it, so a stage proof or a boot-gate test runs the branch-built plugin and the user's
-own profiles are never touched.
+release packs it, so a stage proof runs the branch-built plugin and the user's own profiles are never
+touched.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
@@ -882,50 +951,23 @@ the manifest both daemons' contract gates read under the same profile — the Ty
 (`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
 goes to stderr.
 
-The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
-because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
-`node_modules`:
+The plugin is packed by [`lib/pack-plugin.sh`](#libpack-pluginsh), the release's pack steps run in the
+checkout, into the run's `mktemp -d` directory (never beside `package.json`, so an interrupted run
+strands no `.tgz` in the checkout). Then:
 
-1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
-   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
-   in "Point extensions at the packed bundles");
-2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
-   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
-3. `bun pm pack`, whose `prepack` builds `dist/` (the release's "Pack extension" step,
-   `packages/pi-envoy/scripts/prepack.sh`);
-4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
-   manifest");
-5. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
+1. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
    `tar xzf ./*.tgz -C /out/pi-legion-envoy --strip-components=1`);
-6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
+2. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
    `omp plugin install /opt/legion/pi-legion-envoy`);
-7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
+3. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the tarball's version,
    enabled, and resolving to `<dir>`.
 
-Steps 6 and 7 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
+Steps 2 and 3 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
 `HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
 there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
 
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them.
-
-The release's version bump (its "Set release version" step) is not a step: the profile gets the checkout's
-own version. The packed manifest and the tarball are written to the run's `mktemp -d` directory,
-never beside `package.json`, so an interrupted run strands no `tmp.json` or `.tgz` in the checkout.
-
-The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
-way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
-dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
-itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
-`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
-the checkout.
-
-Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
-itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
-has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
-rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
-jj snapshots the rewritten `package.json`. `go test ./...` runs package test binaries in parallel,
-so two callers at once is the expected case.
 
 The script creates the profile and `<dir>` and removes neither; the caller does, with its work
 directory, which holds both (the profile holds `plugins/` — the link and `omp-plugins.lock.json` —
@@ -1219,6 +1261,20 @@ where an agent runs:
 `new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
 `legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
 none, since it runs under its root's tree.
+
+`require_proof_human` is the proof human's precondition, which every stage proof that writes to
+GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox
+`gh` which account it acts as, through GraphQL's `viewer` with `GH_REPO` naming `repo` (the owner
+the dotfiles shim routes by): an App installation token answers `viewer` with the App's bot login,
+where REST's `GET /user` refuses one (403, "Resource not accessible by integration"). Unless the
+answer is `sjawhar-agent[bot]` it fails the check in one line: the account it found ("no account"
+when `gh` gave none, and why when it gave no answer within the probe's 60 s), the requirement (the
+operator's own Oh My Pi session, not a Legion pane, with no personal `GH_TOKEN` in its
+environment), and whatever `gh` wrote to stderr, where the shim names an inherited `GH_TOKEN`. Each
+harness's GitHub teardown (Stage 3's `close_unpassed_run_pull_requests`, 4b.13b's `github_cleanup`,
+Stage 4b's `remove_run_branches`) returns without a `gh` call unless the check passed.
+`lib/proof-human.test.ts` drives the check and Stage 3's teardown against a fake `gh`
+(`bun test scripts/e2e/lib`, which CI runs).
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own

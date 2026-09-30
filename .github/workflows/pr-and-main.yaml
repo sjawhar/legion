@@ -111,7 +111,7 @@ jobs:
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
 
-      - name: Test the live proofs' GitHub ingress bridge
+      - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check)
         run: bun test scripts/e2e/lib
 
       - name: Pre-pull daemon E2E NATS image
