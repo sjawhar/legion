@@ -78,6 +78,7 @@ var runtimeOwned = map[string]bool{
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
+	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true,
 }
 
 // legionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
@@ -586,7 +587,9 @@ func (r *Runtime) initWaitSeconds() int64 {
 // them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned), and the
 // daemon an operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
 // runtime.GrantFile on the state volume, which is empty at start: the extension makes its
-// directory. POD_UID is the pod's own incarnation, from the downward API.
+// directory. POD_UID is the pod's own incarnation, from the downward API. UV_PYTHON_INSTALL_DIR and
+// UV_CACHE_DIR put uv's Pythons and cache on the tree volume (uvPythonDir, uvCacheDir), so a later
+// pod of the tree runs a .venv an earlier one made.
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
 	spec := l.spec
 	var env []corev1.EnvVar
@@ -625,6 +628,8 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
 	env = append(env, xdgEnvironment()...)
+	add("UV_PYTHON_INSTALL_DIR", uvPythonDir)
+	add("UV_CACHE_DIR", uvCacheDir)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})

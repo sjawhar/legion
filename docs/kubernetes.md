@@ -31,14 +31,17 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   image's jj accepts its git with a network-free `jj git clone` of a scratch bare repository before the
   probes run, and its last step refuses a git anywhere but `/usr/bin/git`;
 - a generic toolchain for the repositories the workers work, specific to none of them: `uv` and `uvx`;
-  `node`, `npm`, `npx` and `corepack` from Node's Active LTS line; and the AWS CLI v2's `aws` — all at
-  `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned release whose
-  linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the `ARG`s at the
-  top of `worker.Dockerfile`). The image bakes no Python: `uv` installs each project's own, from its
-  `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`), into
-  `~/.local/share/uv/python` on the pod's own filesystem, so every new pod downloads it once. Node and the
-  AWS CLI keep their trees at `/opt/node` and `/opt/aws-cli`, outside `HOME`, so no volume a pod mounts
-  under `HOME` shadows any of it.
+  `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
+  to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); and the AWS CLI
+  v2's `aws` — all at `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned
+  release whose linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the
+  `ARG`s at the top of `worker.Dockerfile`). A corepack shim runs the version a project's
+  `packageManager` names, or corepack's default, fetched on first use into the user's corepack cache.
+  The image bakes no Python: `uv` installs each project's own, from its `.python-version` or
+  `requires-python`, the first time the project runs (`uv sync`, `uv run`). In a Sandbox pod that is on
+  the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
+  `~/.local/share/uv/python`. Node and the AWS CLI keep their trees at `/opt/node` and `/opt/aws-cli`,
+  outside `HOME`, so no volume a pod mounts under `HOME` shadows any of it.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -72,8 +75,10 @@ tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.g
 `docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
 (`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
-The same final step runs every toolchain command (`uv`, `uvx`, `node`, `npm`, `npx`, `corepack`, `aws`)
-as `legion`, from the image `PATH`, so a toolchain binary that does not run on the base fails the build.
+The same final step runs every toolchain command (`uv`, `uvx`, `node`, `npm`, `npx`, `corepack`, `aws`,
+and the `pnpm`, `pnpx`, `yarn` and `yarnpkg` shims, which fetch corepack's default versions into a
+scratch `COREPACK_HOME` the step removes) as `legion`, from the image `PATH`, so a toolchain command that
+does not run on the base fails the build.
 To check a published image's toolchain end to end, Python install included:
 `docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
@@ -139,11 +144,12 @@ set to public — a package-settings action on GitHub with no API.
 
 ### Per-deployment toolchains layer on top
 
-The base image carries Legion's own tools and the generic toolchain above (`uv`, Node with npm, the AWS
-CLI v2), and nothing in it is specific to one repository: `uv` takes each project's Python from the
-project itself, and the rest is the same for every project. A Python or Node repository therefore runs on
-the published image as it is. A deployment whose repositories need more than that (a system library,
-another language, a different Node line) builds its own image in **its** repo:
+The base image carries Legion's own tools and the generic toolchain above (`uv`, Node 24 LTS with npm
+and corepack's pnpm and yarn, the AWS CLI v2), and nothing in it is specific to one repository: `uv`
+takes each project's Python from the project itself, a corepack shim takes its version from the
+project's `packageManager`, and the rest is the same for every project. A Python or Node repository
+therefore runs on the published image as it is. A deployment whose repositories need more than that (a
+system library, another language, a different Node line) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
@@ -496,6 +502,16 @@ projected twice: its boot half into the worker, read-only, and its provisioning 
 `workspace-fetch` alone. The operator's volumes and mounts join the worker's, and the providers
 Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon has a
 NATS nkey seed. State, `/tmp` and the XDG config home are in-memory.
+
+The worker is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python` and `UV_CACHE_DIR=/legion/uv/cache`, so
+uv keeps the Pythons it installs and its cache on the tree volume beside the workspaces. A project's
+`.venv`, in its workspace on that volume, links to its interpreter there, so it runs as it is in every
+later pod of the tree, which also reuses the packages an earlier pod downloaded. With the cache and the
+`.venv` on one filesystem, uv hardlinks a package's files from the cache into each `.venv` that installs
+it (falling back to a copy, with a warning, on a filesystem that refuses the link). A file edited in
+place inside a `.venv` therefore also changes the cached copy and that file in every other `.venv` of
+the tree; `uv cache clean <package>`, then `uv sync --reinstall-package <package>` in each affected
+workspace, repairs it.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;

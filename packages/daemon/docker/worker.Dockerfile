@@ -14,8 +14,9 @@
 # and linked into the isolated OMP profile `legion`; the role prompts (packages/pi-envoy/roles) at
 # /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
-# repositories the workers work, specific to none of them: uv and uvx, Node with npm (an LTS line), and
-# the AWS CLI v2, each on PATH at /usr/local/bin. The last two RUNs gate the publish,
+# repositories the workers work, specific to none of them: uv and uvx, Node 24 LTS with npm and
+# corepack's pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last two RUNs
+# gate the publish,
 # as the runtime user: the first checks every binary runs on the base, proves jj accepts the image's git
 # with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
 # daemon's two plus the session-storage probe) through `legion probe-image`; the last runs the Go
@@ -42,7 +43,7 @@ ARG GO_VERSION=1.26.1
 # stage downloads for it, which the build checks before unpacking anything.
 ARG UV_VERSION=0.12.21
 ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
-# Node's Active LTS line.
+# Node 24 LTS.
 ARG NODE_VERSION=24.21.0
 ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
 ARG AWS_CLI_VERSION=2.37.6
@@ -146,10 +147,13 @@ RUN test -n "$LEGION_REVISION" \
 # ------------------------------------------------------------------------------------------------
 # toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
 # installs each project's own Python from its `.python-version` or `requires-python`, so the image bakes
-# no Python), Node with npm, and the AWS CLI v2. All three archives are checked against their pinned
-# SHA-256 before any is unpacked. uv and uvx are single binaries, copied to /usr/local/bin as gh and jj
-# are; Node and the AWS CLI keep their own trees under /opt, and /out/bin holds the symlinks into them
-# that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir` writes its two).
+# no Python), Node with npm and corepack, and the AWS CLI v2. All three archives are checked against
+# their pinned SHA-256 before any is unpacked. uv and uvx are single binaries, copied to /usr/local/bin
+# as gh and jj are; Node and the AWS CLI keep their own trees under /opt, and /out/bin holds the
+# symlinks into them that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir`
+# writes its two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
+# beside node, which the runtime user cannot: each runs the version a project's `packageManager` names,
+# or corepack's default, fetched on first use into the user's own corepack cache.
 FROM debian:trixie-slim AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
@@ -173,6 +177,9 @@ RUN set -eu; \
       uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
     tar -xJf "$t/node.tar.xz" -C /opt/node --strip-components=1 --no-same-owner; \
     for tool in node npm npx corepack; do ln -s "/opt/node/bin/$tool" "/out/bin/$tool"; done; \
+    for shim in pnpm pnpx yarn yarnpkg; do \
+      ln -s "/opt/node/lib/node_modules/corepack/dist/$shim.js" "/out/bin/$shim"; \
+    done; \
     unzip -q "$t/awscli.zip" -d "$t"; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
     rm -rf "$t"
@@ -273,7 +280,9 @@ COPY --from=go /out/agent-secrets /opt/legion/go/bin/agent-secrets
 # resolving every agent's model, and refuses a skipped result, before any claim runs on the image
 # (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
 # the cached probe layer above carries. Last, every toolchain command runs, as the runtime user from the
-# image PATH. No Python is checked: uv installs each project's own at run time.
+# image PATH; the corepack shims fetch their default pnpm and yarn into a scratch COREPACK_HOME, which
+# the step removes, so nothing lands under HOME. No Python is checked: uv installs each project's own
+# at run time.
 ARG LEGION_REVISION
 RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
@@ -283,6 +292,9 @@ RUN set -eu; \
     /opt/legion/go/bin/agent-secrets --help >/dev/null; \
     uv --version; uvx --version; node --version; npm --version; npx --version; corepack --version; \
     aws --version; \
+    corepack_home="$(mktemp -d)"; \
+    for shim in pnpm pnpx yarn yarnpkg; do COREPACK_HOME="$corepack_home" "$shim" --version; done; \
+    rm -rf "$corepack_home"; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs

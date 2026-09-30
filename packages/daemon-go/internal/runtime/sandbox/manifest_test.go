@@ -318,6 +318,43 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	}
 }
 
+// uv links a project's .venv, in a workspace on the tree volume, to an interpreter under
+// UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. A later pod of the tree, which
+// mounts the same tree volume, runs that .venv as it is and reuses what an earlier pod downloaded
+// only when both directories are on the tree volume's own mount (no other mount covering them),
+// outside the workspace, whose tree is the project's, and the same in every pod of the tree.
+func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first map[string]string
+	for _, spec := range []runtime.SpawnSpec{rootSpec(t), workerSpec(t)} {
+		main := containerNamed(t, podOf(t, r, spec, false), mainContainer)
+		env := envOf(main)
+		dirs := map[string]string{"UV_PYTHON_INSTALL_DIR": env["UV_PYTHON_INSTALL_DIR"], "UV_CACHE_DIR": env["UV_CACHE_DIR"]}
+		for name, dir := range dirs {
+			var mount *corev1.VolumeMount
+			for i, m := range main.VolumeMounts {
+				if (dir == m.MountPath || strings.HasPrefix(dir, m.MountPath+"/")) && (mount == nil || len(m.MountPath) > len(mount.MountPath)) {
+					mount = &main.VolumeMounts[i]
+				}
+			}
+			if mount == nil || mount.Name != treeVolume || mount.SubPath != "" {
+				t.Errorf("%s: %s %q is on mount %+v, want the tree volume's own mount at %s", spec.Role, name, dir, mount, TreeRoot)
+			}
+			if overlaps(dir, env["LEGION_WORKSPACE"]) {
+				t.Errorf("%s: %s %q overlaps the workspace %s", spec.Role, name, dir, env["LEGION_WORKSPACE"])
+			}
+		}
+		if first == nil {
+			first = dirs
+		} else if !maps.Equal(first, dirs) {
+			t.Errorf("%s pod's uv directories %v differ from the root's %v; a later pod of the tree would not find them", spec.Role, dirs, first)
+		}
+	}
+}
+
 // Oh My Pi copies its own environment once for every `gh` it runs to serve a pr:// or issue://
 // read, so the worker container is told LEGION_GRANT_FILE from its start; the extension writes a
 // grant there before each such call (LEGION-262). The file is the claim's, on the state volume in
