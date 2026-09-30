@@ -67,7 +67,7 @@ Two shapes to attack first:
 
 ## Security Guidelines
 
-For each row whose surface the diff touches, answer with a file:line citation. If the diff touches none, write one line: `Security: no sensitive surface in this diff.`
+For each row whose surface the diff touches, answer with a file:line citation. End your report with one `Security:` line: each touched row's tag and its answer with file:line, or `Security: no sensitive surface in this diff.` when the diff touches none.
 
 | Tag | If the diff touches… | Answer, with file:line |
 | --- | --- | --- |
@@ -78,7 +78,7 @@ For each row whose surface the diff touches, answer with a file:line citation. I
 | `supply-chain` | a dependency, lockfile, base image, or GitHub Action | the version, the pin (a digest or a SHA checked against its tag), and the permissions the workflow runs with |
 | `sandbox` | a sandbox or pod manifest, a capability, or a network policy | which isolation property changed, and against whom |
 
-Cite an OWASP ASVS v5.0.0 identifier where one applies (`v5.0.0-1.2.5` style). A finding with no stated exploit path is not a finding: call it hardening and rank it Minor. Report at most two security findings per review, ranked; fold the rest into one hardening paragraph. Start each security finding with its row's tag, `Security[<tag>]:`, so it can be told from the others and counted by row.
+Cite an OWASP ASVS v5.0.0 identifier where one applies (`v5.0.0-1.2.5` style). A finding with no stated exploit path is not a finding: call it hardening and rank it Minor. A security finding that states an exploit path is always its own finding at its real priority, never folded into hardening. Report at most two hardening items, ranked, and fold the rest into one hardening paragraph. Start each security finding with its row's tag, `Security[<tag>]:`, so it can be told from the others and counted by row.
 
 ## Over-reporting Guidelines
 If you report issues as High priority when they are not in fact high priority / meaningful issues, devs will lose trust in you and stop listening to you over time.
