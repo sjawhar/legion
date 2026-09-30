@@ -170,16 +170,37 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 	return s.registerReply(sess, wait)
 }
 
+// registerReply answers a register, first waiting up to wait for the session to enroll. Without a
+// launcher credential the enroll loop cannot succeed until a human logs the helper in, so it does
+// not wait at all: a launcher's `register --wait N` then costs nothing on a helper that was never
+// logged in, or whose credential the broker has refused once. An expired credential stays held
+// until a call is refused, so the first register after it expires still waits the full N. A
+// session the helper cannot enroll for want of a credential, read after any wait, gets Code
+// NO_CREDENTIAL and that reason in Error, so a launcher can say what the session will do.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
-	if wait > 0 {
+	if wait > 0 && s.Broker.HasCredential() {
 		select {
 		case <-sess.ready:
 		case <-time.After(wait):
 		case <-sess.stop:
 		}
 	}
-	operator := s.Broker.Operator()
-	return Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: operator, State: sess.State(), Error: sess.LastError()}
+	resp := Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: sess.State(), Error: sess.LastError()}
+	if resp.EnrollmentID == "" && !s.Broker.HasCredential() {
+		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
+	}
+	return resp
+}
+
+// notEnrolled answers sign or sign-request for a registered session with no enrollment yet: it is
+// enrolling (NOT_ENROLLED) while the helper holds a launcher credential, and without one the
+// helper enrolls no one until a human logs it in, so the session has no broker identity
+// (NO_CREDENTIAL).
+func (s *Server) notEnrolled(sess *Session) Response {
+	if !s.Broker.HasCredential() {
+		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
+	}
+	return Response{Code: CodeNotEnrolled, Error: "this session is not enrolled with the broker yet; last attempt: " + sess.LastError()}
 }
 
 // resolveDescendant keeps peer's pidfd open through Registry.Root's ancestry walk, exactly like
@@ -216,7 +237,7 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 	}
 	id := sess.EnrollmentID()
 	if id == "" {
-		return Response{Code: CodeNotEnrolled, Error: "this session is not enrolled with the broker yet; last attempt: " + sess.LastError()}
+		return s.notEnrolled(sess)
 	}
 	compact, err := proof.Sign(sess.Key, id, method, url, time.Now())
 	if err != nil {
@@ -242,7 +263,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 		return resp
 	}
 	if sess.EnrollmentID() == "" {
-		return Response{Code: CodeNotEnrolled, Error: "this session is not enrolled with the broker yet; last attempt: " + sess.LastError()}
+		return s.notEnrolled(sess)
 	}
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
@@ -333,13 +354,20 @@ func (s *Server) adopt(ctx context.Context, sess *Session, priorID string) {
 // starts at start and doubles toward maxDelay after each failure (start == maxDelay gives a
 // caller a fixed delay instead of a growing one); attempts caps the number of tries (0 means
 // unlimited), and try's last permitted attempt failing ends the loop at once, without waiting.
-// onFail runs after every failed attempt with its 1-based number, the error, the delay before
-// the next attempt (meaningless once retrying is false), and whether the loop is about to
-// retry, so a caller expresses only what it retries — its logging and any per-failure side
-// effect — not how retrying works. Returns whether try eventually succeeded.
-func retryUntilStop(ctx context.Context, stop <-chan struct{}, attempts int, start, maxDelay time.Duration, onFail func(attempt int, err error, delay time.Duration, retrying bool), try func() error) bool {
+// wake, when non-nil, gives a channel taken before each attempt: its closing cuts the wait short
+// and starts the backoff over, so a retry that failed for want of something retries the moment
+// it arrives (the broker's CredentialInstalled). onFail runs after every failed attempt with its
+// 1-based number, the error, the delay before the next attempt (meaningless once retrying is
+// false), and whether the loop is about to retry, so a caller expresses only what it retries —
+// its logging and any per-failure side effect — not how retrying works. Returns whether try
+// eventually succeeded.
+func retryUntilStop(ctx context.Context, stop <-chan struct{}, wake func() <-chan struct{}, attempts int, start, maxDelay time.Duration, onFail func(attempt int, err error, delay time.Duration, retrying bool), try func() error) bool {
 	delay := start
 	for attempt := 1; attempts <= 0 || attempt <= attempts; attempt++ {
+		var woken <-chan struct{}
+		if wake != nil {
+			woken = wake()
+		}
 		err := try()
 		if err == nil {
 			return true
@@ -351,12 +379,14 @@ func retryUntilStop(ctx context.Context, stop <-chan struct{}, attempts int, sta
 		}
 		select {
 		case <-time.After(delay):
+			delay = min(delay*2, maxDelay)
+		case <-woken:
+			delay = start
 		case <-stop:
 			return false
 		case <-ctx.Done():
 			return false
 		}
-		delay = min(delay*2, maxDelay)
 	}
 	return false
 }
@@ -401,7 +431,9 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session, priorID string) 
 	for {
 		var id string
 		var lease time.Time
-		enrolled := retryUntilStop(ctx, sess.stop, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		// A login wakes the retry, so a session registered before it enrolls within about a second
+		// rather than when a backoff of up to a minute comes round.
+		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			sess.setError(err.Error())
 			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID, "error", err, "in", delay)
 		}, func() error {
@@ -462,9 +494,10 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 // session ends, or ctx is done. Backoff matches enrollLoop's: 1 s doubling to a 1-minute cap,
 // retried indefinitely rather than a fixed number of times — giving up would hand the dead id
 // straight back to the broker's idempotent-enroll conflict path, which can keep answering it
-// forever. Returns false only when the session ended or ctx was canceled first.
+// forever — and, like enrollLoop's, woken by a login, since a revoke needs the credential too.
+// Returns false only when the session ended or ctx was canceled first.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
-	return retryUntilStop(ctx, sess.stop, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+	return retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
 	}, func() error {
 		return s.Broker.Revoke(ctx, id)
@@ -495,7 +528,7 @@ func (s *Server) retire(ctx context.Context, sess *Session, why string) {
 }
 
 func (s *Server) revoke(ctx context.Context, id string) {
-	retryUntilStop(ctx, nil, 3, 2*time.Second, 2*time.Second, func(attempt int, err error, delay time.Duration, retrying bool) {
+	retryUntilStop(ctx, nil, nil, 3, 2*time.Second, 2*time.Second, func(attempt int, err error, delay time.Duration, retrying bool) {
 		if !retrying {
 			s.Log.Warn("revoke failed; the lease lapses on its own", "enrollment_id", id, "error", err)
 		}
