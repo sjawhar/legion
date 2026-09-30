@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
@@ -150,6 +150,7 @@ export function AskCard({
   onAnswered,
 }: AskCardProps): ReactNode {
   const {
+    answerFailure,
     answerFieldId,
     answerPlaceholder,
     answerText,
@@ -558,19 +559,13 @@ export function AskCard({
             {answerActions}
           </>
         )}
-        {mutation.isError ? (
-          // An approval ask naming an older version is refused however often it is sent, and
-          // the refusal says where the human can approve instead.
-          mutation.error instanceof ApiError && mutation.error.code === "APPROVAL_ASK_STALE" ? (
-            <QueryError message={mutation.error.message} />
-          ) : (
-            <QueryError
-              message="Could not save your answer."
-              onRetry={() => submitGuard.retryLast(mutation)}
-              retrying={mutation.isPending}
-            />
-          )
-        ) : null}
+        {answerFailure === null ? null : (
+          <QueryError
+            message={answerFailure.message}
+            onRetry={answerFailure.retryable ? () => submitGuard.retryLast(mutation) : undefined}
+            retrying={mutation.isPending}
+          />
+        )}
         {clarification.isError ? (
           <QueryError
             message="Could not send your clarification."

@@ -32,6 +32,24 @@ interface UseAskAnswerFormOptions {
   onAnswered?: (id: string) => void;
 }
 
+/** A failed answer, as the card shows it. */
+interface AskAnswerFailure {
+  message: string;
+  /** False for a refusal the same answer never gets past. */
+  retryable: boolean;
+}
+
+/**
+ * An approval ask naming an older version is refused however often it is sent, and the refusal
+ * says where the human can review instead; any other failure may pass on a retry.
+ */
+function answerFailure(error: Error): AskAnswerFailure {
+  if (error instanceof ApiError && error.code === "APPROVAL_ASK_STALE") {
+    return { message: error.message, retryable: false };
+  }
+  return { message: "Could not save your answer.", retryable: true };
+}
+
 export function useAskAnswerForm({
   answer,
   ask,
@@ -240,6 +258,7 @@ export function useAskAnswerForm({
   const completed = justAnswered ?? (displayedAsk.state === "open" ? null : displayedAsk);
 
   return {
+    answerFailure: mutation.error === null ? null : answerFailure(mutation.error),
     answerFieldId,
     answerPlaceholder,
     answerText,
