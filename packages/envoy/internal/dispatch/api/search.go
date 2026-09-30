@@ -91,20 +91,17 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "q must be at least 2 characters")
 		return
 	}
-	// q and project ride in the URL, so each is capped in UTF-16 units after trimming, never more
-	// than dispatch_search counts before it sends anything: a value the tool sends is never refused
-	// here. The tool's refusal is what keeps its URL under the load balancer's request-line quota.
-	// These name the limit to any other sender, an older tool build included, whose URL still fits
-	// under that quota; a longer URL never reaches this handler.
+	// q is capped as dispatch_search caps it, counted after trimming so a query the tool sends is
+	// never refused here, and a project must be a key (an empty one searches every project). Both
+	// ride in the URL; packages/contracts/AGENTS.md "Search limits" says what keeps it short.
 	if length := len16(searchText); length > contracts.SearchQueryMax {
 		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
 		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchQueryHint)
 		return
 	}
 	project := strings.TrimSpace(query.Get("project"))
-	if length := len16(project); length > contracts.SearchProjectMax {
-		tooLong := capExceededError("project", length, contracts.SearchProjectMax)
-		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchProjectHint)
+	if project != "" && !projectKeyPattern.MatchString(project) {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project must be a project key such as CORE")
 		return
 	}
 

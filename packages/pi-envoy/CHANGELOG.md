@@ -50,10 +50,11 @@
 
 ### Changed
 
-- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` over
-  100 before any request, naming the limit and what to send instead. Both ride in the search URL,
-  which the load balancer in front of production Dispatch answers with a bare HTML `414` past
-  16,369 bytes, so this refusal is what stops a pasted passage from becoming that error.
+- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
+  not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
+  which the load balancer in front of production Dispatch answers with a bare HTML `414` when it
+  is too long, so this refusal is what stops a pasted passage from becoming that error; a
+  lowercased key, which used to come back as no results, is now refused by name.
 - The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
   in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
   threshold, where the 75 KB single file used to reach agents with its middle cut out.

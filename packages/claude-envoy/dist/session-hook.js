@@ -14132,8 +14132,7 @@ var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
-var SEARCH_PROJECT_MAX = 100;
-var SEARCH_PROJECT_HINT = "send one project key, such as LEGION, or leave project out to search every project";
+var PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -14451,9 +14450,16 @@ var dispatchToolSpecs = [
         max: SEARCH_QUERY_MAX,
         maxHint: SEARCH_QUERY_HINT
       }).describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
-      project: z2.string({ max: SEARCH_PROJECT_MAX, maxHint: SEARCH_PROJECT_HINT }).describe("Optional project key to search within.").optional(),
+      project: z2.string().describe("Optional project key to search within.").optional(),
       limit: z2.number({ int: true, min: 1, max: 50 }).describe("Maximum results, 1-50; default 20.").optional()
-    })
+    }),
+    validation: {
+      check: (value) => {
+        const { project } = value;
+        return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: "project must be a project key such as CORE"
+    }
   },
   {
     name: "dispatch_issues",
@@ -16041,7 +16047,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
     problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
-    if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
+    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push("project must be a project key such as CORE");
     }
     const refDocument = ref?.owner.kind === "project" ? ref.artifact ?? ref.id : undefined;

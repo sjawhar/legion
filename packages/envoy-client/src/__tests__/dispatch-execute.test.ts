@@ -6,7 +6,6 @@ import {
   type Artifact,
   dispatchToolSpecs,
   type IssueComponents,
-  SEARCH_PROJECT_MAX,
   SEARCH_QUERY_MAX,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -1115,34 +1114,6 @@ describe("executeDispatchTool", () => {
       })
     ).rejects.toThrow(
       `- query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
-    );
-    expect(requests).toBe(0);
-  });
-
-  test("dispatch_search refuses an over-long project beside a maximal query before any request", async () => {
-    let requests = 0;
-    const fetchImpl = (() => {
-      requests += 1;
-      throw new Error("network must not be called");
-    }) as unknown as typeof fetch;
-    // With `&limit=50`, this pair encodes to a 16,370-byte request line: one byte past what the
-    // load balancer in front of Dispatch passes, which it answers with a bare 414 before the
-    // server runs.
-    const length = 815;
-
-    await expect(
-      executeDispatchTool({
-        tool: "dispatch_search",
-        args: { query: "中".repeat(SEARCH_QUERY_MAX), project: "中".repeat(length), limit: 50 },
-        cwd: "/workspace",
-        host: "omp",
-        config,
-        env: {},
-        exec: repoExec("owner/repo"),
-        fetchImpl,
-      })
-    ).rejects.toThrow(
-      `- project is ${length - SEARCH_PROJECT_MAX} characters over the ${SEARCH_PROJECT_MAX}-character limit (${length}/${SEARCH_PROJECT_MAX}); send one project key, such as LEGION, or leave project out to search every project\n`
     );
     expect(requests).toBe(0);
   });

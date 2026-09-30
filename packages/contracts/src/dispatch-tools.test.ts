@@ -6,7 +6,6 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
-  SEARCH_PROJECT_MAX,
   SEARCH_QUERY_MAX,
   SPEC_SECTIONS,
 } from "./dispatch-tools";
@@ -217,15 +216,18 @@ describe("dispatchToolSpecs", () => {
     ]);
   });
 
-  test("dispatch_search accepts a project at the limit and refuses one character over by name", () => {
+  test("dispatch_search takes a project key or none, and refuses anything else by name", () => {
     const schema = schemaFor("dispatch_search");
 
-    const atLimit = schema.safeParse({ query: "ok", project: "P".repeat(SEARCH_PROJECT_MAX) });
-    expect(atLimit.success).toBe(true);
-    const over = schema.safeParse({ query: "ok", project: "P".repeat(SEARCH_PROJECT_MAX + 1) });
-    expect(over.error?.issues.map((issue) => issue.message)).toEqual([
-      `is 1 characters over the ${SEARCH_PROJECT_MAX}-character limit (${SEARCH_PROJECT_MAX + 1}/${SEARCH_PROJECT_MAX}); send one project key, such as LEGION, or leave project out to search every project`,
-    ]);
+    for (const project of [undefined, "", "LEGION", "LEGSMOKE"]) {
+      expect(schema.safeParse({ query: "ok", project }).success).toBe(true);
+    }
+    for (const project of ["legion", " LEGION", "LEGION-1", "中".repeat(100)]) {
+      const refused = schema.safeParse({ query: "ok", project });
+      expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
+        "project must be a project key such as CORE",
+      ]);
+    }
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {

@@ -535,45 +535,34 @@ func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
 	}
 }
 
-// The project rides in the same URL as the query, so it is capped the same way: dispatch_search
-// refuses a project over contracts.SearchProjectMax UTF-16 units before sending it, and the
-// server refuses a longer one from any other client by name, counting after trimming as it does
-// for q, so its count is never the higher of the two.
-func TestSearchRefusesAProjectOverTheLimit(t *testing.T) {
+// A project is a key or nothing. A value no project can have, a lowercased key among them, is
+// refused by name instead of answering an empty result; an empty project still searches every
+// project, and a key is read after trimming, as q is.
+func TestSearchRefusesAProjectThatIsNotAKey(t *testing.T) {
 	handler := newTestHandler(t)
+	seedSearchCorpus(t, handler)
 	search := func(project string) *httptest.ResponseRecorder {
 		return searchRequest(t, handler, url.Values{"q": {"astrolabe"}, "project": {project}}.Encode())
 	}
 
-	// At the limit in UTF-16 units once trimmed, and three times it in bytes.
-	if atLimit := search("  " + strings.Repeat("中", contracts.SearchProjectMax) + "  "); atLimit.Code != http.StatusOK {
-		t.Fatalf("project at the limit: status=%d body=%s", atLimit.Code, atLimit.Body.String())
+	for _, project := range []string{"", "  SRCH  "} {
+		response := search(project)
+		if response.Code != http.StatusOK {
+			t.Fatalf("project %q: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+		if hits := decodeBody[model.SearchResponse](t, response).Results; len(hits) == 0 {
+			t.Fatalf("project %q: no hits, want the SRCH issue", project)
+		}
 	}
-
-	cases := map[string]struct {
-		project string
-		length  int
-	}{
-		"one character over": {strings.Repeat("P", contracts.SearchProjectMax+1), contracts.SearchProjectMax + 1},
-		// 51 characters outside the Basic Multilingual Plane are 102 UTF-16 units.
-		"counted in UTF-16 units": {strings.Repeat("😀", contracts.SearchProjectMax/2+1), contracts.SearchProjectMax + 2},
-	}
-	for name, test := range cases {
-		t.Run(name, func(t *testing.T) {
-			response := search(test.project)
-			if response.Code != http.StatusBadRequest {
-				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
-			}
-			body := decodeBody[struct {
-				Code  string `json:"code"`
-				Error string `json:"error"`
-			}](t, response)
-			want := fmt.Sprintf("project is %d characters over the %d-character limit (%d/%d); %s",
-				test.length-contracts.SearchProjectMax, contracts.SearchProjectMax, test.length, contracts.SearchProjectMax, contracts.SearchProjectHint)
-			if body.Code != "CAP_EXCEEDED" || body.Error != want {
-				t.Fatalf("refusal = %+v, want CAP_EXCEEDED %q", body, want)
-			}
-		})
+	for _, project := range []string{"srch", "SRCH-1", strings.Repeat("中", 100)} {
+		response := search(project)
+		body := decodeBody[struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}](t, response)
+		if response.Code != http.StatusBadRequest || body.Code != "INVALID_PROJECT" || body.Error != "project must be a project key such as CORE" {
+			t.Fatalf("project %q: status=%d refusal=%+v, want 400 INVALID_PROJECT", project, response.Code, body)
+		}
 	}
 }
 
