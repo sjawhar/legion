@@ -9,7 +9,7 @@ tags:
   - field-enumeration
   - code-review
 date: 2026-09-28
-status: active
+status: historical
 module: packages/pi-envoy
 problem_type: testing
 component: src/legion/pane-guard.ts
@@ -22,6 +22,10 @@ related_issues:
   - "LEGION-121"
   - "sjawhar/legion#1536"
 ---
+
+> **[HISTORICAL]** The pane guard this review hardened was removed from `packages/pi-envoy` on
+> 2026-09-29, and the files and rows named below no longer exist. The three testing lessons still
+> apply to any guard.
 
 # A guard row called correctly allowed needs its dangerous payload run on each side
 

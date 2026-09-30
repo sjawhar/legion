@@ -65,13 +65,6 @@ this proof.
 
 ## The rules every phase's evidence follows
 
-- **Correctness fixes land in this PR; cleanup is one named fast-follow.** A finding that
-  changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
-  Findings about naming, duplication, or wording are batched into the single `Fast-follow`
-  line instead of iterating per push.
-- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
-  field names naming, duplication, or wording cleanup only; anything that changes behaviour,
-  hides an error, or breaks a gate lands in this PR.
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
   The proof is the one defined above. It goes into `.legion/implement.json` as the required `proof`
   array (`handoff_write` for phase `implement` refuses a payload without one, or with a blank or
@@ -112,8 +105,10 @@ this proof.
   and the tester re-runs its proof for the touched surface into `E2E (tester)`, before the
   reviewer's final pass. Simplify is the last code change; the pair is the last review. Record it
   in the `Thermo` line.
-- Once a base is frozen for others to stack on, never rewrite it — fixes land as new
-  commits on top, and the `Chain` line records what is frozen.
+- **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
+  `skill://legion-worker`): the `Fast-follow:` line holds naming, duplication, or wording cleanup
+  only. A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
+  `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
 
 ## When no surface reaches the changed path
 

@@ -344,7 +344,8 @@ A caller resolved by header identity without a stored GitHub token receives
 
 `POST /api/v1/artifacts/{id}/edits` accepts an `ops` array. Quote targets resolve against the
 document's plain text rather than Markdown source: inline-code and link text match without their
-syntax, and a table-cell target is its cell text.
+syntax, and a table-cell target is its cell text. A quote holding a table with a row shorter than
+its delimiter row, the header included, is matched as the text it is.
 
 | Operation | Required fields | Behavior |
 | --- | --- | --- |
@@ -353,7 +354,8 @@ syntax, and a table-cell target is its cell text.
 | `insert` | `markdown`, exactly one of `after` or `before` | Insert a sibling block before or after a quote or heading's enclosing document block. `"start"` and `"end"` select document edges. Pipe-table row fragments at a table-cell target are the exception: they extend that table before or after the containing row. Use `replace` for inline continuation. |
 
 Table-row fragments contain body rows only: omit the table header and delimiter row. Short rows are
-padded to the table width; rows wider than the table are rejected.
+padded to the table width while all operations in the edit request add at most 10,000 cells; a
+larger request is rejected as `INVALID_OP` on `markdown`. Rows wider than the table are rejected.
 
 ## Document errors
 

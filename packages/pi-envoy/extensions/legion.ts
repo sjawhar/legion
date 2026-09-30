@@ -43,7 +43,6 @@ import {
 import { createGoLegionTool } from "../src/legion/go-tools";
 import { writeMintedGrant } from "../src/legion/grant-file";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
-import { createPaneGuard, type PaneGuard } from "../src/legion/pane-guard";
 import {
   assistantText,
   inboundKind,
@@ -456,52 +455,6 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   return undefined;
 }
 
-/** The refusal the filesystem and signal boundary (LEGION-121, `src/legion/pane-guard.ts`) gives
- * a tool call, or undefined. A `bash` command runs in the session's directory (Oh My Pi resets it
- * for every call, or the call's own `cwd`) with the pane's environment and the call's own `env`;
- * `eval` code and a `hub` process start are held to the same roots. A guard that fails on a
- * command refuses it, since it never guesses. */
-function paneGuardRefusal(
-  toolCall: ToolCallEvent,
-  guard: PaneGuard,
-  sessionCwd: string
-): string | undefined {
-  const { toolName, input } = toolCall;
-  const cwd = typeof input.cwd === "string" ? path.resolve(sessionCwd, input.cwd) : sessionCwd;
-  try {
-    if (toolName === "bash" && typeof input.command === "string") {
-      const own =
-        typeof input.env === "object" && input.env !== null
-          ? Object.fromEntries(
-              Object.entries(input.env).filter(
-                (entry): entry is [string, string] => typeof entry[1] === "string"
-              )
-            )
-          : {};
-      return guard.bash(input.command, cwd, { ...process.env, ...own });
-    }
-    if (toolName === "eval" && typeof input.code === "string") {
-      const language = input.language === "js" ? "js" : input.language === "py" ? "py" : undefined;
-      return language === undefined
-        ? undefined
-        : guard.code(language, input.code, cwd, process.env);
-    }
-    if (toolName === "hub" && input.op === "start" && typeof input.application === "string") {
-      const args = Array.isArray(input.args)
-        ? input.args.filter((arg): arg is string => typeof arg === "string")
-        : [];
-      return guard.argv([input.application, ...args], cwd, process.env);
-    }
-    return undefined;
-  } catch (error) {
-    logger.error("legion pane guard failed", { toolName, error: messageFor(error) });
-    return (
-      `refused: the Legion pane guard (LEGION-121) could not check this ${toolName} call ` +
-      `(${messageFor(error)}), and it refuses what it cannot check; simplify the command`
-    );
-  }
-}
-
 // Read by the daemon's startup probe (packages/daemon/src/daemon/index.ts,
 // verifyLegionPluginLoaded) to prove this extension actually loaded from an
 // ambient installed-plugin discovery -- not just that a manifest file exists,
@@ -549,12 +502,10 @@ export default function legionExtension(pi: PiApi): void {
   // Gates both session_start and tool_call below; memoised so it runs once per session, not
   // once per tool call.
   const checkSubagentSession = subagentSessionCheck();
-  // The pane rules this pane is held to (PANE_RULES), and for a phase worker's or root architect's
-  // pane the filesystem and signal boundary (LEGION-121), judged from the environment on the
-  // first tool_call. A subagent's own instance inherits the pane's environment, so both bind it
+  // The pane rules this pane is held to (PANE_RULES), judged from the environment on the first
+  // tool_call. A subagent's own instance inherits the pane's environment, so the rules bind it
   // exactly as they bind the worker that spawned it.
   let paneRules: readonly PaneRule[] | undefined;
-  let paneGuard: PaneGuard | undefined;
 
   // The phase-stall check (src/legion/phase-stall.ts). It runs only in a session holding a
   // phase-worker capability for its own id with a phase role, so never in an architect (a root,
@@ -992,26 +943,13 @@ export default function legionExtension(pi: PiApi): void {
     });
     // LEGION-45: the operation log is shared by every issue workspace (all are jj workspaces of
     // one clone), and a `task` subagent's bash runs in the same pane against it; a subagent has no
-    // `legion` tool, so a handoff from its bash is one the phase stall cannot see. LEGION-121: a
-    // subagent's `rm` or `pkill` reaches the same machine as its parent's. The pane rules and the
-    // pane guard are therefore judged from the pane's environment ahead of the subagent exemption
-    // below -- the one gate that reaches a subagent -- and before any grant is minted. Classified
-    // once per instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the
-    // Both daemons put a phase worker in LEGION_WORKSPACE. The TypeScript daemon names a root
-    // architect's workspace LEGION_ROOT_WORKSPACE, while the Go daemon uses LEGION_WORKSPACE.
-    if (paneRules === undefined) {
-      const { kind } = classifySession(process.env);
-      paneRules = PANE_RULES[kind] ?? [];
-      if (kind === "phase-worker" || kind === "root-architect") {
-        paneGuard = createPaneGuard({
-          workspace: process.env.LEGION_WORKSPACE ?? process.env.LEGION_ROOT_WORKSPACE,
-          ompPid: process.pid,
-        });
-      }
-    }
-    const refusal =
-      paneRuleRefusal(toolCall, paneRules) ??
-      (paneGuard === undefined ? undefined : paneGuardRefusal(toolCall, paneGuard, context.cwd));
+    // `legion` tool, so a handoff from its bash is one the phase stall cannot see. The pane rules
+    // are therefore judged from the pane's environment ahead of the subagent exemption below --
+    // the one gate that reaches a subagent -- and before any grant is minted. Classified once per
+    // instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the handler,
+    // never at load.
+    paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
+    const refusal = paneRuleRefusal(toolCall, paneRules);
     if (refusal !== undefined) return { block: true, reason: refusal };
     // No other gate applies to a subagent's own tool calls: the parent session's gate, running
     // in the parent's own module instance, already governs the parent's `task` call that spawned

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added `claimHolds(claim, titles)` and its `ClaimHolding` answer (`holds`, `lapsed`, `unknown`):
+  whether a claim still holds its issue against the live agent registry. A person's always holds;
+  a session's holds while the loaded registry lists it; with no registry it is `unknown`. The
+  dashboard's claim chip and the agent tools' claim lines both judge a claim with it.
 - Added shared schemas and descriptions for the nine native Dispatch tools.
 - Added the `Agent` row type behind Dispatch's `GET /api/v1/agents`.
 - Added required `Ask.opened_event_id`, the canonical event ID for an ask's opening turn.

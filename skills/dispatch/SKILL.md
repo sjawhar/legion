@@ -215,8 +215,11 @@ dispatch_claim({ issue: "LEGION-234", release: true })   // I have stopped; it i
 
 A claim records **your** session — the one making the call, never another — and shows on every
 read of the issue: the dashboard header, the issue list and board, `dispatch_read` (a
-`Claimed by:` line) and `dispatch_issues` (a claim on the row). `dispatch_issues` plus the
-dashboard's **Unclaimed** filter is how you find work nobody is on.
+`Claimed by:` line) and `dispatch_issues` (a claim on the row). A session's claim there ends
+`· not running` when the live agent registry does not list that session, as the dashboard's chip
+does — that claim is free to take — and `· liveness unknown` when the registry could not be read,
+which says nothing either way. `dispatch_issues` plus the dashboard's **Unclaimed** filter is how
+you find work nobody is on.
 
 - **`409 ISSUE_CLAIMED` means someone else holds this issue.** When it is another session, the
   refusal names it and says it is still running: do not work the issue in parallel — message
@@ -274,7 +277,8 @@ The two clears differ: `priority` clears with `null`, while `parent` and `route`
 Guessing the other one is a refusal either way.
 
 Link the pull request that delivers the issue in `external_links` when you open it; the issue page
-renders its state and checks from that link. The call is authenticated with the same bearer as every
+renders its state and checks from that link, and `dispatch_read` lists it under `External links:`.
+The call is authenticated with the same bearer as every
 other `dispatch_*` tool: a Legion pane reads it from the `DISPATCH_TOKEN_FILE` path the daemon sets on
 the pane; an OMP session outside Legion reads `dispatch.token` from `~/.config/opencode/envoy.json`.
 

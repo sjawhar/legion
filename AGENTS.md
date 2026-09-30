@@ -95,22 +95,22 @@ projects:
 | Task                   | Location                                      | Notes                                     |
 | ---------------------- | --------------------------------------------- | ----------------------------------------- |
 | Add CLI command        | `packages/daemon/src/cli/index.ts`            | citty `defineCommand` pattern                  |
-| Change Legion API      | `packages/daemon/src/daemon/api.ts`            | See @packages/daemon/src/daemon/AGENTS.md      |
-| Change daemon state    | `packages/daemon/src/daemon/legion-state.ts`   | See @packages/daemon/src/state/AGENTS.md       |
-| Deployment instructions (`legion.yaml` `instructions:`) | `packages/daemon/src/daemon/deployment-instructions.ts` | Operator markdown appended to every pane's system prompt; see @packages/daemon/src/daemon/AGENTS.md |
-| Add phase guidance     | `skills/legion-worker/SKILL.md`                | See @skills/AGENTS.md                          |
-| Change architect loop  | `skills/legion-architect/SKILL.md`             | See @skills/AGENTS.md                          |
+| Change Legion API      | `packages/daemon/src/daemon/api.ts`            | See `packages/daemon/src/daemon/AGENTS.md`      |
+| Change daemon state    | `packages/daemon/src/daemon/legion-state.ts`   | See `packages/daemon/src/state/AGENTS.md`       |
+| Deployment instructions (`legion.yaml` `instructions:`) | `packages/daemon/src/daemon/deployment-instructions.ts` | Operator markdown appended to every pane's system prompt; see `packages/daemon/src/daemon/AGENTS.md` |
+| Add phase guidance     | `skills/legion-worker/SKILL.md`                | See `skills/AGENTS.md`                          |
+| Change architect loop  | `skills/legion-architect/SKILL.md`             | See `skills/AGENTS.md`                          |
 | Handoff ledger         | `.legion/` on issue branch                     | Committed phase output                          |
-| Envoy event routing    | `packages/envoy/`                              | See @packages/envoy/AGENTS.md                  |
-| Shared event contracts | `packages/contracts/`                          | See @packages/contracts/AGENTS.md               |
-| Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
+| Envoy event routing    | `packages/envoy/`                              | See `packages/envoy/AGENTS.md`                  |
+| Shared event contracts | `packages/contracts/`                          | See `packages/contracts/AGENTS.md`               |
+| Envoy OMP adapter      | `packages/pi-envoy/`                          | See `packages/pi-envoy/AGENTS.md`          |
 | Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
 | Operator controller configuration (Kubernetes) | `deploy/kubernetes/daemon/controller.yaml.example` | The operator-side file `legion controller start` reads. See `docs/kubernetes.md` "Operator-launched controller" |
 | Prove the Kubernetes runtime live | `scripts/e2e/stage4b-sandbox-tree.sh` (a full tree), `scripts/e2e/stage4a-sandbox-runtime.sh` (the runtime alone) | The Go daemon on Agent Sandbox in the production cluster; `scripts/e2e/README.md` |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
-| Dispatch's document editor | `packages/proof-editor/` | The editor entry, typed blocks and block ids, source-only. Copied from the `sjawhar/proof-sdk` fork at the commit a git dependency pins; the upstream editor modules stay there. See @packages/proof-editor/AGENTS.md |
+| Dispatch's document editor | `packages/proof-editor/` | The editor entry, typed blocks and block ids, source-only. Copied from the `sjawhar/proof-sdk` fork at the commit a git dependency pins; the upstream editor modules stay there. See `packages/proof-editor/AGENTS.md` |
 | Go coordinator (in progress) | `packages/daemon-go/` | LEGION-208's Go rewrite: a separate module bound by the root `go.work`, sharing no file with `packages/daemon`, which stays the shipped daemon until Stage 7. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-go-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof. It resolves role prompts at boot from `LEGION_ROLE_PROMPTS_DIR` or `role-prompts` beside the running `legion` executable, validates every shared part, and snapshots the bundle below its state directory before any pane or controller starts. |
-| Secrets broker | `packages/envoy/cmd/broker`, `packages/envoy/internal/broker` | See @packages/envoy/AGENTS.md |
+| Secrets broker | `packages/envoy/cmd/broker`, `packages/envoy/internal/broker` | See `packages/envoy/AGENTS.md` |
 
 ## Conventions
 
@@ -121,6 +121,7 @@ projects:
 - **No barrel files** — direct imports between modules (intentional, avoids circular deps)
 - **Dependency injection** — daemon accepts `overrides` for testability
 - **Tests** — co-located `__tests__/` dirs, Bun test runner (`bun:test`)
+- **Point to other guides by plain path** — write another `AGENTS.md` as `` `packages/x/AGENTS.md` ``, never `@packages/x/AGENTS.md`: Oh My Pi and Claude Code read an `@path` outside code as an include and paste the whole file into every session started in this repository, Legion's own phase workers included
 - **This repository is public** — no name from the private infrastructure it deploys into goes in the tree or a commit message: no hostname or tailnet machine name, account id, IAM role, admission-policy name, token audience, secret-store id, bucket or alert channel. A test or example uses a placeholder (`<name>.internal.example` hosts, `example-host-<name>` machines, `example/<service>/<name>` secret ids, `<placeholder>` in a shell example); a value a live script needs is a required operator input the script refuses to start without, never a literal. Legion's own names (the `legion` namespace, `legion-worker`, `legion-daemon`, `LEGSMOKE`), internal issue keys and repository paths are not in this class
 
 ## Issue Lifecycle
@@ -149,6 +150,10 @@ close an issue into `done` and reopen it into `backlog` from the Dispatch dashbo
 Dispatch label `legion` (in any case), so it can share a Dispatch project with humans and other
 agents; a dedicated project hands its issues over the same way. A human sets the label from the
 issue header in the Dispatch dashboard, an agent with `dispatch_issue` or `dispatch_issue_update`.
+The controller hands over work itself: at its start, and whenever the daemon wakes it with
+`slot-free` because a released admission slot stayed empty, it labels and admits the
+highest-priority `todo` leaf issue (one with no children) nobody else is working
+(`skills/legion-controller/SKILL.md`, "Keeping the slots full").
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
 the controller. A child needs none: it runs under its tree's architect once its root is admitted. A
 child whose tree is not live is an orphan, admitted as a root of its own, so it needs the label as
