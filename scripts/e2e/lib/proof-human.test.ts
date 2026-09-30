@@ -56,16 +56,17 @@ function run(script: string, fake: { login?: string; stderr?: string; exit?: num
   };
 }
 
+// The refusal names the account it found right before the smoke repository; the proof human's own
+// name and the repository appear on every refusal, so only that position tells the two apart.
 const refusedAs = (login: string) =>
-  new RegExp(`^FAIL prerequisites: the devbox gh acts as ${login.replace(/[[\]]/g, "\\$&")} for `);
+  new RegExp(
+    `^FAIL prerequisites: .* ${login.replace(/[[\]]/g, "\\$&")} for sjawhar/legion-smoke\\b`
+  );
 
 describe("require_proof_human", () => {
   test("passes the sjawhar-agent App's bot, asking gh with GH_REPO naming the smoke repository", () => {
-    const r = run('require_proof_human\nprintf "proof_human=%s\\n" "$proof_human"', {
-      login: "sjawhar-agent[bot]",
-    });
+    const r = run("require_proof_human", { login: "sjawhar-agent[bot]" });
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("proof_human=sjawhar-agent[bot]");
     expect(r.calls).toHaveLength(1);
     expect(r.calls[0]).toStartWith("GH_REPO=sjawhar/legion-smoke api graphql ");
   });
@@ -117,6 +118,17 @@ describe("close_unpassed_run_pull_requests", () => {
     const r = run("close_unpassed_run_pull_requests");
     expect(r.status).toBe(0);
     expect(r.calls).toEqual([]);
+  });
+
+  // A refused run's own sequence: the check fails, the run exits, and the EXIT trap runs the close.
+  // The probe must be the only gh call, since every other would act as the refused account.
+  test("a refused run's EXIT trap makes no gh call after the probe", () => {
+    const r = run("trap close_unpassed_run_pull_requests EXIT\nrequire_proof_human", {
+      login: "sjawhar",
+    });
+    expect(r.status).toBe(1);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]).toContain(" api graphql ");
   });
 
   test("lists the run's pull requests once require_proof_human passed", () => {
