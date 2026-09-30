@@ -706,17 +706,21 @@ func (p *syncedPeer) write(connection *gws.Conn, syncMessage []byte) error {
 	return connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
 }
 
-// barrier returns once the room holds everything the peer sent. It asks for the room's whole
-// state, a sync step 1 naming no state, until an answer holds the peer's document. Each answer is
-// applied to the peer before barrier sees it, so the peer then also holds what the room did. The
-// room answers one connection in order, but a sync step 2 already on its way cannot tell barrier
-// that: the one the room opens every connection with, or another peer's that the room relays, can
-// arrive after the request and predate an update the peer sent just before it.
+// barrier returns once the room holds everything the peer sent and has answered a request sent
+// now. It drops the answers already queued, then asks for the room's whole state (a sync step 1
+// naming no state) until an answer holds the peer's document. The room answers one connection in
+// order, and each answer is applied to the peer before barrier sees it, so the peer then holds
+// everything the room sent before that answer. The document check covers a sync step 2 that was
+// already on its way when barrier drained: another peer's that the room relays can arrive after
+// the request and predate an update this peer sent just before it.
 func (p *syncedPeer) barrier(t *testing.T) {
 	t.Helper()
 	p.mu.Lock()
 	connection, answers, done := p.connection, p.answers, p.readerDone
 	p.mu.Unlock()
+	for len(answers) > 0 {
+		<-answers
+	}
 	deadline := time.After(5 * time.Second)
 	for {
 		if err := p.write(connection, ygsync.EncodeSyncStep1(crdt.New())); err != nil {
