@@ -22,9 +22,11 @@ events and sends them to the current Claude Code session as supported
   the session's open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
   `unavailable: <reason>` when Dispatch cannot be reached; nothing when Dispatch is not
   configured). With Dispatch configured, `dist/session-hook.js dispatch-first` puts the
-  `dispatch-first` skill into the context of each new session (startup, clear, compact) and of each
-  subagent (`SubagentStart`), as a hook entry of its own so neither output crowds the other past
-  Claude Code's 10,000-character hook limit.
+  `dispatch-first` skill into the context of every session on the same `SessionStart` events and of
+  each subagent (`SubagentStart`), as a hook of its own so neither output crowds the other past
+  Claude Code's 10,000-character hook limit. On a resume or fork Claude Code adds it only when the
+  transcript does not already hold the same text, so a session keeps one copy, and one opened
+  before the skill shipped gets it.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe` or a successful Dispatch mutation. It renders every envelope with
   the shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
