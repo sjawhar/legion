@@ -78,6 +78,13 @@ case "$path" in
     serve "$d/markers-$name.json" '{"total_count":0,"artifacts":[]}' ;;
   repos/*/pulls\?*) serve "$d/pulls.json" '[]' ;;
   repos/*/pulls/comments\?*) serve "$d/comments.json" '[]' ;;
+  repos/*/collaborators/*/permission)
+    # permission-LOGIN holds that login's role; anyone else reads as GitHub reads an outsider on a
+    # public repository.
+    login=$(sed -E 's|.*/collaborators/([^/]+)/permission|\1|' <<<"$path")
+    role=$(cat "$d/permission-$login" 2> /dev/null || echo read)
+    jq -cn --arg login "$login" --arg role "$role" \
+      '{permission: (if $role == "maintain" then "write" else $role end), role_name: $role, user: {login: $login}}' ;;
   repos/*/code-scanning/alerts*) serve "$d/codeql-alerts.json" '[]' ;;
   repos/*/code-scanning/analyses*) serve "$d/codeql-analyses.json" '[]' ;;
   repos/*/secret-scanning/alerts*) serve "$d/secret-alerts.json" '[]' ;;
@@ -255,11 +262,14 @@ pr_with_findings() {
   fi
 }
 
-# add_comment ID IN_REPLY_TO BODY
+# add_comment ID IN_REPLY_TO BODY [LOGIN]: a review comment by LOGIN (default legion-review[bot],
+# a GitHub App); a login ending in [bot] is a Bot, any other a User.
 add_comment() {
+  local login=${4:-legion-review[bot]}
   [ -e "$d/comments.json" ] || echo '[]' > "$d/comments.json"
-  append "$d/comments.json" . "$(jq -cn --argjson id "$1" --argjson reply "$2" --arg body "$3" \
+  append "$d/comments.json" . "$(jq -cn --argjson id "$1" --argjson reply "$2" --arg body "$3" --arg login "$login" \
     --arg created "$(iso '4 days ago')" '{id: $id, in_reply_to_id: $reply, body: $body,
+    user: {login: $login, type: (if ($login | endswith("[bot]")) then "Bot" else "User" end)},
     created_at: $created, updated_at: $created, pull_request_url: "https://api.github.com/repos/sjawhar/legion/pulls/9"}')"
 }
 
@@ -585,6 +595,34 @@ add_comment 13 null "An ordinary review comment"
 run_report
 check "narrows the prompt row" "$(has "NARROW: prompt row (3 not a defect, 0 fixed)")"
 check "keeps the supply-chain row" "$(has "keep: supply-chain row (1 not a defect, 2 fixed)")"
+
+echo "=== rule 4 counts writers and GitHub Apps only: anyone else's threads and replies are ignored, and named ==="
+setup r10-authors "15 days ago"
+echo write > "$d/permission-maintainer"
+add_comment 1 null "Security[supply-chain]: a floating tag" outsider
+add_comment 2 1 "Accepted: not a defect — pinned" outsider
+add_comment 3 null "Security[supply-chain]: another floating tag" outsider
+add_comment 4 3 "Accepted: not a defect — pinned" outsider
+add_comment 5 null "Security[supply-chain]: a third floating tag" outsider
+add_comment 6 5 "Accepted: not a defect — pinned" outsider
+add_comment 7 null "Security[sandbox]: the pod mounts the Docker socket"
+add_comment 8 7 "Accepted: not a defect — it is read-only" outsider
+add_comment 9 null "Security[secret]: the token reaches the log" maintainer
+add_comment 10 9 "Accepted: fixed in 1234567" maintainer
+run_report
+check "a CONTRIBUTOR human's three not-a-defect threads narrow nothing" "$(lacks "supply-chain row")"
+check "each of them is named as ignored" \
+  "$(has "ignored: Security[supply-chain] thread 5 by outsider (not a collaborator with write access, nor a GitHub App)")"
+check "their Accepted: reply on an App's thread leaves it unanswered" \
+  "$(has "keep: sandbox row (0 not a defect, 0 fixed, 1 unanswered)")"
+check "and that reply is named" \
+  "$(has "ignored: Accepted: reply 8 by outsider on thread 7 (not a collaborator with write access, nor a GitHub App)")"
+check "a human collaborator with write access counts" "$(has "keep: secret row (0 not a defect, 1 fixed)")"
+check "each human's permission is read once, and no App's" \
+  "$( [ "$(grep -cF "collaborators/outsider/permission" "$d/calls.log")" = 1 ] &&
+    [ "$(grep -cF "collaborators/maintainer/permission" "$d/calls.log")" = 1 ] &&
+    [ "$(grep -c "collaborators/legion-review" "$d/calls.log" || true)" = 0 ] && echo true || echo false)"
+check "so every rubric row is kept" "$(has "DECISION: keep every rubric row")"
 
 echo "=== R11. every check promoted: the report prints, with no decision ==="
 setup r11 "15 days ago"

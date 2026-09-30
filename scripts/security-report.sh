@@ -58,7 +58,11 @@
 #    `security-events: read`; `BLOCKED` on the devbox.
 # 4. **Rubric rows:** a tag with ≥ 3 `Accepted: not a defect` and 0 `Accepted: fixed` in the window
 #    is narrowed or removed in the promotion PR (both copies, kept identical); the ≤ 2 findings
-#    budget stays.
+#    budget stays. **Who counts** (AGENTC-1330): a `Security[<tag>]:` thread and an `Accepted:`
+#    reply count only from a collaborator with write, maintain or admin, or from a GitHub App bot.
+#    Every Legion reviewer is an installed App, which GitHub reads as permission `none`, and only an
+#    App the owner installed can comment here (no workflow runs on `pull_request_target`, so an
+#    outsider cannot make a bot comment). Anyone else's thread or reply is ignored and named.
 # 5. **Required check:** only when rule 1 promotes, ask Sami to add the check `security`
 #    (integration 15368) to ruleset 12331919's required checks, so the merger's `--ready` also
 #    refuses; the promotion PR adds `scripts/security-settings.sh --require-security-check`, which
@@ -686,22 +690,59 @@ def narrowed(counts):
     return counts["not a defect"] >= NARROW_AT and counts["fixed"] == 0
 
 
+NOT_COUNTED = "not a collaborator with write access, nor a GitHub App"
+
+
+@functools.cache
+def counts_for_rule_4(login, kind):
+    """Whether LOGIN's threads and replies count for rule 4 (its header): a GitHub App bot, or a
+    collaborator whose role is write, maintain or admin. A login GitHub no longer knows does not."""
+    if kind == "Bot":
+        return True
+    try:
+        permission = gh(f"repos/{repo}/collaborators/{quote(login, safe='')}/permission")
+    except NotFound:
+        return False
+    except Forbidden as error:
+        fail(f"cannot read {login}'s permission on {repo}, which rule 4 needs: {error}")
+    return permission.get("role_name") in ("admin", "maintain", "write") or permission.get("permission") in ("admin", "write")
+
+
+def author(comment):
+    """(login, counts for rule 4) for a review comment; a deleted account's comment does not count."""
+    user = comment.get("user") or {}
+    login = user.get("login")
+    return login or "(deleted account)", bool(login) and counts_for_rule_4(login, user.get("type"))
+
+
 def review_threads(window):
     """Rule 4: {tag: Counter of fixed, not a defect and open} over the Security[<tag>]: review threads
-    opened inside the window, each by its newest `Accepted:` reply."""
+    opened inside the window by an author who counts, each by its newest `Accepted:` reply from one."""
     comments = list(paged(f"repos/{repo}/pulls/comments?sort=created&direction=asc"
                           f"&since={window.start:%Y-%m-%dT%H:%M:%SZ}"))
     replies = defaultdict(list)
     for comment in comments:
         if comment.get("in_reply_to_id"):
             replies[comment["in_reply_to_id"]].append(comment)
-    threads = defaultdict(Counter)
+    threads, ignored = defaultdict(Counter), []
     for comment in comments:
         tag = SECURITY_TAG.match(comment.get("body") or "")
         if comment.get("in_reply_to_id") or not tag or not window.holds(comment["created_at"]):
             continue
-        accepted = [r for r in sorted(replies[comment["id"]], key=lambda r: r["created_at"])
-                    if (r.get("body") or "").startswith("Accepted:")]
+        login, counted = author(comment)
+        if not counted:
+            ignored.append(f"ignored: Security[{tag.group(1)}] thread {comment['id']} by {login} ({NOT_COUNTED})")
+            continue
+        accepted = []
+        for reply in sorted(replies[comment["id"]], key=lambda r: r["created_at"]):
+            if not (reply.get("body") or "").startswith("Accepted:"):
+                continue
+            login, counted = author(reply)
+            if counted:
+                accepted.append(reply)
+            else:
+                ignored.append(f"ignored: Accepted: reply {reply['id']} by {login} on thread {comment['id']} "
+                               f"({NOT_COUNTED})")
         reply = accepted[-1]["body"] if accepted else ""
         if reply.startswith("Accepted: fixed"):
             threads[tag.group(1)]["fixed"] += 1
@@ -712,11 +753,14 @@ def review_threads(window):
     print()
     print("## Security review threads")
     print()
+    print("counted: threads and Accepted: replies from collaborators with write access and from GitHub Apps")
     if not threads:
         print("no Security[<tag>]: review threads in the window")
     for tag, counts in sorted(threads.items()):
         print(f"{'NARROW' if narrowed(counts) else 'keep'}: {tag} row ({counts['not a defect']} not a defect, "
               f"{counts['fixed']} fixed" + (f", {counts['open']} unanswered" if counts["open"] else "") + ")")
+    for line in ignored:
+        print(line)
     return threads
 
 

@@ -98,6 +98,13 @@ run has none of the findings their Gate fails on, osv findings with a fix and re
 findings; the report names both counts, since promoting a gate that fails on `main` would fail
 every pull request.
 
+Rule 4 counts a `Security[<tag>]:` review thread and its `Accepted:` reply only from a
+collaborator with write, maintain or admin access, or from a GitHub App bot, and the report names
+every thread and reply it ignores. Every Legion reviewer is an installed App, which GitHub reads as
+permission `none`, so a permission check alone would count none of them; only an App the owner
+installed can comment here, and no workflow runs on `pull_request_target`, so an outsider cannot
+make a bot comment.
+
 ```bash
 scripts/security-report.sh                        # sjawhar/legion, 14-day window
 scripts/security-report.sh --decision force       # print the decision block now
