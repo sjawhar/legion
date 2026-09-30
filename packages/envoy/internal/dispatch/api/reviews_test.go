@@ -724,6 +724,13 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 		f.peers = append(f.peers, peer)
 		return peer
 	}
+	// typeNote types a paragraph as peer and returns once the room holds it: the room credits the
+	// peers connected when it applies the edit, which can be after the peer's own sync answer.
+	typeNote := func(t *testing.T, f *fixture, peer *syncedPeer, text string) {
+		t.Helper()
+		peer.appendParagraph(t, text)
+		waitForLiveText(t, f.documentService, f.artifactID, text)
+	}
 	type actorRead struct {
 		Kind string `json:"kind"`
 		ID   string `json:"id"`
@@ -740,9 +747,7 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 	}{
 		{"two connected peers where the second types", func(t *testing.T, f *fixture) {
 			connect(t, f, askerPeer)
-			typist := connect(t, f, humanPeer)
-			typist.appendParagraph(t, "Bob's note.")
-			typist.barrier(t)
+			typeNote(t, f, connect(t, f, humanPeer), "A note from bob.")
 		}, 2, docs.SettlementActor, true},
 		{"an agent's joined write and a human's typing in one settlement window", func(t *testing.T, f *fixture) {
 			typist := connect(t, f, humanPeer)
@@ -762,13 +767,11 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 			}
 			waitForLiveText(t, f.documentService, f.artifactID, "A revised spec")
 			typist.barrier(t)
-			typist.appendParagraph(t, "Bob's note.")
-			typist.barrier(t)
+			typeNote(t, f, typist, "A note from bob.")
 		}, 2, docs.SettlementActor, true},
 		{"a human's typing and then an agent's edit that versions both", func(t *testing.T, f *fixture) {
 			typist := connect(t, f, humanPeer)
-			typist.appendParagraph(t, "Bob's note.")
-			typist.barrier(t)
+			typeNote(t, f, typist, "A note from bob.")
 			if edited := sessionRequest(t, f.handler, http.MethodPost, "/api/v1/artifacts/"+f.artifactID+"/edits", map[string]any{
 				"ops": []map[string]string{{"op": "replace", "find": "A spec", "with": "A revised spec"}}, "actor": sessionActor(),
 			}); edited.Code != http.StatusOK {
@@ -776,14 +779,10 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 			}
 		}, 2, docs.SettlementActor, true},
 		{"the only connected peer types", func(t *testing.T, f *fixture) {
-			typist := connect(t, f, humanPeer)
-			typist.appendParagraph(t, "Bob's note.")
-			typist.barrier(t)
+			typeNote(t, f, connect(t, f, humanPeer), "A note from bob.")
 		}, 1, bob, true},
 		{"the asking session alone types over its connection", func(t *testing.T, f *fixture) {
-			typist := connect(t, f, askerPeer)
-			typist.appendParagraph(t, "The asker's note.")
-			typist.barrier(t)
+			typeNote(t, f, connect(t, f, askerPeer), "A note from the asker.")
 		}, 1, asker, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -801,32 +800,20 @@ func TestAStaleApprovalAskIsRetractedByItsVersionsOnlyWriterElseBySettlement(t *
 			if len(version.Authors) != test.authors {
 				t.Fatalf("version 2 authors = %#v, want %d", version.Authors, test.authors)
 			}
-			var resolution struct {
-				Kind   string    `json:"kind"`
-				Reason string    `json:"reason"`
-				Actor  actorRead `json:"actor"`
-			}
-			deadline := time.Now().Add(5 * time.Second)
-			for {
-				read := decodeBody[struct {
-					Ask struct {
-						State      string          `json:"state"`
-						Resolution json.RawMessage `json:"resolution"`
-					} `json:"ask"`
-				}](t, dispatchRequest(t, f.handler, http.MethodGet, "/api/v1/asks/"+f.askID, nil, "alice")).Ask
-				if read.State == "resolved" {
-					if err := json.Unmarshal(read.Resolution, &resolution); err != nil {
-						t.Fatalf("decode the ask's resolution: %v", err)
-					}
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("the approval ask naming version 1 is still %s after version 2", read.State)
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if resolution.Kind != "retracted" || resolution.Actor != (actorRead{test.retractor.Kind, test.retractor.ID}) || !strings.Contains(resolution.Reason, "version 2") {
-				t.Fatalf("the ask's resolution = %#v, want retracted by %#v with a reason naming version 2", resolution, test.retractor)
+			// The retraction commits in the transaction that writes the version.
+			retracted := decodeBody[struct {
+				Ask struct {
+					State      string `json:"state"`
+					Resolution *struct {
+						Kind   string    `json:"kind"`
+						Reason string    `json:"reason"`
+						Actor  actorRead `json:"actor"`
+					} `json:"resolution"`
+				} `json:"ask"`
+			}](t, dispatchRequest(t, f.handler, http.MethodGet, "/api/v1/asks/"+f.askID, nil, "alice")).Ask
+			resolution := retracted.Resolution
+			if retracted.State != "resolved" || resolution == nil || resolution.Kind != "retracted" || resolution.Actor != (actorRead{test.retractor.Kind, test.retractor.ID}) || !strings.Contains(resolution.Reason, "version 2") {
+				t.Fatalf("the ask naming version 1 after version 2 is %s with resolution %+v, want retracted by %+v with a reason naming version 2", retracted.State, resolution, test.retractor)
 			}
 			if strings.HasPrefix(resolution.Reason, docs.SettlementRetractionReason) {
 				t.Fatalf("retraction reason %q is one only settlement's removal of a block writes", resolution.Reason)
