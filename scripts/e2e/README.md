@@ -711,9 +711,10 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
-| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
+| `controller` | `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself: its session's first user message is the start message the command launches Oh My Pi with, and the model answers it, with nothing typed into its pane; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go`. With tree 3 out and a slot free, the controller's walk wakes: its Oh My Pi was launched with the daemon's ``Design gate policy: `gates.design: off`.`` line; an unlabelled issue set to `todo` puts `todo on <KEY>` in its session, and the daemon's tick (`controller_wake_interval_seconds: 60`) `tick on LEGSMOKE`; a minute later that issue is still unlabelled and unrecorded, since the proof's scope says the controller hands Legion no issue, and it is set `done`; tree 3's root issue is claimed by its architect's session, and its events carry the `issue.claimed` |
+| `daily-report` | the controller's daily report, which the proof's instructions exempt from their wait for a targeted message and fit to the run: an issue titled `Legion daily report (<run directory>)` appears in LEGSMOKE, parked in icebox and without the `legion` label, holding the controller session's message, which names tree 1 and the free slots within 2,000 characters; in the controller's session that message comes after the first `tick on LEGSMOKE` delivery, never in its start turn. `production-audit` then holds that the issue, like every write, is in LEGSMOKE |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
-| `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
+| `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done`; tree 1's events carry its architect's `issue.claimed`, and the done leaves its root issue unclaimed |
 | `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
 | `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/workspace-recovered.json` naming `legion/<tree 1>` |
@@ -729,9 +730,10 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 Task 4b.5's acceptance for `legion controller start`, on tmux. The Go daemon runs on a real Postgres
 with this checkout's plugin in an isolated OMP profile, against a real Envoy listener and NATS, and
 the command runs in real tmux panes, as an operator would. The pinned Oh My Pi is launched through
-mise. The controller takes no model turn, so the run needs no model route: the profile names the
-roles the task agents use (`review`, `oracle`) and the default on a static-key provider that listens
-nowhere, which is all the boot gate's agent-model check resolves.
+mise. The run needs no model route: the controller's one model turn, the start message
+`legion controller start` opens it with, fails against the profile's default, a static-key
+provider that listens nowhere, and no check reads its answer. The profile names the roles the
+task agents use and that default, which is all the boot gate's agent-model check resolves.
 
 ```bash
 bash scripts/e2e/controller-start-tmux.sh
@@ -1069,9 +1071,8 @@ per call and its outcome to `<dir>/hawk-token.calls`
 alone. The profile's `agent/models.yml` points the `anthropic` provider at
 `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My
 Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started,
-so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model role
-(`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
-`oracle`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
+so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model
+role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
 `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
 `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 

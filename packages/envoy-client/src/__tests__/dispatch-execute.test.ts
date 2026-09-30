@@ -1645,28 +1645,33 @@ describe("executeDispatchTool", () => {
       if (target.pathname === "/api/v1/agents") {
         return response([{ session_id: "s1", title: "Live registry title" }]);
       }
-      return response([
-        {
-          key: "AGENTC-1",
-          title: "First",
-          status: "todo",
-          priority: 1,
-          rank: "a",
-          labels: ["bug"],
-          parent: null,
-          assignee: "alice",
-          updated_at: "2026-09-13T00:00:00Z",
-          last_seq: 4,
-          open_asks: 2,
-          claim: {
-            actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
-            at: "2026-09-13T01:00:00Z",
+      return response({
+        issues: [
+          {
+            key: "AGENTC-1",
+            title: "First",
+            status: "todo",
+            priority: 1,
+            rank: "a",
+            labels: ["bug"],
+            parent: null,
+            assignee: "alice",
+            updated_at: "2026-09-13T00:00:00Z",
+            last_seq: 4,
+            open_asks: 2,
+            claim: {
+              actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
+              at: "2026-09-13T01:00:00Z",
+            },
+            route: "role:sre",
+            route_status: "no_holder",
+            route_holder: null,
           },
-          route: "role:sre",
-          route_status: "no_holder",
-          route_holder: null,
-        },
-      ]);
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      });
     };
 
     const result = await executeDispatchTool({
@@ -1703,6 +1708,8 @@ describe("executeDispatchTool", () => {
       ["priority", "none"],
       ["updated_since", "2026-09-01T00:00:00Z"],
       ["route_status", "no_holder"],
+      ["limit", "50"],
+      ["offset", "0"],
     ]);
     // A route that reaches nobody is what the owner audit reads, so the row says so.
     expect(result.text).toContain("AGENTC-1 [todo] P1 First · 2 open asks · claimed by ");
@@ -1806,7 +1813,7 @@ describe("executeDispatchTool", () => {
     expect(unrouted.text).toContain("Route: none\n");
   });
 
-  test("dispatch_issues omits absent optional filters and clamps the row count to limit", async () => {
+  test("dispatch_issues against a Dispatch that predates paging sends limit and offset and pages the whole answer itself", async () => {
     const requests: URL[] = [];
     const issues = Array.from({ length: 5 }, (_, index) => ({
       key: `AGENTC-${index}`,
@@ -1838,7 +1845,11 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({ project: "AGENTC" });
+    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
+      project: "AGENTC",
+      limit: "2",
+      offset: "0",
+    });
     expect(result.details.issues).toHaveLength(2);
     expect(result.text).toContain("2 issues in AGENTC (showing 1-2 of 5)");
     expect(result.details).toMatchObject({ total: 5, offset: 0, limit: 2 });
@@ -1924,6 +1935,72 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("No issues in AGENTC. (showing 0-0 of 1)");
     expect(result.details).toMatchObject({ total: 1, offset: 1, limit: 50 });
     expect(result.details.issues).toEqual([]);
+  });
+
+  // Dispatch deploys apart from the hosts that release this executor, so the answer text must not
+  // depend on which side of the listing's paging the server stands.
+  test("dispatch_issues answers the same from a paging Dispatch as from one that predates paging", async () => {
+    const issues = Array.from({ length: 300 }, (_, index) => ({
+      key: `AGENTC-${index}`,
+      title: `Issue ${index}`,
+      status: "todo",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+    }));
+    const served: Array<{ limit: string | null; offset: string | null }> = [];
+    const paging = async (url: RequestInfo | URL): Promise<Response> => {
+      const query = new URL(String(url)).searchParams;
+      served.push({ limit: query.get("limit"), offset: query.get("offset") });
+      const limit = Number(query.get("limit"));
+      const offset = Number(query.get("offset"));
+      return response({
+        issues: issues.slice(offset, offset + limit),
+        total: issues.length,
+        limit,
+        offset,
+      });
+    };
+    const unpaged = async (_url: RequestInfo | URL): Promise<Response> => response(issues);
+    const list = (args: Record<string, unknown>, fetchImpl: typeof paging) =>
+      executeDispatchTool({
+        tool: "dispatch_issues",
+        args: { project: "AGENTC", ...args },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    for (const args of [
+      {},
+      { limit: 2 },
+      { offset: 250 },
+      { limit: 250, offset: 100 },
+      { offset: 300 },
+    ]) {
+      const fromPage = await list(args, paging);
+      const fromArray = await list(args, unpaged);
+      expect(fromPage.text, JSON.stringify(args)).toBe(fromArray.text);
+      expect(fromPage.details, JSON.stringify(args)).toEqual(fromArray.details);
+    }
+    expect(served).toEqual([
+      { limit: "50", offset: "0" },
+      { limit: "2", offset: "0" },
+      { limit: "50", offset: "250" },
+      { limit: "250", offset: "100" },
+      { limit: "50", offset: "300" },
+    ]);
+    expect((await list({ limit: 2, offset: 5 }, paging)).text).toBe(
+      "2 issues in AGENTC (showing 6-7 of 300)\nAGENTC-5 [todo] Issue 5\nAGENTC-6 [todo] Issue 6"
+    );
   });
 
   test("dispatch_issue returns duplicate candidates instead of throwing", async () => {

@@ -236,6 +236,14 @@ type Store interface {
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
+	// ControllerRegistered says whether a session holds the current controller registration of the
+	// Dispatch project key project (controller.Record.Registered's rule), reading the controllers
+	// table under the project token (claim.ProjectToken) `legion controller start` mints under.
+	ControllerRegistered(ctx context.Context, tx pgx.Tx, project string) (bool, error)
+	// ControllerNoticePending says whether the outbox of the Dispatch project key project still
+	// holds an unpublished controller notice of kind, so a wake is never queued behind an
+	// identical one.
+	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error)
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error

@@ -351,9 +351,8 @@ cat >"$agent/config.yml" <<EOF
 # retries choose from every enabled provider instead, so each one a pane can use without the
 # gateway is disabled: Bedrock twice (the instance role is its key), Google (Stage 2's provider-key
 # path hands panes GEMINI_API_KEY), and the local servers OMP uses with no key. Every role is the
-# one model: the gateway answers claude-haiku-4-5, which OMP gave that scout next, with 404. review
-# and oracle are the roles Legion's task agents name (@review, @oracle), which the daemon's boot
-# gate refuses to start without.
+# one model: the gateway answers claude-haiku-4-5, which OMP gave that scout next, with 404. The
+# daemon's boot gate refuses to start without the roles Legion's task agents name.
 enabledModels:
   - anthropic/*
 disabledProviders:
@@ -375,6 +374,7 @@ modelRoles:
   advisor: $model
   review: $model
   oracle: $model
+  deep: $model
 EOF
 echo "$me: OMP profile $profile routes $model through LEGION_E2E_MODEL_GATEWAY_URL, keyed by $key_command" >&2
 printf '%s\n' "$key_command"
