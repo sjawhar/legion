@@ -36,10 +36,10 @@ var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
 // daemon's notice executor), since every issue's topic is a subject its phase workers subscribe
 // to. It carries the controller notices (record.ControllerNotice), each an outbox row of its own:
 // every hold and a tree architect's own failed claim (workflow's noticeWithController), a root in
-// triage handed to Legion (admission), a slot admission released that no waiting root took
-// (admission's wakeForFreeSlot, `slot-free`), and, while a slot stands free and a controller is
-// registered, an issue not handed to Legion changing in `todo` and the periodic tick
-// (admission's wakeWhileSlotFree, `todo` and `tick`). It sits among the issue topics, where no issue key
+// triage handed to Legion (admission), and the walk wakes admission sends a registered controller
+// through wakeController: a slot it released that no waiting root took (wakeForFreeSlot,
+// `slot-free`), an issue not handed to Legion changing in `todo` while a slot stands free
+// (`todo`), and the periodic tick, whatever the slots (`tick`). It sits among the issue topics, where no issue key
 // (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it while
 // it holds the controller role (legionControllerNoticeSubject, packages/contracts/src/subject.ts).
 // project is the project token panes are told as LEGION_PROJECT
