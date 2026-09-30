@@ -92,14 +92,15 @@ export async function getUnsubscribeCalls(): Promise<{ session_id: string; topic
 }
 
 // The Agents page's keyboard rows, in `keyboard-agents.e2e.ts` and in the picker spec the WebKit
-// and Firefox projects also run, share one page: two sessions seen recently, each with Dispatch
-// activity of its own, so both are listed rows rather than folded into `Inactive` or `No
-// Dispatch activity`. The Planner's open ask waits on the viewer, which puts it above the
-// Reviewer.
+// and Firefox projects also run, share one page: two live sessions, each with Dispatch activity of
+// its own, so both are listed rows rather than folded into `Inactive` or `No Dispatch activity`.
+// The Planner's open ask waits on the viewer, which puts it above the Reviewer. Neither carries a
+// `last_seen`, so the fake Envoy stamps each seed when it is made: this module is evaluated once
+// per Playwright worker, at the first spec that imports it, and a time computed here would age with
+// every spec the worker runs after that, until the sessions fold under `Inactive`.
 export const plannerSession: FakeSession = {
   capabilities: ["aside", "btw"],
   dir: "/srv/planner",
-  last_seen: Date.now() - 30_000,
   machine_id: "box-1",
   roles: ["planner"],
   session_id: "planner-session",
@@ -108,7 +109,6 @@ export const plannerSession: FakeSession = {
 export const reviewerSession: FakeSession = {
   capabilities: ["aside", "btw"],
   dir: "/srv/reviewer",
-  last_seen: Date.now() - 30_000,
   machine_id: "box-1",
   roles: ["reviewer"],
   session_id: "reviewer-session",

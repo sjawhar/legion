@@ -435,7 +435,12 @@ response with `setSessionSendStatus`, and inspect targeted sends with `getSentMe
 persisted subscriptions use `setInterests`, all from `e2e/agents.ts`. It also holds the Agents
 page the keyboard specs share: `seedAgents` (the Planner and Reviewer sessions, both listed, and two
 open issues for the picker) and `openAgents`, which waits for the page's heading before a key is
-pressed, since the keymap binds only once sign-in resolves.
+pressed, since the keymap binds only once sign-in resolves. A session a shared helper seeds, as
+these two are, carries no `last_seen`, so the fake stamps one when the seed is made. A Playwright
+worker evaluates a helper module once, at the first spec that imports it, so a time computed at
+the helper's module scope ages with every spec the worker runs after that, until the Agents page
+folds the session under `Inactive` at 10 minutes. A spec's own module scope is evaluated when the
+worker reaches that spec, which is why `agents.e2e.ts` can pin literal ages for its freshness rows.
 `e2e/clipboard.ts`'s `recordClipboard(page)` swaps the page's async clipboard for a recorder before
 navigation, so a copy-button test asserts the written value rather than only the `Copied` label.
 `e2e/touch.ts` drives real touch gestures through Chromium's `Input.dispatchTouchEvent`
