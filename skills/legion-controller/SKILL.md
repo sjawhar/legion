@@ -141,7 +141,8 @@ it.
 at all, before anything below. When they say you hand Legion no issue yourself, or that Legion
 runs only issues someone else sets to `todo`, the walk takes nothing: stop here, whatever slots
 are free. When they narrow the scope (a repository, a kind of change, paths never to touch), a
-candidate outside it is skipped (the last row of the table below).
+candidate outside it is skipped (the last row of the table below). With no scope stated, every
+issue of the project is in scope.
 
 **How many.** Read `legion state --json`. The free slots are `admission.cap` minus the roots in
 `admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything
@@ -176,7 +177,7 @@ reading it.
 | A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. You cannot read GitHub, so an open, merged, or closed pull request all count. A person who wants Legion on it anyway hands it over themselves: the label, then `todo`. |
 | Its assignee is working it | `Assignee:` names a person who holds the claim (the row above), or whose own comment or message among `Events:` says they are working on it. The assignee alone is who answers the issue's questions, not who works it. |
 | A person parked it with a reason | It is in `backlog`, the `Events:` line that moved it there (`issue.updated · … · status backlog`) is a person's (`user <login>`), and a comment or message says why. A move by `session legion-daemon:<PROJECT>` is Legion's own, which the row above already skips. When the events the read shows do not reach back to that move, you cannot tell who parked it: skip it. |
-| It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch_doc_read({ issue: "<KEY>" })`). When in doubt, skip it. |
+| It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch_doc_read({ issue: "<KEY>" })`). When in doubt, skip it. With no scope stated, every issue of the project is in scope. |
 
 **Take.** For each candidate that passes, in order:
 
