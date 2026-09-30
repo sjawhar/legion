@@ -49,6 +49,17 @@ if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
   exit 1
 fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which closes the proof's pull requests, never fail on a write whoever is reading. The
+# evidence is under $work by default, and the sweeps in services-stopped and cleanup SIGKILL every
+# process whose command line names $work (run_processes, lib/rig.sh), so the tee gets the transcript
+# as fd 8, never by path. The tee keeps the copy it forked with, and the driver closes its own so
+# nothing it starts inherits it. The lib is this script's own, not ACCEPT_ROOT's.
+exec 8>>"$evidence/transcript.log"
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$(dirname "$0")/lib/transcript.sh"
+transcript_to /dev/fd/8
+exec 8>&-
 ok=
 check=setup
 TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)

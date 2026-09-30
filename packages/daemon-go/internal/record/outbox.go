@@ -32,7 +32,9 @@ const (
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
 type OutboxPayload interface{ OutboxKind() OutboxKind }
 
-// StatusWrite records the Dispatch status observed when this write was enqueued.
+// StatusWrite is a Dispatch status the daemon writes. ObservedStatus is the status Dispatch shows
+// until the write runs: the runner writes Status only while Dispatch still shows ObservedStatus, so a
+// move someone else made since the write was queued stands.
 type StatusWrite struct {
 	Status         string `json:"status"`
 	ObservedStatus string `json:"observedStatus"`

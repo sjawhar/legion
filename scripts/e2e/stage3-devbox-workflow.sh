@@ -33,6 +33,11 @@ if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$e
   exit 1
 fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which closes the run's pull requests, never fail on a write whoever is reading.
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to "$evidence/transcript.log"
 ok=
 check=setup
 TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)

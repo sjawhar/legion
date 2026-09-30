@@ -19,9 +19,10 @@
 #                  production's)
 #   dispatch_actor the session every proof-human write names as its actor, or empty. A bearer caller
 #                  must name one (production Dispatch refuses the write otherwise, ACTOR_KIND); it
-#                  holds no claim, so the workflow reads its status writes as a human's. Empty, the
-#                  writes carry none and the human header alone says who wrote (a scratch
-#                  Dispatch's X-Dispatch-User)
+#                  holds no claim, so the daemon sets back its status write on a live root as it does
+#                  any outside session's, and a proof takes a tree out with `legion status` instead.
+#                  Empty, the writes carry none and the human header alone says who wrote (a scratch
+#                  Dispatch's X-Dispatch-User), which the workflow reads as a person's move
 #   pg_container   the container holding the daemon's Postgres database
 #   pr_number      the issue's pull request, once it exists
 #   smoke_file     the one product file that pull request's first implementation changed: the
