@@ -51,12 +51,12 @@
 #   - merged pull requests (merged inside the window): a PR's runs are matched by head branch and
 #     time, since GitHub empties a run's pull_requests list once the PR closes, and a run with a
 #     zizmor-tool-error marker is skipped. new₀ is the new set of its first run (from that run's
-#     zizmor-new marker; no marker means nothing new). Each new₀ finding is `ignored` when the PR's
-#     own patches add a `# zizmor: ignore[<audit>]` line in its file, or add its file name to an
-#     ignore list whose enclosing `rules.<audit>` key is read from .github/zizmor.yml at the PR's
-#     head commit (a hunk's context rarely reaches the key), `merged with findings` when the PR's
-#     last run still reports it new against its base (compared as a multiset, so a repeated finding
-#     counts once per copy), and `fixed` otherwise.
+#     zizmor-new marker; no marker means nothing new). Each new₀ finding is compared, as a
+#     multiset so a repeated finding counts once per copy, with the PR's last run's
+#     zizmor-findings: `ignored` when that run's `ignored` lists it (the findings its --no-ignores
+#     audit reports beyond its head audit, i.e. what the tree's inline and zizmor.yml ignores
+#     suppress, as zizmor matches them), `merged with findings` when that run still reports it new
+#     against its base, and `fixed` otherwise.
 #   - Security[<tag>]: review threads opened inside the window, with the newest `Accepted:` reply
 #     of each, from the repository's review comments.
 # Nothing published here carries a CodeQL location or a secret: alerts are counted by rule,
@@ -87,10 +87,6 @@ NARROW_AT = 3
 CODEQL_BLOCKED = "BLOCKED (caller lacks security-events read; the scheduled Security run has it)"
 SECRET_BLOCKED = "BLOCKED (caller lacks secret_scanning read; run as an admin)"
 SECURITY_TAG = re.compile(r"^Security\[([a-z][a-z-]*)\]:")
-INLINE_IGNORE = re.compile(r"zizmor:\s*ignore\[([^\]]*)\]")
-HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-RULE_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
-IGNORE_ITEM = re.compile(r"^\s+-\s+[\"']?([^\"':\s]+)")
 
 
 def fail(message, code=2):
@@ -313,47 +309,6 @@ def belongs(pr, branch, stamp):
     return branch == pr["head"]["ref"] and when(pr["created_at"]) <= when(stamp) <= when(pr["merged_at"])
 
 
-def config_ignores(pr, patch):
-    """The (rule, file name) pairs a PR's .github/zizmor.yml patch adds to ignore lists. Each added
-    line is numbered from its hunk header and its enclosing `  <rule>:` key is read from the whole
-    file at the PR's head commit, the file the hunk's line numbers count (the merge commit can carry
-    lines main added above), since a hunk's three context lines rarely reach the key."""
-    try:
-        content = gh(f"repos/{repo}/contents/.github/zizmor.yml?ref={pr['head']['sha']}")
-    except NotFound:
-        return set()
-    lines = base64.b64decode(content["content"]).decode("utf-8").splitlines()
-    added, number = set(), None
-    for line in patch.splitlines():
-        header = HUNK.match(line)
-        if header:
-            number = int(header.group(1))
-            continue
-        if number is None or line.startswith("-") or line.startswith("\\"):
-            continue
-        item = IGNORE_ITEM.match(line[1:]) if line.startswith("+") else None
-        if item:
-            rule = next((key.group(1) for key in map(RULE_KEY.match, reversed(lines[:number - 1])) if key), None)
-            added.add((rule, item.group(1)))
-        number += 1
-    return added
-
-
-def ignored_by(found, files, configured):
-    ident, path = found["ident"], found["path"]
-    if (ident, path.rsplit("/", 1)[-1]) in configured:
-        return True
-    for changed in files:
-        if changed["filename"] != path:
-            continue
-        for line in (changed.get("patch") or "").splitlines():
-            if line.startswith("+") and not line.startswith("+++"):
-                for match in INLINE_IGNORE.finditer(line):
-                    if ident in (part.strip() for part in match.group(1).split(",")):
-                        return True
-    return False
-
-
 totals = Counter()
 per_audit = defaultdict(Counter)
 nothing_new, pr_rows = [], []
@@ -378,15 +333,13 @@ for pr in merged:
     if not new0:
         nothing_new.append(pr)
         continue
-    final = (artifact_file(markers[last["id"]], "zizmor-findings.json") if last["id"] in markers
-             else run_file(last["id"], "zizmor-findings", "zizmor-findings.json")) or {}
+    final = run_file(last["id"], "zizmor-findings", "zizmor-findings.json") or {}
+    ignored = Counter(found["fingerprint"] for found in final.get("ignored") or [])
     remaining = Counter(found["fingerprint"] for found in final.get("new") or [])
-    files = list(paged(f"repos/{repo}/pulls/{pr['number']}/files"))
-    configured = set().union(*(config_ignores(pr, changed.get("patch") or "") for changed in files
-                               if changed["filename"] == ".github/zizmor.yml"))
     counts = Counter()
     for found in new0:
-        if ignored_by(found, files, configured):
+        if ignored[found["fingerprint"]] > 0:
+            ignored[found["fingerprint"]] -= 1
             outcome = "ignored"
         elif remaining[found["fingerprint"]] > 0:
             remaining[found["fingerprint"]] -= 1
