@@ -43,11 +43,9 @@ export interface DeliveryOutcome {
  *
  * It can only be promised while the notification stream still recognises the repeat. The key a
  * retry carries is scoped to (message, mode, recipient), so inside the stream's duplicate window
- * a same-mode retry of a send that landed is stored nowhere new, and a pi-envoy session it reaches
- * again drops it by that key while it still remembers it; a Claude Code session keys on each
- * send's fresh event id and is handed it again (`packages/envoy/AGENTS.md`, on the idempotency
- * key). Past that window the stream holds neither the message nor its MsgId, and the same retry
- * publishes a second frame — the very defect this promise exists to rule out.
+ * a same-mode retry of a send that landed is dropped before the agent's subject sees it. Past
+ * that window the stream holds neither the message nor its MsgId, and the same retry publishes a
+ * second frame — the very defect this promise exists to rule out.
  *
  * An attempt already recorded `duplicate` is excluded for a different reason: it reached the
  * listener and changed nothing, so there is no failure left to retry.
@@ -65,25 +63,17 @@ export function isSafeRetry(attempt: DeliveryOutcome, now: number = Date.now()):
   return Number.isFinite(age) && age < DELIVERY_DUPLICATE_WINDOW_MS;
 }
 
-/** What a delivered-but-duplicate attempt reads as: it reached the listener, which already held
- *  the message and stored nothing new. The envelope still went out on the recipient's subject,
- *  where a pi-envoy session that remembers its key drops it and a Claude Code session does not
- *  (LEGION-271), so the text claims only what the listener did. */
+/** What a delivered-but-duplicate attempt reads as: it reached the listener and added nothing. */
 export const duplicateText = "Delivered; the listener already had this message";
 
 /**
  * The guidance a failed attempt earns while a same-mode retry is still safe.
  *
- * "Retry won't deliver it twice" holds for any in-window failure of a send to a pi-envoy session
- * that still remembers the key: if the send landed, the stream stores the repeat nowhere new and
- * that session drops it by its dedupe key (it remembers the last 1,000 frames, in memory, so a
- * busy or restarted session forgets sooner), and if it never landed there is nothing to
- * duplicate. A Claude Code session keys on each send's fresh event id, so a repeat of a send that
- * landed reaches it again (`packages/envoy/AGENTS.md`, on the idempotency key). The second clause
- * does not hold for every failure. "Sending in a different mode delivers it again" is only true
- * of a send that may already have reached the recipient — a receipt timeout — so it is keyed on
- * that cause. It is also withheld on the mention surface, which has no mode-change button to
- * name.
+ * "Retry won't deliver it twice" holds for any in-window failure: if the send landed the stream
+ * drops the repeat, and if it never landed there is nothing to duplicate. The second clause does
+ * not. "Sending in a different mode delivers it again" is only true of a send that may already
+ * have reached the recipient — a receipt timeout — so it is keyed on that cause. It is also
+ * withheld on the mention surface, which has no mode-change button to name.
  */
 export function safeRetryGuidance(surface: "card" | "mention", cause?: string | null): string {
   const safe = "Retry won't deliver it twice.";

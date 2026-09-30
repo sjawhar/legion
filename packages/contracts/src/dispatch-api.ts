@@ -911,8 +911,8 @@ export interface MessageDeliveryEventPayload {
   readonly target?: string;
   readonly title: string;
   readonly state: "sent" | "failed";
-  /** The stream already held this message, so it stored nothing new; whether the receiving
-   *  session shows the repeat is its own (`packages/envoy/AGENTS.md`). Absent means false. */
+  /** The stream already held this message, so the recipient gained nothing from this attempt:
+   *  it reached the listener and put nothing new on the session's subject. Absent means false. */
   readonly duplicate?: boolean;
   readonly error?: string;
 }
