@@ -8,8 +8,14 @@ import path from "node:path";
 // score reports it as a rig error and leaves it out of the pass counts. An agent that got a turn and
 // then did nothing the scenario asks is a failure.
 
-const runs = mkdtempSync(path.join(tmpdir(), "skill-scenarios-score-"));
-afterAll(() => rmSync(runs, { recursive: true, force: true }));
+// score.ts reads each label's checkout from <work>/profiles/<label>/checkout, beside <work>/runs.
+const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-score-"));
+const runs = path.join(work, "runs");
+afterAll(() => rmSync(work, { recursive: true, force: true }));
+for (const label of ["head", "base", "cross"]) {
+  mkdirSync(path.join(work, "profiles", label), { recursive: true });
+  writeFileSync(path.join(work, "profiles", label, "checkout"), `/checkouts/${label}\n`);
+}
 
 /** Oh My Pi's transcript header entries: what a session writes before its first model request. */
 const header = [
@@ -54,6 +60,52 @@ const capture = { "asks.json": "[]", "events.json": seeded, "message.json": mess
 run("ask-on-message-head-1", { ...capture, "out.txt": noKey }, header);
 run("ask-on-message-head-2", { ...capture, "out.txt": "exit=0\n" }, [...header, ...turn]);
 
+/** An assistant turn whose one tool call is `bash` running `command`. */
+const bash = (command: string) => ({
+  type: "message",
+  message: {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command } }],
+  },
+});
+/** The legion stand-in's record of an accepted test handoff write, after the run's other calls. */
+const write = {
+  at: "2026-09-30T17:29:11.031Z",
+  as: "legion",
+  argv: ["handoff", "write", "--phase", "test"],
+  exit: 0,
+};
+const calls = (records: object[]) =>
+  [...records, write].map((record) => `${JSON.stringify(record)}\n`).join("");
+// Ran the CLI: the bun stand-in recorded `"$BUN" greet.ts Ada`, a command line no pattern names.
+run(
+  "tester-proof-ran-1",
+  {
+    "out.txt": "exit=0\n",
+    "world.json": world,
+    "calls.jsonl": calls([
+      { at: "2026-09-30T17:27:33.658Z", as: "bun", argv: ["greet.ts", "Ada"], exit: 0 },
+    ]),
+  },
+  [...header, turn[0], bash('BUN=$(command -v bun); "$BUN" greet.ts Ada')]
+);
+// Only mentioned it: a PR body drafted in a heredoc names `bun greet.ts`, and bun never ran it.
+run(
+  "tester-proof-ran-2",
+  { "out.txt": "exit=0\n", "world.json": world, "calls.jsonl": calls([]) },
+  [
+    ...header,
+    turn[0],
+    bash("cat > /tmp/pr-body.md <<'EOF'\nAdds `greet(name)` and `bun greet.ts <name>`.\nEOF"),
+  ]
+);
+// Read the other label's checkout, in a command whose path starts past its 200th character.
+run("tester-proof-cross-1", { "out.txt": "exit=0\n", "world.json": world }, [
+  ...header,
+  turn[0],
+  bash(`echo ${"x".repeat(220)} && cat /checkouts/base/skills/legion-worker/SKILL.md`),
+]);
+
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
 
@@ -72,4 +124,13 @@ test("a run whose agent got a turn and did nothing is a failure", () => {
   for (const name of ["tester-proof-head-2", "ask-on-message-head-2"]) {
     expect(out).toContain(`${name}\tpass=false\t`);
   }
+});
+
+test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, not when a command named it", () => {
+  expect(out).toMatch(/tester-proof-ran-1\tpass=false\tref=false\tran=true /);
+  expect(out).toMatch(/tester-proof-ran-2\tpass=false\tref=false\tran=false /);
+});
+
+test("a tool call naming the other label's checkout is a rig error wherever the name falls in it", () => {
+  expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
 });

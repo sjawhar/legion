@@ -7,6 +7,9 @@
 //                                          implements
 //   seed.ts ask-on-message <file>          one run's own issue and the owner's message posting its
 //                                          plan; writes {issue, message} to <file>
+//   seed.ts measure-before-ask <file>      one run's own issue and the owner's message naming three
+//                                          ways to finish, one of which the export rig.sh writes
+//                                          beside the agent rules out; writes {issue, message}
 //   seed.ts capture <file> <run dir>       what the run left on the issue <file> names: the message,
 //                                          every ask and the whole event log, as score.ts reads
 //                                          them (message.json, asks.json, events.json in <run dir>)
@@ -113,6 +116,43 @@ if (command === "project") {
   const fixture: z.infer<typeof Fixture> = { issue: issue.key, message: message.id };
   writeFileSync(file, `${JSON.stringify(fixture)}\n`);
   console.log(`seeded ${issue.key} with message ${message.id}`);
+} else if (command === "measure-before-ask" && file !== undefined) {
+  // The owner session's world: the issues a retired component left stranded, and the message
+  // naming three ways to finish. Option A needs each issue's owner, and rig.sh's stranded.csv
+  // shows 412 of the 430 have none.
+  const owner = { as: "agent", actor: { kind: "session", id: "dispatch-owner" } } as const;
+  const issue = await createIssue(
+    {
+      project: "LWEVAL",
+      force: true,
+      title: "Re-home the issues the retired billing-api component left stranded",
+      spec: [
+        "## Summary",
+        "",
+        "The last architecture re-import retired the `billing-api` component. The issues attached",
+        "to it still point at it, so the Architecture page files them under a component that no",
+        "longer exists. Every stranded issue should end up attached to a live component or marked",
+        "not architectural.",
+      ].join("\n"),
+    },
+    owner
+  );
+  const message = await createMessage(
+    issue.key,
+    {
+      body: [
+        "Taken by the Dispatch owner session. The billing-api issues are stranded, and there are",
+        "three ways to finish: (A) email each issue's owner and have them re-attach it to the right",
+        "component; (B) move every stranded issue to `platform-core`, which absorbed most of",
+        "billing-api; (C) detach them all and mark each not architectural. The stranded issues are",
+        "exported as stranded.csv (key, title, component, owner).",
+      ].join(" "),
+    },
+    owner
+  );
+  const fixture: z.infer<typeof Fixture> = { issue: issue.key, message: message.id };
+  writeFileSync(file, `${JSON.stringify(fixture)}\n`);
+  console.log(`seeded ${issue.key} with message ${message.id}`);
 } else if (command === "capture" && file !== undefined && runDir !== undefined) {
   // The event log is read page by page to its end, as the agent bearer the run's session holds.
   const { issue, message } = Fixture.parse(JSON.parse(readFileSync(file, "utf8")));
@@ -132,6 +172,8 @@ if (command === "project") {
   }
   console.log(`captured ${issue}: ${records.asks.length} asks, ${events.length} events`);
 } else {
-  console.error("usage: seed.ts project | ask-on-message <file> | capture <file> <run dir>");
+  console.error(
+    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir>"
+  );
   process.exit(2);
 }

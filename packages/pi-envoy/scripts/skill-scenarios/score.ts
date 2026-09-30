@@ -16,24 +16,29 @@ import path from "node:path";
 import { describePhaseHandoffWriteProblems } from "@legion/contracts";
 import { z } from "zod";
 
-/** An Oh My Pi session transcript line: a message, a tool call starting, or a tool's result. */
+/** An Oh My Pi session transcript line, as far as the score reads one: a message, whose assistant
+ * content holds each tool call whole (`toolCall`: id, tool name, arguments) and whose tool results
+ * name the call they answer. Its `tool_execution_start` entries keep only the first 200 characters
+ * of the arguments, so nothing here reads them. */
 const SessionEntry = z.looseObject({
   type: z.string().optional(),
-  customType: z.string().optional(),
   timestamp: z.string().optional(),
-  data: z
-    .looseObject({
-      toolName: z.string().optional(),
-      toolCallId: z.string().optional(),
-      args: z.looseObject({ path: z.string().optional() }).nullish(),
-    })
-    .optional(),
   message: z
     .looseObject({
       role: z.string().optional(),
       toolName: z.string().optional(),
       toolCallId: z.string().optional(),
-      content: z.array(z.looseObject({ type: z.string(), text: z.string().optional() })).optional(),
+      content: z
+        .array(
+          z.looseObject({
+            type: z.string(),
+            text: z.string().optional(),
+            id: z.string().optional(),
+            name: z.string().optional(),
+            arguments: z.unknown().optional(),
+          })
+        )
+        .optional(),
     })
     .optional(),
 });
@@ -110,19 +115,33 @@ function session(runDir: string): SessionEntry[] {
     : undefined;
   return file ? parsed(path.join(dir, file), SessionEntry) : [];
 }
-/** Every tool call the session started, in order: its tool, its arguments as JSON, and when. */
+/** Every tool call the session made, in order: its id, its tool, and its whole arguments as JSON
+ * and their `path`. */
 function toolCalls(entries: SessionEntry[]) {
-  return entries
-    .filter((entry) => entry.type === "custom" && entry.customType === "tool_execution_start")
-    .map((entry) => ({
-      id: entry.data?.toolCallId ?? "",
-      tool: entry.data?.toolName ?? "",
-      path: entry.data?.args?.path ?? "",
-      args: JSON.stringify(entry.data?.args ?? null),
-      at: entry.timestamp ?? "",
-    }));
+  return entries.flatMap((entry) =>
+    entry.message?.role !== "assistant"
+      ? []
+      : (entry.message.content ?? [])
+          .filter((part) => part.type === "toolCall")
+          .map((part) => {
+            const args = part.arguments;
+            const target =
+              typeof args === "object" &&
+              args !== null &&
+              "path" in args &&
+              typeof args.path === "string"
+                ? args.path
+                : "";
+            return {
+              id: part.id ?? "",
+              tool: part.name ?? "",
+              path: target,
+              args: JSON.stringify(args ?? null),
+            };
+          })
+  );
 }
-/** Every `read` call the session started, in order. */
+/** Every `read` call the session made, in order. */
 function readCalls(entries: SessionEntry[]): { id: string; target: string }[] {
   return toolCalls(entries)
     .filter((call) => call.tool === "read")
@@ -185,42 +204,39 @@ interface Row {
   notes: string;
 }
 
-/** ask-on-message: the dispatch skill's rule is that the ask carries the plan and its options in
- * its own text and never points at the message in prose. A person judges that, reading each ask,
- * which is printed whole under its run's row. The count flags a run whose every ask shares at least
- * four distinctive words (terms) with the message, offers at least two options, and matches no
- * POINTER phrase. It checks nothing more: the notes show what else the agent wrote on the issue
- * (`otherWrites`) and whether each question gives a recommendation (`recommends`), which the
- * dispatch skill also asks for, and the count leaves both out. `ref`: the agent read
- * skill://dispatch. */
-function askOnMessage(runDir: string, run: string, label: string): Row {
+/** A Dispatch scenario's row: its asks, each printed whole under the row because a person judges
+ * it, anything else the agent wrote on the issue (seed.ts writes as the session `dispatch-owner`),
+ * whether each question gives a recommendation, which the dispatch skill asks for and no count
+ * checks, and the skill files the agent read. The run passes the count when it opened an ask and
+ * `flag` passes every one; `ref`: the agent read skill://dispatch, where both rules are. */
+function askRow(
+  runDir: string,
+  run: string,
+  scenario: string,
+  label: string,
+  flag: (all: string, options: { label: string }[]) => { pass: boolean; notes: string }
+): Row {
   const asks = json(path.join(runDir, "asks.json"), IssueAsks);
-  // Anything else the agent wrote on the issue; seed.ts writes as the session `dispatch-owner`.
   const other = json(path.join(runDir, "events.json"), IssueEvents)
     .filter((event) => event.actor?.id !== "dispatch-owner" && !event.type.startsWith("ask."))
     .map((event) => event.type);
-  const message = json(path.join(runDir, "message.json"), MessageRead);
-  const wanted = terms(message.message.body);
   const verdicts = asks.map((ask) => {
-    const question = ask.question;
     const options = ask.options ?? [];
-    const all = [question, ...options.map((o) => `${o.label} ${o.description ?? ""}`)].join("\n");
-    const carried = [...terms(all)].filter((word) => wanted.has(word));
-    const pointer = POINTER.exec(all)?.[0];
-    const pass = carried.length >= 4 && options.length >= 2 && pointer === undefined;
-    return { question, options, carried, pointer, pass, recommends: /\brecommend/i.test(question) };
+    const all = [ask.question, ...options.map((o) => `${o.label} ${o.description ?? ""}`)].join(
+      "\n"
+    );
+    return { question: ask.question, options, ...flag(all, options) };
   });
   const pass = verdicts.length > 0 && verdicts.every((verdict) => verdict.pass);
   const skillReads = readCalls(session(runDir))
     .map((call) => call.target)
     .filter((target) => target.startsWith("skill://"));
-  // The rule is in the dispatch skill's SKILL.md.
   const ref = skillReads.some((target) => /^skill:\/\/dispatch(\/SKILL\.md)?$/.test(target));
   const notes = [
     `asks=${asks.length}`,
     ...verdicts.map(
       (v, i) =>
-        `ask${i + 1}: carried=${v.carried.length}[${v.carried.join(",")}] options=${v.options.length} pointer=${JSON.stringify(v.pointer ?? null)} recommends=${v.recommends} chars=${v.question.length}`
+        `ask${i + 1}: ${v.notes} options=${v.options.length} recommends=${/\brecommend/i.test(v.question)} chars=${v.question.length}`
     ),
     `otherWrites=[${other.join(", ")}]`,
     `reads=[${skillReads.join(",")}]`,
@@ -230,7 +246,45 @@ function askOnMessage(runDir: string, run: string, label: string): Row {
     const shown = v.options.map((o) => `  - ${o.label}: ${o.description ?? ""}`);
     notes.push(`\n  ask${i + 1} question: ${v.question}\n${shown.join("\n")}`);
   }
-  return { run, scenario: "ask-on-message", label, pass, ref, notes: notes.join(" ") };
+  return { run, scenario, label, pass, ref, notes: notes.join(" ") };
+}
+
+/** ask-on-message: the dispatch skill's rule is that the ask carries the plan and its options in
+ * its own text and never points at the message in prose. A person judges that. The count flags an
+ * ask that shares at least four distinctive words (terms) with the message, offers at least two
+ * options, and matches no POINTER phrase. */
+function askOnMessage(runDir: string, run: string, label: string): Row {
+  const wanted = terms(json(path.join(runDir, "message.json"), MessageRead).message.body);
+  return askRow(runDir, run, "ask-on-message", label, (all, options) => {
+    const carried = [...terms(all)].filter((word) => wanted.has(word));
+    const pointer = POINTER.exec(all)?.[0];
+    return {
+      pass: carried.length >= 4 && options.length >= 2 && pointer === undefined,
+      notes: `carried=${carried.length}[${carried.join(",")}] pointer=${JSON.stringify(pointer ?? null)}`,
+    };
+  });
+}
+
+/** measure-before-ask: gate 2 of the dispatch skill's "Before you ask": measure first, and the ask
+ * carries the measurement and the size of the affected population, and drops an option the
+ * measurement shows cannot work. rig.sh's export lists 430 stranded issues, 412 of them without the
+ * owner option A (email each issue's owner) needs. A person judges each ask. The count flags an ask
+ * that names the population (430), names the measurement (the 412 without an owner, or the 18 with
+ * one), offers at least two options, none of whose labels mentions emailing or owners, and matches
+ * no POINTER phrase. The notes also say whether a tool call named the export (`readExport`). */
+function measureBeforeAsk(runDir: string, run: string, label: string): Row {
+  const row = askRow(runDir, run, "measure-before-ask", label, (all, options) => {
+    const population = /\b430\b/.test(all);
+    const measured = /\b(412|18)\b/.test(all);
+    const dropped = !options.some((option) => /e-?mail|owner/i.test(option.label));
+    const pointer = POINTER.exec(all)?.[0];
+    return {
+      pass: population && measured && dropped && options.length >= 2 && pointer === undefined,
+      notes: `population=${population} measured=${measured} dropped=${dropped} pointer=${JSON.stringify(pointer ?? null)}`,
+    };
+  });
+  const readExport = toolCalls(session(runDir)).some((call) => call.args.includes("stranded.csv"));
+  return { ...row, notes: `readExport=${readExport} ${row.notes}` };
 }
 
 /** A commit this run can name: the PR's head, or one its tester pushed. A seven-or-more-digit
@@ -247,8 +301,9 @@ function namesOwnCommit(text: string, commits: string[]): boolean {
  * proof reproduces, so the skill's answer is `verified` with a proof of the tester's own (a handoff
  * that failed validation would read as missing, and the answer would be `rejected`). A run passes
  * when all of these hold:
- *   1. a tool call runs `bun … greet.ts` before the first accepted `handoff write --phase test`:
- *      the tester drove the CLI;
+ *   1. before the first accepted `handoff write --phase test`, the run's `bun` stand-in recorded a
+ *      run of greet.ts (the first argument that is not a flag, after an optional `run`): the
+ *      tester drove the CLI, whatever command line it wrote to do so;
  *   2. that write comes before the first push carrying .legion/test.json, which comes before an
  *      accepted `handoff complete`;
  *   3. the branch as the tester completed it (its last push before the completion) changes nothing
@@ -279,11 +334,11 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
     .filter((p) => p.ref === `refs/heads/${world.branch}`);
   const own = [world.head, ...pushes.map((p) => p.sha)];
   const entries = session(runDir);
-  // `bun greet.ts`, `/path/to/bun greet.ts` or `"$BUN" greet.ts`, as a tester that looked bun up
-  // runs it; reading the file is not running it.
-  const drove = toolCalls(entries).find((call) =>
-    /(?:\bbun|\$\{?\w*BUN\w*\}?)["'\\]*\s+(?:run\s+)?\S*greet\.ts\b/.test(call.args)
-  );
+  const drove = calls.find((c) => {
+    if (c.as !== "bun") return false;
+    const args = c.argv.filter((arg) => !arg.startsWith("-"));
+    return (args[0] === "run" ? args[1] : args[0])?.endsWith("greet.ts") ?? false;
+  });
   const ran = drove !== undefined && write !== undefined && drove.at < write.at;
   const push = pushes.find(
     (p) => git("cat-file", "-e", `${p.sha}:.legion/test.json`).exitCode === 0
@@ -352,12 +407,12 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
  *     the profile's gateway key command ran past its budget. The key command's own record of each
- *     call, judged by scripts/e2e/lib/model-gateway-unserved.sh, is the better signal; no checkout
- *     writes that record yet;
+ *     call, which #1623 adds, is the better signal; no checkout on main writes it yet;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
  *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
- *     anywhere but its own label's profile or checkout. An agent reads the whole filesystem, and
- *     `legion` on its PATH resolves into the checkout rig.sh runs from.
+ *     anywhere but its own run directory (its HOME is there) or its label's profile or checkout.
+ *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
+ *     rig.sh runs from.
  * A record missing or malformed is a rig error too, thrown by the scenario's function. */
 function unscored(runDir: string, label: string, labels: Map<string, string>): string | undefined {
   if (!lines(path.join(runDir, "out.txt")).at(-1)?.startsWith("exit="))
@@ -366,7 +421,7 @@ function unscored(runDir: string, label: string, labels: Map<string, string>): s
   if (!entries.some((entry) => entry.message?.role === "assistant"))
     return "the agent got no model turn: no transcript, or one with no assistant message";
   const profile = path.join(path.dirname(path.dirname(runDir)), "profiles", label);
-  const allowed = [profile, labels.get(label) ?? profile].map((dir) => `${dir}/`);
+  const allowed = [runDir, profile, labels.get(label) ?? profile].map((dir) => `${dir}/`);
   for (const call of toolCalls(entries)) {
     for (const [other, checkout] of labels)
       if (other !== label && call.args.includes(checkout))
@@ -400,7 +455,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
     }
   });
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
-    const match = /^(ask-on-message|tester-proof)-(.+)-(\d+)$/.exec(run);
+    const match = /^(ask-on-message|measure-before-ask|tester-proof)-(.+)-(\d+)$/.exec(run);
     if (!match) continue;
     const [, scenario = "", label = ""] = match;
     if (only && scenario !== only) continue;
@@ -413,7 +468,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
         rows.push(
           scenario === "ask-on-message"
             ? askOnMessage(dir, run, label)
-            : testerProof(dir, run, label, heads)
+            : scenario === "measure-before-ask"
+              ? measureBeforeAsk(dir, run, label)
+              : testerProof(dir, run, label, heads)
         );
     } catch (error) {
       reason = error instanceof Error ? error.message : String(error);
@@ -441,9 +498,9 @@ function scoreRuns(runsDir: string, only: string | undefined) {
   console.log(
     [
       "",
-      "pass       tester-proof: the four conditions on testerProof; ask-on-message: its automatic",
-      "           flags clear (askOnMessage), which point a person at the asks to read and do not",
-      "           check a recommendation",
+      "pass       tester-proof: the four conditions on testerProof. ask-on-message and",
+      "           measure-before-ask: their automatic flags clear (askOnMessage, measureBeforeAsk),",
+      "           which point a person at the asks to read and do not check a recommendation",
       "pass+ref   passed, and the agent read the file the rule is in",
       "rig errors runs the rig could not score (unscored), left out of both counts",
     ].join("\n")

@@ -22,6 +22,11 @@
 #                   is told the implementer has finished; its world is worker_fixture's, with GitHub
 #                   a recording stand-in and the remote a local bare repository. Scored by
 #                   testerProof.
+#   measure-before-ask
+#                   A plain session is told to ask Sami which of three ways to finish an owner
+#                   session posted, with the export the message names in its working directory;
+#                   the export shows one way cannot work (run_measure_before_ask). Scored by
+#                   measureBeforeAsk.
 #
 # A batch's services are the e2e harness's real Go Dispatch server
 # (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded and read back
@@ -37,19 +42,21 @@
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run may take (default 1500)
 #
 # Each run:
-#   - Its agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), under the label's own
-#     HOME and profile (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), with
-#     `env -i` and only the variables its pane file names (base_env).
+#   - Its agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), in the label's profile
+#     (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), under a HOME of its own
+#     copied from the label's, with `env -i` and only the variables its pane file names (base_env).
+#     An agent that writes to its HOME (`mise use -g`, say) changes nothing for another run.
 #   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
 #     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n>. The pane shows nothing: omp's
 #     output goes to <work>/runs/<run>/out.txt, and the transcript, which grows as the agent works,
 #     to the .jsonl under <work>/runs/<run>/sessions.
-#   - A `gh` stand-in is first on its PATH, so it never reaches GitHub. Every container and tmux
-#     session a work directory starts carries the directory's digest in its name.
+#   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and every
+#     bun it runs is the bun this script runs on, recorded. Every container and tmux session a work
+#     directory starts carries the directory's digest in its name.
 #   - Its agent can still read the whole filesystem, including the other label's checkout and the
 #     checkout this script runs from (its `legion` resolves there), and write the machine's /tmp,
-#     which nothing here cleans. score.ts does not score a run that read outside its own label
-#     (unscored), and worker_fixture keeps two runs of a batch apart in /tmp.
+#     which nothing here cleans. score.ts does not score a run that read outside its own label, or
+#     whose PR body carries another run's line (unscored, testerProof).
 #   - An exit stops what its command started (on_exit, stop_run, stop_batch).
 set -euo pipefail
 # Nothing the rig starts inherits a service endpoint or credential from the caller: a Legion pane
@@ -142,12 +149,14 @@ cmd_profile() {
   cat "$P/built-from"
 }
 
-# Writes the variables every agent gets to $R/pane.env: the label's home and profile, the run's
-# stand-ins first on PATH, its own TMPDIR, and nothing else from the caller's environment.
+# Writes the variables every agent gets to $R/pane.env: a HOME copied from the label's, the
+# label's profile, the run's stand-ins first on PATH, its own TMPDIR, and nothing else from the
+# caller's environment.
 base_env() {
   mkdir -p "$R/tmp"
+  cp -a "$P/home" "$R/home"
   {
-    echo "HOME=$P/home"
+    echo "HOME=$R/home"
     echo "USER=$USER"
     echo "TERM=xterm-256color"
     echo "TMPDIR=$R/tmp"
@@ -160,11 +169,25 @@ base_env() {
   } >"$R/pane.env"
 }
 
-# The run's `gh`: the stand-in, which records the call and answers from $R/fixtures.json.
-gh_standin() {
+# The run's stand-ins in $R/bin: `gh`, which records the call and answers from $R/fixtures.json,
+# and `bun`, which runs the bun this script runs on (a caller's `bun` may be a shim that resolves
+# nothing under the agent's HOME) and records the call to $R/calls.jsonl as legion-standin.sh
+# records its own. The score reads the tester's run of the CLI from that record.
+standins() {
+  local bun_real
+  bun_real=$(bun -e 'console.log(process.execPath)')
   mkdir -p "$R/bin"
-  printf '#!/bin/sh\nexec bun %q gh "$@"\n' "$here/gh-standin.ts" >"$R/bin/gh"
-  chmod +x "$R/bin/gh"
+  printf '#!/bin/sh\nexec %q %q gh "$@"\n' "$bun_real" "$here/gh-standin.ts" >"$R/bin/gh"
+  cat >"$R/bin/bun" <<EOF
+#!/usr/bin/env bash
+at=\$(date -u +%FT%T.%3NZ)
+status=0
+$(printf %q "$bun_real") "\$@" || status=\$?
+jq -cn --arg at "\$at" --argjson exit "\$status" '{at:\$at, as:"bun", argv:\$ARGS.positional, exit:\$exit}' \\
+  --args -- "\$@" >>$(printf %q "$R/calls.jsonl")
+exit "\$status"
+EOF
+  chmod +x "$R/bin/gh" "$R/bin/bun"
   [ -f "$R/fixtures.json" ] || printf '{"routes":[]}\n' >"$R/fixtures.json"
 }
 
@@ -269,11 +292,11 @@ cmd_live_read() {
   done
   printf 'Call the read tool once for each of these paths, in this order, one call at a time, and nothing else: %s. Then reply with the single word DONE.\n' "${paths[*]}" >"$R/prompt.txt"
   base_env
-  gh_standin
+  standins
   # No Dispatch, and an Envoy address nothing listens on: the session reads files and nothing else.
   echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
   launch "live-read-${P##*/}"
-  bun "$here/score.ts" live-read "$R" "$co/skills" "$P/home/.omp/profiles/$profile/logs"
+  bun "$here/score.ts" live-read "$R" "$co/skills" "$R/home/.omp/profiles/$profile/logs"
 }
 
 services_env=$work/services/env
@@ -359,25 +382,47 @@ services_down() {
   rm -f "$services_env" "$S/up"
 }
 
-run_ask_on_message() {
-  local name=$1 issue message dispatch_port
-  dispatch_port=$(<"$work/services/dispatch-port")
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" ask-on-message "$R/fixture.json") \
+# seed_dispatch SCENARIO seeds the run's own issue and the owner's message with `seed.ts SCENARIO`
+# and sets the caller's issue and message, which its prompt names.
+seed_dispatch() {
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "$1" "$R/fixture.json") \
     >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   issue=$(jq -r .issue "$R/fixture.json")
   message=$(jq -r .message "$R/fixture.json")
+}
+
+# dispatch_session NAME runs $R/prompt.txt as a plain session outside Legion, with Dispatch as its
+# own and no Envoy (an address nothing listens on) or NATS, then reads back, with seed.ts capture,
+# what it left on Dispatch and the message it was asked about, for the score.
+dispatch_session() {
   base_env
-  gh_standin
-  # Dispatch as the agent's own, with no Envoy (an address nothing listens on) and no NATS: a plain
-  # session outside Legion.
+  standins
   grep '^DISPATCH_' "$services_env" >>"$R/pane.env"
   echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
+  launch "$1"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" capture "$R/fixture.json" "$R") \
+    >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
+}
+
+run_ask_on_message() {
+  local name=$1 issue message
+  seed_dispatch ask-on-message
   printf 'On Dispatch issue %s, the Dispatch owner session posted its plan for the rest of the work in this message: dispatch://%s/message/%s. Open an ask on %s asking Sami whether to go ahead with that plan. Do nothing else.\n' \
     "$issue" "$issue" "$message" "$issue" >"$R/prompt.txt"
-  launch "$name"
-  # What the agent left on Dispatch, and the message it was asked about, for the score.
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" capture "$R/fixture.json" "$R") \
-    >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
+  dispatch_session "$name"
+}
+
+# The export the owner's message names, in the agent's working directory: 430 stranded issues, of
+# which only every 23rd (18) has the owner option A needs.
+run_measure_before_ask() {
+  local name=$1 issue message
+  seed_dispatch measure-before-ask
+  awk 'BEGIN { print "key,title,component,owner"
+    for (n = 1; n <= 430; n++) printf "ISS-%d,Stranded issue %d,billing-api,%s\n", 1000 + n, n, (n % 23 == 0 ? "owner" n "@example.invalid" : "") }' \
+    >"$R/cwd/stranded.csv"
+  printf 'On Dispatch issue %s, the Dispatch owner session posted three ways to finish its work in this message: dispatch://%s/message/%s. The export it names, stranded.csv, is in your working directory. Open an ask on %s asking Sami which way to go. Change nothing else.\n' \
+    "$issue" "$issue" "$message" "$issue" >"$R/prompt.txt"
+  dispatch_session "$name"
 }
 
 # The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the
@@ -528,12 +573,12 @@ run_tester_proof() {
     echo "JJ_CONFIG=$R/jj.toml"
     echo "GH_REPO=$worker_repo"
   } >"$R/pane.env"
-  gh_standin
+  standins
   launch "$name"
 }
 
 cmd_run() {
-  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|tester-proof> <label> <n> <index> <start>"
+  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof> <label> <n> <index> <start>"
   local scenario=$1 n=$3 index=$4 start=$5 name
   load_label "$2"
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
@@ -548,6 +593,7 @@ cmd_run() {
   cp "$P/built-from" "$R/built-from"
   case $scenario in
   ask-on-message) run_ask_on_message "$name" ;;
+  measure-before-ask) run_measure_before_ask "$name" ;;
   tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
   *) fail "unknown scenario $scenario" ;;
   esac
@@ -572,7 +618,7 @@ cmd_batch() {
   [ $# -ge 3 ] || fail "usage: rig.sh batch <scenario> <runs> <label>..."
   local runs=$2 label n index=0 start
   batch_scenario=$1
-  case $batch_scenario in ask-on-message | tester-proof) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   shift 2
   for label in "$@"; do load_label "$label"; done
