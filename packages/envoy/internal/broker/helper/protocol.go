@@ -49,6 +49,7 @@ type Response struct {
 	Operator      string        `json:"operator,omitempty"`
 	State         string        `json:"state,omitempty"`         // register: enrolling | enrolled
 	LoginState    string        `json:"login_state,omitempty"`   // login/login-status: pending|issued|denied|expired
+	LoginRefused  bool          `json:"login_refused,omitempty"` // login-status: "expired" because the broker refused the issued credential
 	LeaseExpires  string        `json:"lease_expires,omitempty"` // enroll-box: RFC3339Nano
 	Proof         string        `json:"proof,omitempty"`
 	RequestObject string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
