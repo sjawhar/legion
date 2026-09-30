@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -641,7 +642,7 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 	// its grant names is computed from the same test's bucket.
 	t.Run("a grant that allows it purges, and the trace names the subject", func(t *testing.T) {
 		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + testBuckets(t).interests
-		granted := grantedRegistry(t, nil)
+		granted := startGrantedServer(t, nil)
 		purged, err := collectorOf(granted.registry).pass(granted.js, nil)
 		if err != nil || purged == 0 {
 			t.Fatalf("a pass under a grant that allows the purge = %d, %v; want the markers purged", purged, err)
@@ -664,7 +665,7 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 		bucket := testBuckets(t).interests
 		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + bucket
 		records := captureJSONLogs(t)
-		granted := grantedRegistry(t, []string{purgeSubject})
+		granted := startGrantedServer(t, []string{purgeSubject})
 		before := bucketState(t, granted.js, bucket)
 		// The server answers a purge the grant refuses with nothing, so the passes purge through a
 		// context that waits a second; on granted.js each pass would wait out its whole 10 s.
@@ -727,10 +728,10 @@ type grantedServer struct {
 	kv natsgo.KeyValue
 }
 
-// grantedRegistry starts a tracing NATS server whose one nkey user may publish to everything except
-// deny, opens a registry on it as the listener does (one connection, its own JetStream context) and
-// seeds t's interest bucket with markers behind live keys.
-func grantedRegistry(t *testing.T, deny []string) grantedServer {
+// startGrantedServer starts a tracing NATS server whose one nkey user may publish to everything
+// except deny, opens a registry on it as the listener does (one connection, its own JetStream
+// context) and seeds t's interest bucket with markers behind live keys.
+func startGrantedServer(t *testing.T, deny []string) grantedServer {
 	t.Helper()
 	seed, public := testnats.User(t)
 	quoted := make([]string, len(deny))
@@ -788,8 +789,9 @@ func grantedRegistry(t *testing.T, deny []string) grantedServer {
 	return grantedServer{ctr: ctr, conn: conn, registry: registry, js: js, kv: kv}
 }
 
-// traceSentinel is the subject traceThrough publishes. Nothing else in these tests publishes it.
-const traceSentinel = "trace.sentinel"
+// traceSentinels numbers the sentinels traceThrough publishes, so each call waits for its own
+// sentinel's line rather than for one an earlier call on the same server put in the log.
+var traceSentinels atomic.Uint64
 
 // traceWait bounds how long traceThrough waits for the sentinel's line to reach the container's log.
 const traceWait = 5 * time.Second
@@ -804,13 +806,14 @@ const traceWait = 5 * time.Second
 // line and every publish the server traced.
 func (g grantedServer) traceThrough(t *testing.T) []string {
 	t.Helper()
-	if err := g.conn.Publish(traceSentinel, nil); err != nil {
+	sentinel := fmt.Sprintf("trace.sentinel.%d", traceSentinels.Add(1))
+	if err := g.conn.Publish(sentinel, nil); err != nil {
 		t.Fatalf("publish the trace sentinel: %v", err)
 	}
 	if err := g.conn.Flush(); err != nil {
 		t.Fatalf("flush the trace sentinel: %v", err)
 	}
-	want := "[PUB " + traceSentinel + " "
+	want := "[PUB " + sentinel + " "
 	if err := wait.ForLog(want).WithStartupTimeout(traceWait).WaitUntilReady(context.Background(), g.ctr); err != nil {
 		t.Fatalf("the server's log holds no line with %q after %s (%v). Every publish it traced:\n%s",
 			want, traceWait, err, strings.Join(tracedPublishLines(serverLog(t, g.ctr)), "\n"))
