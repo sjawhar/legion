@@ -269,12 +269,14 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # scratch directory the step removes, so the layer keeps nothing. No Python is checked: uv installs
 # each project's own at run time. Being its own layer above the Go `legion`, it reruns only when the
 # toolchain or a layer before it changes, so a commit that only rebuilds the Go `legion` fetches
-# nothing from a registry.
+# nothing from a registry. pnpx is `pnpm dlx`, which takes no --version; its --help, whose first line
+# names the pnpm version, is the check.
 RUN set -eu; \
     scratch="$(mktemp -d)"; export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack"; \
     uv --version; uvx --version; node --version; npm --version; npx --version; corepack --version; \
     aws --version; \
-    for shim in pnpm pnpx yarn yarnpkg; do "$shim" --version; done; \
+    for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
+    pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     rm -rf "$scratch"
 # The Go `legion` goes in after the probe layer and the toolchain: its binary differs on every commit (it
 # links the commit), so a new commit rebuilds only the layers from here down, never the probe layer and
