@@ -44,10 +44,11 @@ func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, *docs.Se
 	var service *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		service = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		// Shutdown runs the settlement the hour-long settle held back and flushes the room, which
+		// takes as long as that work takes on the machine running the test, so the cleanup waits
+		// for it rather than racing a deadline against it.
 		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := service.Shutdown(ctx); err != nil {
+			if err := service.Shutdown(context.Background()); err != nil {
 				t.Errorf("shutdown document service: %v", err)
 			}
 		})

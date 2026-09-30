@@ -103,20 +103,29 @@ func documentVersions(t *testing.T, handler http.Handler, artifactID string) []m
 	return decodeBody[model.Artifact](t, read).Versions
 }
 
-// awaitDocumentVersions blocks until the document has at least count settled versions, so a
-// test reads a settlement's version rather than racing it.
-func awaitDocumentVersions(t *testing.T, handler http.Handler, artifactID string, count int) []model.Version {
+// awaitSettledVersion blocks until settlement has published the document's version number, on a
+// subscription taken before the write it settles. Settlement commits a version before it
+// releases the authors that version credits from the document's pending authors, so the version
+// can be read while they are still pending, and a write made then is credited to them as well.
+// It publishes the version's event only after releasing them, which makes the event, not the
+// stored version, the signal that settlement has finished.
+func awaitSettledVersion(t *testing.T, published <-chan model.Event, artifactID string, number int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for {
-		versions := documentVersions(t, handler, artifactID)
-		if len(versions) >= count {
-			return versions
+		select {
+		case event, ok := <-published:
+			if !ok {
+				t.Fatalf("the event stream closed before version %d of %s was published", number, artifactID)
+			}
+			payload, _ := event.Payload.(map[string]any)
+			version, _ := payload["version"].(model.Version)
+			if event.Type == "artifact.version" && payload["artifact_id"] == artifactID && version.Number == number {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("settlement published no version %d of %s", number, artifactID)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("document %s settled %d versions, want %d", artifactID, len(versions), count)
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -220,21 +229,24 @@ func TestEditedBlockAskSurvivesTheNextDocumentSettlement(t *testing.T) {
 // Acceptance 8: the ask's wording is part of the document, so an edit versions it once, crediting
 // the session that edited - never the room's last actor.
 func TestEditedBlockAskWritesOneVersionCreditingTheEditor(t *testing.T) {
-	handler, _ := blockAskHandler(t)
+	handler, _, deps := newTestServer(t, testServerOptions{settle: 20 * time.Millisecond})
 	issue, askID := seedBlockAsk(t, handler, "Block ask version", "decision", transportAsk, "Which transport?")
 	before := len(documentVersions(t, handler, issue.PrimaryArtifactID))
 
+	published, unsubscribe := deps.Events.Subscribe()
+	defer unsubscribe()
 	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
 		"question": "Which transport ships first?", "actor": sessionActor(),
 	})
 	if edited.Code != http.StatusOK {
 		t.Fatalf("edit block ask: status=%d body=%s", edited.Code, edited.Body.String())
 	}
-	// The edit's own settlement writes its version; waiting for it is what makes the authors
-	// the edit's, rather than whoever else happens to touch the document within the settle
-	// window.
-	versions := awaitDocumentVersions(t, handler, issue.PrimaryArtifactID, before+1)
-	edit := versions[before]
+	// The edit's own settlement writes its version. Waiting until that settlement has finished
+	// is what makes the authors the edit's, rather than whoever else happens to touch the
+	// document within the settle window, and what keeps the next edit below from being credited
+	// to this edit's session too.
+	awaitSettledVersion(t, published, issue.PrimaryArtifactID, before+1)
+	edit := documentVersions(t, handler, issue.PrimaryArtifactID)[before]
 	if len(edit.Authors) != 1 || edit.Authors[0].Kind != "session" || edit.Authors[0].ID != sessionActor()["id"] {
 		t.Fatalf("the edit's version authors = %#v, want the editing session alone", edit.Authors)
 	}
