@@ -164,9 +164,13 @@ const lockWaitQuery = `
 type watch struct {
 	cancel context.CancelFunc
 	done   chan struct{}
-	// wait and err are written by the watch's goroutine alone and read by stop once it has ended.
+	// wait, emptyBefore and err are written by the watch's goroutine alone and read by stop once
+	// it has ended.
 	wait *LockWait
-	err  error
+	// emptyBefore records that the reading before this one was of the same wait and named no
+	// holder.
+	emptyBefore bool
+	err         error
 }
 
 func startWatch(ctx context.Context, config *pgx.ConnConfig, pid uint32) *watch {
@@ -211,15 +215,20 @@ func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
 		err := conn.QueryRow(ctx, lockWaitQuery, pid).Scan(&wait.LockType, &wait.Mode, &wait.Object, &wait.Holders)
 		switch {
 		case err == nil:
-			// pg_locks and pg_blocking_pids read the lock table in separate passes, so a reading
+			// pg_locks and pg_blocking_pids read the lock table in separate passes, so one reading
 			// taken as the cancellation dequeues the migration can list its ungranted lock with no
-			// blocker. It does not replace a reading of the same lock that named its holders.
-			if len(wait.Holders) == 0 && w.wait != nil && len(w.wait.Holders) > 0 &&
-				w.wait.Mode == wait.Mode && w.wait.Object == wait.Object {
+			// blocker; that reading does not replace one of the same lock that named its holders.
+			// Two in a row do, since a holder that has left - or one pg_blocking_pids cannot name,
+			// such as a prepared transaction, which it reports as pid 0 - must not stay named.
+			sameLock := w.wait != nil && w.wait.Mode == wait.Mode && w.wait.Object == wait.Object
+			if len(wait.Holders) == 0 && sameLock && len(w.wait.Holders) > 0 && !w.emptyBefore {
+				w.emptyBefore = true
 				continue
 			}
+			w.emptyBefore = false
 			w.wait = &wait
 		case errors.Is(err, pgx.ErrNoRows):
+			w.emptyBefore = false
 			// Not waiting at this reading; an earlier wait the migration got past stays recorded,
 			// since only a later one it did not get past would replace it.
 		case ctx.Err() == nil:
