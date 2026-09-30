@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -25,8 +24,7 @@ type approverGrantResp struct {
 
 func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 	approver := r.URL.Query().Get("approver")
-	if approver == "" {
-		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+	if !requireApprover(w, approver) {
 		return
 	}
 	rows, err := s.deps.Machine.GrantsForApprover(r.Context(), approver)
@@ -70,8 +68,7 @@ func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body, "INVALID_REVOKE") {
 		return
 	}
-	if record.CanonicalLogin(body.Approver) == "" {
-		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+	if !requireApprover(w, body.Approver) {
 		return
 	}
 	err := s.deps.Machine.RevokeByApprover(r.Context(), id, body.Approver)

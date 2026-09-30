@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
+import type { CredentialDecisionResponse } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   dangerText,
@@ -16,11 +17,35 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
 
+/** What the broker recorded for the looked-up login, in place of the buttons that decided it. */
+function MachineLoginDecision({
+  decision,
+  host,
+}: {
+  decision: CredentialDecisionResponse;
+  host: string;
+}): ReactNode {
+  return (
+    <div className="space-y-1 text-sm">
+      <p className={`font-medium ${textPrimaryOnCanvas}`}>
+        {decision.state === "approved"
+          ? `Approved. ${host} can start agent sessions as you.`
+          : `Denied. ${host} is not logged in.`}
+      </p>
+      {decision.state === "approved" && decision.credential_id ? (
+        <p className={textMutedOnCanvas}>Credential {decision.credential_id}</p>
+      ) : null}
+    </div>
+  );
+}
+
 /**
  * The machine-login code-entry page: `agent-secrets launcher login` prints an 8-character code
  * on the machine, and the operator types it here. Contract v9 ruling 13 - only this code-lookup
  * route selects a `launcher_credential` record, and deciding it sends the same code again, so
- * this is the one place a machine record gets Approve/Deny buttons.
+ * this is the one place a machine record gets Approve/Deny buttons. Once a decision succeeds the
+ * page shows it in their place, as the record page does, so a second click never reaches the
+ * broker's already-decided refusal.
  */
 export function MachineLoginPage(): ReactNode {
   const [code, setCode] = useState("");
@@ -50,8 +75,13 @@ export function MachineLoginPage(): ReactNode {
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    submitGuard.guard(() => lookup.mutate(code));
+    submitGuard.guard(() => {
+      approve.reset();
+      deny.reset();
+      lookup.mutate(code);
+    });
   };
+  const decision = approve.data ?? deny.data;
 
   return (
     <section className="max-w-2xl space-y-6">
@@ -91,9 +121,11 @@ export function MachineLoginPage(): ReactNode {
       {record === undefined ? null : (
         <div className="space-y-4">
           <CredentialRecordFacts record={record} />
-          {record.state === "pending" ? (
+          {record.state !== "pending" ? null : decision === undefined ? (
             <CredentialDecisionButtons approve={approve} deny={deny} submitGuard={submitGuard} />
-          ) : null}
+          ) : (
+            <MachineLoginDecision decision={decision} host={record.identifiers[0] ?? ""} />
+          )}
         </div>
       )}
     </section>

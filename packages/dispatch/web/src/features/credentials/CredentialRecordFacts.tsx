@@ -26,11 +26,13 @@ function formatLifetime(seconds: number): string {
   return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
+/** One label and value; the value wraps inside its grid cell, so a 64-hex rules version or a long
+ *  host name never runs into the fact beside it or widens a narrow page. */
 function Fact({ children, label }: { children: ReactNode; label: string }): ReactNode {
   return (
     <div>
       <dt className={textMutedOnCanvas}>{label}</dt>
-      <dd className={`font-medium ${textPrimaryOnCanvas}`}>{children}</dd>
+      <dd className={`break-words font-medium ${textPrimaryOnCanvas}`}>{children}</dd>
     </div>
   );
 }

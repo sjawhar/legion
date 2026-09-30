@@ -36,8 +36,8 @@ var (
 	// record's own: the human is deciding a different login than the one their terminal or
 	// dashboard actually shows, refused before the approver is even checked.
 	ErrCodeMismatch = errors.New("confirmation code does not match")
-	// ErrAlreadyDecided is ApplyDecision's refusal when a concurrent decision already recorded
-	// the record's one terminal event first.
+	// ErrAlreadyDecided is ApplyDecision's refusal for a record that already carries its one
+	// terminal event: a second approve or deny, or one that lost the race to a concurrent one.
 	ErrAlreadyDecided = errors.New("this machine login has already been decided")
 )
 
@@ -185,10 +185,12 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
 // means the human is looking at a different login than the one they're deciding, refused before
 // anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be
-// the record's own approver (record.ErrNotApprover). Approval mints the credential — bound to the
-// request object's own key (thumbprint and embedded JWK), with lifetime CredentialLifetime counted
-// from the decision — in the same transaction that records the decision, so a crash between the
-// two never orphans a credential no decision names.
+// the record's own approver (record.ErrNotApprover). A record that already carries a terminal
+// event is ErrAlreadyDecided, checked under the record's row lock before anything is minted, so a
+// second decision and one racing the first both answer the same way. Approval mints the
+// credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
+// CredentialLifetime counted from the decision — in the same transaction that records the
+// decision, so a crash between the two never orphans a credential no decision names.
 func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bool, login, code string) (state, credentialID string, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -196,9 +198,15 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	defer tx.Rollback(ctx)
 
+	// The row lock serializes every decision of this record; a lock fires no update trigger, so
+	// the append-only record allows it. It is `for no key update`, not `for update`: the foreign
+	// key check of another transaction's event insert (the sweeper's 'expired') takes `for key
+	// share` on this row, which `for update` would block while this transaction then waited on
+	// that insert's unique-index entry, a deadlock; the weaker lock lets that insert commit, and
+	// this decision's own insert then answers ErrAlreadyDecided.
 	var canonical, storedCode string
 	var createdAt time.Time
-	err = tx.QueryRow(ctx, `select body, code, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).
+	err = tx.QueryRow(ctx, `select body, code, created_at from credential_requests where id=$1 and kind='launcher_credential' for no key update`, recordID).
 		Scan(&canonical, &storedCode, &createdAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
@@ -218,10 +226,18 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", err
 	}
 
-	if !body.IsApprover(login) {
-		return "", "", record.ErrNotApprover
+	var decided bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from credential_request_events where record_id=$1 and event in ('approved','denied','expired','cancelled'))`, recordID).
+		Scan(&decided); err != nil {
+		return "", "", err
 	}
-	login = record.CanonicalLogin(login)
+	if decided {
+		return "", "", ErrAlreadyDecided
+	}
+	login, err = body.ApproverLogin(login)
+	if err != nil {
+		return "", "", err
+	}
 	event := "denied"
 	if approve {
 		event = "approved"
@@ -247,6 +263,9 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		}
 		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
 			time.Now().Add(time.Duration(body.LifetimeSeconds)*time.Second))
+		if isUniqueViolation(err) {
+			return "", "", fmt.Errorf("%w: its key already holds a live launcher credential", ErrAlreadyDecided)
+		}
 		if err != nil {
 			return "", "", err
 		}
@@ -255,11 +274,9 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, credential_id, actor) values ($1,$2,$3,$4,$5)`,
-		recordID, event, login, credID, "human:"+login); err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return "", "", ErrAlreadyDecided
-		}
+		recordID, event, login, credID, "human:"+login); isUniqueViolation(err) {
+		return "", "", ErrAlreadyDecided
+	} else if err != nil {
 		return "", "", err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -269,6 +286,12 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "issued", *credID, nil
 	}
 	return "denied", "", nil
+}
+
+// isUniqueViolation reports whether err is Postgres's unique_violation (23505).
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // Read answers a machine's own poll: the record's current state and, once issued, its minted

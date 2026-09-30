@@ -94,33 +94,9 @@ type Machine struct {
 }
 
 // NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
-// records, mirroring enroll.NewChainVerifier's own construction against launcher_credential
-// records: FetchRecord and FetchDecisions read straight from Postgres.
+// records.
 func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
-	return &record.ChainVerifier{
-		Audience: audience,
-		Skew:     skew,
-		FetchRecord: func(ctx context.Context, recordID string) (string, time.Time, bool, error) {
-			var body string
-			var createdAt time.Time
-			err := st.Pool.QueryRow(ctx, `select body, created_at from credential_requests where id=$1 and kind='agent_secret'`, recordID).Scan(&body, &createdAt)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return "", time.Time{}, false, nil
-			}
-			if err != nil {
-				return "", time.Time{}, false, err
-			}
-			return body, createdAt, true, nil
-		},
-		FetchDecisions: func(ctx context.Context, recordID string) ([]record.TerminalEvent, error) {
-			rows, err := st.Pool.Query(ctx, `select event, coalesce(login, '') from credential_request_events
-				where record_id=$1 and event in ('approved','denied','expired','cancelled') order by id`, recordID)
-			if err != nil {
-				return nil, err
-			}
-			return pgx.CollectRows(rows, pgx.RowToStructByPos[record.TerminalEvent])
-		},
-	}
+	return st.ChainVerifier("agent_secret", audience, skew)
 }
 
 type enrollmentRow struct {
@@ -487,10 +463,10 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
 	}
 
-	if !parsed.IsApprover(login) {
-		return Decision{}, record.ErrNotApprover
+	login, err = parsed.ApproverLogin(login)
+	if err != nil {
+		return Decision{}, err
 	}
-	login = record.CanonicalLogin(login)
 	event, by := "denied", "human:"+login
 	next, detail := "denied", ""
 	if approve {

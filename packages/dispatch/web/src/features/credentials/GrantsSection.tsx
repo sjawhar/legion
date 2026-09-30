@@ -22,8 +22,6 @@ import {
 import { Timestamp } from "../refs/Timestamp";
 import { credentialGrantsQuery } from "./grants";
 
-const credentialGrantsQueryKey = ["credential-grants"] as const;
-
 /**
  * The viewer's live approval-granted credential grants, each revocable with one click: Dispatch
  * sends the broker the viewer's own login, and the broker allows the revoke only when that login
@@ -36,7 +34,8 @@ export function GrantsSection(): ReactNode {
   const revoke = useMutation({
     mutationFn: (grantId: string) => api.revokeCredentialGrant(grantId),
     onSettled: () => submitGuard.release(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: credentialGrantsQueryKey }),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: credentialGrantsQuery().queryKey }),
   });
 
   return (

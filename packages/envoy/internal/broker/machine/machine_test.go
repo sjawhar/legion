@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/rules"
+	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -370,17 +371,26 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 }
 
 // TestChainVerificationRefusesADecisionTheBrokerDidNotWrite pins what AuthenticateLauncher's
-// chain re-check proves on every call: a credential authenticates only while its record carries
-// exactly one terminal decision, an approval by the record's own approver. An approved event
-// rewritten to name another login, and a second terminal event beside the real approval (which
-// credential_request_decision's unique index refuses, so the test drops it the way a direct
-// writer could), each turn a credential that authenticates into one that does not.
+// chain re-check proves on every call: a credential authenticates only while its record embeds a
+// request object the machine really signed and carries exactly one terminal decision, an approval
+// by the record's own approver. An approved event rewritten to name another login, a second
+// terminal event beside the real approval (which credential_request_decision's unique index
+// refuses, so the test drops it the way a direct writer could), and a copy of the record whose
+// request object's signature was altered, approved by the approver, each turn a credential that
+// authenticates into one that does not.
 func TestChainVerificationRefusesADecisionTheBrokerDidNotWrite(t *testing.T) {
-	for name, tamper := range map[string][]string{
-		"approved by another login": {`update credential_request_events set login='mallory' where record_id=$1 and event='approved'`},
-		"a second terminal event": {
+	for name, tamper := range map[string]func(t testing.TB, st *store.Store, recordID string){
+		"approved by another login": storetest.Exec(`update credential_request_events set login='mallory' where record_id=$1 and event='approved'`),
+		"a second terminal event": storetest.Exec(
 			`drop index credential_request_decision`,
 			`insert into credential_request_events (record_id, event, login, actor) values ($1, 'denied', 'sjawhar', 'human:sjawhar')`,
+		),
+		"a request object whose signature was altered": func(t testing.TB, st *store.Store, recordID string) {
+			forged := storetest.ForgeRequestSignature(t, st, recordID)
+			tag, err := st.Pool.Exec(context.Background(), `update launcher_credentials set record_id=$2 where record_id=$1`, recordID, forged)
+			if err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("point the credential at the forged record: %d rows, %v", tag.RowsAffected(), err)
+			}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -394,15 +404,7 @@ func TestChainVerificationRefusesADecisionTheBrokerDidNotWrite(t *testing.T) {
 			if _, live, err := svc.Enroll.AuthenticateLauncher(ctx, credentialID); err != nil || !live {
 				t.Fatalf("AuthenticateLauncher(before tamper) = live=%v err=%v, want live=true", live, err)
 			}
-			for _, statement := range tamper {
-				args := []any{recordID}
-				if statement == `drop index credential_request_decision` {
-					args = nil
-				}
-				if _, err := svc.Store.Pool.Exec(ctx, statement, args...); err != nil {
-					t.Fatalf("%s: %v", statement, err)
-				}
-			}
+			tamper(t, svc.Store, recordID)
 			if _, live, err := svc.Enroll.AuthenticateLauncher(ctx, credentialID); err != nil || live {
 				t.Fatalf("AuthenticateLauncher(%s) = live=%v err=%v, want live=false, err=nil", name, live, err)
 			}

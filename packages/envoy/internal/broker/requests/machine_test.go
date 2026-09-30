@@ -251,23 +251,32 @@ func TestValuesRefusesAGrantWhoseRowWasForged(t *testing.T) {
 
 // TestValuesRefusesAChainTheBrokerDidNotWrite pins what "every release re-verifies the whole
 // chain" means now that no approval signature exists: a grant releases only while its record
-// reproduces its own content-addressed id and carries exactly one terminal decision, an approval
-// by the record's approver. Each subtest writes the kind of row only a writer other than the
-// broker could — past the append-only trigger and the one-decision unique index where it must —
-// and the grant that released before the write releases nothing after it.
+// reproduces its own content-addressed id, embeds a request object its requester really signed,
+// and carries exactly one terminal decision, an approval by the record's approver. Each subtest
+// writes the kind of row only a writer other than the broker could — past the append-only trigger
+// and the one-decision unique index where it must — and the grant that released before the write
+// releases nothing after it. Nor does reuse hand it back: a new request for the same name opens a
+// fresh pending request rather than returning the grant whose chain no longer verifies.
 func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
-	for name, tamper := range map[string][]string{
-		"a tampered body": {
+	for name, tamper := range map[string]func(t testing.TB, st *store.Store, recordID string){
+		"a tampered body": storetest.Exec(
 			`alter table credential_requests disable trigger credential_requests_no_update`,
 			`update credential_requests set body = replace(body, 'lifetime_seconds: 3600', 'lifetime_seconds: 43200')
 				where id=$1 and body like '%lifetime_seconds: 3600%'`,
-		},
-		"an approval by another login": {
+		),
+		"an approval by another login": storetest.Exec(
 			`update credential_request_events set login='mallory' where record_id=$1 and event='approved'`,
-		},
-		"a second terminal event": {
+		),
+		"a second terminal event": storetest.Exec(
 			`drop index credential_request_decision`,
 			`insert into credential_request_events (record_id, event, login, actor) values ($1, 'denied', 'sjawhar', 'human:sjawhar')`,
+		),
+		"a request object whose signature was altered": func(t testing.TB, st *store.Store, recordID string) {
+			forged := storetest.ForgeRequestSignature(t, st, recordID)
+			tag, err := st.Pool.Exec(context.Background(), `update requests set record_id=$2 where record_id=$1`, recordID, forged)
+			if err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("point the request at the forged record: %d rows, %v", tag.RowsAffected(), err)
+			}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -285,22 +294,17 @@ func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
 				t.Fatalf("Values before the write: %v", err)
 			}
 
-			for _, statement := range tamper {
-				var args []any
-				if strings.Contains(statement, "$1") {
-					args = []any{*req.RecordID}
-				}
-				tag, err := m.Store.Pool.Exec(ctx, statement, args...)
-				if err != nil {
-					t.Fatalf("%s: %v", statement, err)
-				}
-				if strings.HasPrefix(statement, "update") && tag.RowsAffected() != 1 {
-					t.Fatalf("%s changed %d rows, want 1", statement, tag.RowsAffected())
-				}
-			}
+			tamper(t, m.Store, *req.RecordID)
 
 			if _, _, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantChainInvalid) {
 				t.Fatalf("Values after %s = %v, want ErrGrantChainInvalid", name, err)
+			}
+			again, err := m.Create(ctx, enr, signRequest(t, m, key, "why, again", "DEEL_API_KEY"), "")
+			if err != nil {
+				t.Fatalf("Create after %s: %v", name, err)
+			}
+			if again.ID == req.ID || again.State != "pending" || again.GrantID != nil {
+				t.Fatalf("Create after %s = %+v, want a fresh pending request, not request %s's grant %s", name, again, req.ID, dec.GrantID)
 			}
 		})
 	}

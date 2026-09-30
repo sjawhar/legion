@@ -5,9 +5,9 @@
 # Postgres (dev-postgres.sh, made idempotent here since that script has no guard of its own),
 # writes a scratch rules file (one automatic and one approval-required secret, approved by
 # APPROVER_LOGIN) and a fake secrets file, then starts cmd/broker against them. Prints the exports
-# a second shell needs to drive agent-secrets and agent-secrets-devkey against it: devkey stands in
-# for Dispatch's credential-request relay, sending the broker's UI routes the UI bearer and the
-# approving human's login, as Dispatch does when a signed-in human clicks Approve.
+# a second shell needs to drive agent-secrets and agent-secrets-devrelay against it: devrelay
+# stands in for Dispatch's credential-request relay, sending the broker's UI routes the UI bearer
+# and the approving human's login, as Dispatch does when a signed-in human clicks Approve.
 #
 # Each invocation creates and drops its own isolated Postgres database inside the shared
 # dispatch-pg container (named from this run's own WORK_DIR, below) and binds an OS-assigned
@@ -36,7 +36,7 @@ UI_TOKEN="${BROKER_UI_TOKEN:-dev}"
 APPROVER_LOGIN="sjawhar"
 
 WORK_DIR="$(mktemp -d /tmp/agent-secrets-dev.XXXXXX)"
-DEVKEY_BIN="$WORK_DIR/agent-secrets-devkey"
+DEVRELAY_BIN="$WORK_DIR/agent-secrets-devrelay"
 BROKER_BIN="$WORK_DIR/broker"
 RULES_FILE="$WORK_DIR/agent-secret-rules.yaml"
 FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.env"
@@ -91,8 +91,8 @@ echo "dev-broker: created isolated database $DB_NAME" >&2
 docker exec "$POSTGRES_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -q -c "create database ${DB_NAME};"
 
 # --- Build the two binaries this stack needs. ---
-echo "dev-broker: building agent-secrets-devkey and broker..." >&2
-( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$DEVKEY_BIN" ./cmd/agent-secrets-devkey )
+echo "dev-broker: building agent-secrets-devrelay and broker..." >&2
+( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$DEVRELAY_BIN" ./cmd/agent-secrets-devrelay )
 ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$BROKER_BIN" ./cmd/broker )
 
 # --- Scratch rules file: one automatic secret, one approval-required secret. ---
@@ -191,15 +191,15 @@ dev-broker: ready.
   export AGENT_SECRETS_UI_TOKEN=$UI_TOKEN
   export AGENT_SECRETS_APPROVER=$APPROVER_LOGIN
 
-  devkey binary:       $DEVKEY_BIN
+  devrelay binary:     $DEVRELAY_BIN
   fake secrets file:   $FAKE_SECRETS_FILE  (source -> value, for confirming a released grant)
   rules file:          $RULES_FILE
-  approver login:      $APPROVER_LOGIN (devkey approve/deny --login \$AGENT_SECRETS_APPROVER decides as this human)
+  approver login:      $APPROVER_LOGIN (devrelay approve/deny --login \$AGENT_SECRETS_APPROVER decides as this human)
   database:            $POSTGRES_URL  (this instance's own; created and dropped by this script)
 
   One automatic secret (AGENT_SECRETS_PROOF_AUTOMATIC) and one approval-required secret
   (AGENT_SECRETS_PROOF_APPROVAL, approver: $APPROVER_LOGIN) are configured. Drive it with
-  agent-secrets and \$DEVKEY_BIN in another shell; press Ctrl-C here to stop the broker.
+  agent-secrets and \$DEVRELAY_BIN in another shell; press Ctrl-C here to stop the broker.
 EOF
 
 wait "$BROKER_PID"

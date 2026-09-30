@@ -33,9 +33,9 @@ type TerminalEvent struct {
 // must carry exactly one terminal decision, an approval by the login the record names as its
 // approver.
 //
-// enroll.AuthenticateLauncher and requests.Machine's own chain check each build one of these
-// against the same underlying tables through these narrow func fields, so neither package need
-// import the other's store access — or, transitively, each other.
+// store.Store.ChainVerifier builds the one enroll.AuthenticateLauncher and requests.Machine's own
+// chain check each use, by record kind, through these narrow func fields, so this package needs no
+// store access of its own.
 type ChainVerifier struct {
 	// Audience and Skew re-verify the embedded request object exactly as VerifyRequestObject
 	// enforced them when the record was first created.
@@ -84,7 +84,8 @@ func (c *ChainVerifier) Verify(ctx context.Context, recordID string) (Body, erro
 		return Body{}, fmt.Errorf("%w: %d terminal decision events, want exactly one", ErrChainBroken, len(decisions))
 	case decisions[0].Event != "approved":
 		return Body{}, fmt.Errorf("%w: no approved event (decided %s)", ErrChainBroken, decisions[0].Event)
-	case !body.IsApprover(decisions[0].Login):
+	}
+	if _, err := body.ApproverLogin(decisions[0].Login); err != nil {
 		return Body{}, fmt.Errorf("%w: approved by %q, not the record's approver %q", ErrChainBroken, decisions[0].Login, body.Approver)
 	}
 	return body, nil

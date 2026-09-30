@@ -1525,10 +1525,12 @@ requester's signed request object end to end (single ES256 JWS, `typ` `agent-sec
 `iat`/`exp` within skew and a 600-second cap, a `reason` of at most 400 runes with bidi/zero-width
 categories refused, and `authorization_details` either every entry `agent_secret` or exactly one
 `launcher_credential` entry naming a valid hostname and an optional `[a-z0-9-]{1,64}` service).
-`Body.IsApprover(login)` is the one approver comparison: a record's approver is resolved when the
-record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
+`Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
+the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
 `approver: operator`, or a machine login's `login_hint`), and every decision and every chain
-re-check compares the canonical lowercase login against it. `record.ChainVerifier` (`chain.go`) is
+re-check compares the canonical lowercase login against it, a decision recording the canonical
+login it returns. `record.ChainVerifier` (`chain.go`, built per record kind by
+`store.Store.ChainVerifier`, so a record of one kind never backs the other's credential) is
 what "every release re-verifies the whole chain" means in code: given a record id it re-fetches
 the stored body, confirms it still reproduces its own id, re-verifies the embedded request object
 as of the record's own creation time (not now — a request object's ~10-minute `exp` is long past
@@ -1589,12 +1591,16 @@ pending login by that human-readable code alone (`LookupByCode` / `POST /v1/mach
 — never the machine's opaque pending id — and this is the *only* route that selects a machine
 record (ruling 13: a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
-(`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` then refuses any login but the
-record's own approver (`403 NOT_APPROVER`) and, on approval, mints the launcher credential in the
-same transaction: bound to the request object's own key (its thumbprint and embedded JWK, never a
-bearer token), with
-lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted from the decision, so a crash between minting
-and recording the decision never orphans a credential no decision names. `Read` (the machine's own
+(`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
+update`, which an event insert's foreign-key check does not wait on), answers a record that
+already carries a terminal event `409 RECORD_TERMINAL` before minting anything, as a decided
+`agent_secret` record answers, so a second click and a concurrent one both get it, then refuses
+any login but the record's own approver (`403 NOT_APPROVER`) and, on approval, mints the launcher
+credential in the same transaction: bound to the request object's own key (its thumbprint and
+embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
+from the decision, so a crash between minting and recording the decision never orphans a
+credential no decision names. A key that already holds a live launcher credential under another
+record is `409 RECORD_TERMINAL` too. `Read` (the machine's own
 poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
 the minted credential's id — no token is ever returned; the credential is usable only with proofs
 signed by the key the request object embedded.
@@ -1613,7 +1619,7 @@ through the same Envoy wake seam the poller used to own) and overdue pending mac
 reading fresh from Postgres every time so a restart resumes exactly where the rows are.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
-./cmd/agent-secrets/... ./cmd/agent-secrets-devkey/...`. The Postgres-backed tests skip, rather
+./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather
 than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
@@ -1621,11 +1627,11 @@ CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
 `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`. Every client-facing
 lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services)
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
-`internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devkey/main_test.go` all wire real
+`internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
 `enroll.Service`/`requests.Machine`/`machine.Service` behind an `httptest.Server`;
 `cmd/agent-secrets/main_test.go`'s own hand-rolled `fakeBroker` is the one sanctioned exception,
 since it exists to test the CLI binary's own request-building and response-parsing logic, not
-broker behavior. `packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devkey` (a stand-in
+broker behavior. `packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
 for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login, as Dispatch does
 when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
 testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,

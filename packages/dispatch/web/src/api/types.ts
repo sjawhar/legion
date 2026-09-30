@@ -172,11 +172,17 @@ export interface CredentialRecord {
   decided: CredentialDecisionEvent | null;
 }
 
-export interface CredentialDecisionResponse {
-  state: "approved" | "denied";
+export interface CredentialApproval {
+  state: "approved";
   grant_id: string | null;
   credential_id: string | null;
 }
+export interface CredentialDenial {
+  state: "denied";
+}
+/** What approve and deny answer, relayed verbatim from the broker: an approval names the grant or
+ *  the launcher credential it made, and a denial is `{state: "denied"}` alone. */
+export type CredentialDecisionResponse = CredentialApproval | CredentialDenial;
 
 export interface CredentialGrant {
   grant_id: string;

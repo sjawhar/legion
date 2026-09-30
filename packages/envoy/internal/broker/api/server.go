@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -177,6 +178,17 @@ func pathRecordID(w http.ResponseWriter, r *http.Request, name, code string) (st
 		return "", false
 	}
 	return id, true
+}
+
+// requireApprover refuses an approver login that canonicalizes to nothing with 400
+// APPROVER_REQUIRED: every UI route names the human it acts for, whether a decision's or a
+// revoke's approver field or a list's ?approver= query.
+func requireApprover(w http.ResponseWriter, login string) bool {
+	if record.CanonicalLogin(login) == "" {
+		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+		return false
+	}
+	return true
 }
 
 func writeError(w http.ResponseWriter, status int, code, msg string) {

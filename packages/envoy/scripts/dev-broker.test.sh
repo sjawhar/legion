@@ -7,7 +7,7 @@
 # answering it without touching anything real — plus a fake `go build -o <path> ...` that installs
 # a tiny stub script at <path> instead of compiling (dev-broker.sh's own isolation logic lives
 # entirely in the shell driver, never in the Go binaries it starts, so a stub proves the driver's
-# behavior without depending on cmd/agent-secrets-devkey or cmd/broker compiling or running for
+# behavior without depending on cmd/agent-secrets-devrelay or cmd/broker compiling or running for
 # real). The broker stub logs "broker listening addr=127.0.0.1:<its own PID>" exactly like the
 # real cmd/broker does once it binds (AGENTC-833) — using its own PID as a stand-in for the
 # kernel-assigned port a real Listen would report, since two concurrently running stub processes
@@ -64,7 +64,7 @@ EOF
 chmod +x "${fake_bin_dir}/docker"
 
 # --- Fake go: "go build -o <path> ./cmd/<pkg>" installs a stub executable at <path> instead of
-# compiling. The devkey stub is never run by dev-broker.sh (it only prints the binary's path); the
+# compiling. The devrelay stub is never run by dev-broker.sh (it only prints the binary's path); the
 # broker stub logs a "broker listening addr=..." line exactly like the real cmd/broker does once
 # it binds (AGENTC-833) — using its own PID as a stand-in for the kernel-assigned port a real
 # Listen would report, since two concurrently running stub processes always have distinct PIDs —
@@ -83,11 +83,11 @@ for arg in "$@"; do
   prev="$arg"
 done
 case "$pkg" in
-  */agent-secrets-devkey)
-    cat >"$out" <<'DEVKEY'
+  */agent-secrets-devrelay)
+    cat >"$out" <<'DEVRELAY'
 #!/usr/bin/env bash
 exit 0
-DEVKEY
+DEVRELAY
     ;;
   */broker)
     cat >"$out" <<'BROKER'

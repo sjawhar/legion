@@ -93,8 +93,6 @@ test("code -> lookup -> Deny posts the looked-up code too, which the broker requ
   const record = machineRecord();
   const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue(record);
   const denyCredentialRecord = spyOn(api, "denyCredentialRecord").mockResolvedValue({
-    credential_id: null,
-    grant_id: null,
     state: "denied",
   });
 

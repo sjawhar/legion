@@ -116,33 +116,9 @@ func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, opera
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
-// re-verification uses, scoped to launcher_credential records: FetchRecord and FetchDecisions
-// read straight from Postgres.
+// re-verification uses, scoped to launcher_credential records.
 func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
-	return &record.ChainVerifier{
-		Audience: audience,
-		Skew:     skew,
-		FetchRecord: func(ctx context.Context, recordID string) (string, time.Time, bool, error) {
-			var body string
-			var createdAt time.Time
-			err := st.Pool.QueryRow(ctx, `select body, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).Scan(&body, &createdAt)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return "", time.Time{}, false, nil
-			}
-			if err != nil {
-				return "", time.Time{}, false, err
-			}
-			return body, createdAt, true, nil
-		},
-		FetchDecisions: func(ctx context.Context, recordID string) ([]record.TerminalEvent, error) {
-			rows, err := st.Pool.Query(ctx, `select event, coalesce(login, '') from credential_request_events
-				where record_id=$1 and event in ('approved','denied','expired','cancelled') order by id`, recordID)
-			if err != nil {
-				return nil, err
-			}
-			return pgx.CollectRows(rows, pgx.RowToStructByPos[record.TerminalEvent])
-		},
-	}
+	return st.ChainVerifier("launcher_credential", audience, skew)
 }
 
 // AuthenticateLauncher answers proof.Verifier's LookupLauncher hook directly: given a launcher

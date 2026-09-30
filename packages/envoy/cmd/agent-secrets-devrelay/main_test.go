@@ -1,12 +1,12 @@
-// packages/envoy/cmd/agent-secrets-devkey/main_test.go
+// packages/envoy/cmd/agent-secrets-devrelay/main_test.go
 //
 // This test mounts the real broker handlers (api.Register) on a real Postgres test store — no
-// fakes — and drives the devkey binary's own run() function directly (in-process, exactly the
+// fakes — and drives the devrelay binary's own run() function directly (in-process, exactly the
 // argv a subprocess would receive) for both decisions the dev stack needs a human for: the typed-
 // code machine login that enrolls a box, and the approval of that box's secret request. The
 // machine and requester sides (signed request objects, launcher and session proofs) are built
 // directly with record.Sign, proof.SignLauncher and proof.Sign — the calls agent-secrets and its
-// helper make — since devkey only ever plays the approving human's relay.
+// helper make — since devrelay only ever plays the approving human's relay.
 package main
 
 import (
@@ -39,9 +39,9 @@ const (
 	testValue    = "dev-secret-value"
 )
 
-// newDevkeyTestServer is a live broker HTTP server (real handlers, real Postgres) on the rules
+// newDevrelayTestServer is a live broker HTTP server (real handlers, real Postgres) on the rules
 // scripts/dev-broker.sh writes: one approval-required secret, approved by the box's operator.
-func newDevkeyTestServer(t *testing.T) string {
+func newDevrelayTestServer(t *testing.T) string {
 	t.Helper()
 	st := storetest.Open(t)
 
@@ -123,18 +123,18 @@ func req(t *testing.T, method, url string, headers map[string]string, body any) 
 	return resp.StatusCode, raw
 }
 
-// devkey runs the command in-process with args and the broker connection flags, failing t on a
+// devrelay runs the command in-process with args and the broker connection flags, failing t on a
 // nonzero exit, and decodes its stdout into T.
-func devkey[T any](t *testing.T, brokerURL string, args ...string) T {
+func devrelay[T any](t *testing.T, brokerURL string, args ...string) T {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	args = append(args, "--broker", brokerURL, "--ui-token", testUIToken, "--login", testApprover)
 	if code := run(args, &stdout, &stderr); code != 0 {
-		t.Fatalf("agent-secrets-devkey %v: exit %d\nstdout: %s\nstderr: %s", args, code, stdout.String(), stderr.String())
+		t.Fatalf("agent-secrets-devrelay %v: exit %d\nstdout: %s\nstderr: %s", args, code, stdout.String(), stderr.String())
 	}
 	var out T
 	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		t.Fatalf("decode devkey output: %v\n%s", err, stdout.String())
+		t.Fatalf("decode devrelay output: %v\n%s", err, stdout.String())
 	}
 	return out
 }
@@ -149,17 +149,17 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 }
 
 // TestDevStackEnrollsRequestsApprovesAndReleases runs the dev stack's whole story end to end: a
-// machine logs in and devkey approves its typed code by the operator's login, the resulting
-// launcher credential enrolls a box, the box asks for an approval-required secret, devkey approves
-// that record by the same login through the broker's UI route Dispatch relays to, and the grant
-// releases the fake secrets store's value.
+// machine logs in and devrelay approves its typed code by the operator's login, the resulting
+// launcher credential enrolls a box, the box asks for an approval-required secret, devrelay
+// approves that record by the same login through the broker's UI route Dispatch relays to, and
+// the grant releases the fake secrets store's value.
 func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
-	brokerURL := newDevkeyTestServer(t)
+	brokerURL := newDevrelayTestServer(t)
 
-	// --- enroll: a machine login approved by devkey, then a box enrollment on its credential ---
+	// --- enroll: a machine login approved by devrelay, then a box enrollment on its credential ---
 	machineKey := newKey(t)
 	loginRequest, err := record.Sign(machineKey, brokerURL, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: "devkey-test-host"},
+		{Type: "launcher_credential", Identifier: "devrelay-test-host"},
 	}, "", testApprover, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign(machine login): %v", err)
@@ -174,7 +174,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	if err := json.Unmarshal(body, &login); err != nil || login.Code == "" {
 		t.Fatalf("decode machine login: %v (body: %s)", err, body)
 	}
-	issued := devkey[struct {
+	issued := devrelay[struct {
 		State        string  `json:"state"`
 		CredentialID *string `json:"credential_id"`
 	}](t, brokerURL, "machine-approve", "--code", login.Code)
@@ -192,7 +192,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, body = req(t, http.MethodPost, brokerURL+"/v1/enrollments", map[string]string{"Proof": launcherProof},
-		map[string]any{"kind": "box", "runtime_id": "box-devkey-test", "operator": testApprover, "thumbprint": thumbprint})
+		map[string]any{"kind": "box", "runtime_id": "box-devrelay-test", "operator": testApprover, "thumbprint": thumbprint})
 	if status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments = %d: %s", status, body)
 	}
@@ -206,7 +206,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	// --- request: the box asks for the approval-required secret ---
 	compact, err := record.Sign(sessionKey, brokerURL, []record.AuthorizationDetail{
 		{Type: "agent_secret", Identifier: "AGENT_SECRETS_PROOF_APPROVAL", Actions: []string{"inject"}},
-	}, "devkey main_test", "", time.Now())
+	}, "devrelay main_test", "", time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -227,8 +227,8 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 		t.Fatalf("create response = %s (%v), want a pending request with a record_id", body, err)
 	}
 
-	// --- approve: devkey decides the record by the operator's login ---
-	approved := devkey[struct {
+	// --- approve: devrelay decides the record by the operator's login ---
+	approved := devrelay[struct {
 		State   string  `json:"state"`
 		GrantID *string `json:"grant_id"`
 	}](t, brokerURL, "approve", "--record", *created.RecordID)

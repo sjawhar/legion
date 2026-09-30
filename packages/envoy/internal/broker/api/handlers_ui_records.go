@@ -106,8 +106,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bo
 	if !readJSON(w, r, &body, "INVALID_DECISION") {
 		return
 	}
-	if record.CanonicalLogin(body.Approver) == "" {
-		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+	if !requireApprover(w, body.Approver) {
 		return
 	}
 	kind, err := s.deps.Machine.RecordKind(r.Context(), recordID)

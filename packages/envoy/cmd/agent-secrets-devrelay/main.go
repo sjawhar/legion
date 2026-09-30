@@ -1,12 +1,12 @@
-// Command agent-secrets-devkey is the local dev stack's stand-in for Dispatch's credential-request
-// relay, so the AGENTC-393 credential-request broker (packages/envoy/cmd/broker) can be decided by
-// hand without a Dispatch deployment: it calls the broker's UI routes with the UI bearer token and
-// the approving human's login, the same request Dispatch's server sends when a signed-in human
-// clicks Approve or Deny.
+// Command agent-secrets-devrelay is the local dev stack's stand-in for Dispatch's
+// credential-request relay, so the AGENTC-393 credential-request broker
+// (packages/envoy/cmd/broker) can be decided by hand without a Dispatch deployment: it calls the
+// broker's UI routes with the UI bearer token and the approving human's login, the same request
+// Dispatch's server sends when a signed-in human clicks Approve or Deny.
 //
-//	agent-secrets-devkey approve --record <id> --login <login> --broker <url> --ui-token <token>
-//	agent-secrets-devkey deny    --record <id> --login <login> --broker <url> --ui-token <token>
-//	agent-secrets-devkey machine-approve --code XXXX-XXXX --login <login> --broker <url> --ui-token <token> [--deny]
+//	agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --ui-token <token>
+//	agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --ui-token <token>
+//	agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --ui-token <token> [--deny]
 //
 // Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_UI_TOKEN, AGENT_SECRETS_APPROVER. The
 // login is whatever the broker should record as the decider: Dispatch sends its session's own
@@ -49,7 +49,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "machine-approve":
 		return cmdMachineApprove(args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "agent-secrets-devkey: unknown subcommand %q\n\n", args[0])
+		fmt.Fprintf(stderr, "agent-secrets-devrelay: unknown subcommand %q\n\n", args[0])
 		fmt.Fprint(stderr, usage())
 		return exitUsageError
 	}
@@ -57,9 +57,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func usage() string {
 	return `usage:
-  agent-secrets-devkey approve --record <id> --login <login> --broker <url> --ui-token <token>
-  agent-secrets-devkey deny    --record <id> --login <login> --broker <url> --ui-token <token>
-  agent-secrets-devkey machine-approve --code XXXX-XXXX --login <login> --broker <url> --ui-token <token> [--deny]
+  agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --ui-token <token>
+  agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --ui-token <token>
+  agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --ui-token <token> [--deny]
 
 Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_UI_TOKEN, AGENT_SECRETS_APPROVER.
 `
@@ -181,7 +181,7 @@ func cmdDecide(approve bool, args []string, stdout, stderr io.Writer) int {
 	if approve {
 		name = "approve"
 	}
-	fs := flag.NewFlagSet("agent-secrets-devkey "+name, flag.ContinueOnError)
+	fs := flag.NewFlagSet("agent-secrets-devrelay "+name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	recordID := fs.String("record", "", "credential-request record id (required)")
 	c := registerCommonFlags(fs)
@@ -189,17 +189,17 @@ func cmdDecide(approve bool, args []string, stdout, stderr io.Writer) int {
 		return exitUsage(err)
 	}
 	if *recordID == "" {
-		fmt.Fprintf(stderr, "agent-secrets-devkey %s: --record is required\n", name)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: --record is required\n", name)
 		return 1
 	}
 	if err := c.validate(); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devkey %s: %v\n", name, err)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
 		return 1
 	}
 	decideRaw, err := newUIClient(c.broker, c.uiToken).do(context.Background(), http.MethodPost,
 		"/v1/credential-requests/"+url.PathEscape(*recordID)+"/"+name, map[string]any{"approver": c.login})
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devkey %s: %v\n", name, err)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
 		return 1
 	}
 	writeVerbatim(stdout, decideRaw)
@@ -214,7 +214,7 @@ func cmdDecide(approve bool, args []string, stdout, stderr io.Writer) int {
 // machine-login page does, then decides that record with the same code: the code is the only
 // thing that selects a machine login (ruling 13).
 func cmdMachineApprove(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("agent-secrets-devkey machine-approve", flag.ContinueOnError)
+	fs := flag.NewFlagSet("agent-secrets-devrelay machine-approve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	code := fs.String("code", "", "the machine login's confirmation code, XXXX-XXXX (required)")
 	deny := fs.Bool("deny", false, "deny the machine login instead of approving it")
@@ -223,18 +223,18 @@ func cmdMachineApprove(args []string, stdout, stderr io.Writer) int {
 		return exitUsage(err)
 	}
 	if *code == "" {
-		fmt.Fprintln(stderr, "agent-secrets-devkey machine-approve: --code is required")
+		fmt.Fprintln(stderr, "agent-secrets-devrelay machine-approve: --code is required")
 		return 1
 	}
 	if err := c.validate(); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devkey machine-approve: %v\n", err)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay machine-approve: %v\n", err)
 		return 1
 	}
 	client := newUIClient(c.broker, c.uiToken)
 	ctx := context.Background()
 	lookupRaw, err := client.do(ctx, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": *code})
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devkey machine-approve: lookup: %v\n", err)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay machine-approve: lookup: %v\n", err)
 		return 1
 	}
 	var rec struct {
@@ -242,11 +242,11 @@ func cmdMachineApprove(args []string, stdout, stderr io.Writer) int {
 		State    string `json:"state"`
 	}
 	if err := json.Unmarshal(lookupRaw, &rec); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devkey machine-approve: decode lookup: %v\n", err)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay machine-approve: decode lookup: %v\n", err)
 		return 1
 	}
 	if rec.State != "pending" {
-		fmt.Fprintf(stderr, "agent-secrets-devkey machine-approve: code %s names a machine login that is %s, not pending\n", *code, rec.State)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay machine-approve: code %s names a machine login that is %s, not pending\n", *code, rec.State)
 		return 1
 	}
 	action := "approve"
@@ -256,7 +256,7 @@ func cmdMachineApprove(args []string, stdout, stderr io.Writer) int {
 	decideRaw, err := client.do(ctx, http.MethodPost, "/v1/credential-requests/"+url.PathEscape(rec.RecordID)+"/"+action,
 		map[string]any{"approver": c.login, "code": *code})
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets-devkey machine-approve: %v\n", err)
+		fmt.Fprintf(stderr, "agent-secrets-devrelay machine-approve: %v\n", err)
 		return 1
 	}
 	writeVerbatim(stdout, decideRaw)

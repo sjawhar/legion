@@ -336,11 +336,15 @@ func ParseBody(canonical string) (Body, error) {
 	return b, nil
 }
 
-// IsApprover reports whether login, canonicalized, is the approver this record names. A record's
-// approver is resolved when it is created — an approval rule's login:<name>, the requesting
-// enrollment's operator for approver: operator, or a machine login's login_hint — so this one
-// comparison is every decision's and every chain re-check's approver rule.
-func (b Body) IsApprover(login string) bool {
+// ApproverLogin canonicalizes login and returns it when it is the approver this record names, and
+// ErrNotApprover otherwise. A record's approver is resolved when it is created — an approval
+// rule's login:<name>, the requesting enrollment's operator for approver: operator, or a machine
+// login's login_hint — so this one comparison is every decision's and every chain re-check's
+// approver rule, and the login it returns is the one a decision records.
+func (b Body) ApproverLogin(login string) (string, error) {
 	login = CanonicalLogin(login)
-	return login != "" && login == CanonicalLogin(b.Approver)
+	if login == "" || login != CanonicalLogin(b.Approver) {
+		return "", ErrNotApprover
+	}
+	return login, nil
 }
