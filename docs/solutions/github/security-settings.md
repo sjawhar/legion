@@ -91,7 +91,10 @@ ends in a `DECISION:` block with a line per check, decided on its own; its heade
 rules. The daily scheduled run runs it, and while any check is still report-only the block makes
 that run fail, which is the signal to open the promotion pull request that applies the decision
 and sets each promoted check's flag to `false`. A check already set to `false` reads as `already
-blocking` and is not decided again.
+blocking` and is not decided again. The dependency scanners are promoted only when `main`'s newest
+run has none of the findings their Gate fails on, osv findings with a fix and reachable govulncheck
+findings; the report names both counts, since promoting a gate that fails on `main` would fail
+every pull request.
 
 ```bash
 scripts/security-report.sh                        # sjawhar/legion, 14-day window

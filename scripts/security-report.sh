@@ -45,6 +45,10 @@
 # 2. **osv-scanner / govulncheck → blocking** (osv findings with a fixed version; govulncheck
 #    symbol-level findings) iff 0 runs in the window recorded `tool_error`; otherwise stay
 #    report-only and switch osv-scanner to offline databases before re-deciding.
+#    **Precondition** (AGENTC-1330): the newest `main` run with a dependency result has 0 osv
+#    findings with a fixed version and 0 reachable govulncheck findings, the set the dependencies
+#    Gate fails on, so a promotion never makes a gate that fails on `main` fail every pull
+#    request; with either count above 0 the rule holds and names both.
 # 3. **CodeQL → add the `pull_request` trigger** iff ≥ 1 CodeQL alert on `main` reached `state:
 #    fixed` inside the window (`code-scanning/alerts`, `fixed_at`); if none, or every alert was
 #    dismissed, stay `main`-only and record it. Computed in CI, where the token has
@@ -453,6 +457,24 @@ def zizmor_on_main(done):
     return None
 
 
+def plural(count, noun):
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def dependencies_on_main(done):
+    """Rule 2's precondition: (osv findings with a fix, reachable govulncheck findings) of the newest
+    completed main run with both dependency results, looking back ten runs at most, or None."""
+    for run in list(reversed(done))[:10]:
+        found = security_report(run["id"])
+        if found["osv"] is not None and found["govulncheck"] is not None:
+            counts = found["osv"]["with_fix"], found["govulncheck"]["reachable"]
+            print(f"dependencies on main: {plural(counts[0], 'osv-scanner finding')} with a fix, "
+                  f"{plural(counts[1], 'reachable govulncheck finding')} (run {run['id']}, {run['event']})")
+            return counts
+    print("dependencies on main: no result in main's newest ten runs (tool errors)")
+    return None
+
+
 # --- tool errors (rule 2) ------------------------------------------------------------------------
 def dependency_tool_errors(window):
     """Rule 2: how many runs inside the window marked a dependency scanner tool error."""
@@ -688,14 +710,19 @@ def zizmor_decision(main_count, dispositions):
                    f"over {dispositions.count} dispositions")
 
 
-def dependencies_decision(tool_error_runs):
-    """Rule 2: the dependency scanners' DECISION line."""
-    if tool_error_runs:
-        return f"HOLD dependencies — {tool_error_runs} tool errors in the window"
-    return "PROMOTE dependencies"
+def dependencies_decision(tool_error_runs, main_deps):
+    """Rule 2 and its precondition: the dependency scanners' DECISION line."""
+    reasons = [f"{tool_error_runs} tool errors in the window"] if tool_error_runs else []
+    if main_deps is None:
+        reasons.append("no dependency result in main's newest ten runs (tool errors)")
+    elif any(main_deps):
+        with_fix, reachable = main_deps
+        reasons.append(f"main has {plural(with_fix, 'osv-scanner finding')} with a fix and "
+                       f"{plural(reachable, 'reachable govulncheck finding')}; the gate would fail every pull request")
+    return f"HOLD dependencies — {'; '.join(reasons)}" if reasons else "PROMOTE dependencies"
 
 
-def decide(flags, main_count, dispositions, tool_error_runs, codeql_fixed, threads):
+def decide(flags, main_count, main_deps, dispositions, tool_error_runs, codeql_fixed, threads):
     """The DECISION lines from each rule's value, with rule 5's NEXT when rule 1 promotes zizmor. A check
     whose flag on main is already false is blocking, and is not decided again."""
     lines = []
@@ -706,7 +733,7 @@ def decide(flags, main_count, dispositions, tool_error_runs, codeql_fixed, threa
             lines.append("NEXT: ask a repository admin to require the check `security` (rule 5)")
     else:
         lines.append("DECISION: zizmor already blocking (report_only.zizmor is false)")
-    lines.append(f"DECISION: {dependencies_decision(tool_error_runs)}" if flags["dependencies"]
+    lines.append(f"DECISION: {dependencies_decision(tool_error_runs, main_deps)}" if flags["dependencies"]
                  else "DECISION: dependencies already blocking (report_only.dependencies is false)")
     if codeql_fixed is None:
         lines.append(f"DECISION: codeql: {CODEQL_BLOCKED}")
@@ -747,6 +774,7 @@ def main():
     done = completed(runs)
     print_main_runs(done, window)
     main_count = zizmor_on_main(done)
+    main_deps = dependencies_on_main(done)
     tool_error_runs = dependency_tool_errors(window)
     dispositions = merged_findings(window, runs_path)
     codeql_fixed = codeql_fixed_in_window(window)
@@ -763,7 +791,7 @@ def main():
     if forced:
         print("FORCED: --decision force" if window.closed
               else "FORCED: --decision force printed this block before the window closed")
-    for line in decide(flags, main_count, dispositions, tool_error_runs, codeql_fixed, threads):
+    for line in decide(flags, main_count, main_deps, dispositions, tool_error_runs, codeql_fixed, threads):
         print(line)
     sys.exit(1 if still_report_only else 0)
 

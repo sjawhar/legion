@@ -372,6 +372,31 @@ check "holds the dependencies on the two runs inside the window" "$(has "DECISIO
 check "the scheduled run's row says tool error" "$(has "| 7002 | schedule | $(sha 7002 | cut -c1-7) | 0/- | -/- | -/- | yes |")"
 check "a zizmor-only tool error is not counted (still 2)" "$(lacks "3 tool errors")"
 
+echo "=== rule 2's precondition: the dependency gate must pass on main ==="
+setup r2-main "15 days ago"
+add_run 1001 schedule main "$(iso '1 day ago')"
+add_report 1001 "$(security_report "$(zizmor_findings '[]')" vulnerable)"
+run_report
+check "names main's count of each finding the gate blocks on" \
+  "$(has "dependencies on main: 3 osv-scanner findings with a fix, 1 reachable govulncheck finding (run 1001, schedule)")"
+check "holds the dependencies on them, naming both counts" \
+  "$(has "DECISION: HOLD dependencies — main has 3 osv-scanner findings with a fix and 1 reachable govulncheck finding; the gate would fail every pull request")"
+setup r2-main-both "15 days ago"
+add_run 7101 pull_request feat-p "$(iso '5 days ago')"
+add_marker dependencies-tool-error 7101
+add_run 1001 schedule main "$(iso '1 day ago')"
+add_report 1001 "$(security_report "$(zizmor_findings '[]')" vulnerable)"
+run_report
+check "a tool error and findings on main: the hold names both" \
+  "$(has "DECISION: HOLD dependencies — 1 tool errors in the window; main has 3 osv-scanner findings with a fix and 1 reachable govulncheck finding")"
+setup r2-main-error "15 days ago"
+add_run 1001 schedule main "$(iso '1 day ago')"
+add_report 1001 "$(security_report "$(zizmor_findings '[]')" error)"
+run_report
+check "a dependency tool error on main's newest run: rule 2 reads the run before it" \
+  "$(has "dependencies on main: 0 osv-scanner findings with a fix, 0 reachable govulncheck findings (run 1000, push)")"
+check "and promotes on its zeros" "$(has "DECISION: PROMOTE dependencies")"
+
 echo "=== #81. a dependency tool error on a PR's first run leaves its zizmor result counted ==="
 setup r81 "15 days ago"
 pr_with_findings 81 feat-n 8101 8102 "$(audit "$a_artipacked")" '[]' '[]'
