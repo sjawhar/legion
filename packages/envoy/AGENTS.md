@@ -1364,13 +1364,7 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. That command keeps `AGENT_SECRETS_URL`, `AGENT_SECRETS_HELPER_SOCK` and
-`AGENT_SECRETS_KEY_DIR`, so an `agent-secrets` call it makes is the same session's. `agent-secrets
-identity` answers locally, with no broker call and no registration, whether the calling process
-has a session identity, for callers that choose between the broker and another backend. The
-helper's `launcher login-status` exits 0 only while it holds an issued launcher credential: one
-the broker later refuses (401 `LAUNCHER_INVALID`, expired or revoked) turns its login `expired`.
-The broker holds no Dispatch credential and opens no Dispatch ask anywhere: every human decision —
+its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere: every human decision —
 approving or denying a secret request, approving or denying a machine login, revoking a grant,
 registering or endorsing an approver key — is a WebAuthn assertion the broker verifies itself
 against its own persisted, attested key set (`internal/broker/approvers`) over a domain-separated
@@ -1385,6 +1379,25 @@ that file's `approvers:` section (origin, AAGUID allowlist, per-login attested k
 enrollment or credential; `internal/broker/machine` decides typed-code machine logins and mints the
 launcher credentials they approve; and `internal/broker/secrets` reads the granted value from AWS
 Secrets Manager, or a fake local file for development.
+
+The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
+`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
+Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
+`helper.sock` inside it, used only when that file is there; a pod sets its variables and has no
+`XDG_RUNTIME_DIR`. The exec form's command keeps exactly those three variables, so an
+`agent-secrets` call it makes is the same session's. A box's key and enrollment arrive after the
+box starts, so its launcher writes `enrollment.pending` into the key dir before the box starts and
+removes it once it has written `enrollment` or `enrollment.error`. While that marker is there and
+younger than 160 s by mtime, a call waits for `key.pem` and `enrollment`, up to
+`AGENT_SECRETS_ENROLL_WAIT` (default 20s), then fails with its ordinary error; with no fresh marker
+nothing waits, and the Go shim never writes one, so a pod never waits. `agent-secrets identity`
+answers locally, with no broker call and no registration, whether the calling process has a
+session identity (exit 0 for a `key.pem`, a fresh marker, or the helper's sign probe answering OK
+or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but cannot be asked),
+for callers that choose between the broker and another backend. `agent-secrets launcher
+login-status`, which the helper answers, exits 0 only for an issued login whose credential the
+helper still holds; once the broker refuses it (401 `LAUNCHER_INVALID`, expired or revoked) the
+login reads `expired`.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal

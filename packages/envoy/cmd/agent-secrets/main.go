@@ -245,12 +245,12 @@ func buildSigner() (enrollmentID string, signer Signer, err error) {
 }
 
 func selectSigner(dir string) (string, Signer, error) {
-	if _, statErr := os.Stat(filepath.Join(dir, "key.pem")); statErr == nil {
-		key, keyErr := loadKey(filepath.Join(dir, "key.pem"))
+	if keyPath := filepath.Join(dir, keyFile); exists(keyPath) {
+		key, keyErr := loadKey(keyPath)
 		if keyErr != nil {
 			return "", nil, keyErr
 		}
-		id, idErr := readTrimmed(filepath.Join(dir, "enrollment"))
+		id, idErr := readTrimmed(filepath.Join(dir, enrollmentFile))
 		if idErr != nil {
 			if reason, rerr := readTrimmed(filepath.Join(dir, "enrollment.error")); rerr == nil {
 				return "", nil, fmt.Errorf("%w (enrollment.error: %s)", idErr, reason)
@@ -258,7 +258,7 @@ func selectSigner(dir string) (string, Signer, error) {
 			return "", nil, idErr
 		}
 		if id == "" {
-			return "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, "enrollment"))
+			return "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, enrollmentFile))
 		}
 		return id, &fileSigner{key: key, enrollmentID: id}, nil
 	}
@@ -342,7 +342,7 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	if err := writeFileAtomic(filepath.Join(*out, "key.pem"), pemBytes, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(*out, keyFile), pemBytes, 0o600); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
 		return 1
 	}
@@ -411,10 +411,7 @@ func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stde
 		fmt.Fprintln(stderr, "agent-secrets enroll: AGENT_SECRETS_KEY_DIR is required")
 		return exitUsageError
 	}
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
+	sock, _ := helperSocket()
 	var sessionIDPtr *string
 	if sessionID != "" {
 		sessionIDPtr = &sessionID
@@ -432,7 +429,7 @@ func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stde
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "enrollment"), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
 	}
@@ -471,10 +468,7 @@ func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
 // Idempotent: the helper's UnenrollBox treats 204 and 404 as done. Prints nothing on success,
 // matching the exit-code-only unenroll contract.
 func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
+	sock, _ := helperSocket()
 	resp, err := helper.Call(sock, helper.Request{Op: "unenroll-box", EnrollmentID: enrollmentID}, 30*time.Second)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
@@ -516,10 +510,7 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", args[0])
 		return exitUsageError
 	}
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
+	sock, _ := helperSocket()
 	resp, err := helper.Call(sock, helper.Request{Op: "login"}, 10*time.Second)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
@@ -567,16 +558,15 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // "pending"/"denied"/"expired" and for "" (login never run) — the same distinction the doctor
 // and installer checks in ~/.dotfiles need and, before this verb existed, had no side-effect-free
 // way to make (AGENTC-834). An issued login whose credential the broker later refused reads
-// "expired". Every state but "issued" says on stderr what to do about it.
+// "expired". The state is the most recent login's: a re-login that was denied, expired or is still
+// pending reads that way even while the credential an earlier login installed is still held. Every
+// state but "issued" says on stderr what to do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
 		return exitUsageError
 	}
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		sock = helper.DefaultSocket(os.Getenv)
-	}
+	sock, _ := helperSocket()
 	resp, err := helper.Call(sock, helper.Request{Op: "login-status"}, 10*time.Second)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %v\n", err)
@@ -596,8 +586,10 @@ func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "pending":
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: a machine login is waiting for approval (code %s)\n", resp.Code)
+	case "none":
+		fmt.Fprintln(stderr, "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login")
 	default:
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: this helper holds no launcher credential (%s); run: agent-secrets launcher login\n", state)
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: the last machine login is %s; run: agent-secrets launcher login\n", state)
 	}
 	return 1
 }

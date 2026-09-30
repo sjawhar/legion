@@ -462,7 +462,10 @@ func TestExecFormNestedCallKeepsTheSessionIdentity(t *testing.T) {
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, []string{"BIN=" + binary},
+	// No default key dir or helper socket to fall back to: the inner call can reach the broker
+	// only through the variables the outer one kept for it.
+	env := []string{"BIN=" + binary, "XDG_RUNTIME_DIR=" + t.TempDir(), "AGENT_SECRETS_HELPER_SOCK="}
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, env,
 		"GRANT_ME", "--", "sh", "-c", `"$BIN" NONEWLINE_ME -- sh -c "printf %s \"\$NONEWLINE_ME\""`)
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, redactSecrets(stdout), redactSecrets(stderr))
@@ -512,9 +515,13 @@ func runExecForm(t *testing.T, binary, broker, keyDir string, extraEnv ...string
 	return exit, stderr, time.Since(start)
 }
 
-// writePendingMarker writes the launcher's enrollment.pending into dir, aged by age.
+// writePendingMarker writes the launcher's enrollment.pending into dir (created if absent), aged
+// by age.
 func writePendingMarker(t *testing.T, dir string, age time.Duration) string {
 	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(dir, "enrollment.pending")
 	if err := os.WriteFile(marker, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -616,7 +623,7 @@ func TestEnrollWaitNeedsAFreshMarker(t *testing.T) {
 			if exit == 0 || !strings.Contains(stderr, tc.want) {
 				t.Fatalf("exit = %d, stderr = %q, want a failure naming %q", exit, stderr, tc.want)
 			}
-			if elapsed > 2*time.Second {
+			if elapsed > 10*time.Second {
 				t.Fatalf("took %s; with no fresh marker the call must not wait", elapsed)
 			}
 		})

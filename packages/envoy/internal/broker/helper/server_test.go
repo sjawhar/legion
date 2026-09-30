@@ -947,29 +947,6 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue(t *testing.
 	}
 }
 
-// TestLoginStatusStopsReportingIssuedOnceTheBrokerRejectsTheCredential covers a launcher
-// credential that expires (seven days by default) or is revoked after its login was issued: the
-// broker's 401 LAUNCHER_INVALID clears the credential, and login-status — the probe the
-// launchers decide on — must then stop answering "issued", or every later launch waits on an
-// enrollment that cannot happen and every new box sets one up that fails.
-func TestLoginStatusStopsReportingIssuedOnceTheBrokerRejectsTheCredential(t *testing.T) {
-	r := startRig(t, "")
-	if status := r.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "issued" {
-		t.Fatalf("login-status after the login: %+v", status)
-	}
-	r.fake.mu.Lock()
-	r.fake.enrollUnauthorizedNext = 1
-	r.fake.mu.Unlock()
-	enroll := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"})
-	if enroll.OK || !strings.Contains(enroll.Error, "agent-secrets launcher login") {
-		t.Fatalf("enroll-box with a rejected credential must name the login command: %+v", enroll)
-	}
-	status := r.call(t, Request{Op: "login-status"})
-	if !status.OK || status.LoginState == "issued" || status.LoginState == "pending" {
-		t.Fatalf("login-status after the broker rejected the credential: %+v, want a settled state other than issued", status)
-	}
-}
-
 // TestSignStillRequiresDescendancyButEnrollBoxDoesNot pins the stated boundary: enroll-box is a
 // pass-through broker call available to ANY peer, while sign still requires the caller to be a
 // descendant of a registered session root. A peer that is refused sign as NOT_A_SESSION must

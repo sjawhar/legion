@@ -30,11 +30,17 @@ import (
 )
 
 const (
+	// keyFile and enrollmentFile are a box's or pod's identity in its key dir: the key keygen
+	// writes, and the enrollment id enroll (or the pod's launcher) writes beside it.
+	keyFile        = "key.pem"
+	enrollmentFile = "enrollment"
 	// pendingMarker is the file a box's launcher keeps in the key dir while it sets the box up.
 	pendingMarker = "enrollment.pending"
-	// pendingMarkerLife is how long a marker counts, by its mtime: the launcher's own setup bound
-	// (120 s for omp's session id, ten enrollment attempts about 3 s apart, and keygen). An older
-	// marker was left by a launcher that died, and nothing waits on it.
+	// pendingMarkerLife bounds how long a client trusts a marker, by its mtime. It covers the
+	// launcher's usual setup (120 s for omp's session id, ten enrollment attempts about 3 s apart,
+	// and keygen), not its worst case: against a slow broker the launcher can keep retrying for
+	// about 450 s. A setup slower than this bound, or a marker a dead launcher left, makes a call
+	// fail fast with the message it would give without the marker.
 	pendingMarkerLife = 160 * time.Second
 	// defaultEnrollWait bounds how long a call waits on a live marker (AGENT_SECRETS_ENROLL_WAIT
 	// overrides it). It stays under omp's 30 s MCP connect timeout: an MCP server's first call is
@@ -96,7 +102,7 @@ func enrollWait() (time.Duration, error) {
 // key.pem and enrollment. It reports whether it gave up with the marker still there.
 func awaitEnrollment(dir string, wait time.Duration) (gaveUp bool) {
 	deadline := time.Now().Add(wait)
-	for freshMarker(dir) && !(exists(filepath.Join(dir, "key.pem")) && exists(filepath.Join(dir, "enrollment"))) {
+	for freshMarker(dir) && !(exists(filepath.Join(dir, keyFile)) && exists(filepath.Join(dir, enrollmentFile))) {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return true
@@ -115,25 +121,6 @@ func helperInstalled() bool {
 	return err == nil && exists(filepath.Join(home, ".config", "systemd", "user", "agent-secrets-helper.service"))
 }
 
-// askHelper is one helper.Call bounded to total overall, dial included.
-func askHelper(sock string, req helper.Request, total time.Duration) (helper.Response, error) {
-	type answer struct {
-		resp helper.Response
-		err  error
-	}
-	answered := make(chan answer, 1)
-	go func() {
-		resp, err := helper.Call(sock, req, total)
-		answered <- answer{resp, err}
-	}()
-	select {
-	case a := <-answered:
-		return a.resp, a.err
-	case <-time.After(total):
-		return helper.Response{}, fmt.Errorf("no answer within %s", total)
-	}
-}
-
 // cmdIdentity implements "identity": exit 0 when this process has a broker identity, 1 when it
 // does not, without the network and without changing anything. It never prints to stdout, so a
 // caller can put it in front of a command whose stdout is the caller's own (dotfiles'
@@ -144,27 +131,27 @@ func askHelper(sock string, req helper.Request, total time.Duration) (helper.Res
 // the helper's sign op — which signs a throwaway proof and changes nothing — answers OK (enrolled)
 // or NOT_ENROLLED (registered and still enrolling) for it. Such a process uses the broker even if
 // its enrollment later fails, and the failure is the broker call's. A helper that cannot be asked
-// — its socket refuses connections, is absent although the helper is installed, or gives no
-// answer within identityDeadline — is exit 1 with a notice on stderr, so a caller that then uses
-// its other backend does not do so silently. With no key dir, no socket and no helper installed
-// (a laptop), it is exit 1 and silent.
+// — its socket refuses connections, is absent although AGENT_SECRETS_HELPER_SOCK names it or the
+// helper is installed, or gives no answer within identityDeadline — is exit 1 with a notice on
+// stderr, so a caller that then uses its other backend does not do so silently. With no key dir,
+// no socket named or present, and no helper installed (a laptop), it is exit 1 and silent.
 func cmdIdentity(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets identity: unexpected argument %q\n", args[0])
 		return exitUsageError
 	}
 	dir := keyDir()
-	if exists(filepath.Join(dir, "key.pem")) || freshMarker(dir) {
+	if exists(filepath.Join(dir, keyFile)) || freshMarker(dir) {
 		return 0
 	}
-	sock, _ := helperSocket()
+	sock, named := helperSocket()
 	if !exists(sock) {
-		if helperInstalled() {
-			fmt.Fprintf(stderr, "agent-secrets: helper unreachable at %s; not an agent session (the helper is installed, but its socket is absent)\n", sock)
+		if named || helperInstalled() {
+			fmt.Fprintf(stderr, "agent-secrets: helper unreachable at %s; not an agent session (the socket is absent)\n", sock)
 		}
 		return 1
 	}
-	resp, err := askHelper(sock, helper.Request{Op: "sign", Method: http.MethodGet, URL: identityProbeURL}, identityDeadline)
+	resp, err := helper.Call(sock, helper.Request{Op: "sign", Method: http.MethodGet, URL: identityProbeURL}, identityDeadline)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: helper unreachable at %s; not an agent session (%v)\n", sock, err)
 		return 1

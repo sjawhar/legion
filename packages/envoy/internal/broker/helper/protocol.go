@@ -86,15 +86,16 @@ func DefaultSocket(getenv func(string) string) string {
 	return filepath.Join(dir, "agent-secrets", "helper.sock")
 }
 
-// Call sends one request and reads one reply. The dial has a 2 s limit of its own; timeout
-// bounds the whole exchange (a register with wait_seconds needs that much plus slack).
+// Call sends one request and reads one reply, all within timeout, the dial included (the dial
+// alone also gives up after 2 s). A register with wait_seconds needs that much plus slack.
 func Call(sock string, req Request, timeout time.Duration) (Response, error) {
-	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	deadline := time.Now().Add(timeout)
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second, Deadline: deadline}).Dial("unix", sock)
 	if err != nil {
 		return Response{}, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	_ = conn.SetDeadline(deadline)
 	data, err := json.Marshal(req)
 	if err != nil {
 		return Response{}, err

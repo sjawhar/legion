@@ -33,12 +33,10 @@ var errNoCredential = errors.New(noCredentialMsg)
 
 // machineCredential is the helper's launcher identity, existing only in memory: the private key
 // never touches disk, and id is the launcher credential the broker minted once a human approved
-// the machine login that installed this. pendingID names that login, whose "issued" state lasts
-// exactly as long as this credential does (clearOnInvalid).
+// the machine login that installed this.
 type machineCredential struct {
-	key       *ecdsa.PrivateKey
-	id        string
-	pendingID string
+	key *ecdsa.PrivateKey
+	id  string
 }
 
 // loginState is a machine login in flight or settled: the human-facing confirmation code, the
@@ -168,12 +166,19 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 }
 
 // LoginStatus reports the current (or most recently settled) machine login; the zero value means
-// none has ever run.
+// none has ever run. A login whose credential clearOnInvalid has since cleared reads "expired":
+// the credential is the one source of whether an issued login still holds, and only
+// clearOnInvalid ever clears it (pollLogin installs the credential before it records "issued").
 func (b *Broker) LoginStatus() loginState {
-	if ls := b.login.Load(); ls != nil {
-		return *ls
+	ls := b.login.Load()
+	if ls == nil {
+		return loginState{}
 	}
-	return loginState{}
+	out := *ls
+	if out.State == "issued" && b.cred.Load() == nil {
+		out.State = "expired"
+	}
+	return out
 }
 
 // pollLogin polls a pending machine login until a human decides it, backing off from 2s to 10s
@@ -186,7 +191,7 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
 		if state, credentialID, ok := b.readLoginStatus(ctx, pendingID); ok {
 			switch state {
 			case "issued":
-				b.cred.Store(&machineCredential{key: key, id: credentialID, pendingID: pendingID})
+				b.cred.Store(&machineCredential{key: key, id: credentialID})
 				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: "issued"})
 				return
 			case "denied", "expired":
@@ -249,19 +254,15 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 // clearOnInvalid clears the machine credential and reports it missing whenever err is the
 // broker's 401 LAUNCHER_INVALID — an expired or revoked credential. It never auto-relogins. cred
 // is the credential the refused call was signed with, and only that one is cleared: a refusal
-// that arrives after another login has installed a new credential leaves the new one alone. The
-// login that issued the cleared credential moves from "issued" to "expired", so login-status —
+// that arrives after another login has installed a new credential leaves the new one alone. With
+// the credential gone, LoginStatus reads the login that issued it as "expired", so login-status —
 // the probe every launcher decides on — stops reporting a credential the helper no longer holds.
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
 		return err
 	}
-	if b.cred.CompareAndSwap(cred, nil) {
-		if ls := b.login.Load(); ls != nil && ls.State == "issued" && ls.PendingID == cred.pendingID {
-			b.login.CompareAndSwap(ls, &loginState{Code: ls.Code, PendingID: ls.PendingID, State: "expired"})
-		}
-	}
+	b.cred.CompareAndSwap(cred, nil)
 	return errNoCredential
 }
 

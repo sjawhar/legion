@@ -50,30 +50,26 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	}
 
 	resp, err := registerWithPatience(sock, *wait, helperConnectPatience)
-	if err != nil && !*doExec {
-		fmt.Fprintf(stderr, "agent-secrets register: %v\n", err)
-		return 1
-	}
-	if err != nil {
-		// --exec never blocks a launch on the broker: warn and fall through to exec anyway.
-		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
-	} else {
-		if !*doExec {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", resp.RuntimeID, resp.EnrollmentID, resp.State)
-		}
-		if *wait > 0 && resp.State != "enrolled" {
-			if !*doExec {
-				fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet: %s\n", resp.Error)
-				return 1
-			}
-			// The launch still goes ahead, but not silently: the agent starts with a session
-			// whose broker calls fail (NOT_ENROLLED) until the helper's enroll loop succeeds.
-			fmt.Fprintf(stderr, "agent-secrets register: not enrolled after %ds (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", *wait, resp.Error)
-		}
-	}
-
 	if !*doExec {
+		if err != nil {
+			fmt.Fprintf(stderr, "agent-secrets register: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\n", resp.RuntimeID, resp.EnrollmentID, resp.State)
+		if *wait > 0 && resp.State != "enrolled" {
+			fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet: %s\n", resp.Error)
+			return 1
+		}
 		return 0
+	}
+	// --exec never blocks a launch on the broker, but never launches silently either: the agent
+	// starts with no secrets access (helper unreachable), or with broker calls that fail
+	// NOT_ENROLLED until the helper's enroll loop succeeds.
+	switch {
+	case err != nil:
+		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
+	case *wait > 0 && resp.State != "enrolled":
+		fmt.Fprintf(stderr, "agent-secrets register: not enrolled after %ds (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", *wait, resp.Error)
 	}
 	path, err := exec.LookPath(command[0])
 	if err != nil {

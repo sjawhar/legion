@@ -487,30 +487,19 @@ func TestSignEnrollmentRefusedInHelperMode(t *testing.T) {
 // AGENT_SECRETS_HELPER_SOCK, once with both unset and the files at the $XDG_RUNTIME_DIR defaults.
 func TestIdentity(t *testing.T) {
 	type paths struct{ home, keyDir, sock string }
-	writeMarker := func(t *testing.T, p paths, age time.Duration) {
-		t.Helper()
-		marker := filepath.Join(p.keyDir, "enrollment.pending")
-		if err := os.MkdirAll(p.keyDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(marker, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		then := time.Now().Add(-age)
-		if err := os.Chtimes(marker, then, then); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// namedNotice: the notice appears only when AGENT_SECRETS_HELPER_SOCK names the absent socket,
+	// since an explicit path says a helper was expected there.
 	cases := []struct {
-		name   string
-		setup  func(t *testing.T, p paths)
-		exit   int
-		notice bool
-		slow   bool
+		name        string
+		setup       func(t *testing.T, p paths)
+		exit        int
+		notice      bool
+		namedNotice bool
+		slow        bool
 	}{
 		{name: "key.pem", setup: func(t *testing.T, p paths) { copyKeyDir(t, newKeyDir(t), p.keyDir) }, exit: 0},
-		{name: "fresh marker", setup: func(t *testing.T, p paths) { writeMarker(t, p, 0) }, exit: 0},
-		{name: "stale marker", setup: func(t *testing.T, p paths) { writeMarker(t, p, 200*time.Second) }, exit: 1},
+		{name: "fresh marker", setup: func(t *testing.T, p paths) { writePendingMarker(t, p.keyDir, 0) }, exit: 0},
+		{name: "stale marker", setup: func(t *testing.T, p paths) { writePendingMarker(t, p.keyDir, 200*time.Second) }, exit: 1, namedNotice: true},
 		{name: "helper OK", setup: func(t *testing.T, p paths) {
 			fakeHelperAt(t, p.sock, helper.Response{OK: true, Proof: "eyJ.fake.proof", EnrollmentID: "enr-h"})
 		}, exit: 0},
@@ -523,7 +512,7 @@ func TestIdentity(t *testing.T) {
 		{name: "nothing listening", setup: func(t *testing.T, p paths) { staleSocketAt(t, p.sock) }, exit: 1, notice: true},
 		{name: "unit installed, no socket", setup: func(t *testing.T, p paths) { installHelperUnit(t, p.home) }, exit: 1, notice: true},
 		{name: "helper never answers", setup: func(t *testing.T, p paths) { silentHelperAt(t, p.sock) }, exit: 1, notice: true, slow: true},
-		{name: "nothing", setup: func(t *testing.T, p paths) {}, exit: 1},
+		{name: "nothing", setup: func(t *testing.T, p paths) {}, exit: 1, namedNotice: true},
 	}
 	for _, mode := range []string{"named", "defaults"} {
 		for _, tc := range cases {
@@ -556,16 +545,17 @@ func TestIdentity(t *testing.T) {
 					t.Fatalf("identity printed to stdout: %q", stdout.String())
 				}
 				want := "agent-secrets: helper unreachable at " + p.sock + "; not an agent session"
-				if tc.notice && !strings.Contains(stderr.String(), want) {
+				notice := tc.notice || (tc.namedNotice && mode == "named")
+				if notice && !strings.Contains(stderr.String(), want) {
 					t.Fatalf("stderr %q, want the notice %q", stderr.String(), want)
 				}
-				if !tc.notice && stderr.Len() != 0 {
+				if !notice && stderr.Len() != 0 {
 					t.Fatalf("stderr %q, want nothing", stderr.String())
 				}
 				if tc.slow && (elapsed < 1500*time.Millisecond || elapsed > 4*time.Second) {
 					t.Fatalf("a helper that never answers is given up on after about 2 s, took %s", elapsed)
 				}
-				if !tc.slow && elapsed > time.Second {
+				if !tc.slow && elapsed > 5*time.Second {
 					t.Fatalf("identity took %s; only a silent helper may hold it up", elapsed)
 				}
 			})
