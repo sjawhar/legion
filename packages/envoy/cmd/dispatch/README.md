@@ -212,11 +212,10 @@ is not decimal digits from 1 to 2147483647, and when a file cannot be read. The 
 embedded whole (`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` says why), so a name beginning with
 `_` or `.` is refused like any other. An editor's swap file therefore stops a locally built
 `envoy-dispatch` from booting, and fails the store's tests, until it is gone; Vim writes its swap
-file beside the file it edits by default. Versions are applied
-by number, not by file name, and the store's tests require every file on disk to be embedded
-(`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap
-(`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number
-on `main`.
+file beside the file it edits by default. Versions are applied by number, not by file name, and
+the store's tests require every file on disk to be embedded (`TestEveryMigrationFileIsEmbedded`)
+and the versions to run 1 to N with no gap (`TestMigrationSetIsNumberedOneToN`), both reading
+file names alone, so take the next free number on `main`.
 
 Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which
 `pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a
