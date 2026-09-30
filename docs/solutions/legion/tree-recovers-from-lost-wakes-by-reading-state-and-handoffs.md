@@ -84,7 +84,7 @@ and the deletion commit removes it with the rest. Rebasing the whole chain
 5. Build on other roles' commits, and push only from a head that descends from
    `legion/<KEY>@origin` (the push procedure in `skills/legion-worker/SKILL.md` checks it); when a
    conflict needs resolving, merge forward from the bookmark, not `@` (`jj new legion/<KEY>
-   main@origin -m "<message>"`, `skills/legion-worker/SKILL.md`) rather than rewriting the chain —
+   main@origin -m "<message>"`, `skills/legion-worker/references/conflicts-and-rewrites.md`) rather than rewriting the chain —
    nothing built on your prior commits, in this tree or another, is ever rewritten, and the push
    is a genuine fast-forward.
 

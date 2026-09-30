@@ -165,6 +165,18 @@
                 "value": "/home/legion/.local/state"
               },
               {
+                "name": "UV_PYTHON_INSTALL_DIR",
+                "value": "/legion/uv/python/legion-208"
+              },
+              {
+                "name": "UV_CACHE_DIR",
+                "value": "/legion/uv/cache"
+              },
+              {
+                "name": "UV_LINK_MODE",
+                "value": "copy"
+              },
+              {
                 "name": "POD_UID",
                 "valueFrom": {
                   "fieldRef": {

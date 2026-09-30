@@ -1,3 +1,6 @@
+import { expect, type Page } from "@playwright/test";
+
+import { createAsk, createComment, createIssue, createProject } from "./api";
 import { fakeEnvoyPort } from "./harness-ports";
 
 export interface FakeSession {
@@ -86,4 +89,56 @@ export async function getUnsubscribeCalls(): Promise<{ session_id: string; topic
     );
   }
   return (await response.json()) as { session_id: string; topics: string[] }[];
+}
+
+// The Agents page's keyboard rows, in `keyboard-agents.e2e.ts` and in the picker spec the WebKit
+// and Firefox projects also run, share one page: two live sessions, each with Dispatch activity of
+// its own, so both are listed rows rather than folded into `Inactive` or `No Dispatch activity`.
+// The Planner's open ask waits on the viewer, which puts it above the Reviewer. Neither carries a
+// `last_seen`, so the fake Envoy stamps each seed when it is made: this module is evaluated once
+// per Playwright worker, at the first spec that imports it, and a time computed here would age with
+// every spec the worker runs after that, until the sessions fold under `Inactive`.
+export const plannerSession: FakeSession = {
+  capabilities: ["aside", "btw"],
+  dir: "/srv/planner",
+  machine_id: "box-1",
+  roles: ["planner"],
+  session_id: "planner-session",
+  title: "Planner",
+};
+export const reviewerSession: FakeSession = {
+  capabilities: ["aside", "btw"],
+  dir: "/srv/reviewer",
+  machine_id: "box-1",
+  roles: ["reviewer"],
+  session_id: "reviewer-session",
+  title: "Reviewer",
+};
+
+/** Both sessions live, both with Dispatch activity, and two open issues for the picker to offer:
+ *  a keyboard reader has to be able to pass the first to reach the second. Returns the first. */
+export async function seedAgents(): Promise<string> {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Keyboard issue" });
+  await createIssue({ project: "CORE", title: "Rollout plan" });
+  await createAsk(
+    issue.key,
+    { question: "Which release?" },
+    { actor: { id: plannerSession.session_id, kind: "session" }, as: "agent" }
+  );
+  await createComment(
+    issue.key,
+    { body: "Reviewing the diff." },
+    { actor: { id: reviewerSession.session_id, kind: "session" }, as: "agent" }
+  );
+  await setLiveSessions([plannerSession, reviewerSession]);
+  return issue.key;
+}
+
+/** The keymap binds only once sign-in resolves (`AuthGate` renders a skeleton until
+ *  `/auth/whoami` answers), so a key pressed before the page renders reaches no handler. */
+export async function openAgents(page: Page): Promise<void> {
+  await page.goto("/agents");
+  await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
+  await page.locator("body").focus();
 }

@@ -61,7 +61,7 @@ Rules that fall out:
 **Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
 another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
 bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
-`skills/legion-worker/SKILL.md`; a handoff split leaves `@` empty and undescribed, and `jj git
+`skills/legion-worker/references/conflicts-and-rewrites.md`; a handoff split leaves `@` empty and undescribed, and `jj git
 push` refuses a commit with no description). What follows records this PR's earlier workflow.
 
 `main` moved 40 commits while #980 waited (LEGION-21's runtime boundary, LEGION-30's idle-retire

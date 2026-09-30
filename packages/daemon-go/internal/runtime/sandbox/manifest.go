@@ -78,6 +78,7 @@ var runtimeOwned = map[string]bool{
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
+	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
 }
 
 // legionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
@@ -540,6 +541,31 @@ func xdgEnvironment() []corev1.EnvVar {
 	}
 }
 
+// uv's settings in the worker container, which the pod's environment hands the image's uv.
+const (
+	// uvPythonRoot holds the Pythons uv installs, one directory per issue (uvPythonDir), and
+	// uvCacheDir its cache, both on the tree volume beside the workspaces. A project's .venv, in an
+	// issue's workspace on that volume, links to an interpreter in that issue's directory, so every
+	// later pod of the issue finds the interpreter and the environment works there as it is; the
+	// cache lets every pod of the tree reuse what an earlier one downloaded.
+	uvPythonRoot = TreeRoot + "/uv/python"
+	uvCacheDir   = TreeRoot + "/uv/cache"
+	// uvLinkMode is how uv puts a package from uvCacheDir into a .venv: a copy. With the cache and
+	// the .venv on one filesystem uv would otherwise hardlink them, and an edit made in place in one
+	// workspace's .venv would change the cache and every other .venv of the tree that installed the
+	// package, the shared-inode failure LEGION-198 hit with bun's cache.
+	uvLinkMode = "copy"
+)
+
+// uvPythonDir is issue's own directory under uvPythonRoot, named by the issue as a DNS label
+// (dnsName). uv serializes the installs into a directory with a file lock there, and a gVisor
+// pod's lock reaches no other pod (awaitTreeInitialized), so two pods first installing one Python
+// into a shared directory at once can each delete the other's interpreter. One directory per issue
+// keeps every other issue's pods out; only the pods of one issue share it.
+func uvPythonDir(issue string) string {
+	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
+}
+
 // fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, and the
 // mounted provisioning token. Its git reads no configuration but its own, so it is told no config
 // home.
@@ -625,6 +651,9 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
 	env = append(env, xdgEnvironment()...)
+	add("UV_PYTHON_INSTALL_DIR", uvPythonDir(spec.Issue))
+	add("UV_CACHE_DIR", uvCacheDir)
+	add("UV_LINK_MODE", uvLinkMode)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})

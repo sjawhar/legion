@@ -45,6 +45,9 @@ var __export = (target, all) => {
 };
 var __require = import.meta.require;
 
+// hooks/session-hook.ts
+import { join as join4 } from "path";
+
 // ../envoy-client/src/dispatch-config.ts
 import { readFileSync as readFileSync2 } from "fs";
 import { homedir } from "os";
@@ -17313,6 +17316,31 @@ function asObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
 }
 
+// ../envoy-client/src/dispatch-first.ts
+import { readFileSync as readFileSync3 } from "fs";
+import { join as join2 } from "path";
+var DISPATCH_FIRST_MARKER = "<dispatch-first-skill>";
+function dispatchFirstSkillFile(skillsDirectory) {
+  return join2(skillsDirectory, "dispatch-first", "SKILL.md");
+}
+function readDispatchFirstContext(skillFile) {
+  let skill;
+  try {
+    skill = readFileSync3(skillFile, "utf8");
+  } catch (error48) {
+    throw new Error(`the dispatch-first skill ${skillFile} could not be read: ${messageFor(error48)}`);
+  }
+  const body = skill.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+  return [
+    DISPATCH_FIRST_MARKER,
+    "This session has Dispatch, so the dispatch-first skill is loaded for it. Follow it.",
+    "",
+    body,
+    "</dispatch-first-skill>"
+  ].join(`
+`);
+}
+
 // src/claude-session.ts
 function configuredValue(value) {
   return value !== undefined && value.trim().length > 0 ? value : undefined;
@@ -17329,7 +17357,7 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, join as join2 } from "path";
+import { dirname, join as join3 } from "path";
 
 class SessionIdentity {
   directory;
@@ -17346,13 +17374,13 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join2(stateDirectory, "sessions", String(claudePid));
+  return join3(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join2(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join3(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 function roleStateFile(stateDirectory, sessionId) {
-  return join2(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+  return join3(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
 }
 function hasErrnoCode(error48, code) {
   return error48 instanceof Error && "code" in error48 && error48.code === code;
@@ -17386,7 +17414,7 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  const sessions = join2(stateDirectory, "sessions");
+  const sessions = join3(stateDirectory, "sessions");
   const entries = await readdir(sessions).catch((error48) => {
     if (hasErrnoCode(error48, "ENOENT"))
       return [];
@@ -17395,36 +17423,67 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
   for (const entry of entries) {
     if (!/^\d+$/.test(entry) || processExists(Number(entry)))
       continue;
-    await rm(join2(sessions, entry), { recursive: true, force: true });
+    await rm(join3(sessions, entry), { recursive: true, force: true });
   }
 }
 
-// hooks/open-asks-hook.ts
+// hooks/session-hook.ts
 var OPEN_ASKS_TIMEOUT_MS = 3000;
-var HookInput = exports_external.object({ session_id: exports_external.string().min(1), cwd: exports_external.string().optional() });
-var input = HookInput.parse(JSON.parse(await Bun.stdin.text()));
-var pluginData = process.env["CLAUDE_PLUGIN_DATA"];
-if (pluginData !== undefined && pluginData.trim().length > 0) {
-  try {
-    await writeSessionHandoff(sessionHandoffFile(pluginData, process.ppid), input.session_id);
-  } catch (error48) {
-    process.stderr.write(`envoy: could not record the session id \u2014 ${messageFor(error48)}
+var OpenAsksInput = exports_external.object({ session_id: exports_external.string().min(1), cwd: exports_external.string().optional() });
+var DispatchFirstInput = exports_external.object({
+  hook_event_name: exports_external.enum(["SessionStart", "SubagentStart"]),
+  cwd: exports_external.string().optional()
+});
+async function openAsks(raw) {
+  const input = OpenAsksInput.parse(raw);
+  const pluginData = process.env["CLAUDE_PLUGIN_DATA"];
+  if (pluginData !== undefined && pluginData.trim().length > 0) {
+    try {
+      await writeSessionHandoff(sessionHandoffFile(pluginData, process.ppid), input.session_id);
+    } catch (error48) {
+      process.stderr.write(`envoy: could not record the session id \u2014 ${messageFor(error48)}
 `);
+    }
   }
-}
-var directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
-var config2 = resolveDispatchConfig(process.env, { cwd: directory });
-if (config2.enabled && config2.url !== null && config2.token !== null) {
-  try {
-    const snapshot = await new DispatchClient(config2.url, config2.token, fetch, AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)).openAsks(input.session_id);
-    process.stdout.write(`Dispatch authored-ask summary:
+  const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
+  const config2 = resolveDispatchConfig(process.env, { cwd: directory });
+  if (config2.enabled && config2.url !== null && config2.token !== null) {
+    try {
+      const snapshot = await new DispatchClient(config2.url, config2.token, fetch, AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)).openAsks(input.session_id);
+      process.stdout.write(`Dispatch authored-ask summary:
 ${formatOpenAsksSummary(snapshot, config2.url)}
 `);
-  } catch (error48) {
-    process.stdout.write(`Dispatch authored-ask summary unavailable: ${messageFor(error48)}
+    } catch (error48) {
+      process.stdout.write(`Dispatch authored-ask summary unavailable: ${messageFor(error48)}
+`);
+    }
+  } else if (config2.error !== null) {
+    process.stdout.write(`Dispatch authored-ask summary unavailable: ${config2.error}
 `);
   }
-} else if (config2.error !== null) {
-  process.stdout.write(`Dispatch authored-ask summary unavailable: ${config2.error}
-`);
 }
+function dispatchFirst(raw) {
+  const input = DispatchFirstInput.parse(raw);
+  const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
+  if (!resolveDispatchConfig(process.env, { cwd: directory }).enabled)
+    return;
+  const pluginRoot = configuredValue(process.env["CLAUDE_PLUGIN_ROOT"]);
+  if (pluginRoot === undefined) {
+    throw new Error("CLAUDE_PLUGIN_ROOT is unset; Claude Code sets it for every plugin hook");
+  }
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: input.hook_event_name,
+      additionalContext: readDispatchFirstContext(dispatchFirstSkillFile(join4(pluginRoot, "skills")))
+    }
+  }));
+}
+var mode = process.argv[2];
+if (mode !== "open-asks" && mode !== "dispatch-first") {
+  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks or dispatch-first`);
+}
+var input = JSON.parse(await Bun.stdin.text());
+if (mode === "open-asks")
+  await openAsks(input);
+else
+  dispatchFirst(input);
