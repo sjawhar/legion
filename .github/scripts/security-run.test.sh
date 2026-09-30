@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Tests for `deps-summary.sh`: the dependency scanners' counts from their real output, a half that
-# fails closed on any output not in its scanner's shape, and the security report assembled from a
-# run's two artifacts.
+# Tests for `security-run.sh`: the base a run is judged against and the flags it reads there, the
+# dependency scanners' counts from their real output, a half that fails closed on any output not in
+# its scanner's shape, the security report assembled from a run's two artifacts, and enforcement.
 #
 # testdata/ holds the scanners' own output, measured 2026-09-30:
 #   - osv.json: osv-scanner v2.6.0 `scan source --recursive --format json` over a go.mod requiring
@@ -15,13 +15,13 @@
 #     but the osv entries no finding names (the Go standard library's, a few hundred KB).
 #   - zizmor*.json: see zizmor-findings.test.sh.
 #
-# Run from anywhere: .github/scripts/deps-summary.test.sh
+# Run from anywhere: .github/scripts/security-run.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
 set -euo pipefail
 shopt -s inherit_errexit
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-summary_script="$script_dir/deps-summary.sh"
+run_script="$script_dir/security-run.sh"
 testdata="$script_dir/testdata"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -29,13 +29,13 @@ trap 'rm -rf "$work"' EXIT
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
 
-# summarize NAME [ARG…]: runs `deps-summary.sh summarize ARG… --out $work/NAME.json`; its stderr is
+# summarize NAME [ARG…]: runs `security-run.sh summarize ARG… --out $work/NAME.json`; its stderr is
 # in $work/NAME.stderr and its exit code in $rc.
 summarize() {
   local name="$1"
   shift
   rc=0
-  "$summary_script" summarize "$@" --out "$work/$name.json" > /dev/null 2> "$work/$name.stderr" || rc=$?
+  "$run_script" summarize "$@" --out "$work/$name.json" > /dev/null 2> "$work/$name.stderr" || rc=$?
 }
 
 # out NAME JQ: JQ applied to $work/NAME.json, compact.
@@ -103,13 +103,13 @@ check "no --govulncheck (govulncheck failed in a module): a tool error" \
 
 echo "=== 5. usage errors exit 2 ==="
 rc=0
-"$summary_script" summarize --osv "$testdata/osv.json" > /dev/null 2>&1 || rc=$?
+"$run_script" summarize --osv "$testdata/osv.json" > /dev/null 2>&1 || rc=$?
 check "summarize without --out exits 2" "$(is "$rc" 2)"
 rc=0
-"$summary_script" summarize --out "$work/x.json" --nope > /dev/null 2>&1 || rc=$?
+"$run_script" summarize --out "$work/x.json" --nope > /dev/null 2>&1 || rc=$?
 check "an unknown flag exits 2" "$(is "$rc" 2)"
 rc=0
-"$summary_script" > /dev/null 2>&1 || rc=$?
+"$run_script" > /dev/null 2>&1 || rc=$?
 check "no subcommand exits 2" "$(is "$rc" 2)"
 
 # --- report ------------------------------------------------------------------------------------
@@ -119,14 +119,14 @@ check "no subcommand exits 2" "$(is "$rc" 2)"
 summarize deps --osv "$testdata/osv.json" --govulncheck "$testdata/govulncheck.json" \
   --govulncheck "$testdata/govulncheck-clean.json"
 
-# report NAME ZIZMOR DEPS [ARG…]: runs `deps-summary.sh report` for run 42, a pull request with
+# report NAME ZIZMOR DEPS [ARG…]: runs `security-run.sh report` for run 42, a pull request with
 # both checks report-only, into $work/NAME.json; its stdout (the step summary) in $work/NAME.md,
 # stderr in $work/NAME.stderr.
 report() {
   local name="$1" zizmor="$2" deps="$3"
   shift 3
   rc=0
-  "$summary_script" report --zizmor "$zizmor" --deps "$deps" --run-id 42 --event pull_request \
+  "$run_script" report --zizmor "$zizmor" --deps "$deps" --run-id 42 --event pull_request \
     --head abc123 --base def456 --report-only-zizmor true --report-only-dependencies true \
     --workflows success --dependencies success --out "$work/$name.json" "$@" \
     > "$work/$name.md" 2> "$work/$name.stderr" || rc=$?
@@ -202,11 +202,11 @@ report bad-flag "$work/zizmor-findings.json" "$work/deps.json" --report-only-dep
 check "a flag other than true, false or empty exits 2" "$(is "$rc" 2)"
 
 # --- enforce -----------------------------------------------------------------------------------
-# enforce NAME: runs `deps-summary.sh enforce` on $work/NAME.json (a report written above); output
+# enforce NAME: runs `security-run.sh enforce` on $work/NAME.json (a report written above); output
 # in $work/NAME.enforce, exit code in $rc.
 enforce() {
   rc=0
-  "$summary_script" enforce "$work/$1.json" > "$work/$1.enforce" 2>&1 || rc=$?
+  "$run_script" enforce "$work/$1.json" > "$work/$1.enforce" 2>&1 || rc=$?
 }
 
 echo "=== 10. enforce: the security job fails only for a promoted check whose gate failed ==="
@@ -236,10 +236,109 @@ report flags-unknown "$work/zizmor-findings.json" "$work/deps.json" --report-onl
 enforce flags-unknown
 check "flags unknown (the window job did not run): report-only, exits 0" "$(is "$rc" 0)"
 rc=0
-"$summary_script" enforce "$work/nowhere.json" > /dev/null 2>&1 || rc=$?
+"$run_script" enforce "$work/nowhere.json" > /dev/null 2>&1 || rc=$?
 check "a missing report exits 2" "$(is "$rc" 2)"
 jq 'del(.gate)' "$work/zizmor-failed.json" > "$work/no-gate.json"
 enforce no-gate
 check "a report without its gate results exits 2" "$(is "$rc" 2)"
 
-summary "deps-summary.sh summarizes the dependency scanners and assembles the security report"
+echo "=== 11. window-flags: the window job's reading of the file, one output line per check ==="
+# run_flags ARG…: runs `security-run.sh window-flags ARG…` from the current directory; stdout in
+# $flags_out, stderr in $flags_err, exit code in $rc.
+run_flags() {
+  rc=0
+  flags_out=$("$run_script" window-flags "$@" 2> "$work/flags.err") || rc=$?
+  flags_err=$(< "$work/flags.err")
+}
+mkdir -p "$work/flags"
+echo '{"report_only": {"zizmor": true, "dependencies": false}}' > "$work/flags/split.json"
+run_flags "$work/flags/split.json"
+check "exits 0" "$(is "$rc" 0)"
+check "prints one GITHUB_OUTPUT line per check" "$(is "$flags_out" "zizmor=true
+dependencies=false")"
+check "and no note" "$(is "$flags_err" "")"
+echo '{"report_only": true}' > "$work/flags/bare.json"
+run_flags "$work/flags/bare.json"
+check "a bare boolean is that value for each check" "$(is "$flags_out" "zizmor=true
+dependencies=true")"
+check "and is named on stderr" "$(contains "$flags_err" "report_only is one boolean")"
+run_flags "$work/flags/nowhere.json"
+check "no file: exits 0, every check report-only" "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=true
+dependencies=true" ] && echo true || echo false)"
+check "and names the file" "$(contains "$flags_err" "nowhere.json: missing")"
+echo '{"report_only": {"zizmor": 0, "dependencies": false}}' > "$work/flags/number.json"
+run_flags "$work/flags/number.json"
+check "a number is not false: that check stays report-only" "$(is "$flags_out" "zizmor=true
+dependencies=false")"
+run_flags "$script_dir/../security-window.json"
+check "the checked-in window file is in the per-check shape: no note" "$(is "$flags_err" "")"
+rc=0
+"$run_script" window-flags > /dev/null 2>&1 || rc=$?
+check "window-flags without a file exits 2" "$(is "$rc" 2)"
+
+echo "=== 12. the base: a pull request is judged against its merge commit's first parent, and reads its flags there ==="
+# A real repository. Main promotes zizmor (A1); a pull request branched from A1 sets it back to
+# report-only (P); main moves on (A2), so the pull request's recorded base (A1) is stale; GitHub's
+# merge commit M joins A2 and P, as refs/pull/<n>/merge does. The run checks M out at depth 1 from
+# an origin, as actions/checkout does, so HEAD is shallow and its parents are not local.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+g() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
+src="$work/git/src"
+mkdir -p "$src/.github"
+g -C "$src" init -q
+echo '{"report_only": {"zizmor": false, "dependencies": true}}' > "$src/.github/security-window.json"
+echo 1 > "$src/other.txt"
+g -C "$src" add -A
+g -C "$src" commit -qm "A1: main promotes zizmor"
+a1=$(g -C "$src" rev-parse HEAD)
+g -C "$src" checkout -qb pr
+echo '{"report_only": {"zizmor": true, "dependencies": true}}' > "$src/.github/security-window.json"
+g -C "$src" commit -qam "P: the pull request sets zizmor back to report-only"
+g -C "$src" checkout -q main
+echo 2 > "$src/other.txt"
+g -C "$src" commit -qam "A2: main moves on"
+a2=$(g -C "$src" rev-parse HEAD)
+g -C "$src" checkout -q --detach main
+g -C "$src" merge -q --no-ff pr -m "M: GitHub's merge commit"
+g -C "$src" branch pull-merge HEAD
+g clone -q --bare "$src" "$work/git/origin.git"
+g clone -q --depth 1 --branch pull-merge "file://$work/git/origin.git" "$work/git/clone"
+g clone -q --depth 1 --branch main "file://$work/git/origin.git" "$work/git/main"
+# base_commit DIR ARG…: `security-run.sh base-commit ARG…` run in DIR; its output in $base_out,
+# exit code in $rc.
+base_commit() {
+  local dir=$1
+  shift
+  rc=0
+  base_out=$(cd "$dir" && "$run_script" base-commit "$@" 2>&1) || rc=$?
+}
+base_commit "$work/git/clone" pull_request
+check "a pull request's base is its merge commit's first parent (main's tip), not its recorded base" \
+  "$( [ "$rc" = 0 ] && [ "$base_out" = "$a2" ] && [ "$base_out" != "$a1" ] && echo true || echo false)"
+base_commit "$work/git/clone" merge_group "$a1"
+check "a merge group's base is the event's base_sha" "$(is "$base_out" "$a1")"
+base_commit "$work/git/clone" push
+check "a push, a schedule or a dispatch has no base: prints nothing" \
+  "$( [ "$rc" = 0 ] && [ -z "$base_out" ] && echo true || echo false)"
+base_commit "$work/git/main" pull_request
+check "a pull_request run whose HEAD is not a merge commit fails, naming it" \
+  "$( [ "$rc" = 2 ] && [ "$(contains "$base_out" "not a merge commit")" = true ] && echo true || echo false)"
+base_commit "$work/git/clone" merge_group
+check "merge_group without its base_sha exits 2" "$(is "$rc" 2)"
+cd "$work/git/clone"
+run_flags .github/security-window.json --at "$a2"
+check "a pull request that sets zizmor back to report-only over a promoted base still reads the base's false" \
+  "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=false
+dependencies=true" ] && [ -z "$flags_err" ] && echo true || echo false)"
+run_flags .github/security-window.json
+check "the tree itself says true: the base read is what keeps zizmor blocking" "$(is "$flags_out" "zizmor=true
+dependencies=true")"
+run_flags .github/nowhere.json --at "$a2"
+check "a base with no window file: every check report-only, named with the commit" \
+  "$( [ "$flags_out" = "zizmor=true
+dependencies=true" ] && [ "$(contains "$flags_err" ".github/nowhere.json at ${a2:0:12}: missing")" = true ] &&
+  echo true || echo false)"
+cd - > /dev/null
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+
+summary "security-run.sh reads the base and its flags, summarizes the dependency scanners, and assembles and enforces the security report"

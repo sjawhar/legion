@@ -11,7 +11,7 @@
 # their contents are the producers' own output: each zizmor-findings.json is
 # .github/scripts/zizmor-findings.sh run over zizmor 1.30.1's findings
 # (.github/scripts/testdata/zizmor*.json), and each security-report.json is
-# .github/scripts/deps-summary.sh's, from that and the summary of osv-scanner's and govulncheck's
+# .github/scripts/security-run.sh's, from that and the summary of osv-scanner's and govulncheck's
 # own output (.github/scripts/testdata/).
 #
 # Run from anywhere: scripts/security-report.test.sh
@@ -167,23 +167,23 @@ zizmor_findings() {
   cat "$dir/findings.json"
 }
 
-# The dependency summaries deps-summary.sh writes from the scanners' own output: nothing found
+# The dependency summaries security-run.sh writes from the scanners' own output: nothing found
 # (clean), the vulnerable fixture modules (vulnerable: osv 5 with 3 fixable, govulncheck 1
 # reachable and 1 informational), and neither scanner completing (error).
 mkdir -p "$work/deps"
-"$producers/deps-summary.sh" summarize --osv "$testdata/osv-clean.json" \
+"$producers/security-run.sh" summarize --osv "$testdata/osv-clean.json" \
   --govulncheck "$testdata/govulncheck-clean.json" --out "$work/deps/clean.json"
-"$producers/deps-summary.sh" summarize --osv "$testdata/osv.json" --govulncheck "$testdata/govulncheck.json" \
+"$producers/security-run.sh" summarize --osv "$testdata/osv.json" --govulncheck "$testdata/govulncheck.json" \
   --out "$work/deps/vulnerable.json"
-"$producers/deps-summary.sh" summarize --out "$work/deps/error.json" 2> /dev/null
+"$producers/security-run.sh" summarize --out "$work/deps/error.json" 2> /dev/null
 
-# security_report ZIZMOR_FINDINGS DEPS: the security-report.json deps-summary.sh report writes for
+# security_report ZIZMOR_FINDINGS DEPS: the security-report.json security-run.sh report writes for
 # a run whose artifacts are that zizmor-findings.json and the DEPS summary (clean, vulnerable, error).
 security_report() {
   local dir
   dir=$(mktemp -d "$work/report.XXXXXX")
   printf '%s' "$1" > "$dir/zizmor-findings.json"
-  "$producers/deps-summary.sh" report --zizmor "$dir/zizmor-findings.json" --deps "$work/deps/$2.json" \
+  "$producers/security-run.sh" report --zizmor "$dir/zizmor-findings.json" --deps "$work/deps/$2.json" \
     --run-id 1 --event push --head 0 --base "" --report-only-zizmor true --report-only-dependencies true \
     --workflows success --dependencies success --out "$dir/security-report.json" > /dev/null
   cat "$dir/security-report.json"
@@ -637,7 +637,7 @@ echo '{"report_only": false}' > "$d/window.json"
 run_report
 check "a bare false (the file's first form) promotes both checks: exits 0" "$(is "$rc" 0)"
 check "and reads false for each" "$(has "report_only: zizmor false, dependencies false")"
-check "and names the bare boolean" "$(has "note: .github/security-window.json on main: report_only is one boolean")"
+check "and names the bare boolean" "$(has "note: main's .github/security-window.json: report_only is one boolean")"
 
 echo "=== per-check flags: each check's promotion is decided on its own ==="
 setup promoted-zizmor "15 days ago"
@@ -662,15 +662,15 @@ run_report
 check "one check still report-only inside the window: exits 0, no decision" \
   "$( [ "$rc" = 0 ] && [ "$(lacks "DECISION:")" = true ] && echo true || echo false)"
 
-echo "=== a window file not in its shape: each check it does not set false reads as report-only, named ==="
+echo "=== main's window file not in its shape: each check it does not set false reads as report-only, named ==="
 # window_case NAME CONTENT|- ZIZMOR DEPENDENCIES NOTE: main's window file holds CONTENT (- for no
-# file); the report reads the flags ZIZMOR and DEPENDENCIES and prints NOTE.
+# file); the report reads the flags ZIZMOR and DEPENDENCIES through security-run.sh and prints NOTE.
 window_case() {
   setup "window-$1" "15 days ago"
   if [ "$2" = - ]; then rm "$d/window.json"; else printf '%s\n' "$2" > "$d/window.json"; fi
   run_report
   check "$1: reads zizmor $3, dependencies $4" "$(has "report_only: zizmor $3, dependencies $4")"
-  check "$1: names it" "$(has "note: .github/security-window.json on main: $5")"
+  check "$1: names it" "$(has "note: main's .github/security-window.json: $5")"
   check "$1: exits 1 (a check is still report-only after the window)" "$(is "$rc" 1)"
 }
 window_case missing - true true "missing; every check reads as report-only"
@@ -685,105 +685,6 @@ window_case non-boolean '{"report_only": {"zizmor": "false", "dependencies": fal
   'report_only.zizmor is "false", not true or false; zizmor reads as report-only'
 window_case unknown-key '{"report_only": {"zizmor": true, "dependencies": true, "codeql": false}}' true true \
   'report_only."codeql" names no check (zizmor, dependencies); ignored'
-
-echo "=== --window-flags: the window job's reading of the file, one output line per check ==="
-# run_flags ARG…: runs the script's --window-flags mode with ARG… from the current directory;
-# stdout in $flags_out, stderr in $flags_err, exit code in $rc.
-run_flags() {
-  rc=0
-  flags_out=$("$report" --window-flags "$@" 2> "$work/flags.err") || rc=$?
-  flags_err=$(< "$work/flags.err")
-}
-mkdir -p "$work/flags"
-echo '{"report_only": {"zizmor": true, "dependencies": false}}' > "$work/flags/split.json"
-run_flags "$work/flags/split.json"
-check "exits 0" "$(is "$rc" 0)"
-check "prints one GITHUB_OUTPUT line per check" "$(is "$flags_out" "zizmor=true
-dependencies=false")"
-check "and no note" "$(is "$flags_err" "")"
-echo '{"report_only": true}' > "$work/flags/bare.json"
-run_flags "$work/flags/bare.json"
-check "a bare boolean is that value for each check" "$(is "$flags_out" "zizmor=true
-dependencies=true")"
-check "and is named on stderr" "$(contains "$flags_err" "report_only is one boolean")"
-run_flags "$work/flags/nowhere.json"
-check "no file: exits 0, every check report-only" "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=true
-dependencies=true" ] && echo true || echo false)"
-check "and names the file" "$(contains "$flags_err" "nowhere.json: missing")"
-echo '{"report_only": {"zizmor": 0, "dependencies": false}}' > "$work/flags/number.json"
-run_flags "$work/flags/number.json"
-check "a number is not false: that check stays report-only" "$(is "$flags_out" "zizmor=true
-dependencies=false")"
-run_flags "$script_dir/../.github/security-window.json"
-check "the checked-in window file is in the per-check shape: no note" "$(is "$flags_err" "")"
-rc=0
-"$report" --window-flags > /dev/null 2>&1 || rc=$?
-check "--window-flags without a file exits 2" "$(is "$rc" 2)"
-
-echo "=== the base: a pull request is judged against its merge commit's first parent, and reads its flags there ==="
-# A real repository. Main promotes zizmor (A1); a pull request branched from A1 sets it back to
-# report-only (P); main moves on (A2), so the pull request's recorded base (A1) is stale; GitHub's
-# merge commit M joins A2 and P, as refs/pull/<n>/merge does. The run checks M out at depth 1 from
-# an origin, as actions/checkout does, so HEAD is shallow and its parents are not local.
-export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-g() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
-src="$work/git/src"
-mkdir -p "$src/.github"
-g -C "$src" init -q
-echo '{"report_only": {"zizmor": false, "dependencies": true}}' > "$src/.github/security-window.json"
-echo 1 > "$src/other.txt"
-g -C "$src" add -A
-g -C "$src" commit -qm "A1: main promotes zizmor"
-a1=$(g -C "$src" rev-parse HEAD)
-g -C "$src" checkout -qb pr
-echo '{"report_only": {"zizmor": true, "dependencies": true}}' > "$src/.github/security-window.json"
-g -C "$src" commit -qam "P: the pull request sets zizmor back to report-only"
-g -C "$src" checkout -q main
-echo 2 > "$src/other.txt"
-g -C "$src" commit -qam "A2: main moves on"
-a2=$(g -C "$src" rev-parse HEAD)
-g -C "$src" checkout -q --detach main
-g -C "$src" merge -q --no-ff pr -m "M: GitHub's merge commit"
-g -C "$src" branch pull-merge HEAD
-g clone -q --bare "$src" "$work/git/origin.git"
-g clone -q --depth 1 --branch pull-merge "file://$work/git/origin.git" "$work/git/clone"
-g clone -q --depth 1 --branch main "file://$work/git/origin.git" "$work/git/main"
-# base_commit DIR ARG…: the script's --base-commit mode run in DIR; its output in $base_out, exit
-# code in $rc.
-base_commit() {
-  local dir=$1
-  shift
-  rc=0
-  base_out=$(cd "$dir" && "$report" --base-commit "$@" 2>&1) || rc=$?
-}
-base_commit "$work/git/clone" pull_request
-check "a pull request's base is its merge commit's first parent (main's tip), not its recorded base" \
-  "$( [ "$rc" = 0 ] && [ "$base_out" = "$a2" ] && [ "$base_out" != "$a1" ] && echo true || echo false)"
-base_commit "$work/git/clone" merge_group "$a1"
-check "a merge group's base is the event's base_sha" "$(is "$base_out" "$a1")"
-base_commit "$work/git/clone" push
-check "a push, a schedule or a dispatch has no base: prints nothing" \
-  "$( [ "$rc" = 0 ] && [ -z "$base_out" ] && echo true || echo false)"
-base_commit "$work/git/main" pull_request
-check "a pull_request run whose HEAD is not a merge commit fails, naming it" \
-  "$( [ "$rc" = 2 ] && [ "$(contains "$base_out" "not a merge commit")" = true ] && echo true || echo false)"
-base_commit "$work/git/clone" merge_group
-check "merge_group without its base_sha exits 2" "$(is "$rc" 2)"
-cd "$work/git/clone"
-run_flags .github/security-window.json --at "$a2"
-check "a pull request that sets zizmor back to report-only over a promoted base still reads the base's false" \
-  "$( [ "$rc" = 0 ] && [ "$flags_out" = "zizmor=false
-dependencies=true" ] && [ -z "$flags_err" ] && echo true || echo false)"
-run_flags .github/security-window.json
-check "the tree itself says true: the base read is what keeps zizmor blocking" "$(is "$flags_out" "zizmor=true
-dependencies=true")"
-run_flags .github/nowhere.json --at "$a2"
-check "a base with no window file: every check report-only, named with the commit" \
-  "$( [ "$flags_out" = "zizmor=true
-dependencies=true" ] && [ "$(contains "$flags_err" ".github/nowhere.json at ${a2:0:12}: missing")" = true ] &&
-  echo true || echo false)"
-cd - > /dev/null
-unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
 
 echo "=== R12. --decision force with the window open ==="
 setup r12 "3 days ago"

@@ -56,24 +56,24 @@ jobs:
       #
       # One flag per check, from the base's window file on a pull request or merge group and from
       # the tree's own (main's) otherwise, so a promotion takes effect on main from its merge and a
-      # pull request cannot make its own check report-only again. A check is blocking only where
-      # the file sets it false; any other form reads as report-only, and the step summary and an
-      # annotation name it (scripts/security-report.sh --window-flags). The base is fetched without
-      # a credential, which persist-credentials: false relies on.
+      # pull request cannot make its own check report-only again by editing the file. A check is
+      # blocking only where the file sets it false; any other form reads as report-only, and the
+      # step summary and an annotation name it (.github/scripts/security-run.sh window-flags). The
+      # base is fetched without a credential, which persist-credentials: false relies on.
       - name: Read the base and the report-only flags
         id: flags
         env:
           EVENT: ${{ github.event_name }}
           MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
-          base=$(scripts/security-report.sh --base-commit "$EVENT" "$MERGE_GROUP_BASE")
+          base=$(.github/scripts/security-run.sh base-commit "$EVENT" "$MERGE_GROUP_BASE")
           echo "base=$base" >> "$GITHUB_OUTPUT"
           at=()
           if [ -n "$base" ]; then
             echo "base: $base"
             at=(--at "$base")
           fi
-          scripts/security-report.sh --window-flags .github/security-window.json "${at[@]}" > flags.txt 2> notes.txt ||
+          .github/scripts/security-run.sh window-flags .github/security-window.json "${at[@]}" > flags.txt 2> notes.txt ||
             { cat notes.txt >&2; exit 1; }
           cat flags.txt >> "$GITHUB_OUTPUT"
           {
@@ -250,7 +250,7 @@ jobs:
             *) echo tool_error=true >> "$GITHUB_OUTPUT" ;;
           esac
 
-      # -format json exits 0 whatever it finds; .github/scripts/deps-summary.sh reads a finding
+      # -format json exits 0 whatever it finds; .github/scripts/security-run.sh reads a finding
       # whose trace[0] names a function as reachable, and module- and package-level ones as
       # informational.
       - name: govulncheck
@@ -267,7 +267,7 @@ jobs:
           echo "tool_error=$tool_error" >> "$GITHUB_OUTPUT"
 
       # A scanner that did not run to completion, or wrote output not in its shape, is a tool
-      # error for its half (.github/scripts/deps-summary.sh).
+      # error for its half (.github/scripts/security-run.sh summarize).
       - name: Summarize
         if: always()
         env:
@@ -281,7 +281,7 @@ jobs:
           if [ "$GOVULNCHECK_ERROR" = false ]; then
             args+=(--govulncheck govulncheck-envoy.json --govulncheck govulncheck-daemon-go.json)
           fi
-          .github/scripts/deps-summary.sh summarize "${args[@]}"
+          .github/scripts/security-run.sh summarize "${args[@]}"
           cat deps-summary.json
 
       - name: Upload the summary
@@ -336,7 +336,7 @@ jobs:
           path: artifacts
 
       # A missing or malformed artifact records a tool error for that half, never a clean run
-      # (.github/scripts/deps-summary.sh report).
+      # (.github/scripts/security-run.sh report).
       - name: Build the report
         id: report
         env:
@@ -349,7 +349,7 @@ jobs:
           WORKFLOWS_RESULT: ${{ needs.workflows.result }}
           DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
         run: |
-          .github/scripts/deps-summary.sh report --zizmor artifacts/zizmor-findings.json \
+          .github/scripts/security-run.sh report --zizmor artifacts/zizmor-findings.json \
             --deps artifacts/deps-summary.json --run-id "$RUN_ID" --event "$EVENT" --head "$HEAD_SHA" \
             --base "$BASE_SHA" --report-only-zizmor "$ZIZMOR_REPORT_ONLY" \
             --report-only-dependencies "$DEPENDENCIES_REPORT_ONLY" --workflows "$WORKFLOWS_RESULT" \
@@ -403,7 +403,7 @@ jobs:
       # The step that fails this job on a promoted check's finding: a check whose flag is false is
       # blocking, and its job's failure fails this job too, so a ruleset that requires `security`
       # refuses what a promoted check found. While a check is report-only its job concludes
-      # success and this step passes it by (.github/scripts/deps-summary.sh enforce).
+      # success and this step passes it by (.github/scripts/security-run.sh enforce).
       - name: Enforce the promoted checks
         if: always() && steps.report.outcome == 'success'
-        run: .github/scripts/deps-summary.sh enforce security-report.json
+        run: .github/scripts/security-run.sh enforce security-report.json

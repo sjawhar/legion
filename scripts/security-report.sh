@@ -4,27 +4,10 @@
 # `Report and decide`); anyone can run it from a checkout:
 #
 #   scripts/security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]
-#   scripts/security-report.sh --window-flags .github/security-window.json [--at REV]
-#   scripts/security-report.sh --base-commit EVENT [MERGE_GROUP_BASE_SHA]
 #
-# .github/security-window.json holds one report-only flag per check,
-# {"report_only": {"zizmor": true, "dependencies": true}}: while a check's flag is true its Gate
-# step runs under continue-on-error. A check is blocking only where the file sets its flag to
-# false: a missing or unreadable file, a document that is not an object with a report_only key,
-# a missing key and a value that is not true or false each read as report-only, and each is named
-# in a note. A bare boolean ({"report_only": true}, the file's first form) is that value for every
-# check. --window-flags prints the file's flags as `zizmor=<bool>` and `dependencies=<bool>` lines
-# (the window job appends them to $GITHUB_OUTPUT) and its notes on stderr, and exits 0; with --at
-# it reads the file as it is at commit REV (fetched from origin at depth 1 when absent), which is
-# how a pull request or merge group reads its base's flags rather than its own: a promotion takes
-# effect on main from its merge, its own pull request's run stays report-only, and a pull request
-# cannot make its own check report-only again by editing the file.
-#
-# --base-commit prints the commit a run's head is judged against, run from the checked-out tree:
-# for pull_request the first parent of HEAD, which is a merge commit GitHub builds on the base
-# branch's current tip, so its first parent is that tip (the event's pull_request.base.sha is the
-# base when the pull request was opened or last pushed, and does not follow main); for
-# merge_group the event's base_sha; for any other event nothing.
+# The checks' report-only flags are main's .github/security-window.json as
+# .github/scripts/security-run.sh window-flags reads it; that script owns the checks and the file's
+# rules, and its notes on the file print here as `note:` lines.
 #
 # The window opens at the first run of the Security workflow on main (the merge that added it, or
 # the first schedule or dispatch after it) and lasts --window-days. The first run is read one day
@@ -94,7 +77,7 @@
 #     of each, from the repository's review comments.
 # Every artifact is read strictly: a run's security-report or zizmor-findings artifact that is
 # missing, expired or not in the shape the Security workflow writes (.github/scripts/
-# deps-summary.sh, .github/scripts/zizmor-findings.sh), or a zizmor-new marker that lists nothing
+# security-run.sh, .github/scripts/zizmor-findings.sh), or a zizmor-new marker that lists nothing
 # new, stops the report with exit 2 naming it. Only a half that recorded a tool error reads as no
 # result.
 # Nothing published here carries a CodeQL location or a secret: alerts are counted by rule,
@@ -106,14 +89,16 @@
 # CI runs its tests (security-report.test.sh) in the test job of pr-and-main.yaml.
 set -euo pipefail
 
-python3 - "$@" <<'PY'
+SECURITY_RUN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/scripts/security-run.sh" python3 - "$@" <<'PY'
 import base64
 import functools
 import io
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -121,10 +106,8 @@ from datetime import datetime, timedelta, timezone
 from itertools import takewhile
 from urllib.parse import quote
 
-USAGE = """usage: security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]
-       security-report.sh --window-flags .github/security-window.json [--at REV]
-       security-report.sh --base-commit EVENT [MERGE_GROUP_BASE_SHA]"""
-CHECKS = ("zizmor", "dependencies")
+USAGE = "usage: security-report.sh [--repo owner/repo] [--window-days 14] [--decision force|none]"
+SECURITY_RUN = os.environ["SECURITY_RUN"]
 PRECISION_BAR = 0.7
 MIN_DISPOSITIONS = 5
 KILL_AT = 3
@@ -132,115 +115,13 @@ NARROW_AT = 3
 CODEQL_BLOCKED = "BLOCKED (caller lacks security-events read; the scheduled Security run has it)"
 SECRET_BLOCKED = "BLOCKED (caller lacks secret_scanning read; run as an admin)"
 SECURITY_TAG = re.compile(r"^Security\[([a-z][a-z-]*)\]:")
-# The counts of each half of a security-report.json (.github/scripts/deps-summary.sh report).
+# The counts of each half of a security-report.json (.github/scripts/security-run.sh report).
 REPORT_HALVES = {"zizmor": ("head_count",), "osv": ("total", "with_fix"), "govulncheck": ("reachable", "informational")}
 
 
 def fail(message, code=2):
     print(f"security-report.sh: {message}", file=sys.stderr)
     sys.exit(code)
-
-
-def window_flags(text, where):
-    """({check: report_only}, notes) from the text of .github/security-window.json, None when there is
-    no file. A check is blocking only where the file says false; every other form reads as report-only
-    and is named in a note. Values the file holds are quoted with json.dumps, so a note is one line."""
-    every = dict.fromkeys(CHECKS, True)
-    if text is None:
-        return every, [f"{where}: missing; every check reads as report-only"]
-    try:
-        document = json.loads(text)
-    except ValueError as error:
-        return every, [f"{where}: not JSON ({error}); every check reads as report-only"]
-    if not isinstance(document, dict) or "report_only" not in document:
-        return every, [f"{where}: not an object with a report_only key; every check reads as report-only"]
-    value = document["report_only"]
-    if isinstance(value, bool):
-        return dict.fromkeys(CHECKS, value), [
-            f"{where}: report_only is one boolean ({json.dumps(value)}) for every check; the per-check form is "
-            '{"report_only": {"zizmor": …, "dependencies": …}}']
-    if not isinstance(value, dict):
-        return every, [f"{where}: report_only is {json.dumps(value)}, not an object of checks; "
-                       "every check reads as report-only"]
-    flags, notes = dict(every), []
-    for check in CHECKS:
-        if check not in value:
-            notes.append(f"{where}: report_only has no {check} key; {check} reads as report-only")
-        elif not isinstance(value[check], bool):
-            notes.append(f"{where}: report_only.{check} is {json.dumps(value[check])}, not true or false; "
-                         f"{check} reads as report-only")
-        else:
-            flags[check] = value[check]
-    for key in sorted(set(value) - set(CHECKS)):
-        notes.append(f"{where}: report_only.{json.dumps(key)} names no check ({', '.join(CHECKS)}); ignored")
-    return flags, notes
-
-
-def git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True)
-
-
-def file_at(rev, path):
-    """PATH's text at commit REV, None when REV has no such file; REV is fetched from origin at depth 1
-    when it is not local (a depth-1 checkout holds only HEAD)."""
-    if git("cat-file", "-e", f"{rev}^{{commit}}").returncode != 0:
-        fetched = git("fetch", "--no-tags", "--depth=1", "origin", rev)
-        if fetched.returncode != 0:
-            fail(f"cannot fetch {rev} from origin: {fetched.stderr.strip()}")
-    if git("cat-file", "-e", f"{rev}:{path}").returncode != 0:
-        return None
-    shown = git("show", f"{rev}:{path}")
-    if shown.returncode != 0:
-        fail(f"cannot read {path} at {rev}: {shown.stderr.strip()}")
-    return shown.stdout
-
-
-def print_window_flags(args):
-    """--window-flags FILE [--at REV]: the window job's reading of the flags, as $GITHUB_OUTPUT lines."""
-    if len(args) == 1:
-        path, rev = args[0], None
-    elif len(args) == 3 and args[1] == "--at":
-        path, rev = args[0], args[2]
-    else:
-        fail(f"--window-flags takes one file and, optionally, --at REV\n{USAGE}")
-    if rev is None:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
-        except OSError:
-            text = None
-        flags, notes = window_flags(text, path)
-    else:
-        flags, notes = window_flags(file_at(rev, path), f"{path} at {rev[:12]}")
-    for check in CHECKS:
-        print(f"{check}={json.dumps(flags[check])}")
-    for note in notes:
-        print(note, file=sys.stderr)
-    sys.exit(0)
-
-
-def print_base_commit(args):
-    """--base-commit EVENT [MERGE_GROUP_BASE_SHA]: the commit a run's head is judged against."""
-    if not args or len(args) > 2:
-        fail(f"--base-commit takes an event and, for merge_group, its base_sha\n{USAGE}")
-    event = args[0]
-    if event == "merge_group":
-        if len(args) != 2 or not args[1]:
-            fail("--base-commit merge_group needs the merge group's base_sha")
-        print(args[1])
-    elif event == "pull_request":
-        # A depth-1 checkout marks HEAD shallow, so `git rev-parse HEAD^1` fails; the raw commit still
-        # names its parents.
-        head = git("cat-file", "-p", "HEAD")
-        if head.returncode != 0:
-            fail(f"cannot read HEAD: {head.stderr.strip()}")
-        parents = [line.split()[1] for line in head.stdout.split("\n\n", 1)[0].splitlines()
-                   if line.startswith("parent ")]
-        if len(parents) != 2:
-            fail(f"HEAD is not a merge commit ({len(parents)} parents); a pull_request run checks out the pull "
-                 "request's merge commit")
-        print(parents[0])
-    sys.exit(0)
 
 
 def parse_args(args):
@@ -269,10 +150,6 @@ def parse_args(args):
     return repo, window_days, decision
 
 
-if sys.argv[1:2] == ["--window-flags"]:
-    print_window_flags(sys.argv[2:])
-if sys.argv[1:2] == ["--base-commit"]:
-    print_base_commit(sys.argv[2:])
 repo, window_days, decision = parse_args(sys.argv[1:])
 
 
@@ -411,13 +288,28 @@ def security_workflow():
 
 
 def report_only_flags():
-    """({check: report_only}, notes) from .github/security-window.json on main (window_flags)."""
+    """({check: report_only}, notes) from main's .github/security-window.json, as security-run.sh
+    window-flags reads it: the file is read through the contents API and handed over in a tree of
+    its own, which holds no such file where main has none."""
     try:
         document = gh(f"repos/{repo}/contents/.github/security-window.json?ref=main")
         text = base64.b64decode(document["content"]).decode("utf-8", "replace")
     except NotFound:
         text = None
-    return window_flags(text, ".github/security-window.json on main")
+    with tempfile.TemporaryDirectory() as root:
+        if text is not None:
+            os.mkdir(f"{root}/.github")
+            with open(f"{root}/.github/security-window.json", "w", encoding="utf-8") as handle:
+                handle.write(text)
+        read = subprocess.run([SECURITY_RUN, "window-flags", ".github/security-window.json"], cwd=root,
+                              capture_output=True, text=True)
+    if read.returncode != 0:
+        fail(f"security-run.sh window-flags could not read main's window file: {read.stderr.strip()}")
+    flags = {}
+    for line in read.stdout.splitlines():
+        check, value = line.split("=", 1)
+        flags[check] = json.loads(value)
+    return flags, [f"main's {note}" for note in read.stderr.splitlines()]
 
 
 MAIN_EVENTS = ("push", "schedule", "workflow_dispatch")
@@ -826,7 +718,7 @@ def main():
     flags, notes = report_only_flags()
     print(f"# Security report for {repo}")
     print()
-    print("report_only: " + ", ".join(f"{check} {json.dumps(flags[check])}" for check in CHECKS))
+    print("report_only: " + ", ".join(f"{check} {json.dumps(flag)}" for check, flag in flags.items()))
     for note in notes:
         print(f"note: {note}")
 
@@ -851,7 +743,7 @@ def main():
     print_secret_scanning()
     threads = review_threads(window)
 
-    still_report_only = [check for check in CHECKS if flags[check]]
+    still_report_only = [check for check, flag in flags.items() if flag]
     forced = decision == "force"
     if not (forced or (window.closed and still_report_only)):
         sys.exit(0)
