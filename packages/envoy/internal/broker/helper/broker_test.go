@@ -65,8 +65,9 @@ const failAlways = 1 << 30
 // The fake also serves the machine-login routes a Broker.Login talks to: POST
 // /v1/launcher-credentials verifies the posted request object with record.VerifyRequestObject and
 // mints a pending id and confirmation code; GET /v1/launcher-credentials/{pending} answers
-// loginOutcome ("issued" by default, or "denied"/"expired" when a test sets it before Login),
-// minting a fresh credential id on "issued".
+// loginOutcome ("issued" by default, or "denied"/"expired" when a test sets it before Login, or
+// "pending" to hold the login undecided until the test sets "issued"), minting a fresh credential
+// id on "issued".
 type fakeBroker struct {
 	mu               sync.Mutex
 	srv              *httptest.Server
@@ -97,8 +98,15 @@ type fakeBroker struct {
 	pendingThumbprint  string // the embedded key's thumbprint from that request object
 	pendingID          string // the opaque id minted for the most recent login
 	pendingCode        string // the confirmation code minted for the most recent login
-	loginOutcome       string // what the pending login's poll answers: "issued", "denied", or "expired"
+	loginOutcome       string // what the pending login's poll answers: "issued", "pending", "denied", or "expired"
 	issuedCredentialID string // the launcher credential id minted for the most recent "issued" login
+
+	// refuseRenewNext answers the next N renews 401 LEASE_EXPIRED whatever the lease, so a test
+	// lapses a session on its next renew without racing the lease's wall clock.
+	refuseRenewNext int
+	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
+	// session enrolling for exactly as long as it needs.
+	enrollGate chan struct{}
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -109,6 +117,12 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		gate := f.enrollGate
+		f.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.lastAuthorization = r.Header.Get("Authorization")
@@ -205,6 +219,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 			writeJSON(w, 503, map[string]string{"code": "DATABASE", "error": "postgres unreachable"})
 			return
 		}
+		if f.refuseRenewNext > 0 {
+			f.refuseRenewNext--
+			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
+			return
+		}
 		v := &proof.Verifier{
 			Skew: time.Minute,
 			Lookup: func(_ context.Context, eid string) (string, bool, error) {
@@ -261,7 +280,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 			return
 		}
 		switch f.loginOutcome {
-		case "denied", "expired":
+		case "denied", "expired", "pending":
 			writeJSON(w, 200, map[string]string{"state": f.loginOutcome})
 			return
 		default:

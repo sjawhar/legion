@@ -9,15 +9,21 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-// lapseRig is a logged-in rig whose one session (this test process) enrolls on a 60 ms lease and
-// then has its renew refused: three failed renews outlast the lease, so the next is refused
-// because the lease lapsed (TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling). The
-// fake then answers failRevokes revokes of the lapsed id with a 503.
+// lapseRig is a logged-in rig whose one session (this test process) enrolls and then has its
+// first renew refused (the fake's refuseRenewNext: 401 LEASE_EXPIRED, whenever that renew comes).
+// Nothing here races a lease's wall clock. The first enrollment's lease is short only so that its
+// renew comes soon (at MinRenew, 50 ms), and every later enrollment gets an hour, so the
+// re-enrollment a test waits for can never lapse again underneath it. The fake then answers
+// failRevokes revokes of the lapsed id with a 503; all callers fail at least the first, so the
+// hour is set well before any re-enrollment.
 //
 // lapseRig returns once the first of those revokes has been answered. It returns the rig, the
 // enrollment id the session had before the lapse, and the state path its records are saved to.
@@ -26,14 +32,17 @@ func lapseRig(t *testing.T, failRevokes int) (*rig, string, string) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
 	r.fake.mu.Lock()
-	r.fake.lease = 60 * time.Millisecond
-	r.fake.renewFail = 3
+	r.fake.lease = 150 * time.Millisecond
+	r.fake.refuseRenewNext = 1
 	r.fake.revokeFailFirst = failRevokes
 	r.fake.mu.Unlock()
 	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !reg.OK || reg.State != "enrolled" {
 		t.Fatalf("register: %+v", reg)
 	}
+	r.fake.mu.Lock()
+	r.fake.lease = time.Hour
+	r.fake.mu.Unlock()
 	waitFor(t, func() bool {
 		r.fake.mu.Lock()
 		defer r.fake.mu.Unlock()
@@ -149,14 +158,72 @@ func TestASessionThatEndsWhileItsLapsedRevokeRetriesStillRevokesIt(t *testing.T)
 
 // TestRegisterWaitWaitsForTheReEnrollmentAfterALapse: a lapse reopens the session's ready
 // channel, so `register --wait` from inside a lapsed session waits for its re-enrollment instead
-// of returning at once with the session still enrolling. The first revoke of the lapsed id fails
-// and the next, a second later, lands, so the re-enrollment comes well inside the wait.
+// of returning at once with the session still enrolling. The re-enrollment is held at the fake's
+// enroll gate until the register call is blocked in registerReply's select on that channel, so the
+// test cannot pass by arriving after the session enrolled again: a register that does not wait
+// answers while the gate is still shut, and the test fails.
 func TestRegisterWaitWaitsForTheReEnrollmentAfterALapse(t *testing.T) {
-	r, lapsed, _ := lapseRig(t, 1)
-	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
-	if !reg.OK || reg.State != "enrolled" || reg.EnrollmentID == "" || reg.EnrollmentID == lapsed {
-		t.Fatalf("register --wait in a lapsed session: %+v; want the fresh enrollment, not %q", reg, lapsed)
+	r, lapsed, _ := lapseRig(t, failAlways)
+	gate := make(chan struct{})
+	var release sync.Once
+	open := func() { release.Do(func() { close(gate) }) }
+	t.Cleanup(open) // runs before the fake's own Close, which waits for the held request
+	r.fake.mu.Lock()
+	r.fake.enrollGate = gate
+	r.fake.revokeFailFirst = 0 // the lapsed id's next revoke lands; the re-enrollment then waits at the gate
+	r.fake.mu.Unlock()
+
+	type reply struct {
+		resp Response
+		err  error
 	}
+	replies := make(chan reply, 1)
+	go func() {
+		resp, err := Call(r.sock, Request{Op: "register", WaitSeconds: 10}, 20*time.Second)
+		replies <- reply{resp, err}
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for !blockedInRegisterReply() {
+		select {
+		case got := <-replies:
+			t.Fatalf("register --wait answered while the re-enrollment was still held: %+v (%v); it must wait for the lapsed session to enroll again", got.resp, got.err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the register call never started waiting on the session's ready channel")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	open()
+	select {
+	case got := <-replies:
+		if got.err != nil || !got.resp.OK || got.resp.State != "enrolled" || got.resp.EnrollmentID == "" || got.resp.EnrollmentID == lapsed {
+			t.Fatalf("register --wait in a lapsed session: %+v (%v); want the fresh enrollment, not %q", got.resp, got.err, lapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("register --wait never answered after the re-enrollment was released")
+	}
+}
+
+// blockedInRegisterReply reports whether some goroutine is blocked in a select inside
+// Server.registerReply, which is where a register call waits for its session to enroll.
+func blockedInRegisterReply() bool {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		header, _, _ := strings.Cut(g, "\n")
+		if strings.Contains(header, "[select") && strings.Contains(g, ").registerReply(") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne: a session enrolling with no failure yet

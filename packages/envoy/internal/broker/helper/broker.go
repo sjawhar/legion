@@ -59,9 +59,9 @@ type Broker struct {
 	OperatorFile string // login_hint source; read per login, as before
 	HTTP         *http.Client
 	// Log records every change of the launcher credential: a machine login installing one, and
-	// a broker refusal clearing it. Its lines carry the credential id, the operator and the
-	// broker's refusal code, which are identifiers, never a proof, a request object or key
-	// material. Nil logs nothing.
+	// a broker refusal clearing it. Its lines carry the credential id, the operator the login was
+	// signed with (its login_hint) and the broker's refusal code, which are identifiers, never a
+	// proof, a request object or key material. Nil logs nothing.
 	Log *slog.Logger
 
 	cred    atomic.Pointer[machineCredential]
@@ -173,7 +173,7 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 		return "", fmt.Errorf("broker returned no pending_id/code")
 	}
 	b.login.Store(&loginState{Code: out.Code, PendingID: out.PendingID, State: "pending"})
-	go b.pollLogin(key, out.PendingID, out.Code)
+	go b.pollLogin(key, out.PendingID, out.Code, operator)
 	return out.Code, nil
 }
 
@@ -226,8 +226,10 @@ func (b *Broker) installCredential(cred *machineCredential) {
 
 // pollLogin polls a pending machine login until a human decides it, backing off from 2s to 10s
 // between attempts. On "issued" it installs the credential (key and id only — never written to
-// disk); on "denied" or "expired" it records the terminal state and leaves cred untouched.
-func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
+// disk) and logs it with operator, the login_hint the login was signed with, whatever the
+// operator file says by then; on "denied" or "expired" it records the terminal state and leaves
+// cred untouched.
+func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code, operator string) {
 	ctx := context.Background()
 	delay := 2 * time.Second
 	for {
@@ -236,7 +238,7 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
 			case "issued":
 				b.installCredential(&machineCredential{key: key, id: credentialID})
 				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: "issued"})
-				b.logger().Info("machine login issued; the helper holds a launcher credential", "credential_id", credentialID, "operator", b.Operator())
+				b.logger().Info("machine login issued; the helper holds a launcher credential", "credential_id", credentialID, "operator", operator)
 				return
 			case "denied", "expired":
 				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: state})
