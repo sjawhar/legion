@@ -161,13 +161,13 @@ Before you plan, file an issue, start a design document, ask, or post a finding,
 ```ts
 dispatch_search({ query, project?, limit? })
 ```
-Every word of the query must match, so search with a short phrase: two to four distinctive words
-from the bug as a user would report it, or from the question you are about to ask. Try two or three
-wordings (the component, the symptom, the fix) before concluding nothing exists. Websearch syntax
-applies: `"merge queue"`, `-daemon`, `OR`. It returns the best `limit` hits (20 by default, 50 at
-most) across issues, documents, comments, asks, and messages. Issue-owned hit lines start with the
-issue key; standalone project-document hit lines start with `dispatch://PROJECT/artifact/<slug>`,
-followed by the absolute link.
+Every word of the query must match, so each word you add can only lose hits: search with two or
+three words, the thing and what is wrong with it, as a user would name them, and when a query finds
+nothing, drop a word before you add one. Try two or three wordings (the component, the symptom, the
+fix) before concluding nothing exists. Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`.
+It returns the best `limit` hits (20 by default, 50 at most) across issues, documents, comments,
+asks, and messages. Issue-owned hit lines start with the issue key; standalone project-document hit
+lines start with `dispatch://PROJECT/artifact/<slug>`, followed by the absolute link.
 
 Open each hit that could be yours with `dispatch_read`, then its parent (the `child_of` row under
 `Links:`); the parent's children and the issue's `Components:` line show where the rest of the
