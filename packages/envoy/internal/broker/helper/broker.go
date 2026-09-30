@@ -181,6 +181,12 @@ func (b *Broker) LoginStatus() loginState {
 	return out
 }
 
+// HasCredential reports whether the helper holds a launcher credential, the one thing every
+// enrollment needs.
+func (b *Broker) HasCredential() bool {
+	return b.cred.Load() != nil
+}
+
 // pollLogin polls a pending machine login until a human decides it, backing off from 2s to 10s
 // between attempts. On "issued" it installs the credential (key and id only — never written to
 // disk); on "denied" or "expired" it records the terminal state and leaves cred untouched.

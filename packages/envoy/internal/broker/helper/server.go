@@ -170,16 +170,25 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 	return s.registerReply(sess, wait)
 }
 
+// registerReply answers a register, first waiting up to wait for the session to enroll. Without a
+// launcher credential the enroll loop cannot succeed until a human logs the helper in, so it does
+// not wait at all, and the reply names that as the reason: a launcher's `register --wait N`
+// then costs nothing on a helper that was never logged in, or whose credential expired.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
-	if wait > 0 {
+	credential := s.Broker.HasCredential()
+	if wait > 0 && credential {
 		select {
 		case <-sess.ready:
 		case <-time.After(wait):
 		case <-sess.stop:
 		}
 	}
+	lastErr := sess.LastError()
+	if !credential && sess.EnrollmentID() == "" && lastErr == "" {
+		lastErr = noCredentialMsg
+	}
 	operator := s.Broker.Operator()
-	return Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: operator, State: sess.State(), Error: sess.LastError()}
+	return Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: operator, State: sess.State(), Error: lastErr}
 }
 
 // resolveDescendant keeps peer's pidfd open through Registry.Root's ancestry walk, exactly like

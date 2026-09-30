@@ -69,7 +69,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	case err != nil:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
 	case *wait > 0 && resp.State != "enrolled":
-		fmt.Fprintf(stderr, "agent-secrets register: not enrolled after %ds (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", *wait, resp.Error)
+		fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", resp.Error)
 	}
 	path, err := exec.LookPath(command[0])
 	if err != nil {

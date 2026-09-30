@@ -153,3 +153,29 @@ func TestIdentityAsksARealHelperWithoutRegistering(t *testing.T) {
 		t.Fatalf("identity inside a registered, enrolling session: %v, output %q; want exit 0", err, out)
 	}
 }
+
+// TestRegisterWaitReturnsAtOnceWithoutALauncherCredential runs `register --wait 10 --exec` against
+// the real helper while it holds no launcher credential: its enroll loop cannot succeed, so the
+// helper answers at once instead of holding the launch for the full wait. The launch warns, naming
+// the login command, and still execs. The bound only rules out the 10 s wait.
+func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock := realHelper(t)
+	cmd := exec.Command(binary, "register", "--wait", "10", "--exec", "--", "sh", "-c", "echo ran")
+	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_KEY_DIR=")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	start := time.Now()
+	out, err := cmd.Output()
+	elapsed := time.Since(start)
+	if err != nil || strings.TrimSpace(string(out)) != "ran" {
+		t.Fatalf("the command must still run: %q %v (stderr %q)", out, err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not enrolled") || !strings.Contains(stderr.String(), "agent-secrets launcher login") {
+		t.Fatalf("a warning names the missing credential's remedy: %q", stderr.String())
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("register --wait 10 took %s with no credential; it must not wait", elapsed)
+	}
+	t.Logf("register --wait 10 with no credential returned in %s", elapsed)
+}
