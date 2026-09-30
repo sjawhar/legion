@@ -1,5 +1,6 @@
 // Seeds rig.sh's scratch Dispatch through its API. DISPATCH_E2E_PORT names the server, which
-// e2e/api.ts addresses.
+// e2e/api.ts addresses. e2e/api.ts addresses PLAYWRIGHT_BASE_URL instead, with E2E_AGENT_TOKEN as
+// its bearer, whenever it is set, so seed.ts refuses to run while either is set.
 //
 //   seed.ts project                 project LWEVAL and LWEVAL-1, the issue the tester's world implements
 //   seed.ts ask-on-message <file>   one run's own issue and the owner's message posting its plan;
@@ -11,6 +12,15 @@ import {
   createMessage,
   createProject,
 } from "../../../dispatch/e2e/api";
+
+for (const name of ["PLAYWRIGHT_BASE_URL", "E2E_AGENT_TOKEN"]) {
+  if (process.env[name] !== undefined) {
+    console.error(
+      `seed.ts: ${name} is set; seed.ts seeds only rig.sh's scratch Dispatch (DISPATCH_E2E_PORT), so it sends nothing`
+    );
+    process.exit(2);
+  }
+}
 
 const [command, out] = Bun.argv.slice(2);
 if (command === "project") {

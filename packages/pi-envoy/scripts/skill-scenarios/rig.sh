@@ -37,6 +37,13 @@
 # private tmux server (`tmux -L skill-scenarios`), with `env -i` and only the variables its pane
 # file names. A `gh` stand-in is first on every run's PATH, so no run reaches GitHub.
 set -euo pipefail
+# Nothing the rig starts inherits a service endpoint or credential from the caller: a Legion pane
+# exports ENVOY_URL, DISPATCH_URL and their token files, a developer's shell can hold NATS
+# credentials (packages/dispatch/e2e/run-server.sh strips the same three families), and e2e/api.ts,
+# which seed.ts calls, addresses PLAYWRIGHT_BASE_URL with E2E_AGENT_TOKEN whenever it is set.
+for name in $(compgen -e); do
+  case $name in DISPATCH_* | ENVOY_* | NATS_* | PLAYWRIGHT_BASE_URL | E2E_AGENT_TOKEN) unset "$name" ;; esac
+done
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 root=$(cd "$here/../../../.." && pwd -P)
@@ -220,8 +227,8 @@ cmd_services() {
     (cd "$root/packages/envoy" && go build -o "$S/envoy-listener" ./cmd/listener)
     (umask 077 && openssl rand -hex 24 >"$S/envoy-token")
     # The listener's port was picked above.
-    ENVOY_API_TOKEN="$(<"$S/envoy-token")" PORT=$envoy_port ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="$prefix" \
-      NATS_URLS="nats://127.0.0.1:$nats_port" nohup env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE "$S/envoy-listener" >"$S/listener.log" 2>&1 &
+    ENVOY_API_TOKEN="$(<"$S/envoy-token")" PORT=$envoy_port ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_HOST_BRIDGE=127.0.0.1 \
+      ENVOY_MACHINE_ID="$prefix" NATS_URLS="nats://127.0.0.1:$nats_port" nohup "$S/envoy-listener" >"$S/listener.log" 2>&1 &
     echo $! >"$S/listener.pid"
     # Dispatch and the two harness ports its server names were picked above.
     DATABASE_URL="postgres://postgres:ci@127.0.0.1:$pg_port/postgres?sslmode=disable" DISPATCH_E2E_PORT=$dispatch_port \
