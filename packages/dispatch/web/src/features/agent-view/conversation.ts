@@ -163,18 +163,30 @@ export function isRunning(state: AgentConversation): boolean {
   return state.messages.some((message) => message.streaming);
 }
 
+/** One streamed user message a person's Dispatch message became: the Dispatch message it says it
+ *  delivered, and what it says, its text parts joined as the session sent them. */
+export interface DispatchTurn {
+  readonly dispatchMessageId: string;
+  readonly text: string;
+}
+
 /**
  * The Dispatch message each streamed user message delivered, by streamed message id: a person's
  * direct message the session took as its own user turn is tagged with its Dispatch id, and the
- * view shows Dispatch's stored copy of it no longer. The bus is open to any client, so a tag
- * counts only as the publisher's contract puts it, a string on a user message; any other is
- * ignored rather than taking the message with it, since a message shown twice beats one lost.
+ * view shows Dispatch's stored copy of it no longer once the text is the same. The bus is open to
+ * any client, so a tag counts only as the publisher's contract puts it, a string on a user
+ * message; any other is ignored rather than taking the message with it, since a message shown
+ * twice beats one lost. The text is read from the frame's own parts, which on a user message are
+ * text alone (`isRenderableFrame`).
  */
-export function dispatchTurns(state: AgentConversation): Map<string, string> {
-  const turns = new Map<string, string>();
+export function dispatchTurns(state: AgentConversation): Map<string, DispatchTurn> {
+  const turns = new Map<string, DispatchTurn>();
   for (const message of state.messages) {
     if (message.role === "user" && typeof message.dispatchMessageId === "string") {
-      turns.set(message.id, message.dispatchMessageId);
+      turns.set(message.id, {
+        dispatchMessageId: message.dispatchMessageId,
+        text: message.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"),
+      });
     }
   }
   return turns;

@@ -99,7 +99,7 @@ test("a recipient whose send is still outstanding offers no retry at all", async
   const page = renderBroadcast(broadcast([attempt({})]));
   try {
     const row = await screen.findByRole("article", { name: "Planner" });
-    expect(within(row).getByText("Sending to Planner (steer)")).toBeTruthy();
+    expect(within(row).getByText("Sending to Planner (Send)")).toBeTruthy();
     // textContent, never the elements: a failed toEqual on DOM nodes serialises the whole tree
     // and can take minutes to report.
     expect(
@@ -156,7 +156,7 @@ test("a delivered recipient offers nothing", async () => {
   const page = renderBroadcast(broadcast([attempt({ envelope_id: "e1", state: "sent" })]));
   try {
     const row = await screen.findByRole("article", { name: "Planner" });
-    expect(within(row).getByText("Sent to Planner (steer)")).toBeTruthy();
+    expect(within(row).getByText("Sent to Planner (Send)")).toBeTruthy();
     // textContent, never the elements: a failed toEqual on DOM nodes serialises the whole tree
     // and can take minutes to report.
     expect(

@@ -188,7 +188,9 @@ describe("a user message a person's Dispatch message became", () => {
       }),
     ]);
 
-    expect(dispatchTurns(state)).toEqual(new Map([["u10", "m-1"]]));
+    expect(dispatchTurns(state)).toEqual(
+      new Map([["u10", { dispatchMessageId: "m-1", text: "Where is the dashboard?" }]])
+    );
     expect(toThreadMessages(state).map((message) => message.id)).toEqual([
       "u10",
       "u20",

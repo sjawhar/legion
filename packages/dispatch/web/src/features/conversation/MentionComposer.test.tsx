@@ -741,11 +741,45 @@ test("a direct-session reply warns before sending when the target does not adver
 
   try {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
-    expect(screen.getByText(/Worker does not advertise Steer/)).toBeTruthy();
+    expect(screen.getByText(/Worker does not advertise Send/)).toBeTruthy();
   } finally {
     view.unmount();
   }
 });
+
+// The warning's way out names only a mode the session takes: a Claude Code session advertises
+// Aside alone, so offering it /btw would suggest a send that fails the same way.
+for (const [name, capabilities, suggestion] of [
+  [
+    "an aside-only session is offered /aside",
+    ["aside"],
+    "Prefix with /aside to send it as an Aside instead.",
+  ],
+  ["a BTW-only session is offered /btw", ["btw"], "Prefix with /btw to send it as a BTW instead."],
+  [
+    "a session taking both is offered both",
+    ["aside", "btw"],
+    "Prefix with /btw or /aside to send it as a BTW or an Aside instead.",
+  ],
+  ["a session taking neither is offered nothing", [], undefined],
+] as const) {
+  test(`when a session does not advertise Send, ${name}`, () => {
+    const session: Agent = { ...worker, capabilities: [...capabilities] };
+    const { view } = renderComposer({
+      agents: [session],
+      owner: { kind: "session", sessionId: "B" },
+    });
+
+    try {
+      fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
+      const warning = screen.getByText(/Worker does not advertise Send, so sending it records/);
+      if (suggestion === undefined) expect(warning.textContent).not.toContain("Prefix with");
+      else expect(warning.textContent).toContain(suggestion);
+    } finally {
+      view.unmount();
+    }
+  });
+}
 
 test("mentioning two targets that both lack the outbound mode names both in the warning", async () => {
   const { view } = renderComposer({ agents: [planner, worker] });
@@ -762,7 +796,7 @@ test("mentioning two targets that both lack the outbound mode names both in the 
     await screen.findByRole("option", { name: "Worker" });
     fireEvent.click(screen.getByRole("option", { name: "Worker" }));
     await waitFor(() => expect(field.value).toBe("@Planner x @Worker"));
-    expect(screen.getByText(/Planner and Worker do not advertise Steer/)).toBeTruthy();
+    expect(screen.getByText(/Planner and Worker do not advertise Send/)).toBeTruthy();
   } finally {
     view.unmount();
   }

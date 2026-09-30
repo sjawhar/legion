@@ -6,20 +6,22 @@ import { z } from "zod";
  * (LEGION-394): the message a person types at the terminal, not an Envoy card. The frame that says
  * a person wrote it is not proof of that: the listener takes an envelope's source from whoever
  * sends it, and every session holds that token. So a frame is only a candidate
- * (`isUserTurnCandidate`), the session reads the message back from Dispatch with its own bearer
- * (`confirmUserTurn`), and it takes the turn only once Dispatch records that this session accepted
- * that very attempt (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), which Dispatch
- * allows once per message, for a person's attempt of the last minute. Anything else keeps today's
- * card, which is the delivery.
+ * (`isUserTurnCandidate`), and the session takes the turn only once Dispatch records that this
+ * session accepted that very attempt (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`).
+ * That accept is the only gate: Dispatch allows it once per message, for a person's own Send or
+ * Aside to this session, of the last minute, that did not fail, and answers the body it stored,
+ * which is what the session injects (`turnFromAccept`). The session only refuses to accept an
+ * attempt it already delivered, as a card or as a turn (`handledAttempts`). Anything else keeps
+ * today's card, which is the delivery.
  */
 
 /**
- * Whether a frame could be a person's direct Send or Aside, worth reading back from Dispatch: a
+ * Whether a frame could be a person's direct Send or Aside, worth asking Dispatch to accept: a
  * Dispatch `message.created` delivery (renderInbound builds a message delivery for no other event)
  * on no issue, whose actor is a person, in aside or steer, and that names no broadcast. An issue
  * message and a comment mention keep their envelope, since their flow replies on the issue; a BTW
  * is a side turn; a broadcast keeps its envelope and its reply counts, and a frame that falsely
- * claims one only yields the card.
+ * claims one only yields the card. It rules frames out and never in: Dispatch decides the rest.
  */
 export function isUserTurnCandidate(
   rendered: RenderInboundResult
@@ -35,72 +37,60 @@ export function isUserTurnCandidate(
   );
 }
 
-/** What a confirmed message becomes: its stored body, sent as Send (steer) or Aside. */
-export interface ConfirmedUserTurn {
+/** What an accepted attempt becomes: the body Dispatch stored, sent as Send (steer) or Aside,
+ *  and the message it delivers, which tags its turn on the live stream. */
+export interface AcceptedUserTurn {
   readonly messageId: string;
-  readonly attempt: number;
   readonly body: string;
   readonly mode: "aside" | "steer";
 }
 
-/** The fields of one stored message the confirmation reads, and nothing else. */
-const StoredMessageSchema = z.object({
-  id: z.string(),
-  author: z.object({ kind: z.string() }),
+/** The fields of the accept's answer the session injects and tags, and nothing else. */
+const AcceptedDeliverySchema = z.object({
+  message_id: z.string(),
   body: z.string(),
-  issue_key: z.string().nullable(),
-  target: z.string().nullable(),
-  // Absent from a Dispatch older than the field, which is not the same as saying no broadcast.
-  broadcast_id: z.string().nullable().optional(),
-  deliveries: z.array(
-    z.object({ attempt: z.number().int(), session_id: z.string(), delivery: z.string() })
-  ),
-});
-
-/** `GET /api/v1/messages/{id}?session=`'s answer: the thread root and every reply. */
-const MessageThreadSchema = z.object({
-  message: StoredMessageSchema,
-  replies: z.array(StoredMessageSchema),
+  delivery: z.enum(["aside", "steer"]),
 });
 
 /**
- * Whether Dispatch's read of the thread a delivery's message belongs to (`GET
- * /api/v1/messages/{id}?session=`) confirms it as a person's own message to this session: the
- * stored author is a person, it belongs to no issue, the thread's root is aimed at this session,
- * no broadcast sent it (a Dispatch that does not say is not taken as saying no), and Dispatch
- * recorded the attempt the frame names as delivered to this session. The mode is that stored
- * attempt's, never the frame's. The read is untrusted JSON, so anything that is not the shape
- * above confirms nothing.
+ * The turn Dispatch's 200 from the accept route says to inject: the message's stored body in the
+ * stored attempt's mode, never the frame's text or mode. The answer is JSON off the network, so
+ * one without that shape (a Dispatch whose accept predates the body) injects nothing.
  */
-export function confirmUserTurn(
-  read: unknown,
-  delivery: DispatchDelivery,
-  sessionID: string
-): ConfirmedUserTurn | undefined {
-  const parsed = MessageThreadSchema.safeParse(read);
+export function turnFromAccept(accepted: unknown): AcceptedUserTurn | undefined {
+  const parsed = AcceptedDeliverySchema.safeParse(accepted);
   if (!parsed.success) return undefined;
-  const { message: root, replies } = parsed.data;
-  const message = root.id === delivery.id ? root : replies.find(({ id }) => id === delivery.id);
-  if (
-    message === undefined ||
-    message.author.kind !== "user" ||
-    message.issue_key !== null ||
-    root.target !== `session:${sessionID}` ||
-    root.broadcast_id !== null ||
-    message.broadcast_id !== null
-  ) {
-    return undefined;
+  return { body: parsed.data.body, messageId: parsed.data.message_id, mode: parsed.data.delivery };
+}
+
+/**
+ * Transcript entry recording one attempt of a person's direct message this session delivered, as
+ * a card or as a turn: `{ message_id, attempt }`. Written before the card or turn goes out and
+ * read back from every entry of the session file, so a frame naming a delivered attempt - a
+ * replay, or one forged inside the accept's minute - is a card with no accept call, even after a
+ * restart or a switch to another branch of the tree.
+ */
+export const HANDLED_ATTEMPT_ENTRY = "envoy-dispatch-handled-attempt";
+
+/** One attempt's key in the set of handled attempts: a message id and an attempt number. */
+export function handledAttemptKey(messageId: string, attempt: number): string {
+  return `${messageId}#${attempt}`;
+}
+
+/** The attempts a session's entries record it handled (`HANDLED_ATTEMPT_ENTRY`), by key. */
+export function handledAttempts(entries: readonly unknown[]): Set<string> {
+  const handled = new Set<string>();
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null) continue;
+    if (!("type" in entry) || entry.type !== "custom") continue;
+    if (!("customType" in entry) || entry.customType !== HANDLED_ATTEMPT_ENTRY) continue;
+    if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) continue;
+    const { data } = entry;
+    if (!("message_id" in data) || typeof data.message_id !== "string") continue;
+    if (!("attempt" in data) || typeof data.attempt !== "number") continue;
+    handled.add(handledAttemptKey(data.message_id, data.attempt));
   }
-  const attempt = message.deliveries.find(
-    (candidate) => candidate.attempt === delivery.attempt && candidate.session_id === sessionID
-  );
-  if (attempt?.delivery !== "aside" && attempt?.delivery !== "steer") return undefined;
-  return {
-    attempt: attempt.attempt,
-    body: message.body,
-    messageId: message.id,
-    mode: attempt.delivery,
-  };
+  return handled;
 }
 
 /** A user message's own text: its text parts alone, which is what a sent prompt's text became. */

@@ -9,7 +9,13 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
-import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  duplicateText,
+  isSafeRetry,
+  MODE_LABELS,
+  safeRetryGuidance,
+  withGuidance,
+} from "./delivery";
 import { ReplyButton } from "./ReplyButton";
 
 /** The current live capabilities behind a stored delivery target - a bare session, or a role
@@ -57,9 +63,10 @@ export function takenAsUserTurn(deliveries: readonly TargetedMessageAttempt[]): 
 
 /** The headline one targeted message gets: who answered it, that it reached the session's own
  *  conversation, why it failed, that it is still going out, that it is a BTW waiting on an
- *  answer, or that it was delivered. `asking` is that BTW branch, whose line ends in a separator
- *  because it carries a timestamp: the two belong to one decision, so the caller reads it here
- *  rather than restating the condition.
+ *  answer, or that it was delivered, naming the mode as the composer does (`MODE_LABELS`).
+ *  `asking` is that BTW branch, whose line ends in a separator because it carries a timestamp:
+ *  the two belong to one decision, so the caller reads it here rather than restating the
+ *  condition.
  *
  *  A BTW is tested before `duplicate`: an outstanding BTW is still waiting on its answer even
  *  when the send that carried it changed nothing, so the human must keep seeing that one is
@@ -73,7 +80,7 @@ function deliveryHeadline(
   if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
   if (delivery?.acceptedAs === "user_turn") {
     return {
-      text: `Delivered to ${targetName}'s conversation (${delivery.delivery})`,
+      text: `Delivered to ${targetName}'s conversation (${MODE_LABELS[delivery.delivery]})`,
       asking: false,
     };
   }
@@ -88,10 +95,10 @@ function deliveryHeadline(
   }
   const mode = delivery?.delivery ?? "steer";
   if (delivery?.state === "pending")
-    return { text: `Sending to ${targetName} (${mode})`, asking: false };
-  if (mode === "btw") return { text: `Asking ${targetName} (BTW) ·`, asking: true };
+    return { text: `Sending to ${targetName} (${MODE_LABELS[mode]})`, asking: false };
+  if (mode === "btw") return { text: `Asking ${targetName} (${MODE_LABELS.btw}) ·`, asking: true };
   if (delivery?.duplicate === true) return { text: duplicateText, asking: false };
-  return { text: `Sent to ${targetName} (${mode})`, asking: false };
+  return { text: `Sent to ${targetName} (${MODE_LABELS[mode]})`, asking: false };
 }
 
 /** One earlier attempt's line: what it did, and the name its own target resolved to when it
@@ -101,7 +108,7 @@ function attemptSummary(attempt: TargetedMessageAttempt, targetName: string): st
   if (attempt.state === "failed") return `Failed: ${attempt.error ?? "delivery failed"}`;
   if (attempt.duplicate === true) return duplicateText;
   const verb = attempt.state === "pending" ? "Sending" : "Sent";
-  return `${verb} to ${attempt.targetName ?? targetName} (${attempt.delivery})`;
+  return `${verb} to ${attempt.targetName ?? targetName} (${MODE_LABELS[attempt.delivery]})`;
 }
 
 /** Whether this card is offering the same-mode Retry the safe-retry promise describes: the
@@ -198,7 +205,7 @@ export function DeliveryRetry({
           </button>
           {supports[mode] ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support {mode}.
+              {targetName} does not support {MODE_LABELS[mode]}.
             </p>
           )}
         </div>
@@ -215,7 +222,7 @@ export function DeliveryRetry({
           </button>
           {canBtw ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support BTW.
+              {targetName} does not support {MODE_LABELS.btw}.
             </p>
           )}
         </div>
@@ -232,7 +239,8 @@ export function DeliveryRetry({
           </button>
           {canSteer ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support normal delivery — use BTW.
+              {targetName} does not support {MODE_LABELS.steer}
+              {canBtw ? ` — use ${MODE_LABELS.btw}.` : "."}
             </p>
           )}
         </div>

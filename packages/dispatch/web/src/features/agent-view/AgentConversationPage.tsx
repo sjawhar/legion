@@ -17,6 +17,7 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { useMarkRepliesRead } from "../agents/unread";
+import { MODE_LABELS } from "../conversation/delivery";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
@@ -30,13 +31,6 @@ const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
   live: { dot: liveDotBg, label: "Live" },
   reconnecting: { dot: connectionDotConnecting, label: "Reconnecting" },
   unavailable: { dot: connectionDotFailed, label: "This session's conversation is unavailable" },
-};
-
-/** Each mode as the composer names it: Send is Enter at the session's terminal. */
-const MODE_LABELS: Record<MessageDeliveryMode, string> = {
-  aside: "Aside",
-  btw: "BTW",
-  steer: "Send",
 };
 
 /** Where each mode stands in the composer. Send comes first wherever the session takes it, since

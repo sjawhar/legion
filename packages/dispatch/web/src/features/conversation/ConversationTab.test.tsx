@@ -996,9 +996,7 @@ test("a comment-delivery retry disables when the target no longer advertises the
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
     await screen.findByText(/no live session worker/);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(
-      screen.getByText(/session:worker-session no longer supports\s+normal delivery\./)
-    ).toBeTruthy();
+    expect(screen.getByText(/session:worker-session no longer supports Send\./)).toBeTruthy();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1074,7 +1072,7 @@ test("a comment-delivery retry to a role target checks the role's current live h
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
     await screen.findByText(/no live session reviewer/);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(screen.getByText(/role:reviewer no longer supports\s+normal delivery\./)).toBeTruthy();
+    expect(screen.getByText(/role:reviewer no longer supports Send\./)).toBeTruthy();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;

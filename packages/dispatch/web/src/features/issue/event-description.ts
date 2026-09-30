@@ -1,4 +1,5 @@
 import type { Event } from "../../api/types";
+import { capabilityLabel } from "../conversation/delivery";
 import { actorLabel, describeAskResolution } from "../refs/actor";
 
 export function eventDescription(event: Event): string {
@@ -38,8 +39,8 @@ export function eventDescription(event: Event): string {
       // A duplicate attempt reached the listener and put nothing on the recipient's subject;
       // its state is still `sent`, so reporting the state alone would read as a delivery.
       return event.payload.duplicate === true
-        ? `Message already delivered: ${event.payload.delivery}`
-        : `Message ${event.payload.state}: ${event.payload.delivery}`;
+        ? `Message already delivered: ${capabilityLabel(event.payload.delivery)}`
+        : `Message ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;
     case "message.accepted":
       return "Message taken as the session's own turn";
     case "ask.opened":
@@ -59,8 +60,8 @@ export function eventDescription(event: Event): string {
       // Same rule as message.delivery above: a duplicate is still `sent`, so the state alone
       // would report a delivery the mentioned session never received.
       return event.payload.duplicate === true
-        ? `Comment already delivered: ${event.payload.delivery}`
-        : `Comment ${event.payload.state}: ${event.payload.delivery}`;
+        ? `Comment already delivered: ${capabilityLabel(event.payload.delivery)}`
+        : `Comment ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;
     case "issue.created":
       return "Issue created";
     case "issue.updated":

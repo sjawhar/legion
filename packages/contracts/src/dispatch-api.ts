@@ -854,6 +854,15 @@ export interface MessageDelivery {
   readonly accepted_at?: string | null;
 }
 
+/**
+ * `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`'s answer: the attempt it accepted, and
+ * the body of the message as Dispatch stored it. The session injects that body in that attempt's
+ * `delivery` mode, never a frame's text or mode: the accept is the only gate.
+ */
+export interface AcceptedMessageDelivery extends MessageDelivery {
+  readonly body: string;
+}
+
 export interface Message {
   readonly id: string;
   readonly issue_key: string | null;

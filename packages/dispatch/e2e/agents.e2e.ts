@@ -915,7 +915,7 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
     agents,
     composer,
     excludedChip: (title: string) =>
-      composer.getByRole("button", { name: new RegExp(`^${title} · does not advertise btw`) }),
+      composer.getByRole("button", { name: new RegExp(`^${title} · does not advertise BTW`) }),
     excludedLine: composer.getByText(/^Excluded:/),
     limit: composer.getByText(/^At most 100 recipients per broadcast/),
     notice: composer.getByText(NOTICE),
@@ -952,7 +952,7 @@ test("with half the recipients unable to take the mode, the compact composer kee
       for (let index = 21; index <= 40; index += 1) {
         await expect
           .soft(fixture.excludedLine, at)
-          .toContainText(`Planner ${index} (does not advertise btw)`);
+          .toContainText(`Planner ${index} (does not advertise BTW)`);
       }
       const last = await fixture.excludedLine.evaluate((element) => {
         const lastName = "Planner 40";

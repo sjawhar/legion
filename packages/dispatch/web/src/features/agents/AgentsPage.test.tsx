@@ -893,7 +893,7 @@ test("Send normally disables when the target does not advertise steer", async ()
     const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     expect(retry.hasAttribute("title")).toBe(false);
-    await within(planner).findByText("Planner does not support normal delivery — use BTW.");
+    await within(planner).findByText("Planner does not support Send — use BTW.");
     expect(within(planner).getByRole("button", { name: "Retry" }).hasAttribute("disabled")).toBe(
       false
     );
@@ -940,7 +940,7 @@ for (const [name, session, read, headline, retries] of [
       }),
       replies: [],
     },
-    "Delivered to Planner's conversation (aside)",
+    "Delivered to Planner's conversation (Aside)",
     0,
   ],
   [
@@ -958,7 +958,7 @@ for (const [name, session, read, headline, retries] of [
         }),
       ],
     },
-    "Delivered to Planner's conversation (steer)",
+    "Delivered to Planner's conversation (Send)",
     0,
   ],
   [
@@ -977,7 +977,7 @@ for (const [name, session, read, headline, retries] of [
       }),
       replies: [],
     },
-    "Delivered to Planner's conversation (aside)",
+    "Delivered to Planner's conversation (Aside)",
     0,
   ],
   [
@@ -989,7 +989,7 @@ for (const [name, session, read, headline, retries] of [
       }),
       replies: [],
     },
-    "Sent to Planner (aside)",
+    "Sent to Planner (Aside)",
     1,
   ],
   [
@@ -1002,7 +1002,7 @@ for (const [name, session, read, headline, retries] of [
       }),
       replies: [],
     },
-    "Sent to Reviewer (aside)",
+    "Sent to Reviewer (Aside)",
     1,
   ],
 ] as const satisfies readonly (readonly [string, string, MessageRead, string, number])[]) {
@@ -1568,7 +1568,7 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
       target: { value: "btw" },
     });
     expect(
-      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise btw\)/)
+      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise BTW\)/)
     ).toBeTruthy();
     fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
       target: { value: "Stand down and report status." },
@@ -1647,7 +1647,7 @@ test("the header checkbox follows the filters and its count never hides a select
       within(chips)
         .getAllByRole("button")
         .map((chip) => chip.textContent)
-    ).toEqual(["Reviewer · does not advertise btw ✕"]);
+    ).toEqual(["Reviewer · does not advertise BTW ✕"]);
 
     // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
     fireEvent.change(directory, { target: { value: "" } });

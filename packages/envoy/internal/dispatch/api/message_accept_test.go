@@ -15,14 +15,17 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// acceptedAttempt is one delivery attempt as the accept route and every message read answer it.
+// acceptedAttempt is one delivery attempt as the accept route and every message read answer it;
+// the accept alone adds the message's stored body, which is what the session injects.
 type acceptedAttempt struct {
 	Attempt     int          `json:"attempt"`
+	Delivery    string       `json:"delivery"`
 	SessionID   string       `json:"session_id"`
 	State       string       `json:"state"`
 	RequestedBy *model.Actor `json:"requested_by"`
 	AcceptedAt  *time.Time   `json:"accepted_at"`
 	AcceptedAs  *string      `json:"accepted_as"`
+	Body        string       `json:"body"`
 }
 
 // acceptDelivery is the session's one-shot claim that it took attempt `attempt` of a message as
@@ -132,6 +135,10 @@ func TestAcceptRecordsAPersonsFreshAttemptAsTheSessionsTurnOnce(t *testing.T) {
 	if attempt.RequestedBy == nil || attempt.RequestedBy.Kind != "user" || attempt.RequestedBy.ID != "alice" {
 		t.Fatalf("accepted attempt's requested_by = %+v, want alice", attempt.RequestedBy)
 	}
+	// The session injects what Dispatch stored and the mode it stored, never what a frame says.
+	if attempt.Body != "Where is the dashboard?" || attempt.Delivery != "aside" {
+		t.Fatalf("accepted attempt = %+v, want the stored body sent as an aside", attempt)
+	}
 
 	read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+root.ID+"?session=s1", nil)
 	var thread struct {
@@ -168,100 +175,175 @@ func TestAcceptRecordsAPersonsFreshAttemptAsTheSessionsTurnOnce(t *testing.T) {
 	}
 }
 
-// Every attempt that is not a person's fresh, latest, never-accepted delivery to this session is
-// refused, naming the check it failed, and nothing is recorded. The bearer's retry and the stale
-// attempt are the two ways a session could otherwise make a person's earlier message a fresh
-// turn in another session: a retry any bearer can request, and a frame forged later naming an
-// attempt a person asked for long ago.
+// Every attempt that is not a person's fresh, latest, never-accepted Send or Aside of a message
+// that person wrote, to this session, is refused, naming the check it failed, and nothing is
+// recorded. The bearer's retry and the stale attempt are the two ways a session could otherwise
+// make a person's earlier message a fresh turn in another session: a retry any bearer can
+// request, and a frame forged later naming an attempt a person asked for long ago. The session's
+// own reply a person retried, a person's BTW retry and a failed attempt are each a message pi-envoy
+// never takes as a turn, so the page must never say one reached the conversation.
 func TestAcceptRefusesEveryAttemptThatIsNotAPersonsFreshLatestDeliveryToThisSession(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		prepare func(t *testing.T, handler http.Handler, database *store.Store, messageID string) int
+		name string
+		// prepare returns the message and the attempt of it that `session` then accepts.
+		prepare func(t *testing.T, handler http.Handler, database *store.Store, root model.Message,
+			reply func(string) *httptest.ResponseRecorder) (string, int)
 		session string
 		status  int
 		code    string
 	}{
 		{
-			name:    "another session's attempt",
-			prepare: func(*testing.T, http.Handler, *store.Store, string) int { return 1 },
+			name: "another session's attempt",
+			prepare: func(_ *testing.T, _ http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				return root.ID, 1
+			},
 			session: "s2", status: http.StatusForbidden, code: "ACCEPT_FORBIDDEN",
 		},
 		{
-			name:    "an attempt that does not exist",
-			prepare: func(*testing.T, http.Handler, *store.Store, string) int { return 9 },
+			name: "an attempt that does not exist",
+			prepare: func(_ *testing.T, _ http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				return root.ID, 9
+			},
 			session: "s1", status: http.StatusNotFound, code: "MESSAGE_NOT_FOUND",
 		},
 		{
+			name: "the session's own reply, which a person retried",
+			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, _ model.Message, reply func(string) *httptest.ResponseRecorder) (string, int) {
+				answered := reply("On it.")
+				if answered.Code != http.StatusCreated {
+					t.Fatalf("session's reply: status=%d body=%s", answered.Code, answered.Body.String())
+				}
+				own := decodeBody[model.Message](t, answered)
+				if retry := retryDelivery(t, handler, own.ID, "steer", "alice"); retry.Code != http.StatusCreated {
+					t.Fatalf("person's retry of the session's reply: status=%d body=%s", retry.Code, retry.Body.String())
+				}
+				return own.ID, 1
+			},
+			session: "s1", status: http.StatusConflict, code: "ACCEPT_NOT_WRITTEN_BY_PERSON",
+		},
+		{
+			name: "a person's BTW retry",
+			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				if retry := retryDelivery(t, handler, root.ID, "btw", "alice"); retry.Code != http.StatusCreated {
+					t.Fatalf("person's BTW retry: status=%d body=%s", retry.Code, retry.Body.String())
+				}
+				return root.ID, 2
+			},
+			session: "s1", status: http.StatusConflict, code: "ACCEPT_NOT_ASIDE_OR_STEER",
+		},
+		{
+			name: "an attempt the session reported failed",
+			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				failed := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
+					"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "error": "the host refused the message",
+				})
+				if failed.Code != http.StatusOK || decodeBody[acceptedAttempt](t, failed).State != "failed" {
+					t.Fatalf("session's error report: status=%d body=%s", failed.Code, failed.Body.String())
+				}
+				return root.ID, 1
+			},
+			session: "s1", status: http.StatusConflict, code: "ACCEPT_FAILED",
+		},
+		{
 			name: "an attempt a later one superseded",
-			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, messageID string) int {
-				if retry := retryDelivery(t, handler, messageID, "steer", "alice"); retry.Code != http.StatusCreated {
+			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				if retry := retryDelivery(t, handler, root.ID, "steer", "alice"); retry.Code != http.StatusCreated {
 					t.Fatalf("person's retry: status=%d body=%s", retry.Code, retry.Body.String())
 				}
-				return 1
+				return root.ID, 1
 			},
 			session: "s1", status: http.StatusConflict, code: "ACCEPT_SUPERSEDED",
 		},
 		{
 			name: "a message the session already took",
-			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, messageID string) int {
-				if accepted := acceptDelivery(t, handler, messageID, 1, "s1"); accepted.Code != http.StatusOK {
+			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				if accepted := acceptDelivery(t, handler, root.ID, 1, "s1"); accepted.Code != http.StatusOK {
 					t.Fatalf("first accept: status=%d body=%s", accepted.Code, accepted.Body.String())
 				}
-				if retry := retryDelivery(t, handler, messageID, "steer", "alice"); retry.Code != http.StatusCreated {
+				if retry := retryDelivery(t, handler, root.ID, "steer", "alice"); retry.Code != http.StatusCreated {
 					t.Fatalf("person's retry: status=%d body=%s", retry.Code, retry.Body.String())
 				}
-				return 2
+				return root.ID, 2
 			},
 			session: "s1", status: http.StatusConflict, code: "ACCEPT_ALREADY_ACCEPTED",
 		},
 		{
 			name: "a retry a session requested",
-			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, messageID string) int {
-				if retry := bearerRetryDelivery(t, handler, messageID, "steer", "s-attacker"); retry.Code != http.StatusCreated {
+			prepare: func(t *testing.T, handler http.Handler, _ *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
+				if retry := bearerRetryDelivery(t, handler, root.ID, "steer", "s-attacker"); retry.Code != http.StatusCreated {
 					t.Fatalf("bearer retry: status=%d body=%s", retry.Code, retry.Body.String())
 				}
-				return 2
+				return root.ID, 2
 			},
 			session: "s1", status: http.StatusConflict, code: "ACCEPT_NOT_REQUESTED_BY_PERSON",
 		},
 		{
 			name: "an attempt that records no requester",
-			prepare: func(t *testing.T, _ http.Handler, database *store.Store, messageID string) int {
+			prepare: func(t *testing.T, _ http.Handler, database *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
 				if _, err := database.Pool.Exec(context.Background(), `
 					update message_deliveries set requested_by = null where message_id = $1 and attempt = 1
-				`, messageID); err != nil {
+				`, root.ID); err != nil {
 					t.Fatalf("clear the requester: %v", err)
 				}
-				return 1
+				return root.ID, 1
 			},
 			session: "s1", status: http.StatusConflict, code: "ACCEPT_NOT_REQUESTED_BY_PERSON",
 		},
 		{
 			name: "an attempt older than a minute",
-			prepare: func(t *testing.T, _ http.Handler, database *store.Store, messageID string) int {
+			prepare: func(t *testing.T, _ http.Handler, database *store.Store, root model.Message, _ func(string) *httptest.ResponseRecorder) (string, int) {
 				if _, err := database.Pool.Exec(context.Background(), `
 					update message_deliveries set created_at = now() - interval '61 seconds'
 					where message_id = $1 and attempt = 1
-				`, messageID); err != nil {
+				`, root.ID); err != nil {
 					t.Fatalf("age the attempt: %v", err)
 				}
-				return 1
+				return root.ID, 1
 			},
 			session: "s1", status: http.StatusConflict, code: "ACCEPT_STALE",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			handler, database, root, _, _ := directConversationFrom(t, "alice")
-			attempt := test.prepare(t, handler, database, root.ID)
-			before := len(acceptedEvents(t, database, root.ID))
+			handler, database, root, reply, _ := directConversationFrom(t, "alice")
+			messageID, attempt := test.prepare(t, handler, database, root, reply)
+			before := len(acceptedEvents(t, database, messageID))
 
-			refused := acceptDelivery(t, handler, root.ID, attempt, test.session)
+			refused := acceptDelivery(t, handler, messageID, attempt, test.session)
 			if refused.Code != test.status || responseCode(t, refused) != test.code {
 				t.Fatalf("accept: status=%d body=%s, want %d %s", refused.Code, refused.Body.String(), test.status, test.code)
 			}
-			assertNothingAccepted(t, database, root.ID, attempt, before)
+			assertNothingAccepted(t, database, messageID, attempt, before)
 		})
 	}
+}
+
+// A person's Send to a session Dispatch finds not live is recorded as failed: no frame of it ever
+// left. A frame forged inside the minute naming that attempt must not make it the session's turn,
+// or the person, shown "Failed", may already have sent it another way (Deep's first round-2
+// construction).
+func TestAcceptRefusesASendDispatchCouldNotDeliver(t *testing.T) {
+	live := false
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	t.Cleanup(listener.Close)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Restart the deploy.", "delivery": "steer",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("direct message: status=%d body=%s", created.Code, created.Body.String())
+	}
+	message := decodeBody[model.Message](t, created)
+	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" || len(sent) != 0 {
+		t.Fatalf("the Send to a session that is not live = %+v with %d sends, want one failed attempt and none sent", message.Deliveries, len(sent))
+	}
+	live = true
+
+	refused := acceptDelivery(t, handler, message.ID, 1, "s1")
+	if refused.Code != http.StatusConflict || responseCode(t, refused) != "ACCEPT_FAILED" {
+		t.Fatalf("accept: status=%d body=%s, want 409 ACCEPT_FAILED", refused.Code, refused.Body.String())
+	}
+	assertNothingAccepted(t, database, message.ID, 1, 0)
 }
 
 // assertNothingAccepted fails t when a refused accept of attempt `attempt` recorded anything: an
@@ -395,6 +477,80 @@ func TestConcurrentAcceptsOfOneAttemptLetExactlyOneWin(t *testing.T) {
 	}
 	if got := len(acceptedEvents(t, database, root.ID)); got != 1 {
 		t.Fatalf("message.accepted events = %d, want one", got)
+	}
+}
+
+// The accept, a claim of the message's next attempt and the session's reply to the same attempt
+// take the message row and the attempt row in two orders. The accept and the claim take the
+// message row and then the attempt row; the reply takes the attempt row and then, through its
+// insert's foreign key, the message row FOR KEY SHARE. So the accept and the claim take the message
+// row FOR NO KEY UPDATE, which that key share does not wait for: whichever of the two holds the
+// message row while the reply holds the attempt, all three land and none deadlocks.
+func TestAcceptAClaimAndAReplyOfOneAttemptAllLand(t *testing.T) {
+	for _, test := range []struct {
+		// first takes the message row while the reply waits for the attempt; second queues behind it.
+		first, second string
+		// want is each call's status once the three have run.
+		want map[string]string
+	}{
+		{first: "accept", second: "claim", want: map[string]string{"accept": "200 ", "claim": "201 ", "reply": "201 "}},
+		// The claim opens attempt 2 before the accept reads, so attempt 1 is no longer the latest.
+		{first: "claim", second: "accept", want: map[string]string{"accept": "409 ACCEPT_SUPERSEDED", "claim": "201 ", "reply": "201 "}},
+	} {
+		t.Run("the "+test.first+" holds the message row", func(t *testing.T) {
+			handler, database, root, reply, _ := directConversationFrom(t, "alice")
+			ctx := context.Background()
+			// The send that carried attempt 1 is still out, so a claim locks the attempt too.
+			if _, err := database.Pool.Exec(ctx, `
+				update message_deliveries set state = 'pending' where message_id = $1 and attempt = 1
+			`, root.ID); err != nil {
+				t.Fatalf("hold attempt 1 in its send: %v", err)
+			}
+			holder, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin holder: %v", err)
+			}
+			defer holder.Rollback(ctx)
+			if _, err := holder.Exec(ctx, `
+				select 1 from message_deliveries where message_id = $1 and attempt = 1 for update
+			`, root.ID); err != nil {
+				t.Fatalf("hold the attempt row: %v", err)
+			}
+			type outcome struct {
+				call     string
+				response *httptest.ResponseRecorder
+			}
+			outcomes := make(chan outcome, 3)
+			calls := map[string]func() *httptest.ResponseRecorder{
+				"reply":  func() *httptest.ResponseRecorder { return reply("On it.") },
+				"accept": func() *httptest.ResponseRecorder { return acceptDelivery(t, handler, root.ID, 1, "s1") },
+				"claim":  func() *httptest.ResponseRecorder { return retryDelivery(t, handler, root.ID, "steer", "alice") },
+			}
+			// The reply queues on the attempt row first, so it takes that row before either other
+			// call does, and then needs the message row the first of them holds.
+			for queued, call := range []string{"reply", test.first, test.second} {
+				go func() { outcomes <- outcome{call: call, response: calls[call]()} }()
+				waitForDatabaseLocks(t, holder, queued+1)
+			}
+			if err := holder.Rollback(ctx); err != nil {
+				t.Fatalf("release the attempt row: %v", err)
+			}
+			got := map[string]string{}
+			for range 3 {
+				select {
+				case landed := <-outcomes:
+					got[landed.call] = fmt.Sprintf("%d %s", landed.response.Code, responseCode(t, landed.response))
+					if landed.response.Code >= http.StatusInternalServerError {
+						t.Errorf("%s: status=%d body=%s", landed.call, landed.response.Code, landed.response.Body.String())
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatalf("the three calls did not all return; returned so far %v", got)
+				}
+			}
+			if fmt.Sprint(got) != fmt.Sprint(test.want) {
+				t.Fatalf("outcomes = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

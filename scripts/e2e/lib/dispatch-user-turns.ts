@@ -1,6 +1,6 @@
 // The browser and bus halves of scripts/e2e/dispatch-user-turns.sh: what a person does on
-// Dispatch's conversation page, what the page is served, and the one read of the notification
-// stream a replay needs.
+// Dispatch's conversation page, what the page is served, the one read of the notification stream
+// a replay needs, and the bare publish a forger with no listener needs.
 //
 //   bun scripts/e2e/lib/dispatch-user-turns.ts send <dispatch-url> <login> <session> <mode> <body> <shot.png>
 //     opens /agents/<session>/live as <login> (Dispatch's trusted identity header), reads which mode
@@ -15,6 +15,9 @@
 //   bun scripts/e2e/lib/dispatch-user-turns.ts envelope <nats-url> <session> <message-id> <seconds>
 //     prints the envelope Dispatch published on notifications.agent.<session> for Dispatch message
 //     <message-id>, as the notification stream holds it; exits 1 when it holds none.
+//   bun scripts/e2e/lib/dispatch-user-turns.ts publish <nats-url> <subject> <data>
+//     publishes <data> on <subject> as a bare bus client, with no listener in between: what any
+//     process that can reach NATS can put on a session's agent subject.
 //
 // Playwright is resolved from packages/dispatch, the package that owns the browser suite.
 import { createRequire } from "node:module";
@@ -239,7 +242,20 @@ async function envelope(): Promise<void> {
   }
 }
 
+async function publish(): Promise<void> {
+  const [url, subject, data] = args;
+  if (!url || !subject || data === undefined) refuse("usage: publish <nats-url> <subject> <data>");
+  const nc = await connect({ name: "legion-e2e-user-turns", servers: url, timeout: 10_000 });
+  try {
+    nc.publish(subject, new TextEncoder().encode(data));
+    await nc.flush();
+  } finally {
+    await nc.close();
+  }
+}
+
 if (command === "send") await send();
 else if (command === "count") await count();
 else if (command === "envelope") await envelope();
-else refuse(`unknown command ${command ?? "(none)"}: send, count or envelope`);
+else if (command === "publish") await publish();
+else refuse(`unknown command ${command ?? "(none)"}: send, count, envelope or publish`);

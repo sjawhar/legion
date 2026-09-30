@@ -53,6 +53,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import { capabilityLabel, MODE_LABELS } from "../conversation/delivery";
 import type { CarriedDraft } from "../conversation/MentionComposer";
 import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
@@ -930,7 +931,7 @@ function AgentRow({
             className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
           >
             {agent.capabilities.map((capability) => (
-              <span key={capability}>{capability}</span>
+              <span key={capability}>{capabilityLabel(capability)}</span>
             ))}
             <span>
               Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
@@ -1053,7 +1054,11 @@ export function broadcastPlan(
       continue;
     }
     if (!agent.capabilities.includes(delivery)) {
-      excluded.push({ reason: `does not advertise ${delivery}`, sessionID, title: agent.title });
+      excluded.push({
+        reason: `does not advertise ${MODE_LABELS[delivery]}`,
+        sessionID,
+        title: agent.title,
+      });
       continue;
     }
     recipients.push(agent);
@@ -1284,7 +1289,7 @@ function BroadcastComposer({
         >
           {DELIVERY_CAPABILITIES.map((mode) => (
             <option key={mode} value={mode}>
-              {mode}
+              {MODE_LABELS[mode]}
             </option>
           ))}
         </select>

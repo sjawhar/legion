@@ -39,6 +39,12 @@ export interface SessionContext {
     readonly ensureOnDisk: () => Promise<void>;
     /** Entries of the active branch; non-empty at session_start on resume. */
     readonly getBranch?: () => readonly unknown[];
+    /**
+     * Every entry the session holds, on every branch of its tree, in the order they were written
+     * (the header excluded; `ReadonlySessionManager.getEntries`). An entry `pi.appendEntry` wrote
+     * is in it at once, before the transcript reaches disk.
+     */
+    readonly getEntries: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */

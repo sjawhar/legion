@@ -73,6 +73,7 @@ import {
   parseIssuePath,
   parseProjectPath,
 } from "../refs/routes";
+import { MODE_LABELS } from "./delivery";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { useAgents } from "./useAgents";
 
@@ -315,6 +316,10 @@ function mentionQuery(
   if (at < 0 || /\s/.test(before.slice(at + 1))) return undefined;
   return { query: before.slice(at + 1), start: at };
 }
+
+/** The prefix that sends a comment or message in a mode other than a Send, the default one; the
+ *  prefixes `parseDelivery` reads. */
+const DELIVERY_PREFIXES = { aside: "/aside", btw: "/btw" } as const;
 
 function parseDelivery(body: string): { body: string; delivery: DeliveryCapability } {
   const match = /^(\/btw |\/aside )/.exec(body);
@@ -928,6 +933,15 @@ export function MentionComposer({
             : [];
         });
   const unsupported = unsupportedOptions.length > 0;
+  // The prefixed modes a person could send in instead: only one every target refusing this mode
+  // advertises, so the warning never suggests a mode those sessions refuse too (an aside-only
+  // session is offered /aside, never /btw).
+  const alternatives = (["btw", "aside"] as const).filter(
+    (mode) =>
+      unsupported &&
+      mode !== outboundMode &&
+      unsupportedOptions.every((option) => option.capabilities.includes(mode))
+  );
 
   return (
     <form
@@ -1139,11 +1153,13 @@ export function MentionComposer({
         <p className={`text-sm ${dangerText}`}>
           {unsupportedOptions.map((option) => option.title).join(" and ")}{" "}
           {unsupportedOptions.length > 1 ? "do" : "does"} not advertise{" "}
-          {outboundMode === "btw" ? "BTW" : outboundMode === "aside" ? "Aside" : "Steer"}; Send will
-          record the failed attempt.
-          {outboundMode === "steer"
-            ? " Prefix with /btw to send as a background message instead."
-            : null}
+          {outboundMode === undefined ? null : MODE_LABELS[outboundMode]}, so sending it records a
+          failed attempt.
+          {alternatives.length === 0
+            ? null
+            : ` Prefix with ${alternatives.map((mode) => DELIVERY_PREFIXES[mode]).join(" or ")} to send it as ${alternatives
+                .map((mode) => `${mode === "aside" ? "an" : "a"} ${MODE_LABELS[mode]}`)
+                .join(" or ")} instead.`}
         </p>
       ) : null}
       {kind === "ask" ? (

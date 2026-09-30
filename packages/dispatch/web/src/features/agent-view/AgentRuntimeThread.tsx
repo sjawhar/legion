@@ -62,13 +62,9 @@ export function AgentRuntimeThread({
     const turns = dispatchTurns(conversation);
     const taken = new Set<string>();
     const streamed = toThreadMessages(conversation).map((message) => {
-      const source = byID.get(turns.get(message.id ?? "") ?? "");
-      const text = Array.isArray(message.content)
-        ? message.content
-            .flatMap((part) => (part.type === "text" && "text" in part ? [part.text] : []))
-            .join("\n")
-        : message.content;
-      if (source === undefined || text !== source.body) return message;
+      const turn = turns.get(message.id ?? "");
+      const source = byID.get(turn?.dispatchMessageId ?? "");
+      if (turn === undefined || source === undefined || turn.text !== source.body) return message;
       taken.add(source.id);
       return { ...message, metadata: dispatchMetadata({ author: otherAuthor(source, viewer) }) };
     });

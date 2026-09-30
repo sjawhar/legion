@@ -55,19 +55,22 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 // acceptedAsUserTurn is what an accepted attempt records it became: the session's own user turn.
 const acceptedAsUserTurn = "user_turn"
 
-// acceptFresh is the accept's last check, judged by Postgres against the created_at Postgres
+// acceptFresh is one of the accept's checks, judged by Postgres against the created_at Postgres
 // wrote, as claimLapsed is: the attempt was opened within the last minute. created_at, not
 // claimed_at, because a resume moves claimed_at. So only an attempt a person has just asked for
-// can be taken, and one that reached its session as a card - a failed read-back, an older plugin,
-// a Claude Code session - can never be taken as a turn later.
+// can be taken, and one that reached its session as a card - an older plugin, a Claude Code
+// session, a card fallback of the last minute's accept - can never be taken as a turn later.
+// Inside that minute the session itself keeps a carded attempt a card, since only it knows that
+// frame already reached it (pi-envoy's handled attempts, `src/dispatch-user-turn.ts`).
 const acceptFresh = `created_at >= now() - interval '1 minute'`
 
-// acceptDirect is the check that the message is the one kind pi-envoy takes as a turn, a person's
-// direct message from the Agents page: on no issue, neither a broadcast's copy nor a reply in a
-// broadcast's thread, in a thread whose root targets the accepting session ($3). "Accepted as a
-// user turn" means nothing for any other message, so it is refused rather than let a bearer have
-// the page say one reached the conversation. It reads messageThreadCTE's thread of the message
-// ($1); a message's issue, broadcast, target and parent are written once, at insert.
+// acceptDirect is the check that the message is the one kind pi-envoy takes as a turn, a direct
+// message from the Agents page: on no issue, neither a broadcast's copy nor a reply in a
+// broadcast's thread, in a thread whose root targets the accepting session ($3). Who wrote it and
+// how it was sent are the accept's own checks beside it. "Accepted as a user turn" means nothing
+// for any other message, so it is refused rather than let a bearer have the page say one reached
+// the conversation. It reads messageThreadCTE's thread of the message ($1); a message's author,
+// issue, broadcast, target and parent are written once, at insert.
 const acceptDirect = `coalesce((
 	select m.issue_key is null and m.broadcast_id is null
 	       and root.target = 'session:' || $3::text and root.broadcast_id is null
@@ -75,12 +78,21 @@ const acceptDirect = `coalesce((
 	where m.id = $1 and t.in_reply_to is null
 ), false)`
 
+// acceptedDelivery is the accept route's answer: the attempt it accepted and the body of the
+// message as Dispatch stored it, which is what the session injects - never a frame's text.
+type acceptedDelivery struct {
+	model.MessageDelivery
+	Body string `json:"body"`
+}
+
 // acceptDelivery is POST /api/v1/messages/{id}/deliveries/{attempt}/accept: the session an
 // attempt went to records that it took the message as its user's own turn, the one write
-// pi-envoy makes before it injects anything. It is one compare-and-set under the message's row
-// lock, and it succeeds only for a person's direct message to that session (acceptDirect), and
-// only for the latest attempt of one none of whose attempts was accepted before, which a person
-// asked for within the last minute; a refusal names the check.
+// pi-envoy makes before it injects anything, and it is the only gate: the session takes the
+// stored body and mode it answers and decides nothing itself about who wrote the message. It is
+// one compare-and-set under the message's row lock, and it succeeds only for a person's direct
+// message to that session (acceptDirect) which that person wrote, sent as a Send or an Aside,
+// and only for the latest attempt of one none of whose attempts was accepted before, which a
+// person asked for within the last minute and which did not fail; a refusal names the check.
 //
 // It may land while the attempt is still pending, since pi-envoy answers the frame before
 // Dispatch settles the send, so it writes neither state nor claimed_at, which the settle is
@@ -133,25 +145,31 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Every attempt is opened, resumed and accepted under this lock, so what the checks below
-	// read cannot move before the update.
-	if _, err := tx.Exec(ctx, `select 1 from messages where id = $1 for update`, message.ID); err != nil {
+	// read cannot move before the update. It is FOR NO KEY UPDATE, which serialises it against
+	// the claim's, and not FOR UPDATE: the session's reply takes the attempt row first and then,
+	// through its insert's foreign key, this row FOR KEY SHARE, which FOR UPDATE would wait for
+	// while this transaction waits for the attempt row the reply holds.
+	if _, err := tx.Exec(ctx, `select 1 from messages where id = $1 for no key update`, message.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var sessionID string
-	var direct, latest, fresh bool
+	var sessionID, delivery, state string
+	var direct, byPerson, latest, fresh bool
 	var taken *int
 	var requester *string
 	err = tx.QueryRow(ctx, messageThreadCTE+`
-		select session_id,
+		select session_id, delivery, state,
 		       `+acceptDirect+`,
+		       (select author ->> 'kind' = 'user' from messages where id = $1),
 		       attempt = (select max(attempt) from message_deliveries where message_id = $1),
 		       (select attempt from message_deliveries where message_id = $1 and accepted_at is not null),
 		       requested_by ->> 'kind',
 		       `+acceptFresh+`
 		from message_deliveries
 		where message_id = $1 and attempt = $2
-	`, message.ID, number, actor.ID).Scan(&sessionID, &direct, &latest, &taken, &requester, &fresh)
+	`, message.ID, number, actor.ID).Scan(
+		&sessionID, &delivery, &state, &direct, &byPerson, &latest, &taken, &requester, &fresh,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message delivery not found")
 		return
@@ -166,7 +184,15 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	case !direct:
 		writeError(w, "ACCEPT_NOT_DIRECT", http.StatusConflict,
-			"only a person's direct message to this session, on no issue and from no broadcast, is taken as its turn")
+			"only a direct message to this session, on no issue and from no broadcast, is taken as its turn")
+		return
+	case !byPerson:
+		writeError(w, "ACCEPT_NOT_WRITTEN_BY_PERSON", http.StatusConflict,
+			"only a message a person wrote is taken as the session's turn")
+		return
+	case delivery != "aside" && delivery != "steer":
+		writeError(w, "ACCEPT_NOT_ASIDE_OR_STEER", http.StatusConflict,
+			fmt.Sprintf("attempt %d is a %s, and only a Send or an Aside is taken as the session's turn", number, delivery))
 		return
 	case taken != nil:
 		writeError(w, "ACCEPT_ALREADY_ACCEPTED", http.StatusConflict,
@@ -179,6 +205,12 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 	case requester == nil || *requester != "user":
 		writeError(w, "ACCEPT_NOT_REQUESTED_BY_PERSON", http.StatusConflict,
 			fmt.Sprintf("no person requested attempt %d", number))
+		return
+	case state != "pending" && state != "sent":
+		// Dispatch told the person this attempt failed, and they may already have sent the message
+		// another way; a frame naming it is not the delivery they were shown.
+		writeError(w, "ACCEPT_FAILED", http.StatusConflict,
+			fmt.Sprintf("attempt %d failed, and only a pending or sent attempt is taken as the session's turn", number))
 		return
 	case !fresh:
 		writeError(w, "ACCEPT_STALE", http.StatusConflict,
@@ -205,7 +237,7 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(appended)
-	WriteJSON(w, http.StatusOK, accepted)
+	WriteJSON(w, http.StatusOK, acceptedDelivery{MessageDelivery: accepted, Body: message.Body})
 }
 
 // pendingMessageDelivery is the attempt one targeted send owns: committed as pending under
@@ -276,8 +308,11 @@ func (s *server) recordPendingMessageDelivery(
 			return pendingMessageDelivery{}, err
 		}
 	}
+	// FOR NO KEY UPDATE, as the accept's is: the session's reply takes an attempt row and then
+	// this row FOR KEY SHARE through its insert's foreign key, and FOR UPDATE would wait for that
+	// while this transaction waits below for the attempt row the reply holds.
 	var target string
-	if err := tx.QueryRow(ctx, `select target from messages where id = $1 for update`, message.ID).Scan(&target); err != nil {
+	if err := tx.QueryRow(ctx, `select target from messages where id = $1 for no key update`, message.ID).Scan(&target); err != nil {
 		return pendingMessageDelivery{}, err
 	}
 	pending := pendingMessageDelivery{resolved: resolved}
