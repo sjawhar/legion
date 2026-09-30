@@ -2178,9 +2178,10 @@ func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
 	}
 }
 
-// A fragment of table rows alone is judged against the table it lands in, as a whole-document write
-// of the same rows is, whatever hyphen rows it holds; a table the fragment makes itself keeps its own
-// refusal, and any other fragment is the block path's, read as a document of its own.
+// A fragment that passes the line check is parsed as rows of the table it lands in, as a
+// whole-document write of the same rows is, whatever one- or two-hyphen rows it holds, and what that
+// parse refuses is refused; a table the fragment makes itself keeps its own refusal, and a fragment
+// that parse does not read as one table is the block path's, read as a document of its own.
 func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
 	const three = "| K | V | W |\n| --- | --- | --- |\n| a | b | c |\n"
 	const two = "| K | V |\n| --- | --- |\n| a | c |\n"
@@ -2196,8 +2197,12 @@ func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
 		{"wide row", two, "| A11 | x |\n| A12 | y | z |", "TABLE_WIDTH"},
 		{"wide row in a list's own table", two, "- | h |\n  | - |\n  | a | b |", "INVALID_OP"},
 		{"wide row in a table after a heading", two, "# h | x\n| a |\n| - |\n| b | c |", "INVALID_OP"},
-		// Not rows alone, so the block path reads the fragment as a document of its own, whose dash row
-		// makes a table of its first row: refused at that table's width, where an upload stores the rows.
+		// The rows parse refuses before it asks whether it read one table, so a heading after a wide
+		// row is answered for the row, where the block path alone would store a paragraph and a heading.
+		{"wide row then a heading", two, "| a | b | c |\n# h | x", "TABLE_WIDTH"},
+		// The only case the block path answers: the heading after the rows makes it read the fragment
+		// as a document of its own, whose dash row makes a table of its first row. Refused at that
+		// table's width, where main stored it with `z` dropped and an upload stores the rows.
 		{"dash row and a heading under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |\n# h | q", "INVALID_OP"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

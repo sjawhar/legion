@@ -66,11 +66,10 @@ document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` f
 (`400 INVALID_MARKDOWN`). An `insert` takes one of two paths. A fragment of only table rows
 anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:859`), which the route
 tries first; the table-row paragraph under the reading rules below says which fragments are rows.
-It returns
-before any read-back, so a table-row insert is not read back, and it can leave a live document
-its own markdown reads back otherwise: a row inserted under an aligned column is stored without
-alignment and reads back with the column's, and a row whose cells the upload path refuses for
-reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
+It returns before any read-back, so a table-row insert is not read back, and it can leave a live
+document its own markdown reads back otherwise: a row inserted under an aligned column is stored
+without alignment and reads back with the column's, and a row whose cells the upload path refuses
+for reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
 Every other insert is spliced and read back on the document it leaves against the one it started
 from, as an accept is (`400 INVALID_OP` on `markdown`), but with the tables' colspans and rowspans
 unwritten: it runs once for each insert of a batch, and an insert, written between document-level
@@ -831,21 +830,19 @@ goldmark drops the cells past the table's width, where that parser keeps them, a
 every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a row
 that fills its table lost the rest of the row's text when it was stored. A row whose cells past
 the width are blank loses nothing and is read at the table's width. A bare-row insert
-(`InsertTableRows`) loses only its fragment's blank lines at either end, then `parseTableRows`
-parses the rest under a header it writes at the target table's width. A fragment that parse reads
-as rows alone - every line yields a cell and a separator, an unescaped `|` (a lone `|` yields no
-cell, and a line whose only pipe is `\|` no separator), no line is delimiter-shaped (cells of three
-hyphens or more, `tableDelimiterRow`) and no line opens another block - gets an upload's answer
-for each line: a row too wide is `markWideRows`' refusal, answered as `TABLE_WIDTH` for the table
-under the written header alone (a table the fragment makes itself keeps its own refusal), and a
-line `markBlockRows` refuses (indented code, `2. | a | b |`) is refused as an upload refuses it,
-`INVALID_OP` on `markdown`, however many cells it holds, since the refusal walk reads that before
-the width. Any other fragment is read as a document of its own and inserted as blocks after the
-table, whole: its pipe lines become paragraphs, a line opening a block is that block, and a line
-of one or two hyphens, which goldmark takes for a delimiter row, makes a table of the line before
-it, judged at that table's width. So such a fragment can differ from an upload of the same lines
-under the target, which reads them as its rows: its rows are stored as paragraphs, or refused for
-a width the target does not have.
+(`InsertTableRows`) decides in three steps. First, its fragment, less its blank lines at either
+end, must have every line yield a cell and an unescaped `|` (a lone `|` yields no cell, and a line
+whose only pipe is `\|` has no separator), with no line delimiter-shaped (cells of three hyphens
+or more, `tableDelimiterRow`). Second, `parseTableRows` parses such a fragment under a header it
+writes at the target table's width, and what that parse refuses is refused: a wide row of the
+table under that header is `markWideRows`' refusal answered as `TABLE_WIDTH`, and anything else
+keeps its own refusal, `INVALID_OP` on `markdown` (a line `markBlockRows` refuses, such as
+indented code or `2. | a | b |`, however many cells it holds, since the refusal walk reads that
+before the width, or a table the fragment makes itself). Third, when that parse refuses nothing and
+reads one table holding every line, those rows are inserted. Every other fragment goes to the
+block path whole, which reads it as a document of its own and writes whatever blocks that
+reading makes, a table of its own included (a line of hyphens, one or more a cell, is a delimiter
+row there), so its answer can differ from an upload of the same lines under the target.
 Goldmark also drops a row's closing `|` whatever stands before it, where that parser reads one
 after an odd run of backslashes as the last cell's text, so that pipe is put back in the cell
 (`keepEscapedClosingPipes`). The renderer writes a cell's pipe `\|` and the header as wide as the

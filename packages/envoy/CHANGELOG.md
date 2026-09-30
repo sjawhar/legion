@@ -44,31 +44,33 @@
   `markdown` answers `INVALID_OP`), naming the row's cells, its table's width and its opening
   words, and both fixes: write a `|` inside a cell as `\|`, or give the header and delimiter rows
   as many cells as the row. A row whose cells past the width are all blank is still read at the
-  table's width. A bare-row insert of a fragment its rows parse reads as rows alone (every line
-  yields a cell and an unescaped `|`, no line is delimiter-shaped and no line opens another block)
-  now answers each line as an upload of the same rows does, because the same parse judges it; it
-  used to count cells itself first, line by line, over a fragment trimmed of Unicode spaces and a
-  first row's indentation. So it drops blank cells past the width and refuses text there, where it
-  refused both. A `|` after an even run of backslashes is text to it, as it always was to uploads, so
+  table's width. A bare-row insert now decides in three steps. A fragment whose every line yields
+  a cell and an unescaped `|` (a lone `|` yields no cell, and a line whose only pipe is `\|` has no
+  separator), with no line delimiter-shaped (cells of three hyphens or more), is parsed under a
+  header at the target table's width. What that parse refuses is refused, a wide row of that
+  table as `TABLE_WIDTH`. When it refuses nothing and reads one table holding every line, those
+  rows are inserted. Every other fragment goes to the block path whole, which reads it as a
+  document of its own. The insert used to count cells itself first, line by line, over a fragment
+  trimmed of Unicode spaces and a first row's indentation, so it now answers differently in these
+  ways. It drops blank cells past the width and refuses text there, where it refused both. A `|`
+  after an even run of backslashes is text to it, as it always was to uploads, so
   `| A11 | new \\| extra |` under two columns is stored as one cell reading `new \| extra` where it
   was refused as `TABLE_WIDTH`; the browser editor's reading of such a pipe is LEGION-412. A space
   outside ASCII, a vertical tab or a form feed at the fragment's edge is a cell's text, so
   `| A11 | new |` then U+00A0 is refused as three cells where it was stored as two. A line the
   parser refuses as another block (indented code, `2. | a | b |`) is refused as an upload refuses
-  it, `INVALID_OP` on `markdown`, however many cells it holds and wherever it stands. Any other
-  fragment (one holding a line that yields no cell or no unescaped `|`, such as a lone `|` or a
-  line whose only pipe is `\|`, a delimiter-shaped line of cells of three hyphens or more, or a
-  line opening a block that interrupts a paragraph) goes to the block path whole, as blocks after
-  the table, where main refused it as `TABLE_WIDTH` whenever a line it counted too wide came first,
-  as with `- | a | b |`, or `| A11 | x | y |` then `|` under two columns; an upload of the same
-  lines under the table reads them as rows. The edit route now tries a fragment as rows before it
-  reads it as a document of its own, so rows that reading refused, such as `[x]: |`, which it took
-  for a link reference definition, are inserted as the rows an upload reads. Versions written
-  before 2026-09-19 hold rows with text past their table's width, since the renderer then wrote a
-  code span's pipe unescaped; re-uploading one is refused rather than stored short. A row's closing
-  `|` after an odd run of backslashes (`| x | y \|`) is now kept as the last cell's text, as the
-  browser editor reads it, where it was dropped (`y \`). An image's alt holding a backslash before a
-  pipe in a table cell is written so that the browser editor reads it as one cell too.
+  it, `INVALID_OP` on `markdown`, however many cells it holds and wherever it stands. A fragment
+  that goes to the block path was refused as `TABLE_WIDTH` wherever the old count met a line too
+  wide before whatever sends the fragment there, as with `- | a | b |` (counted as three cells) or
+  `| A11 | x | y |` then a lone `|` under two columns; it is now written as the blocks it reads as.
+  The route also tries a fragment as rows before it reads it as a document of its own, so rows
+  that reading refused, such as `[x]: |`, which it took for a link reference definition, are
+  inserted as the rows an upload reads. Versions written before 2026-09-19 hold rows with text
+  past their table's width, since the renderer then wrote a code span's pipe unescaped;
+  re-uploading one is refused rather than stored short. A row's closing `|` after an odd run of
+  backslashes (`| x | y \|`) is now kept as the last cell's text, as the browser editor reads it,
+  where it was dropped (`y \`). An image's alt holding a backslash before a pipe in a table cell
+  is written so that the browser editor reads it as one cell too.
 
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before
