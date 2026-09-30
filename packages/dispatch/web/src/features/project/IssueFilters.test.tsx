@@ -78,15 +78,19 @@ function renderStrip(
   const getMyState = spyOn(api, "getMyState").mockResolvedValue(state);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["whoami"], { kind: "user", login });
-  const view = render(
+  // `ProjectPage` keeps one strip across the List/Board toggle and flips `showStatus`, so
+  // re-rendering this tree with the other value is that toggle. A test that restated the tree
+  // instead would remount the strip, and a remount re-reads the disclosure preference.
+  const tree = (status: boolean) => (
     <MemoryRouter initialEntries={[initialEntry]}>
       <QueryClientProvider client={queryClient}>
-        <StripAndList showStatus={showStatus} />
+        <StripAndList showStatus={status} />
         <LocationSearch />
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return { getMyState, listIssues, view };
+  const view = render(tree(showStatus));
+  return { getMyState, listIssues, tree, view };
 }
 
 test("Needs you keeps only issues with open asks and lives in the URL", async () => {
@@ -342,6 +346,44 @@ test("collapses a saved filter disclosure when no filters are active", async () 
         screen.getByRole("button", { name: "Filters · 0 active" }).getAttribute("aria-expanded")
       ).toBe("false")
     );
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    window.localStorage.clear();
+  }
+});
+
+// The saved preference is the only owner of the open state: the strip reads it when it mounts
+// and when identity resolves, never because the filter count moved. The List folding a
+// `?status=` into the count is the one way that count rises on a strip already up, and it used
+// to reopen one the reader had left closed.
+test("the List and Board toggle leaves a closed strip closed; the reader still opens it", async () => {
+  window.localStorage.clear();
+  const { getMyState, listIssues, tree, view } = renderStrip(
+    [issue()],
+    {},
+    "/projects/CORE?status=todo",
+    "alice",
+    false
+  );
+
+  try {
+    await screen.findByText("Core work");
+    // The Board ignores `?status=`, so nothing is active and the strip starts collapsed.
+    expect(
+      screen.getByRole("button", { name: "Filters · 0 active" }).getAttribute("aria-expanded")
+    ).toBe("false");
+
+    view.rerender(tree(true));
+    const trigger = screen.getByRole("button", { name: "Filters · 1 active" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "Remove Status: Todo filter" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Status( · \d+)?$/ })).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Status · 1" })).toBeTruthy();
   } finally {
     view.unmount();
     getMyState.mockRestore();

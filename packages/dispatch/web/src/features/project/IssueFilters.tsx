@@ -43,27 +43,21 @@ export function IssueFilters({
     ...filters.activeFilters,
   ];
   const noIdentityFiltersExpanded = labels.length > 0;
-  // The strip re-reads its saved open state when the filter count changes only while it is
-  // closed: that is how filters arriving from a link open it. While it is open the count changes
-  // because the user is filtering in it, and a re-read would collapse it the moment the last
-  // filter goes (clearing the search box), taking the control they are typing in with it. So it
-  // stays open until they close it or leave the project (`ProjectPage` keys the strip by it).
-  const [refreshOn, setRefreshOn] = useState(activeFilterCount);
+  // The saved preference is the only owner of the open state: the strip reads it when it mounts
+  // and when the signed-in identity resolves, never because the filter count moved. A route
+  // that arrives with filters mounts a new strip, so its own read opens it; while a strip is up
+  // the count moves because the reader is filtering in it, and a re-read there would collapse
+  // it the moment the last filter goes (clearing the search box), taking the control they are
+  // typing in with it. So it stays as they left it until they close it or leave the project or
+  // its Issues tab, both of which unmount it (`ProjectPage`).
   const [filtersExpanded, setFiltersExpanded] = useUserPreference(
     "project.issue-filters",
     (stored) => activeFilterCount > 0 && stored !== "collapsed",
     (open) => (open ? "expanded" : "collapsed"),
-    {
-      failed: noIdentityFiltersExpanded,
-      pending: noIdentityFiltersExpanded,
-      refreshOn,
-    }
+    { failed: noIdentityFiltersExpanded, pending: noIdentityFiltersExpanded }
   );
   const [openPicker, setOpenPicker] = useState<"labels" | "status" | undefined>(undefined);
 
-  useEffect(() => {
-    if (!filtersExpanded) setRefreshOn(activeFilterCount);
-  }, [activeFilterCount, filtersExpanded]);
   useEffect(() => {
     if (!filtersExpanded) setOpenPicker(undefined);
   }, [filtersExpanded]);

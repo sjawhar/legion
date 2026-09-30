@@ -190,7 +190,7 @@ test("project page groups issues by status in board order; filters narrow issues
 });
 
 // The search filter holds up to 1,000 characters, and its chip laid every one of them out on one
-// line: the page grew to 6,452 px at 1280, and a phone zoomed out until its layout was 1,560 px.
+// line: the page grew to 7,535 px at 1280, and a phone zoomed out until its layout was 1,560 px.
 test("a 1,000-character search filter's chip ends in an ellipsis inside its row", async ({
   browser,
 }, testInfo) => {
