@@ -64,13 +64,19 @@ jobs:
       # bin/agent-secrets-helper. CGO_ENABLED=0 matches the existing agent-secrets
       # builds (packages/envoy/docker/Dockerfile, packages/daemon/docker/worker.Dockerfile):
       # without it, a same-arch build (amd64 here) links dynamically against the
-      # runner's glibc instead of producing a static binary.
+      # runner's glibc instead of producing a static binary. The archive is wrapped
+      # in one top-level "agent-secrets" directory (agent-secrets/bin/...) rather
+      # than bin/... directly: mise's github backend auto-strips exactly one leading
+      # directory from an asset shaped like that, so the installed tree still ends
+      # up bin/agent-secrets, bin/agent-secrets-helper; a bare bin/... top level
+      # would itself be the one directory mise strips, flattening the binaries to
+      # the install root instead.
       - name: Build agent-secrets binaries
         run: |
-          mkdir -p bin
-          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o bin/agent-secrets ./cmd/agent-secrets
-          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o bin/agent-secrets-helper ./cmd/agent-secrets-helper
-          tar czf agent-secrets-${{ matrix.arch }}.tar.gz bin
+          mkdir -p out/agent-secrets/bin
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/agent-secrets/bin/agent-secrets ./cmd/agent-secrets
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/agent-secrets/bin/agent-secrets-helper ./cmd/agent-secrets-helper
+          tar czf agent-secrets-${{ matrix.arch }}.tar.gz -C out agent-secrets
         working-directory: packages/envoy
       - uses: actions/upload-artifact@v4
         with:
