@@ -159,21 +159,8 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
     );
 }
 
-export const SPEC_SECTIONS = [
-  "Summary",
-  "New since we talked",
-  "Acceptance",
-  "Requirements",
-  "Design",
-  "Errors",
-  "Testing",
-  "Rejected",
-] as const;
-
-const SPEC_WRITING_GUIDANCE =
-  `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` +
-  "Write for a reader who has not seen the code: plain sentences, every identifier expanded on " +
-  "first use, no coined shorthand; see skills/dispatch Writing for the human and Writing a spec.";
+const SPEC_WRITING_POINTER =
+  'Write a spec as the "Writing a spec" section of skill://dispatch says.';
 
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
@@ -234,7 +221,7 @@ export const dispatchToolSpecs = [
         .optional(),
       spec: z
         .string()
-        .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_GUIDANCE}`)
+        .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`)
         .optional(),
       labels: z
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
@@ -685,7 +672,7 @@ export const dispatchToolSpecs = [
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
-      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -815,13 +802,14 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1" },
+    example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
     description:
-      "Ask a human to approve a document at its current version - the exception path for a spec " +
-      "that departs from what was settled or proposes children, not a step for every issue. Opens an " +
-      "approval ask (Approve / Request changes) in the human's Inbox; the answer pins a review to the " +
-      "document version and arrives as artifact.approved or artifact.changes_requested. A later edit " +
-      "makes an approval stale; request again for the new version. Idempotent while a request is open. " +
+      "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
+      "Request changes) in the human's Inbox whose question names the document and version, then " +
+      "summary; the answer pins a review to that version and arrives as artifact.approved or " +
+      "artifact.changes_requested. A later version makes an approval stale, and writing it retracts " +
+      "an open request for an older version; request again for the new one. A repeat at the version " +
+      "an open request names returns that request unchanged. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -832,6 +820,11 @@ export const dispatchToolSpecs = [
           "Project document artifact id, slug, or filename; primary document by default for an issue."
         )
         .optional(),
+      summary: z
+        .string({ min: 1 })
+        .describe(
+          "The proposals in this version the human hasn't already agreed to, in one to three sentences. Request approval only when the spec has no open decision blocks."
+        ),
     }),
     validation: documentOwnerValidation(true),
   },

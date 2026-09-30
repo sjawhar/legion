@@ -268,12 +268,14 @@ export class DispatchClient {
   }
 
   /**
-   * Opens (or returns the open) approval ask for a document at its latest version. When that
-   * version is already approved, `ask` is null and `approval` carries the standing approval.
+   * Opens an approval ask for a document at its latest version, its question the document, the
+   * version and `summary`. An open ask at that version is returned unchanged; one naming an older
+   * version is retracted and replaced. When that version is already approved, `ask` is null and
+   * `approval` carries the standing approval.
    */
   async requestApproval(
     artifactID: string,
-    input: { actor: Actor }
+    input: { actor: Actor; summary: string }
   ): Promise<{
     ask: Ask | null;
     artifact_id: string;

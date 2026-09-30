@@ -24,7 +24,7 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 	}
 	instructions := []string{
 		"the tree's work starts only once you register your spec with `register_gate`, under either design gate policy",
-		"With `root-issues`, request the spec's approval with `dispatch_request_approval`",
+		"With `root-issues`, once every decision block in the spec is answered and folded into its text, request its approval with `dispatch_request_approval` and a `summary`",
 		"With `off`, request no approval and wait for no `design-approved`",
 	}
 	for _, policy := range []config.DesignGate{config.DesignGateRootIssues, config.DesignGateOff} {

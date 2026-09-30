@@ -560,6 +560,7 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   LEGION_E2E_DISPATCH_TOKEN_SECRET_ID=<secret id> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
+STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -588,6 +589,15 @@ daemon log, `run.json` (source revision, image and plugin), the pod watch, each 
 every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
 controller's), the interest samples, the audit files and the negative controls. What the
 run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh).
+
+`STAGE4B_DESIGN_GATE=root-issues`, refused without a `STAGE4B_UNTIL` of `spec-posted` or a checkpoint
+before it, arms the design gate (`gates.design: root-issues`) and files tree 1 alone, since each
+admitted root's architect requests approval on its own. Tree 1's document leaves one choice (where
+the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `spec-posted` waits up
+to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
+It then fails unless the architect asked that choice as a decision block, and its approval request
+at the approved version carries a summary after `Approve spec.md (version N)?` and was made after
+every decision block was settled; it keeps the issue's asks as `<issue>-asks.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.

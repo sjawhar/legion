@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0]
+
+### Changed
+
+- `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
+  the human hasn't already agreed to, in one to three sentences (LEGION-387). The Inbox shows it
+  after "Approve spec.md (version N)?", and the result text quotes the question the human sees.
+  It needs a Dispatch server that accepts `summary`; an older one refuses the call.
+- The `dispatch_issue` and `dispatch_doc_edit` descriptions no longer list spec headings; they
+  point at the dispatch skill's "Writing a spec", which describes a spec as the design
+  conversation: the problem and its evidence, open questions as decision blocks after the text
+  that discusses them, and approval requested only once those are settled.
+
 ## [0.5.0]
 
 ### Added

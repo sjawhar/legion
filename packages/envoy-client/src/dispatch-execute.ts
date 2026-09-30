@@ -2458,7 +2458,10 @@ export async function executeDispatchTool(
           ? ownerArguments.ref.id
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
-      const result = await client.requestApproval(resolved.artifact.id, { actor });
+      const result = await client.requestApproval(resolved.artifact.id, {
+        actor,
+        summary: stringArg(args, "summary"),
+      });
       if (result.ask === null) {
         return {
           text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
@@ -2473,7 +2476,7 @@ export async function executeDispatchTool(
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }

@@ -3108,7 +3108,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("# Right document");
   });
 
-  test("dispatch_request_approval opens the approval ask for the issue spec and reports its version", async () => {
+  test("dispatch_request_approval sends its summary and reports the question the Inbox shows", async () => {
     const posts: Array<{ path: string; body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const target = new URL(String(url));
@@ -3121,9 +3121,16 @@ describe("executeDispatchTool", () => {
         });
       }
       if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
-        posts.push({ path: target.pathname, body: JSON.parse(String(init?.body)) });
+        const body = JSON.parse(String(init?.body)) as { summary: string };
+        posts.push({ path: target.pathname, body });
         return response({
-          ask: { id: "ask-9", issue_key: "DSP-42", artifact_id: null, kind: "approval" },
+          ask: {
+            id: "ask-9",
+            issue_key: "DSP-42",
+            artifact_id: null,
+            kind: "approval",
+            question: `Approve spec.md (version 3)? ${body.summary}`,
+          },
           artifact_id: "artifact-42",
           version: 3,
         });
@@ -3133,7 +3140,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_request_approval",
-      args: { issue: "DSP-42" },
+      args: { issue: "DSP-42", summary: "Proposes a live sync in place of the nightly export." },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -3143,14 +3150,67 @@ describe("executeDispatchTool", () => {
     });
 
     expect(posts).toHaveLength(1);
-    expect((posts[0]?.body as { actor: { kind: string } }).actor.kind).toBe("session");
+    expect(posts[0]?.body).toMatchObject({
+      actor: { kind: "session" },
+      summary: "Proposes a live sync in place of the nightly export.",
+    });
     // The architect copies the document id and version from this text into register_gate, so
     // both must be stated — the id in particular, since the slug it typed is not the id.
-    expect(result.text).toContain("spec.md (document id artifact-42) at version 3");
-    expect(result.text).toContain("ask ask-9");
+    expect(result.text).toStartWith(
+      "Approval requested for spec.md (document id artifact-42) at version 3 (ask ask-9)."
+    );
+    expect(result.text).toContain(
+      '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
+    );
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
+  });
+
+  // A repeat at the version an open request already names returns that request unchanged, so
+  // the question the human sees carries the earlier summary, not the one this call sent.
+  test("dispatch_request_approval reports the open request's own question, not the summary it sent", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
+        return response({
+          ask: {
+            id: "ask-8",
+            issue_key: "DSP-42",
+            artifact_id: null,
+            kind: "approval",
+            question: "Approve spec.md (version 3)? Proposes a nightly export to the archive.",
+          },
+          artifact_id: "artifact-42",
+          version: 3,
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_request_approval",
+      args: { issue: "DSP-42", summary: "Proposes a live sync in place of the nightly export." },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(
+      '"Approve spec.md (version 3)? Proposes a nightly export to the archive."'
+    );
+    expect(result.text).not.toContain("live sync");
   });
 
   test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
@@ -3182,7 +3242,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_request_approval",
-      args: { issue: "DSP-42" },
+      args: { issue: "DSP-42", summary: "Proposes a live sync in place of the nightly export." },
       cwd: "/workspace",
       host: "omp",
       config,
