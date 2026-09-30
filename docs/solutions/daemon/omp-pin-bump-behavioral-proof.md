@@ -45,6 +45,11 @@ bump, LEGION-208 4b.16, found a changed key-failure message and a changed catalo
 Do not add any other test that asserts the new string: it repeats the constant, fails on every
 legitimate bump, and defends no behavior.
 
+The Go tests run the binary under a fresh HOME per case, and each HOME's natives (about 355 MiB at
+18.2.9) are hardlinks to one copy per binary, which the first run on a machine extracts into
+`~/.cache/legion/test-omp-natives/<digest of the binary>/` (`testbin.OMPHome`). A bump therefore
+adds one such directory; the old pin's can be removed once no checkout on the machine still tests it.
+
 ## The proof set
 
 Each acceptance line got a command whose output was quoted verbatim in the PR body, and the tester
