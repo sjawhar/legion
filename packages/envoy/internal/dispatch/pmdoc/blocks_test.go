@@ -57,7 +57,7 @@ func TestDeleteBlockLeavesAnEmptyParagraphWhenTheDocumentEmpties(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !emptyDocument(out) {
+	if !EmptyDocument(out) {
 		t.Fatalf("emptied document = %#v, want one empty paragraph", out.Children)
 	}
 }

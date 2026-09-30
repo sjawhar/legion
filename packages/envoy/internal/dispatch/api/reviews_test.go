@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -164,6 +165,130 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 	if len(history) != 2 || history[0].Version != 2 || history[1].Version != 1 {
 		t.Fatalf("review history = %#v, want v2 then v1", history)
+	}
+}
+
+// An approval request's question carries the requester's summary of what the version proposes,
+// within the ask cap. A request after the document has moved on retracts the ask naming the older
+// version and opens one at the latest, so no human approves a version the question never named.
+func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	type approvalAsk struct {
+		ID       string `json:"id"`
+		State    string `json:"state"`
+		Question string `json:"question"`
+		Approval struct {
+			Version int `json:"version"`
+		} `json:"approval"`
+		Resolution *struct {
+			Kind   string `json:"kind"`
+			Reason string `json:"reason"`
+			Actor  struct {
+				ID string `json:"id"`
+			} `json:"actor"`
+		} `json:"resolution"`
+	}
+	type requestResponse struct {
+		Ask     approvalAsk `json:"ask"`
+		Version int         `json:"version"`
+	}
+	request := func(artifactID string, summary *string) *httptest.ResponseRecorder {
+		body := map[string]any{"actor": sessionActor()}
+		if summary != nil {
+			body["summary"] = *summary
+		}
+		return sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/approval-requests", body)
+	}
+
+	// A request without a summary asks what it always has.
+	plain := createInteractionIssue(t, handler, "TEST", "Unsummarised approval", "Another spec")
+	unsummarised := request(plain.PrimaryArtifactID, nil)
+	if unsummarised.Code != http.StatusCreated {
+		t.Fatalf("request without a summary: status=%d body=%s", unsummarised.Code, unsummarised.Body.String())
+	}
+	if got := decodeBody[requestResponse](t, unsummarised).Ask.Question; got != "Approve spec.md (version 1)?" {
+		t.Fatalf("question without a summary = %q", got)
+	}
+
+	issue := createInteractionIssue(t, handler, "SUM", "Summarised approval", "A spec")
+	for _, blank := range []string{"", " \n\t "} {
+		if refused := request(issue.PrimaryArtifactID, &blank); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"SUMMARY_INPUT"`) || !strings.Contains(refused.Body.String(), "summary is blank") {
+			t.Fatalf("summary %q: status=%d body=%s", blank, refused.Code, refused.Body.String())
+		}
+	}
+	// "Approve spec.md (version 1)? " leaves 771 of the 800 UTF-16 units for the summary; each
+	// "é" is one unit and two bytes, and the padding around a summary is not part of it.
+	over := strings.Repeat("é", 772)
+	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), "summary is 1 characters over the 771-character limit (772/771)") {
+		t.Fatalf("summary over the cap: status=%d body=%s", refused.Code, refused.Body.String())
+	}
+	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "draft" {
+		t.Fatalf("approval after refused requests = %#v, want draft with nothing opened", got.Approval)
+	}
+	atCap := strings.Repeat("é", 771)
+	padded := "  " + atCap + "\n"
+	first := request(issue.PrimaryArtifactID, &padded)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("summary at the cap: status=%d body=%s", first.Code, first.Body.String())
+	}
+	opened := decodeBody[requestResponse](t, first).Ask
+	if opened.Question != "Approve spec.md (version 1)? "+atCap || opened.Approval.Version != 1 {
+		t.Fatalf("summarised approval ask = %#v", opened)
+	}
+
+	// A repeat at the same version returns the open ask as it stands, whatever it says.
+	other := "A different summary."
+	repeat := request(issue.PrimaryArtifactID, &other)
+	if repeat.Code != http.StatusOK {
+		t.Fatalf("repeat at the same version: status=%d body=%s", repeat.Code, repeat.Body.String())
+	}
+	if got := decodeBody[requestResponse](t, repeat).Ask; got.ID != opened.ID || got.Question != opened.Question {
+		t.Fatalf("repeat at the same version = %#v, want ask %s unchanged", got, opened.ID)
+	}
+
+	// A repeat after a new version retracts that ask and opens one at the new version.
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("revise document: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("settle revised version: status=%d body=%s", named.Code, named.Body.String())
+	}
+	revised := "Adds the retry budget."
+	second := request(issue.PrimaryArtifactID, &revised)
+	if second.Code != http.StatusCreated {
+		t.Fatalf("repeat after a new version: status=%d body=%s", second.Code, second.Body.String())
+	}
+	reopened := decodeBody[requestResponse](t, second)
+	if reopened.Ask.ID == opened.ID || reopened.Version != 2 || reopened.Ask.Approval.Version != 2 || reopened.Ask.Question != "Approve spec.md (version 2)? Adds the retry budget." {
+		t.Fatalf("approval ask after a new version = %#v", reopened)
+	}
+	retracted := decodeBody[requestResponse](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+opened.ID, nil, "alice")).Ask
+	if retracted.State != "resolved" || retracted.Resolution == nil || retracted.Resolution.Kind != "retracted" || retracted.Resolution.Actor.ID != sessionActor()["id"] || !strings.Contains(retracted.Resolution.Reason, "version 2") {
+		t.Fatalf("superseded approval ask = %#v, want retracted by the requester naming version 2", retracted)
+	}
+	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "awaiting" || got.Approval.AskID == nil || *got.Approval.AskID != reopened.Ask.ID {
+		t.Fatalf("approval after the repeat = %#v, want awaiting on ask %s", got.Approval, reopened.Ask.ID)
+	}
+	// Followers of the old ask learn it closed, then the new ask opens, in that order.
+	var events []struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID string `json:"id"`
+		} `json:"payload"`
+	}
+	if err := json.NewDecoder(dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice").Body).Decode(&events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	tail := events[len(events)-2:]
+	if tail[0].Type != "ask.resolved" || tail[0].Payload.ID != opened.ID || tail[1].Type != "ask.opened" || tail[1].Payload.ID != reopened.Ask.ID {
+		t.Fatalf("last two events = %#v, want ask.resolved for %s then ask.opened for %s", tail, opened.ID, reopened.Ask.ID)
 	}
 }
 

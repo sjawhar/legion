@@ -218,7 +218,17 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 			"reason may not begin with "+strconv.Quote(docs.SettlementRetractionReason)+", which marks a retraction the document's settlement wrote")
 		return
 	}
-	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, askTransition{
+	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, s.resolveTransition(actor, kind, reason))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, ask)
+}
+
+// resolveTransition closes an open ask as retracted or resolved, recording the reason.
+func (s *server) resolveTransition(actor model.Actor, kind, reason string) askTransition {
+	return askTransition{
 		EventType: "ask.resolved",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
 			resolution := model.AskResolution{Kind: kind, Reason: reason, Actor: actor, At: time.Now().UTC()}
@@ -246,12 +256,7 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 			ask.Resolution = &resolution
 			return ask, nil
 		},
-	})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
 	}
-	WriteJSON(w, http.StatusOK, ask)
 }
 
 func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, transition askTransition) (model.Ask, error) {

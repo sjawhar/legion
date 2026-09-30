@@ -865,7 +865,13 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
 			return out, invalidSchemaOp("markdown", err)
 		}
-		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		// A document with nothing in it holds one empty paragraph, which the insert takes the place
+		// of rather than leaving an empty line beside what it writes.
+		at := pmdoc.Range{From: position, To: position}
+		if pmdoc.EmptyDocument(tree) {
+			at = pmdoc.Range{From: 0, To: pmdoc.Size(tree)}
+		}
+		out, err := pmdoc.Splice(tree, at, with)
 		if err != nil {
 			return nil, invalidSchemaOp("markdown", err)
 		}

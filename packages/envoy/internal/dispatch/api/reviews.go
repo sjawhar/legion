@@ -375,14 +375,23 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, review)
 }
 
-// POST /api/v1/artifacts/{id}/approval-requests  (any authenticated actor)
+// POST /api/v1/artifacts/{id}/approval-requests  {summary?}  (any authenticated actor)
 func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Actor *model.Actor `json:"actor"`
+		Actor   *model.Actor `json:"actor"`
+		Summary *string      `json:"summary"`
 	}
 	if r.ContentLength != 0 {
 		if err := decodeJSON(r, &input); err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	var summary string
+	if input.Summary != nil {
+		summary = strings.TrimSpace(*input.Summary)
+		if summary == "" {
+			writeError(w, "SUMMARY_INPUT", http.StatusBadRequest, "summary is blank; say what this version proposes that the human hasn't already agreed to, or omit it")
 			return
 		}
 	}
@@ -434,16 +443,42 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
-	if open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID); err != nil {
+	question, err := approvalQuestion(artifact.Name, version, summary)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	} else if open != nil {
+	}
+	open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if open != nil && open.Approval.Version == version {
 		if err := s.attachOpenedEventIDs(r.Context(), tx, []*model.Ask{open}); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: open.Approval.Version, Approval: *artifact.Approval})
+		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
+	}
+	events := make([]model.Event, 0, 2)
+	if open != nil {
+		// The open request names a version the document has moved past, and an answer to it
+		// would pin a review to the latest version, which its question never named.
+		reason := fmt.Sprintf("%s moved on to version %d; approval is requested for that version instead", artifact.Name, version)
+		retracted, err := s.transitionAskTx(r.Context(), tx, open.ID, s.resolveTransition(actor, "retracted", reason))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		event, err := s.appendEvent(r.Context(), tx, owner.event(
+			"ask.resolved", actor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
+		))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		events = append(events, event)
 	}
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
@@ -456,7 +491,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		ArtifactID: owner.ArtifactID,
 		Author:     actor,
 		Kind:       "approval",
-		Question:   fmt.Sprintf("Approve %s (version %d)?", artifact.Name, version),
+		Question:   question,
 		Options:    approvalAskOptions,
 		Multiple:   false,
 		Urgency:    "high",
@@ -508,14 +543,31 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ask.OpenedEventID = &event.ID
+	events = append(events, event)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publish(events...)
 	awaiting := *artifact.Approval
 	awaiting.State = "awaiting"
 	awaiting.RequestedBy = &actor
 	awaiting.AskID = &ask.ID
 	WriteJSON(w, http.StatusCreated, response{Ask: &ask, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
+}
+
+// approvalQuestion is an approval ask's question: the document and version it names, then the
+// requester's summary of what that version proposes when one was given. A summary that would
+// take the question past the ask cap is refused naming the characters left for it.
+func approvalQuestion(name string, version int, summary string) (string, error) {
+	question := fmt.Sprintf("Approve %s (version %d)?", name, version)
+	if summary == "" {
+		return question, nil
+	}
+	// The summary follows the question after one space.
+	left := max(0, maxAskQuestion16-len16(question)-1)
+	if length := len16(summary); length > left {
+		return "", capExceededError("summary", length, left)
+	}
+	return question + " " + summary, nil
 }
