@@ -235,7 +235,7 @@ bookmark sits on the **remaining** half â€” the new, undescribed working copy â€
 `jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark backwards or sideways`). Before every push,
 run the push procedure in `skills/legion-worker/SKILL.md`: it checks that `@-` descends from `legion/<KEY>@origin`, then
 sets the bookmark with `-r @- --allow-backwards` and pushes it. A rebase, a retarget, or a squash into a pushed commit
-leaves the pushed tip outside `::@-`; record that tip first (*Rewriting pushed commits* there), and the same push
+leaves the pushed tip outside `::@-`; record that tip first (*Rewriting pushed commits* in `skills/legion-worker/references/conflicts-and-rewrites.md`), and the same push
 accepts the recorded tip and refuses any other.
 
 When `@-` descends from the remote branch, the remote moves **forward**: jj 0.45's push summary reads

@@ -41,12 +41,13 @@ this note adds only what the production mode changed.
 
 `RIG_PLUGINS=production` copies `~/.omp/profiles/legion/plugins` (`package.json`, `bun.lock`,
 `node_modules`, ~240 MB) into the rig profile, deletes the profile's `agent/extensions/` so exactly
-one copy of each extension loads, and then swaps only `node_modules/@sjawhar/pi-legion-envoy`:
-`RIG_LEGION_BUILD=branch` runs the checkout's `bun run build` and copies `dist/envoy.js` and
-`dist/legion.js` over the installed package's `dist/` (the installed `package.json` already names
-those files in `omp.extensions`); `RIG_LEGION_BUILD=<version>` runs `npm pack` and extracts the
-release in place. Everything else in the tree — `secretsd`, `superpowers`, codegraph, knives —
-loads exactly as it does in production, at the pinned versions.
+one copy of each extension loads, and then swaps only `node_modules/@sjawhar/pi-legion-envoy` for a
+tarball extracted in its place, so the rig runs exactly what `npm pack` ships (`dist/` with the
+bundles and `dist/skills`, `agents/`, `package.json`). `RIG_LEGION_BUILD=branch` packs the checkout
+with `scripts/e2e/lib/pack-plugin.sh`, the release's pack steps and the same script the stage
+proofs install through; `RIG_LEGION_BUILD=<version>` runs `npm pack` on the release. Everything else
+in the tree — `secretsd`, `superpowers`, codegraph, knives — loads exactly as it does in production,
+at the pinned versions.
 
 Two consequences worth knowing before the first run:
 
