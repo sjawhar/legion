@@ -4,12 +4,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
 )
 
 // Each entry the binary leaves out gets the advice that fixes it: all: brings in a _ or . name, and
-// nothing embeds a symlink or an empty directory, so those are named for what they are.
+// nothing embeds a symlink, a version-control name, an empty directory or an irregular file, so
+// those are named for what they are rather than sent back to all:.
 func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -42,6 +44,27 @@ func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 				}
 			},
 			want: "migrations/_0002_b.up.sql is on disk but not embedded, so no runner would see it; embed the directory with all:",
+		},
+		{
+			name: "a version-control directory, which all: does not bring in",
+			place: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, ".git", "objects"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "migrations/.git is a version-control name, which no //go:embed directive embeds, all: included; remove it",
+		},
+		{
+			name: "a FIFO, which is not a regular file",
+			place: func(t *testing.T, dir string) {
+				if err := syscall.Mkfifo(filepath.Join(dir, "0002_b.up.sql"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "migrations/0002_b.up.sql is not a regular file (a FIFO, socket or device), which no //go:embed directive embeds; remove it",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

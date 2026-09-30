@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
@@ -46,10 +47,16 @@ func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 		switch {
 		case entry.Type()&fs.ModeSymlink != 0:
 			return fmt.Errorf("%s/%s is a symlink, which no //go:embed directive embeds, so no runner would see it; replace it with the file it points to, or remove it (an editor's lock file, such as Emacs's .#<file>, is one)", dir, name)
+		case slices.Contains([]string{".git", ".hg", ".svn", ".bzr"}, name):
+			return fmt.Errorf("%s/%s is a version-control name, which no //go:embed directive embeds, all: included; remove it", dir, name)
 		case entry.IsDir():
 			return fmt.Errorf("%s/%s is a directory holding nothing //go:embed can carry, such as an empty one, and a migrations directory holds files alone; remove it", dir, name)
+		case !entry.Type().IsRegular():
+			return fmt.Errorf("%s/%s is not a regular file (a FIFO, socket or device), which no //go:embed directive embeds; remove it", dir, name)
+		case strings.HasPrefix(name, "_") || strings.HasPrefix(name, "."):
+			return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
 		}
-		return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
+		return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; check the store's //go:embed pattern", dir, name)
 	}
 	return nil
 }
