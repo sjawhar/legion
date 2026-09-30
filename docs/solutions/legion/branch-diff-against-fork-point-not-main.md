@@ -50,6 +50,6 @@ Only a *diff* whose `--from` is `main@origin` misleads.
 
 ## Related
 
-- `skills/legion-worker/SKILL.md`, "The unchanged-diff check": the fork-point fingerprint recipe.
+- `skills/legion-worker/references/conflicts-and-rewrites.md`, "The unchanged-diff check": the fork-point fingerprint recipe.
 - `docs/solutions/legion/long-lived-branch-mechanics-jj-new-and-merge-not-rebase.md`: why Legion
   branches live long enough for `main` to move under them.

@@ -4,6 +4,16 @@
 
 ### Added
 
+- Every session with the Dispatch tools, Legion panes and `task` subagents included, now carries the
+  `dispatch-first` skill in every model request: search Dispatch before planning, filing, asking or
+  starting work; extend the issue that already tracks the work; cite the decision a human already
+  made; close duplicates naming the survivor; write asks and messages that stand on their own; and
+  read `skill://dispatch` before writing a spec (LEGION-386). The extension inserts it as a user
+  message after any compaction summaries on each request, so it survives turn 2 and compaction;
+  a message that quotes its marker never switches it off, and a copy is looked for only where the
+  extension inserts one. It is read once at load, so a package without
+  `dist/skills/dispatch-first/SKILL.md` fails to load naming the file. A session without Dispatch
+  configured gets nothing.
 - The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
   they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
   which runs that procedure and decides whether the push skips CI: a handoff push that a later push
@@ -40,6 +50,21 @@
 
 ### Changed
 
+- The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
+  in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
+  threshold, where the 75 KB single file used to reach agents with its middle cut out.
+  `src/skills-guard.test.ts` now holds every skill to that: it fails when any skill file reaches
+  the threshold, any skill body reaches 500 lines, a skill's frontmatter name is not its
+  directory's, or a `skill://<name>/<path>` link names a missing file or heading.
+- The `legion-worker` skill arrives whole (LEGION-386). At 55,020 bytes it was over Oh My Pi's
+  51,200-byte spill threshold, so a phase worker read it with its middle cut out. Its body is now
+  under 500 lines, and the PR-body template and proofs, review threads, conflicts and fingerprints,
+  and the merge gate are references under `skill://legion-worker/references/`, each linked from
+  the step that needs it. The reviewer's role prompt approves the `.legion/` deletion head with
+  the skill's head-pinned review submission, and the implementer, reviewer and tester role
+  prompts point at the reference that now holds each procedure they name. `src/skills-guard.test.ts`
+  keeps every legion-worker file under the threshold and every `skill://legion-worker/` link and
+  reference resolved, and every change under `skills/` now runs this package's tests in CI.
 - `legion.goDaemonApiVersion` is 11. Contract 11 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, each Legion role App's login keyed by its App role (`{implement, review}`), which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
 - `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
   role Apps once the Legion review App's `Accepted:` is its newest submitted comment. A CI bot
