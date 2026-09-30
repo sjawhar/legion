@@ -335,8 +335,11 @@ jobs:
                 "\(.govulncheck.reachable) reachable, \(.govulncheck.informational) informational" end) + " |"' \
               security-report.json
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "tool_error=$(jq -r .tool_error security-report.json)" >> "$GITHUB_OUTPUT"
-          echo "zizmor_new=$(jq -r '.zizmor.new_count // 0' security-report.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "zizmor_tool_error=$(jq -r .zizmor.tool_error security-report.json)"
+            echo "dependencies_tool_error=$(jq -r '.osv.tool_error or .govulncheck.tool_error' security-report.json)"
+            echo "zizmor_new=$(jq -r '.zizmor.new_count // 0' security-report.json)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload the report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -344,13 +347,21 @@ jobs:
           name: security-report
           path: security-report.json
 
-      # Two markers scripts/security-report.sh lists by name, so the window's report reads a
-      # handful of artifacts rather than one per run.
-      - name: Mark a tool error
-        if: steps.report.outputs.tool_error == 'true'
+      # Markers scripts/security-report.sh lists by name, so the window's report reads a handful
+      # of artifacts rather than one per run: a zizmor tool error drops the run from rule 1b, a
+      # dependency scanner's counts toward rule 2.
+      - name: Mark a zizmor tool error
+        if: steps.report.outputs.zizmor_tool_error == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: security-tool-error
+          name: zizmor-tool-error
+          path: security-report.json
+
+      - name: Mark a dependency scanner tool error
+        if: steps.report.outputs.dependencies_tool_error == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dependencies-tool-error
           path: security-report.json
 
       - name: Mark new zizmor findings

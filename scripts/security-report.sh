@@ -39,21 +39,24 @@
 # Where the numbers come from. Every read is `gh api` (in CI the workflow token with the security
 # job's permissions; on a devbox the routed GitHub App, which reads Actions runs and artifacts and
 # is refused the alert endpoints — those rows read BLOCKED). The Security workflow's security job
-# uploads, per run, `security-report` (its counts) and two marker artifacts listable by name, so a
-# window of a few thousand pull request runs costs a few dozen calls rather than one download per
-# run: `security-tool-error` (the run recorded a tool error; rule 2 counts these) and `zizmor-new`
-# (a pull_request run found zizmor findings new against its base; its zip is that run's
+# uploads, per run, `security-report` (its counts) and three marker artifacts listable by name, so
+# a window of a few thousand pull request runs costs a few dozen calls rather than one download per
+# run: `dependencies-tool-error` (osv-scanner or govulncheck recorded a tool error; rule 2 counts
+# these), `zizmor-tool-error` (the run has no zizmor result; rule 1b skips it) and `zizmor-new` (a
+# pull_request run found zizmor findings new against its base; its zip is that run's
 # zizmor-findings.json).
 #   - runs on main: every scheduled and dispatched run since the window opened, and main's newest
 #     push run, each with its security-report; rule 1a reads the newest completed one with a
 #     zizmor result.
 #   - merged pull requests (merged inside the window): a PR's runs are matched by head branch and
-#     time, since GitHub empties a run's pull_requests list once the PR closes. new₀ is the new set
-#     of its first run (from that run's zizmor-new marker; no marker means nothing new). Each new₀
-#     finding is `ignored` when the PR's own patches add a `# zizmor: ignore[<audit>]` line in its
-#     file or its file name under `rules.<audit>.ignore` in .github/zizmor.yml, `merged with
-#     findings` when the PR's last run still reports it new against its base (compared as a
-#     multiset, so a repeated finding counts once per copy), and `fixed` otherwise.
+#     time, since GitHub empties a run's pull_requests list once the PR closes, and a run with a
+#     zizmor-tool-error marker is skipped. new₀ is the new set of its first run (from that run's
+#     zizmor-new marker; no marker means nothing new). Each new₀ finding is `ignored` when the PR's
+#     own patches add a `# zizmor: ignore[<audit>]` line in its file, or add its file name to an
+#     ignore list whose enclosing `rules.<audit>` key is read from .github/zizmor.yml at the PR's
+#     merge commit (a hunk's context rarely reaches the key), `merged with findings` when the PR's
+#     last run still reports it new against its base (compared as a multiset, so a repeated finding
+#     counts once per copy), and `fixed` otherwise.
 #   - Security[<tag>]: review threads opened inside the window, with the newest `Accepted:` reply
 #     of each, from the repository's review comments.
 # Nothing published here carries a CodeQL location or a secret: alerts are counted by rule,
@@ -85,6 +88,7 @@ CODEQL_BLOCKED = "BLOCKED (caller lacks security-events read; the scheduled Secu
 SECRET_BLOCKED = "BLOCKED (caller lacks secret_scanning read; run as an admin)"
 SECURITY_TAG = re.compile(r"^Security\[([a-z][a-z-]*)\]:")
 INLINE_IGNORE = re.compile(r"zizmor:\s*ignore\[([^\]]*)\]")
+HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 RULE_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 IGNORE_ITEM = re.compile(r"^\s+-\s+[\"']?([^\"':\s]+)")
 
@@ -282,10 +286,10 @@ for run in list(reversed(completed))[:10]:
         break
 
 # --- tool errors (rule 2) ------------------------------------------------------------------------
-tool_error_markers = list(paged(f"repos/{repo}/actions/artifacts?name=security-tool-error", "artifacts"))
+tool_error_markers = list(paged(f"repos/{repo}/actions/artifacts?name=dependencies-tool-error", "artifacts"))
 tool_error_runs = sorted({m["workflow_run"]["id"] for m in tool_error_markers if in_window(m["created_at"])})
 print()
-print(f"## Tool errors in the window: {len(tool_error_runs)}")
+print(f"## Dependency scanner tool errors in the window: {len(tool_error_runs)}")
 for marker in sorted((m for m in tool_error_markers if in_window(m["created_at"])), key=lambda m: m["created_at"]):
     run = marker["workflow_run"]
     print(f"- run {run['id']} ({run.get('head_branch')}@{(run.get('head_sha') or '')[:7]}, {marker['created_at']})")
@@ -301,38 +305,51 @@ while True:
 merged.sort(key=lambda pr: pr["number"])
 
 new_markers = list(paged(f"repos/{repo}/actions/artifacts?name=zizmor-new", "artifacts"))
-tool_error_run_ids = {m["workflow_run"]["id"] for m in tool_error_markers}
+zizmor_error_run_ids = {m["workflow_run"]["id"]
+                        for m in paged(f"repos/{repo}/actions/artifacts?name=zizmor-tool-error", "artifacts")}
 
 
 def belongs(pr, branch, stamp):
     return branch == pr["head"]["ref"] and when(pr["created_at"]) <= when(stamp) <= when(pr["merged_at"])
 
 
-def ignored_by(found, files):
+def config_ignores(pr, patch):
+    """The (rule, file name) pairs a PR's .github/zizmor.yml patch adds to ignore lists. Each added
+    line is numbered from its hunk header and its enclosing `  <rule>:` key is read from the whole
+    file at the PR's merge commit, since a hunk's three context lines rarely reach the key."""
+    try:
+        content = gh(f"repos/{repo}/contents/.github/zizmor.yml?ref={pr['merge_commit_sha']}")
+    except NotFound:
+        return set()
+    lines = base64.b64decode(content["content"]).decode("utf-8").splitlines()
+    added, number = set(), None
+    for line in patch.splitlines():
+        header = HUNK.match(line)
+        if header:
+            number = int(header.group(1))
+            continue
+        if number is None or line.startswith("-") or line.startswith("\\"):
+            continue
+        item = IGNORE_ITEM.match(line[1:]) if line.startswith("+") else None
+        if item:
+            rule = next((key.group(1) for key in map(RULE_KEY.match, reversed(lines[:number - 1])) if key), None)
+            added.add((rule, item.group(1)))
+        number += 1
+    return added
+
+
+def ignored_by(found, files, configured):
     ident, path = found["ident"], found["path"]
-    name = path.rsplit("/", 1)[-1]
+    if (ident, path.rsplit("/", 1)[-1]) in configured:
+        return True
     for changed in files:
-        patch = changed.get("patch") or ""
-        if changed["filename"] == path:
-            for line in patch.splitlines():
-                if line.startswith("+") and not line.startswith("+++"):
-                    for match in INLINE_IGNORE.finditer(line):
-                        if ident in (part.strip() for part in match.group(1).split(",")):
-                            return True
-        if changed["filename"] == ".github/zizmor.yml":
-            rule = None
-            for line in patch.splitlines():
-                if line.startswith("@@"):
-                    rule = None
-                    continue
-                marker, body = line[:1], line[1:]
-                key = RULE_KEY.match(body)
-                if key and marker != "-":
-                    rule = key.group(1)
-                    continue
-                item = IGNORE_ITEM.match(body)
-                if marker == "+" and rule == ident and item and item.group(1) == name:
-                    return True
+        if changed["filename"] != path:
+            continue
+        for line in (changed.get("patch") or "").splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                for match in INLINE_IGNORE.finditer(line):
+                    if ident in (part.strip() for part in match.group(1).split(",")):
+                        return True
     return False
 
 
@@ -348,7 +365,7 @@ for pr in merged:
     runs = sorted(
         (run for run in paged(f"{runs_path}?event=pull_request&branch={quote(pr['head']['ref'], safe='')}", "workflow_runs")
          if run.get("event") == "pull_request" and run.get("status") == "completed"
-         and run.get("conclusion") not in ("cancelled", "skipped") and run["id"] not in tool_error_run_ids
+         and run.get("conclusion") not in ("cancelled", "skipped") and run["id"] not in zizmor_error_run_ids
          and belongs(pr, run.get("head_branch"), run["created_at"])),
         key=lambda run: run["created_at"],
     )
@@ -364,9 +381,11 @@ for pr in merged:
              else run_file(last["id"], "zizmor-findings", "zizmor-findings.json")) or {}
     remaining = Counter(found["fingerprint"] for found in final.get("new") or [])
     files = list(paged(f"repos/{repo}/pulls/{pr['number']}/files"))
+    configured = set().union(*(config_ignores(pr, changed.get("patch") or "") for changed in files
+                               if changed["filename"] == ".github/zizmor.yml"))
     counts = Counter()
     for found in new0:
-        if ignored_by(found, files):
+        if ignored_by(found, files, configured):
             outcome = "ignored"
         elif remaining[found["fingerprint"]] > 0:
             remaining[found["fingerprint"]] -= 1

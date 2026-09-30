@@ -63,6 +63,10 @@ case "$path" in
   repos/*/contents/.github/security-window.json\?ref=main)
     [ -e "$d/window.json" ] || not_found
     printf '{"encoding":"base64","content":"%s"}\n' "$(base64 -w0 "$d/window.json")" ;;
+  repos/*/contents/.github/zizmor.yml\?ref=*)
+    yml="$d/zizmor-${path##*ref=}.yml"
+    [ -e "$yml" ] || not_found
+    printf '{"encoding":"base64","content":"%s"}\n' "$(base64 -w0 "$yml")" ;;
   *) not_found ;;
 esac
 STUB
@@ -157,12 +161,16 @@ add_run_artifact() {
   zip_artifact "$id" "$4" "$5"
 }
 
-# add_marker NAME RUN_ID [JSON]: the zizmor-new or security-tool-error marker artifact of a run;
-# its zip holds JSON (zizmor-findings.json for zizmor-new, security-report.json otherwise).
+# add_marker NAME RUN_ID [JSON]: a marker artifact of a run (zizmor-new, zizmor-tool-error or
+# dependencies-tool-error); its zip holds JSON (zizmor-findings.json for zizmor-new,
+# security-report.json otherwise).
 add_marker() {
-  local file="$d/markers-$1.json" id file_name
-  if [ "$1" = zizmor-new ]; then id=$(($2 * 10 + 3)) file_name=zizmor-findings.json; else
-    id=$(($2 * 10 + 4)) file_name=security-report.json; fi
+  local file="$d/markers-$1.json" id file_name=security-report.json
+  case "$1" in
+    zizmor-new) id=$(($2 * 10 + 3)) file_name=zizmor-findings.json ;;
+    dependencies-tool-error) id=$(($2 * 10 + 4)) ;;
+    zizmor-tool-error) id=$(($2 * 10 + 5)) ;;
+  esac
   [ -e "$file" ] || echo '{"total_count": 0, "artifacts": []}' > "$file"
   append "$file" .artifacts "$(artifact_json "$id" "$1" "$2" "$(run_created "$2")")"
   zip_artifact "$id" "$file_name" "${3:-{\}}"
@@ -172,7 +180,8 @@ add_marker() {
 add_pr() {
   [ -e "$d/pulls.json" ] || echo '[]' > "$d/pulls.json"
   append "$d/pulls.json" . "$(jq -cn --argjson n "$1" --arg ref "$2" --arg created "$3" --arg merged "$4" \
-    '{number: $n, head: {ref: $ref}, created_at: $created, merged_at: $merged, updated_at: $merged}')"
+    '{number: $n, head: {ref: $ref}, created_at: $created, merged_at: $merged, updated_at: $merged,
+      merge_commit_sha: "merge\($n)"}')"
 }
 
 # add_file NUMBER FILENAME PATCH
@@ -299,9 +308,13 @@ check "adds nothing to precision" "$(has "precision undecided (0 of 5 dispositio
 echo "=== R7. kill: an audit ignored 3 times ==="
 setup r7 "15 days ago"
 pr_with_findings 61 feat-h 6001 6002 '[]' "$(entry artipacked .github/workflows/w.yaml)"
-add_file 61 .github/workflows/w.yaml $'@@ -3,1 +3,1 @@\n+      - uses: actions/checkout@v5 # zizmor: ignore[artipacked]'
+add_file 61 .github/zizmor.yml $'@@ -1,3 +1,6 @@\n rules:\n+  artipacked:\n+    ignore:\n+      - w.yaml\n   unpinned-uses:\n     config:'
+printf '%s\n' 'rules:' '  artipacked:' '    ignore:' '      - w.yaml' '  unpinned-uses:' '    config:' > "$d/zizmor-merge61.yml"
+# An item appended far below its rule key: the hunk's context never shows `  artipacked:`.
 pr_with_findings 62 feat-i 6011 6012 '[]' "$(entry artipacked .github/workflows/w.yaml)"
-add_file 62 .github/zizmor.yml $'@@ -1,6 +1,9 @@\n rules:\n+  artipacked:\n+    ignore:\n+      - w.yaml\n   unpinned-uses:\n     config:'
+add_file 62 .github/zizmor.yml $'@@ -7,3 +7,4 @@ rules:\n       - c.yaml\n       - d.yaml\n       - e.yaml\n+      - w.yaml'
+printf '%s\n' '# policy' 'rules:' '  artipacked:' '    ignore:' '      - a.yaml' '      - b.yaml' '      - c.yaml' \
+  '      - d.yaml' '      - e.yaml' '      - w.yaml' '  unpinned-uses:' '    config:' > "$d/zizmor-merge62.yml"
 pr_with_findings 63 feat-j 6021 6022 '[]' "$(entry artipacked .github/actions/z/action.yml)"
 add_file 63 .github/actions/z/action.yml $'@@ -3,1 +3,1 @@\n+    run: | # zizmor: ignore[artipacked]'
 run_report
@@ -310,15 +323,36 @@ check "names the audit to kill and how" "$(has "KILL: artipacked (ignored 3×, f
 echo "=== R8. rule 2: tool errors in the window hold the dependency scanners ==="
 setup r8 "15 days ago"
 add_run 7001 pull_request feat-k "$(iso '5 days ago')"
-add_marker security-tool-error 7001
+add_marker dependencies-tool-error 7001
 add_run 7002 schedule main "$(iso '4 days ago')"
 add_report 7002 "$(report 0 null 0 0 0 0 true)"
-add_marker security-tool-error 7002
+add_marker dependencies-tool-error 7002
 add_run 7003 pull_request feat-l "$(iso '20 days ago')"
-add_marker security-tool-error 7003
+add_marker dependencies-tool-error 7003
+add_run 7004 pull_request feat-m "$(iso '3 days ago')"
+add_marker zizmor-tool-error 7004
 run_report
 check "holds the dependencies on the two runs inside the window" "$(has "DECISION: HOLD dependencies — 2 tool errors in the window")"
 check "the scheduled run's row says tool error" "$(has "| 7002 | schedule | $(sha 7002 | cut -c1-7) | 0/- | 0/0 | 0/0 | yes |")"
+check "a zizmor-only tool error is not counted (still 2)" "$(lacks "3 tool errors")"
+
+echo "=== #81. a dependency tool error on a PR's first run leaves its zizmor result counted ==="
+setup r81 "15 days ago"
+pr_with_findings 81 feat-n 8101 8102 '[]' "$(entry artipacked .github/workflows/a.yaml)"
+add_marker dependencies-tool-error 8101
+run_report
+check "the PR's finding counts as fixed" "$(has "| #81 | 8101 | 8102 | 1 | 1 | 0 | 0 |")"
+check "precision counts the disposition" "$(has "precision undecided (1 of 5 dispositions)")"
+setup r81z "15 days ago"
+add_pr 82 feat-o "$(iso '7 days ago')" "$(iso '5 days ago')"
+add_run 8201 pull_request feat-o "$(iso '6 days ago')"
+add_marker zizmor-tool-error 8201
+add_run 8202 pull_request feat-o "$(iso '6 days ago + 1 hour')"
+add_marker zizmor-new 8202 "$(findings 80 "$(entry artipacked .github/workflows/a.yaml)")"
+add_run 8203 pull_request feat-o "$(iso '5 days ago - 1 hour')"
+add_findings 8203 "$(findings 79)"
+run_report
+check "a zizmor tool error drops that run: the next run is the first" "$(has "| #82 | 8202 | 8203 | 1 | 1 | 0 | 0 |")"
 
 echo "=== R9. rule 3: a fixed CodeQL alert adds the pull_request trigger ==="
 setup r9 "15 days ago"
