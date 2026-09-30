@@ -753,7 +753,9 @@ the browser holds, schema defaults applied, so `TestUpdateFromEmptyEqualsAuthore
 for an attribute of this kind `liveNulls` lacks. It cannot tell an absent attribute from the
 editor's value, since the editor shows its default for both; `TestNullAttributesSurviveABrowserEdit`
 edits a node of each kind through the editor's sync plugin (`pmdoc/gen/edit-blocks.ts`), which
-writes the editor's values back, and requires the read to give each back as null.
+writes the editor's values back, and requires the read to give each back as null. Every gen script
+a test reads hands its result back in a file the test names, never on stdout, which a Bun script
+can cut short while exiting 0 (`docs/solutions/testing/bun-console-log-drops-what-a-full-non-blocking-pipe-cannot-take-and-exits-0.md`).
 
 A document `pmdoc` refuses names the first refused block it writes. One walk of the tree goldmark
 reads decides every block refusal in document order before conversion (`refuseBlocks`), and it
