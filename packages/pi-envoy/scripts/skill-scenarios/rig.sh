@@ -10,8 +10,9 @@
 #                                                  stops the services
 #   rig.sh score     [<scenario>]                  one row per run, then pass counts per label
 #
-# A batch runs each run as `rig.sh run <scenario> <label> <n>`, which needs that batch's services;
-# one run on its own is `rig.sh batch <scenario> 1 <label>`.
+# A batch runs each run as `rig.sh run <scenario> <label> <n> <index> <start>`, which needs that
+# batch's services: <index> is the run's place in the batch and <start> the batch's start in epoch
+# seconds. One run on its own is `rig.sh batch <scenario> 1 <label>`.
 #
 # Scenarios:
 #   ask-on-message  A plain session (no Legion role) is told to ask Sami whether to go ahead with a
@@ -41,17 +42,19 @@
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run may take (default 1500)
 #
 # Each run's agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), under the label's own
-# HOME and profile (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), in a tmux
-# session on the work directory's own tmux server (`tmux -S <work>/tmux.sock attach -t
-# skill-scenarios-<digest>-<run>` watches one, <run> being <scenario>-<label>-<n>), with `env -i`
-# and only the variables its pane file names, TMPDIR its run's own. A
-# `gh` stand-in is first on every run's PATH, so no run reaches GitHub. Every container and tmux
-# session a work directory starts carries its digest in its name. An agent can still write the
-# machine's /tmp, which every run shares and nothing here cleans: two concurrent runs can meet in a
-# scratch file there, so each tester-proof run has a PR number and heads of its own, and the score
+# HOME and profile (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), in the tmux
+# session skill-scenarios-<digest>-<run> on the work directory's own tmux server
+# (<work>/tmux.sock), <run> being <scenario>-<label>-<n>, with `env -i` and only the variables its
+# pane file names, TMPDIR its run's own. The pane shows nothing: omp's output goes to
+# <work>/runs/<run>/out.txt, and the agent's transcript, which grows as it works, to the .jsonl
+# under <work>/runs/<run>/sessions. A `gh` stand-in is first on every run's PATH, so no run reaches
+# GitHub. Every container and tmux session a work directory starts carries its digest in its name.
+# An agent can still write the machine's /tmp, which every run shares and nothing here cleans: two
+# runs can meet in a scratch file there, so each tester-proof run's PR number is 1000 plus its
+# index in the batch and its heads are dated from the batch's start plus that index, and the score
 # reads its E2E (tester) line for this run's head. An exit, INT or TERM stops what the command
 # started: a batch its runs, their agents and its services; a run or a live read its agent and
-# daemon stand-in.
+# daemon stand-in; and either one every process those left (scan_run_processes).
 set -euo pipefail
 # Nothing the rig starts inherits a service endpoint or credential from the caller: a Legion pane
 # exports ENVOY_URL, DISPATCH_URL and their token files, a developer's shell can hold NATS
@@ -120,11 +123,12 @@ cmd_profile() {
   mkdir -p "$P"
   printf '%s\n' "$co" >"$P/checkout"
   # What the label runs: the checkout's working-copy commit and a digest of its skills tree, the
-  # files the packed plugin stages into dist/skills.
+  # files the packed plugin stages into dist/skills, listed in byte order (LC_ALL=C) so the digest
+  # is the same in every locale.
   {
     printf 'checkout %s\n' "$co"
     printf 'commit %s\n' "$(jj -R "$co" log -r @ --no-graph -T 'commit_id ++ " parents=" ++ parents.map(|c| c.commit_id()).join(",")')"
-    printf 'skills %s\n' "$(cd "$co" && find skills -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    printf 'skills %s\n' "$(cd "$co" && find skills -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
   } >"$P/built-from"
   (
     # shellcheck source=/dev/null
@@ -195,35 +199,77 @@ EOF
   tmux kill-session -t "=$session" 2>/dev/null || true
 }
 
-# stop_run_processes DIR SIGKILLs every process whose environment names a run at or under DIR in
-# SKILL_SCENARIO_RUN: an agent gets it from its pane file and every command it runs inherits it.
-# A process that merely works under DIR, such as a developer's shell watching a run, has none, and
-# a process of another user's cannot be read, so neither is touched.
-# shellcheck disable=SC2329 # the exit traps run it
-stop_run_processes() {
-  local p var
+# scan_run_processes DIR PID... prints the pid of every process a run left: each whose environment
+# names a run at or under DIR in SKILL_SCENARIO_RUN, which an agent gets from its pane file and
+# every command it runs inherits, and each that descends, through /proc's parent links as they stand
+# now, from one of those or from one of the PIDs, which reaches a child started with the variable
+# stripped while its parent lives. A PID counts only while its parent is this shell or the work
+# directory's tmux server, so a pid another process reused is never followed. A process that merely
+# works under DIR, such as a developer's shell watching a run, is none of these, and another user's
+# environment cannot be read.
+# shellcheck disable=SC2329 # stop_run_processes, which the exit traps run, runs it
+scan_run_processes() {
+  local dir=$1 server p pid stat rest var child candidates=()
+  local -A parent=() children=() seen=()
+  local queue=()
+  shift
+  server=$(tmux display-message -p '#{pid}' 2>/dev/null || true)
   for p in /proc/[0-9]*; do
-    [ "${p#/proc/}" != "$$" ] && [ "${p#/proc/}" != "$BASHPID" ] && [ -r "$p/environ" ] || continue
+    pid=${p#/proc/}
+    { read -r stat <"$p/stat"; } 2>/dev/null || continue
+    # Field 2, the command name, is in parentheses and may hold spaces; the parent pid is the second
+    # field after the closing parenthesis.
+    rest=${stat##*) }
+    rest=${rest#* }
+    parent[$pid]=${rest%% *}
+    children[${parent[$pid]}]+=" $pid"
+  done
+  # One grep narrows the environments to those holding the text anywhere; each is then read
+  # variable by variable.
+  mapfile -t candidates < <(grep -lzsF -e "SKILL_SCENARIO_RUN=$dir" /proc/[0-9]*/environ || true)
+  for p in "${candidates[@]}"; do
     {
       while IFS= read -r -d '' var; do
-        case $var in
-        "SKILL_SCENARIO_RUN=$1" | "SKILL_SCENARIO_RUN=$1"/*)
-          kill -KILL "${p#/proc/}" 2>/dev/null || true
-          break
-          ;;
-        esac
-      done <"$p/environ"
+        case $var in "SKILL_SCENARIO_RUN=$dir" | "SKILL_SCENARIO_RUN=$dir"/*) queue+=("${p//[!0-9]/}") && break ;; esac
+      done <"$p"
     } 2>/dev/null || true
+  done
+  for pid in "$@"; do
+    [ -n "$pid" ] && [ -n "${parent[$pid]:-}" ] || continue
+    [ "${parent[$pid]}" = "$$" ] || [ "${parent[$pid]}" = "$server" ] && queue+=("$pid")
+  done
+  while [ ${#queue[@]} -gt 0 ]; do
+    pid=${queue[-1]}
+    unset 'queue[-1]'
+    [ -z "${seen[$pid]:-}" ] || continue
+    seen[$pid]=1
+    for child in ${children[$pid]:-}; do queue+=("$child"); done
+  done
+  for pid in "${!seen[@]}"; do
+    [ "$pid" = "$$" ] || [ "$pid" = "$BASHPID" ] || printf '%s\n' "$pid"
   done
 }
 
-# A run's or a live read's exit: its agent's session, its daemon stand-in, and whatever the agent
-# left running.
+# stop_run_processes DIR PID... freezes every process scan_run_processes finds, scans again to take
+# in a child one of them forked before it froze, and SIGKILLs them all.
+# shellcheck disable=SC2329 # the exit traps run it
+stop_run_processes() {
+  local pids=()
+  mapfile -t pids < <(scan_run_processes "$@")
+  [ ${#pids[@]} -gt 0 ] || return 0
+  kill -STOP "${pids[@]}" 2>/dev/null || true
+  mapfile -t pids < <(scan_run_processes "$@")
+  kill -KILL "${pids[@]}" 2>/dev/null || true
+}
+
+# A run's or a live read's exit: its agent's session and its daemon stand-in, with every process
+# either left.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_run() {
+  local panes=()
+  [ -z "$session" ] || mapfile -t panes < <(tmux list-panes -s -t "=$session" -F '#{pane_pid}' 2>/dev/null || true)
+  [ -z "$R" ] || stop_run_processes "$R" "$daemon_pid" "${panes[@]}"
   [ -z "$session" ] || tmux kill-session -t "=$session" 2>/dev/null || true
-  stop_tree "$daemon_pid"
-  [ -z "$R" ] || stop_run_processes "$R"
 }
 
 # on_exit HANDLER runs HANDLER at the command's exit, INT, TERM and HUP included.
@@ -366,16 +412,15 @@ run_ask_on_message() {
 
 # The tester's frozen world under $R: a bare remote whose post-receive hook logs every push, the
 # issue workspace cloned from it, the implementer's commit and handoff on legion/<key>, the PR the
-# gh stand-in serves, and the architect's assignment. The PR number and the commit dates come from
-# a digest of $R, so concurrent runs almost never share a PR number or a head (the fixture's
-# content is the same in every run).
+# gh stand-in serves, and the architect's assignment. The fixture's content is the same in every
+# run; the PR number is 1000 plus the run's index in its batch and the commits are dated <index>
+# seconds after the batch's start, so no two runs of a batch share a PR number or a head, and each
+# batch's heads carry its own start time.
 worker_fixture() {
-  local R=$1 src C1 C2 body digest when worker_pr worker_pr_url
-  digest=$(printf '%s' "$R" | cksum | cut -d' ' -f1)
-  worker_pr=$((1000 + digest % 9000))
+  local R=$1 index=$2 start=$3 src C1 C2 body when worker_pr worker_pr_url
+  worker_pr=$((1000 + index))
   worker_pr_url=https://github.com/$worker_repo/pull/$worker_pr
-  # A time on 2026-01-01.
-  when="@$((1767225600 + digest % 86400)) +0000"
+  when="@$((start + index)) +0000"
   git init -q --bare -b main "$R/remote.git"
   cat >"$R/remote.git/hooks/post-receive" <<EOF
 #!/bin/sh
@@ -477,8 +522,8 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 }
 
 run_tester_proof() {
-  local R=$1 name=$2 n=$3 state project port
-  worker_fixture "$R" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  local R=$1 name=$2 n=$3 index=$4 start=$5 state project port
+  worker_fixture "$R" "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
   # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
@@ -512,10 +557,11 @@ run_tester_proof() {
 }
 
 cmd_run() {
-  [ $# = 3 ] || fail "usage: rig.sh run <ask-on-message|tester-proof> <label> <n>"
-  local scenario=$1 n=$3 name
+  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|tester-proof> <label> <n> <index> <start>"
+  local scenario=$1 n=$3 index=$4 start=$5 name
   load_label "$2"
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
+  [[ $index =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "run index '$index' or batch start '$start' is not a number"
   [ -f "$services_env" ] || fail "a run needs its batch's services: run \`rig.sh batch $scenario 1 $2\`"
   name=$scenario-${P##*/}-$n
   R=$work/runs/$name
@@ -526,28 +572,31 @@ cmd_run() {
   cp "$P/built-from" "$R/built-from"
   case $scenario in
   ask-on-message) run_ask_on_message "$R" "$name" ;;
-  tester-proof) run_tester_proof "$R" "$name" "$n" ;;
+  tester-proof) run_tester_proof "$R" "$name" "$n" "$index" "$start" ;;
   *) fail "unknown scenario $scenario" ;;
   esac
   echo "$name: $(tail -n 1 "$R/out.txt")"
 }
 
 # A batch's exit: its runs (each run's shell, daemon stand-in and fixture commands), the agents they
-# started, and the services.
+# started, every process any of them left, and the services.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_batch() {
-  local s
-  stop_tree "${runs_pid:-}"
+  local s sessions=() panes=()
   for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null || true); do
-    case $s in "$tag-$batch_scenario"-*) tmux kill-session -t "=$s" 2>/dev/null || true ;; esac
+    case $s in "$tag-$batch_scenario"-*) sessions+=("$s") ;; esac
   done
-  stop_run_processes "$work/runs"
+  for s in "${sessions[@]}"; do
+    mapfile -t -O "${#panes[@]}" panes < <(tmux list-panes -s -t "=$s" -F '#{pane_pid}' 2>/dev/null || true)
+  done
+  stop_run_processes "$work/runs" "${runs_pid:-}" "${listener_pid:-}" "${dispatch_pid:-}" "${panes[@]}"
+  for s in "${sessions[@]}"; do tmux kill-session -t "=$s" 2>/dev/null || true; done
   services_down
 }
 
 cmd_batch() {
   [ $# -ge 3 ] || fail "usage: rig.sh batch <scenario> <runs> <label>..."
-  local runs=$2 label n
+  local runs=$2 label n index=0 start
   batch_scenario=$1
   case $batch_scenario in ask-on-message | tester-proof) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
@@ -556,8 +605,13 @@ cmd_batch() {
   lock_services
   on_exit stop_batch
   services_up
-  for label in "$@"; do for n in $(seq 1 "$runs"); do printf '%s %s %s\n' "$batch_scenario" "$label" "$n"; done; done |
-    xargs -P "${SKILL_SCENARIOS_PARALLEL:-5}" -L 1 bash "$here/rig.sh" run &
+  start=$(date +%s)
+  for label in "$@"; do
+    for n in $(seq 1 "$runs"); do
+      index=$((index + 1))
+      printf '%s %s %s %s %s\n' "$batch_scenario" "$label" "$n" "$index" "$start"
+    done
+  done | xargs -P "${SKILL_SCENARIOS_PARALLEL:-5}" -L 1 bash "$here/rig.sh" run &
   runs_pid=$!
   wait "$runs_pid"
 }

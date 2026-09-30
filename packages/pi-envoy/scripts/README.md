@@ -124,8 +124,10 @@ assigns the containers' ports, and the kernel assigns each daemon stand-in's. It
 work directory's own tmux server (`<work>/tmux.sock`), and every container and session name carries
 the work directory's digest, so two rigs on one box never touch each other's. Each run's `TMPDIR`
 is its own, but an agent can still write the machine's `/tmp`, which every run shares and the rig
-does not clean; each tester-proof run therefore has a PR number and heads of its own, and the score
-requires its `E2E (tester)` line to name one of them. A batch stops its runs, agents and services
-when it exits, INT and TERM included. Nothing it runs reaches production Dispatch, GitHub, Envoy or
-NATS: it starts nothing with the caller's `DISPATCH_*`, `ENVOY_*` or `NATS_*` variables, and
-`seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or `E2E_AGENT_TOKEN` is set.
+does not clean; each tester-proof run's PR number is therefore 1000 plus its index in the batch and
+its heads are dated from the batch's start plus that index, so no two runs of a batch share either,
+and the score requires its `E2E (tester)` line to name one of its heads. A batch stops its runs,
+agents and services when it exits, INT and TERM included. Nothing it runs reaches production
+Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's `DISPATCH_*`, `ENVOY_*` or
+`NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or `E2E_AGENT_TOKEN` is
+set.
