@@ -41,9 +41,8 @@ base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
-# A reused ACCEPT_EVIDENCE_DIR that is not empty holds an earlier run's evidence (its
-# soft-failures.txt, perhaps its key command), which this run must neither write into nor read as
-# its own: refused before anything is written or any trap is set.
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
 if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
   echo "FAIL setup: $reason" >&2
   rmdir "$work"
@@ -152,11 +151,9 @@ cleanup() {
   # A hangup, an interrupt or a termination (129, 130, 143, as trapped below) stopped the run and
   # gets none.
   if [ "$status" != 0 ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
-    if [ -z "${ok:-}" ]; then
-      bash "$unserved_reader" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
-    elif [ -n "$first_soft_check" ]; then
-      bash "$unserved_reader" --notes "$evidence/model-gateway" "$first_soft_since" "$first_soft_check" >&2 || true
-    fi
+    local since=$check_started failed=$check
+    [ -z "${ok:-}" ] || { since=$first_soft_since failed=$first_soft_check; }
+    bash "$unserved_reader" --notes "$evidence/model-gateway" "$since" "$failed" >&2 || true
   fi
   return 0
 }

@@ -60,10 +60,8 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
-# A reused STAGE4B_EVIDENCE_DIR that is not empty holds an earlier run's evidence (its transcript.log
-# and daemon log from the first checkpoint on; its key command only from controller), which this run
-# must neither write into nor read as its own: refused before anything is written, the transcript's
-# tee started or any trap set, so it prints the run's verdict line itself.
+# Refused before anything is written into the evidence directory, the transcript's tee started or
+# any trap set, so it prints the run's verdict line itself (lib/model-gateway-unserved.sh --fresh).
 if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
   echo "CHECK setup: FAIL: $reason"
   echo "stage 4b e2e: FAIL (check setup)"
@@ -1008,10 +1006,7 @@ collect_transcripts() {
   fi
 }
 cleanup() {
-  local status=$? p teardown_failed="" stopped=""
-  # A hangup, an interrupt or a termination (129, 130, 143, as trapped below) stopped the run; read
-  # here, before a teardown check can set the status to 1.
-  [[ ! $status =~ ^(129|130|143)$ ]] || stopped=1
+  local status=$? p teardown_failed=""
   # A second signal must not cut the teardown short, and a closed output must not end it.
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
@@ -1038,39 +1033,33 @@ cleanup() {
     # own control pods (the memory hog, the reachability pod) go first.
     op delete pod -l "legion.dev/project=$run_label,legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     teardown
-    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || { status=1 teardown_failed+=" namespace-clean"; }; fi
+    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || teardown_failed+="${teardown_failed:+, }namespace-clean"; fi
     delete_consumers
     remove_run_branches
     if [ -z "$audited" ] && [ -n "$prod_baseline" ] && ! production_audit; then
-      status=1 teardown_failed+=" production-audit"
+      teardown_failed+="${teardown_failed:+, }production-audit"
       echo "CHECK production-audit: FAIL: $(audit_failure)"
     fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
-  # A failed teardown check (a namespace left dirty, a write outside LEGSMOKE) outranks every reason
-  # the run stopped, so it is tested first: it ends FAIL, naming the teardown check whenever the
-  # checkpoint that stopped the run did not fail itself (a pass, a development run's last
-  # checkpoint, a blocked checkpoint, a signal). Only a clean teardown lets a blocked checkpoint end
-  # BLOCKED. The notes are a diagnostic for a failed checkpoint and never set the status; a stopped
-  # run, which still ends FAIL, a blocked checkpoint and a pass get none.
-  if [ -n "$teardown_failed" ]; then
-    if [ -n "$ok" ] || [ -n "$stopped" ] || [ -n "$was_blocked" ]; then
-      teardown_failed=${teardown_failed# }
-      echo "stage 4b e2e: FAIL (check ${teardown_failed// /, }, in the teardown after check $check)"
-    else
-      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
-      echo "stage 4b e2e: FAIL (check $check)"
-    fi
+  # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
+  # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
+  # check (a namespace left dirty, a write outside LEGSMOKE) names itself, and only a clean teardown
+  # lets a blocked checkpoint end BLOCKED.
+  if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
+    echo "stage 4b e2e: FAIL (check $check)"
+  elif [ -n "$teardown_failed" ]; then
+    echo "stage 4b e2e: FAIL (check $teardown_failed, in the teardown after check $check)"
   elif [ -n "$was_blocked" ]; then
     echo "stage 4b e2e: BLOCKED (check $check): the checkpoint could not run, so the run is no verdict on the change; the checkpoints before it stand"
   elif [ -z "$ok" ]; then
-    [ -n "$stopped" ] ||
-      bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
     echo "stage 4b e2e: FAIL (check $check)"
   fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
+  [ -z "$teardown_failed" ] || status=1
   exit "$status"
 }
 trap cleanup EXIT

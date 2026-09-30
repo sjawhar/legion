@@ -6,9 +6,7 @@ import { join } from "node:path";
 // Stage 4b's own blocked, cleanup, audit_verdict and audit_failure, taken from the script by name
 // and run after a checkpoint that ends in blocked, with the teardown's cluster, NATS and GitHub
 // helpers stubbed and production_audit's Dispatch read replaced by its result: a write outside
-// LEGSMOKE, or none. cleanup is taken by name, so a helper it newly calls must be taken or stubbed
-// here too: under the trap's set +e an undefined one is only a command-not-found warning, and the
-// run carries on.
+// LEGSMOKE, or none.
 const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
 const fn = (name: string) => {
   const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
@@ -60,7 +58,11 @@ blocked "the controller's model route could not be installed"
     ],
     { env: { PATH: `${bin}:${process.env.PATH}`, OUTSIDE: outside } }
   );
-  return { code: result.exitCode, stdout: result.stdout.toString() };
+  const stdout = result.stdout.toString();
+  // cleanup's ERR trap reports every teardown command that fails, a helper this harness neither
+  // takes nor stubs included (exit 127).
+  expect(stdout).not.toContain("cleanup warning:");
+  return { code: result.exitCode, stdout };
 }
 
 describe("stage 4b's verdict line", () => {

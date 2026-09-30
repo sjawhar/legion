@@ -610,8 +610,8 @@ the checkpoints before it stand, and gets no notes. A failed teardown check outr
 the run stopped: it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and
 subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is
 `stage 4b e2e: FAIL (check <teardown check>, in the teardown after check <check>)` whenever the
-checkpoint that stopped the run did not fail itself: a pass, a `STAGE4B_UNTIL` run's last
-checkpoint, a blocked checkpoint, a signal. Every verdict but the pass exits non-zero: 1, or the
+checkpoint that stopped the run did not fail itself: a `STAGE4B_UNTIL` run's last checkpoint, a
+blocked checkpoint, a signal. Every verdict but the pass exits non-zero: 1, or the
 stopping signal's 129, 130 or 143 when the teardown was clean.
 
 Three roots are set todo under `admission_cap: 2`:
