@@ -83,7 +83,9 @@ push to `main` and the daily run read `main`'s. So a promotion takes effect on `
 merge, the promotion pull request's own run stays report-only, and a pull request that sets a
 promoted check back to `true` is still judged by the base's `false`.
 
-The window is 14 days from the workflow's first push run on `main`. `scripts/security-report.sh`
+The window is 14 days from the workflow's first run on `main`, which `scripts/security-report.sh`
+reads one day at a time from the workflow's creation, so GitHub's 1,000-result cap on a filtered
+run listing cannot move it as `main`'s runs pile up. The report
 prints the window's numbers: `main`'s daily runs, the merged pull requests' new zizmor findings
 and whether each was fixed or ignored, tool errors, CodeQL alert counts, secret-scanning alert
 counts, and the `Security[<tag>]:` review threads per rubric row. Once the window has closed it

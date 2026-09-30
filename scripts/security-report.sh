@@ -26,13 +26,16 @@
 # base when the pull request was opened or last pushed, and does not follow main); for
 # merge_group the event's base_sha; for any other event nothing.
 #
-# The window opens at the first `push` run of the Security workflow on main (the merge that added
-# it) and lasts --window-days. Once it has closed, or with --decision force, the report ends in a
-# DECISION block with a line per check: the rule's PROMOTE or HOLD while that check is still
-# report-only on main, `already blocking` once its flag is false. While any check is still
-# report-only the block makes the exit code 1, which fails the scheduled run so its status badge
-# turns red and the window watcher wakes the owner of the decision. With every check blocking it
-# prints the numbers and no decision (unless forced), and exits 0.
+# The window opens at the first run of the Security workflow on main (the merge that added it, or
+# the first schedule or dispatch after it) and lasts --window-days. The first run is read one day
+# at a time from the workflow's creation (`created=` ranges), since GitHub's listing of a
+# workflow's runs returns at most 1,000 results once filtered, and a branch listing would lose the
+# first run as main's runs pile up. Once the window has closed, or with --decision force, the
+# report ends in a DECISION block with a line per check: the rule's PROMOTE or HOLD while that
+# check is still report-only on main, `already blocking` once its flag is false. While any check is
+# still report-only the block makes the exit code 1, which fails the scheduled run so its status
+# badge turns red and the window watcher wakes the owner of the decision. With every check
+# blocking it prints the numbers and no decision (unless forced), and exits 0.
 #
 # Decision rules (Task 6), each enforced by the DECISION block:
 # 1. **zizmor → blocking** iff (a) the newest `main` run's `head_count` is 0 with the checked-in
@@ -307,7 +310,9 @@ def paged(path, key=None):
 
 
 def when(stamp):
-    return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) if stamp else None
+    """A GitHub timestamp as an aware datetime: 2026-09-30T08:51:53Z, or with milliseconds, as a
+    workflow's created_at carries them."""
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
 
 
 def dash(value):
@@ -411,8 +416,29 @@ def report_only_flags():
     return window_flags(text, ".github/security-window.json on main")
 
 
+MAIN_EVENTS = ("push", "schedule", "workflow_dispatch")
+
+
+def first_main_run(security, runs_path):
+    """When the Security workflow first ran on main, or None. No run on main predates the workflow's
+    landing there, and none predates the workflow's own created_at, so the runs are read one day at a
+    time from that date, oldest first: a day of main runs is far under the 1,000 results GitHub returns
+    for a filtered listing, so the start stays put however many runs main collects afterwards."""
+    if not security.get("created_at"):
+        fail(f"the Security workflow on {repo} has no created_at")
+    day, now = when(security["created_at"]), datetime.now(timezone.utc)
+    while day <= now:
+        span = f"{day:%Y-%m-%dT%H:%M:%SZ}..{day + timedelta(days=1):%Y-%m-%dT%H:%M:%SZ}"
+        on_main = [run["created_at"] for run in paged(f"{runs_path}?branch=main&created={span}", "workflow_runs")
+                   if run.get("head_branch") == "main" and run.get("event") in MAIN_EVENTS]
+        if on_main:
+            return min(when(stamp) for stamp in on_main)
+        day += timedelta(days=1)
+    return None
+
+
 class Window:
-    """window_days from the Security workflow's first push run on main."""
+    """window_days from the Security workflow's first run on main."""
 
     def __init__(self, start):
         self.start, self.end = start, start + timedelta(days=window_days)
@@ -762,12 +788,12 @@ def main():
 
     runs_path = f"repos/{repo}/actions/workflows/{security['id']}/runs"
     runs = [run for run in paged(f"{runs_path}?branch=main", "workflow_runs")
-            if run.get("head_branch") == "main" and run.get("event") in ("push", "schedule", "workflow_dispatch")]
-    pushes = [run for run in runs if run["event"] == "push"]
-    if not pushes:
-        print("window has not started: the Security workflow has no push run on main yet")
+            if run.get("head_branch") == "main" and run.get("event") in MAIN_EVENTS]
+    start = first_main_run(security, runs_path)
+    if start is None:
+        print("window has not started: the Security workflow has no run on main yet")
         sys.exit(0)
-    window = Window(min(when(run["created_at"]) for run in pushes))
+    window = Window(start)
     print(f"window: {window.start:%Y-%m-%dT%H:%M:%SZ} to {window.end:%Y-%m-%dT%H:%M:%SZ} "
           f"({'window closed' if window.closed else 'window closes'} {window.end:%Y-%m-%d})")
 

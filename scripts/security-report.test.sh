@@ -55,7 +55,19 @@ serve() {
 id_in() { sed -E "s|.*/$1/([0-9]+).*|\\1|" <<<"$path"; }
 case "$path" in
   repos/*/actions/workflows\?*) serve "$d/workflows.json" '{"total_count":0,"workflows":[]}' ;;
-  repos/*/actions/workflows/*/runs\?*) serve "$d/runs.json" '{"total_count":0,"workflow_runs":[]}' ;;
+  repos/*/actions/workflows/*/runs\?*created=*)
+    # A created=FROM..TO listing, as GitHub filters it (both ends inclusive), from every run in
+    # runs.json; one page holds them all here.
+    range=$(sed -E 's/.*[?&]created=([^&]+).*/\1/' <<<"$path")
+    if [ "$page" != 1 ]; then echo '{"total_count":0,"workflow_runs":[]}'; exit 0; fi
+    jq --arg from "${range%%..*}" --arg to "${range##*..}" \
+      '.workflow_runs |= map(select(.created_at >= $from and .created_at <= $to)) | .total_count = (.workflow_runs | length)' \
+      "$d/runs.json" ;;
+  repos/*/actions/workflows/*/runs\?*)
+    # runs.capped.json, when a case writes one, is what GitHub's 1,000-result cap leaves of an
+    # unfiltered-by-date listing.
+    if [ -e "$d/runs.capped.json" ]; then serve "$d/runs.capped.json" '{"total_count":0,"workflow_runs":[]}'
+    else serve "$d/runs.json" '{"total_count":0,"workflow_runs":[]}'; fi ;;
   repos/*/actions/runs/*/artifacts*) serve "$d/artifacts-run-$(id_in runs).json" '{"total_count":0,"artifacts":[]}' ;;
   repos/*/actions/artifacts/*/zip)
     zip="$d/zip-$(id_in artifacts).zip"
@@ -82,18 +94,17 @@ sha() { printf '%s' "$1" | sha1sum | cut -c1-40; }
 # append FILE JQ-PATH OBJECT: appends OBJECT to the array at JQ-PATH in FILE.
 append() { jq --argjson x "$3" "$2 += [\$x]" "$1" > "$1.next" && mv "$1.next" "$1"; }
 
-# setup NAME START: a case directory with the Security and CodeQL workflows, both checks
-# report-only, the window's first push run on main (run 1000) at START with a clean report, and
-# two CodeQL analyses on main. Sets $d.
+# setup NAME START: a case directory with the Security and CodeQL workflows (Security created a
+# day before START), both checks report-only, the window's first run on main (run 1000, a push) at
+# START with a clean report, and two CodeQL analyses on main. Sets $d.
 setup() {
   d="$work/$1"
   mkdir -p "$d"
-  cat > "$d/workflows.json" <<'JSON'
-{"total_count": 3, "workflows": [
-  {"id": 100, "name": "Tests", "path": ".github/workflows/pr-and-main.yaml"},
-  {"id": 101, "name": "Security", "path": ".github/workflows/security.yaml"},
-  {"id": 102, "name": "CodeQL", "path": ".github/workflows/codeql.yaml"}]}
-JSON
+  jq -n --arg created "$(date -u -d "@$(($(date -u -d "$2" +%s) - 86400))" +%Y-%m-%dT%H:%M:%S.000Z)" \
+    '{total_count: 3, workflows: [
+      {id: 100, name: "Tests", path: ".github/workflows/pr-and-main.yaml"},
+      {id: 101, name: "Security", path: ".github/workflows/security.yaml", created_at: $created},
+      {id: 102, name: "CodeQL", path: ".github/workflows/codeql.yaml"}]}' > "$d/workflows.json"
   echo '{"report_only": {"zizmor": true, "dependencies": true}}' > "$d/window.json"
   echo '{"total_count": 0, "workflow_runs": []}' > "$d/runs.json"
   cat > "$d/codeql-analyses.json" <<'JSON'
@@ -758,12 +769,31 @@ run_report
 check "exits 0, as with the alerts readable" "$(is "$rc" 0)"
 check "the row reads BLOCKED with the reason" "$(has "secret-scanning alerts: BLOCKED (caller lacks secret_scanning read; run as an admin)")"
 
-echo "=== the window has not started: no push run on main yet ==="
+echo "=== the window has not started: no Security run on main yet ==="
 setup not-started "3 days ago"
 echo '{"total_count": 0, "workflow_runs": []}' > "$d/runs.json"
 run_report
 check "exits 0" "$(is "$rc" 0)"
 check "says the window has not started" "$(has "window has not started")"
+
+echo "=== the window's start: the first Security run on main, which GitHub's 1,000-run cap cannot move ==="
+setup capped "15 days ago"
+add_run 1001 schedule main "$(iso '10 days ago')"
+add_report 1001 "$clean_report"
+# Past 1,000 runs, a workflow's run listing filtered by branch no longer reaches its oldest: the
+# first push run on main (1000) has dropped off it.
+jq '.workflow_runs |= map(select(.id != 1000)) | .total_count = (.workflow_runs | length)' "$d/runs.json" \
+  > "$d/runs.capped.json"
+run_report
+check "opens the window at the first run on main, not at the oldest run the capped listing holds" \
+  "$(has "window: $start to")"
+check "so the window has closed and the decision is due: exits 1" "$(is "$rc" 1)"
+setup first-dispatch "15 days ago"
+add_run 999 workflow_dispatch main "$(iso '15 days ago - 1 hour')"
+add_report 999 "$clean_report"
+run_report
+check "a dispatched run on main before the first push opens the window" \
+  "$(has "window: $(iso '15 days ago - 1 hour' | cut -c1-13)")"
 
 echo "=== a server error fails loudly ==="
 setup server-error "15 days ago"
