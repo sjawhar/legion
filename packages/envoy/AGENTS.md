@@ -1361,14 +1361,20 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 AGENTC-393 v9's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
-box/pod-side client, which enrolls a runtime, requests grants, polls a pending decision to
-completion, and either prints session/grant state (`self`, `status --json`) or `syscall.Exec`s a
-command with the granted values injected into its environment. The broker holds no Dispatch
-credential and opens no Dispatch ask anywhere: every human decision — approving or denying a
-secret request, approving or denying a machine login, revoking a grant, registering or endorsing an
-approver key — is a WebAuthn assertion the broker verifies itself against its own persisted,
-attested key set (`internal/broker/approvers`) over a domain-separated challenge
-(`internal/broker/record`). Dispatch's server relays that assertion from a browser page on
+client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
+runtime, requests grants, polls a pending decision to completion, and either prints session/grant
+state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
+its environment. That command keeps `AGENT_SECRETS_URL`, `AGENT_SECRETS_HELPER_SOCK` and
+`AGENT_SECRETS_KEY_DIR`, so an `agent-secrets` call it makes is the same session's. `agent-secrets
+identity` answers locally, with no broker call and no registration, whether the calling process
+has a session identity, for callers that choose between the broker and another backend. The
+helper's `launcher login-status` exits 0 only while it holds an issued launcher credential: one
+the broker later refuses (401 `LAUNCHER_INVALID`, expired or revoked) turns its login `expired`.
+The broker holds no Dispatch credential and opens no Dispatch ask anywhere: every human decision —
+approving or denying a secret request, approving or denying a machine login, revoking a grant,
+registering or endorsing an approver key — is a WebAuthn assertion the broker verifies itself
+against its own persisted, attested key set (`internal/broker/approvers`) over a domain-separated
+challenge (`internal/broker/record`). Dispatch's server relays that assertion from a browser page on
 Dispatch's own origin to the broker's UI routes; it never decides anything (contract v9, "The
 approval signal is a WebAuthn assertion..."). `internal/broker/enroll` turns a launcher credential
 into a leased enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a

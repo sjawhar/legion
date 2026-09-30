@@ -452,6 +452,191 @@ func TestExecFormSecondInvocationReusesGrantTransparently(t *testing.T) {
 	}
 }
 
+// TestExecFormNestedCallKeepsTheSessionIdentity proves a command run under the exec form belongs
+// to the same session: its own `agent-secrets` call (a skill that nests a request, gh's token
+// helper under `agent-secrets K -- omp`) reaches the broker as that session instead of failing
+// with "AGENT_SECRETS_URL is required".
+func TestExecFormNestedCallKeepsTheSessionIdentity(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, []string{"BIN=" + binary},
+		"GRANT_ME", "--", "sh", "-c", `"$BIN" NONEWLINE_ME -- sh -c "printf %s \"\$NONEWLINE_ME\""`)
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, redactSecrets(stdout), redactSecrets(stderr))
+	}
+	if stdout != "irrelevant" {
+		t.Fatalf("the nested call's child printed %q, want the value the broker released to it", redactSecrets(stdout))
+	}
+}
+
+// TestBuildChildEnvKeepsOnlyTheSessionIdentity pins which of this CLI's variables the exec'd
+// child inherits: exactly the three that say which session it is (the broker's URL, the helper
+// socket, the box's key dir), never any other AGENT_SECRETS_* setting, and never an inherited
+// copy of a released name beside the released value.
+func TestBuildChildEnvKeepsOnlyTheSessionIdentity(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin",
+		"AGENT_SECRETS_URL=https://broker.internal.example",
+		"AGENT_SECRETS_HELPER_SOCK=/run/user/1000/agent-secrets/helper.sock",
+		"AGENT_SECRETS_KEY_DIR=/run/user/1000/agent-secrets",
+		"AGENT_SECRETS_WAIT=5m",
+		"AGENT_SECRETS_ENROLL_WAIT=3s",
+		"AGENT_SECRETS_APPROVE_URL=https://dispatch.internal.example",
+		"GRANT_ME=inherited-stale-value",
+		"NOT_AN_ASSIGNMENT",
+	}
+	got := buildChildEnv(environ, map[string]string{"GRANT_ME": "released"})
+	want := []string{
+		"PATH=/usr/bin",
+		"AGENT_SECRETS_URL=https://broker.internal.example",
+		"AGENT_SECRETS_HELPER_SOCK=/run/user/1000/agent-secrets/helper.sock",
+		"AGENT_SECRETS_KEY_DIR=/run/user/1000/agent-secrets",
+		"GRANT_ME=released",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("child env:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// runExecForm runs the exec form of GRANT_ME against broker from keyDir with no helper to fall
+// back to (the runtime dir is empty and AGENT_SECRETS_HELPER_SOCK is empty), returning its exit
+// code, stderr and how long it took. extraEnv comes last, so it can override any of that.
+func runExecForm(t *testing.T, binary, broker, keyDir string, extraEnv ...string) (int, string, time.Duration) {
+	t.Helper()
+	env := append([]string{"AGENT_SECRETS_HELPER_SOCK=", "XDG_RUNTIME_DIR=" + t.TempDir()}, extraEnv...)
+	start := time.Now()
+	_, stderr, exit := runAgentSecrets(t, binary, broker, keyDir, env, "GRANT_ME", "--", "sh", "-c", "exit 0")
+	return exit, stderr, time.Since(start)
+}
+
+// writePendingMarker writes the launcher's enrollment.pending into dir, aged by age.
+func writePendingMarker(t *testing.T, dir string, age time.Duration) string {
+	t.Helper()
+	marker := filepath.Join(dir, "enrollment.pending")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	then := time.Now().Add(-age)
+	if err := os.Chtimes(marker, then, then); err != nil {
+		t.Fatal(err)
+	}
+	return marker
+}
+
+// TestEnrollWaitRidesOutTheLaunchersSetup is the box's enrollment race: omp starts its MCP
+// servers, and they call agent-secrets, while the launcher is still generating the box's key and
+// enrolling it. While the launcher's enrollment.pending marker is there, a call waits for key.pem
+// and enrollment to appear instead of failing at once.
+func TestEnrollWaitRidesOutTheLaunchersSetup(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	fixture := newKeyDir(t)
+	keyDir := t.TempDir()
+	marker := writePendingMarker(t, keyDir, 0)
+
+	setupDone := make(chan error, 1)
+	go func() {
+		time.Sleep(time.Second)
+		data, err := os.ReadFile(filepath.Join(fixture, "key.pem"))
+		if err == nil {
+			err = os.WriteFile(filepath.Join(keyDir, "key.pem"), data, 0o600)
+		}
+		time.Sleep(time.Second)
+		if err == nil {
+			err = os.WriteFile(filepath.Join(keyDir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600)
+		}
+		if err == nil {
+			err = os.Remove(marker)
+		}
+		setupDone <- err
+	}()
+
+	exit, stderr, elapsed := runExecForm(t, binary, broker.URL, keyDir)
+	if err := <-setupDone; err != nil {
+		t.Fatal(err)
+	}
+	if exit != 0 {
+		t.Fatalf("exit = %d after %s, want 0 once the launcher finished: stderr=%q", exit, elapsed, stderr)
+	}
+	if elapsed < 2*time.Second {
+		t.Fatalf("finished in %s, before the launcher wrote the enrollment", elapsed)
+	}
+}
+
+// TestEnrollWaitGivesUpAtItsBound pins the wait's end: a marker nothing ever follows (a launcher
+// stuck without removing it) holds a call for AGENT_SECRETS_ENROLL_WAIT at most, and the call then
+// fails with the error it would have failed with at once.
+func TestEnrollWaitGivesUpAtItsBound(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := t.TempDir()
+	writePendingMarker(t, keyDir, 0)
+
+	exit, stderr, elapsed := runExecForm(t, binary, broker.URL, keyDir, "AGENT_SECRETS_ENROLL_WAIT=1s")
+	if exit == 0 || !strings.Contains(stderr, "no session identity") {
+		t.Fatalf("exit = %d, stderr = %q, want the no-identity failure", exit, stderr)
+	}
+	if elapsed < 900*time.Millisecond || elapsed > 5*time.Second {
+		t.Fatalf("gave up after %s, want about the 1s bound", elapsed)
+	}
+}
+
+// TestEnrollWaitNeedsAFreshMarker pins that only the launcher's live marker makes a call wait: an
+// empty key dir (a host session's, a pod's), a marker older than the launcher's own setup bound
+// (a launcher killed outright), and a failed enrollment the launcher has already reported
+// (enrollment.error, marker removed) all fail at once, as they did before the wait existed.
+func TestEnrollWaitNeedsAFreshMarker(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+
+	stale := t.TempDir()
+	writePendingMarker(t, stale, 200*time.Second)
+	failed := newKeyDir(t)
+	if err := os.Remove(filepath.Join(failed, "enrollment")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(failed, "enrollment.error"), []byte("broker 503 DATABASE: postgres unreachable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, keyDir, want string
+	}{
+		{"empty key dir", t.TempDir(), "no session identity"},
+		{"stale marker", stale, "no session identity"},
+		{"reported failure", failed, "postgres unreachable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exit, stderr, elapsed := runExecForm(t, binary, broker.URL, tc.keyDir)
+			if exit == 0 || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("exit = %d, stderr = %q, want a failure naming %q", exit, stderr, tc.want)
+			}
+			if elapsed > 2*time.Second {
+				t.Fatalf("took %s; with no fresh marker the call must not wait", elapsed)
+			}
+		})
+	}
+}
+
+// TestEnrollWaitRefusesAnInvalidBound pins that a malformed AGENT_SECRETS_ENROLL_WAIT is an
+// error naming the variable, never a silent fall back to the default.
+func TestEnrollWaitRefusesAnInvalidBound(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	for _, bad := range []string{"soon", "-1s"} {
+		exit, stderr, _ := runExecForm(t, binary, broker.URL, newKeyDir(t), "AGENT_SECRETS_ENROLL_WAIT="+bad)
+		if exit == 0 || !strings.Contains(stderr, "AGENT_SECRETS_ENROLL_WAIT") {
+			t.Fatalf("AGENT_SECRETS_ENROLL_WAIT=%s: exit = %d, stderr = %q, want a refusal naming the variable", bad, exit, stderr)
+		}
+	}
+}
+
 func TestRequestJSONPrintsExactlyOneContractObject(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
@@ -673,19 +858,22 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 // single-shot contract (AGENTC-834): it prints the bare state on stdout and its exit code is a
 // liveness probe — 0 only for "issued", 1 for every other terminal/pending state and for "none"
 // when login was never run (empty LoginState) — with a single helper call, never login's
-// mint-a-fresh-key-and-poll side effect.
+// mint-a-fresh-key-and-poll side effect. Every state with no credential and no login in flight
+// (never logged in, denied, or expired, which is also what a credential the broker rejected
+// becomes) says on stderr to run the login again.
 func TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	for _, tc := range []struct {
-		state string
-		want  string
-		exit  int
+		state  string
+		want   string
+		exit   int
+		remedy bool
 	}{
-		{"issued", "issued\n", 0},
-		{"pending", "pending\n", 1},
-		{"denied", "denied\n", 1},
-		{"expired", "expired\n", 1},
-		{"", "none\n", 1},
+		{"issued", "issued\n", 0, false},
+		{"pending", "pending\n", 1, false},
+		{"denied", "denied\n", 1, true},
+		{"expired", "expired\n", 1, true},
+		{"", "none\n", 1, true},
 	} {
 		t.Run(tc.state, func(t *testing.T) {
 			sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{tc.state})
@@ -693,6 +881,9 @@ func TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued(t *testing.T) 
 				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
 			if exit != tc.exit || stdout != tc.want {
 				t.Fatalf("state %q: exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", tc.state, exit, stdout, tc.exit, tc.want, stderr)
+			}
+			if got := strings.Contains(stderr, "run: agent-secrets launcher login"); got != tc.remedy {
+				t.Fatalf("state %q: stderr = %q, want the login remedy: %v", tc.state, stderr, tc.remedy)
 			}
 		})
 	}

@@ -57,11 +57,18 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		// --exec never blocks a launch on the broker: warn and fall through to exec anyway.
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
-	} else if !*doExec {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\n", resp.RuntimeID, resp.EnrollmentID, resp.State)
+	} else {
+		if !*doExec {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\n", resp.RuntimeID, resp.EnrollmentID, resp.State)
+		}
 		if *wait > 0 && resp.State != "enrolled" {
-			fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet: %s\n", resp.Error)
-			return 1
+			if !*doExec {
+				fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet: %s\n", resp.Error)
+				return 1
+			}
+			// The launch still goes ahead, but not silently: the agent starts with a session
+			// whose broker calls fail (NOT_ENROLLED) until the helper's enroll loop succeeds.
+			fmt.Fprintf(stderr, "agent-secrets register: not enrolled after %ds (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", *wait, resp.Error)
 		}
 	}
 
