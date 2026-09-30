@@ -167,8 +167,9 @@ type watch struct {
 	// wait and err are written by the watch's goroutine alone and read by stop once it has ended.
 	wait *LockWait
 	err  error
-	// heldBack records that an empty reading of the current wait has already been held back, so
-	// the next empty one replaces it (observe). Only the watch's goroutine touches it.
+	// heldBack is true exactly when the latest reading observed was held back: an empty reading of
+	// the recorded wait, which named holders, taken just after a reading that was not held back.
+	// Only the watch's goroutine touches it.
 	heldBack bool
 }
 
@@ -218,8 +219,9 @@ func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
 		case errors.Is(err, pgx.ErrNoRows):
 			w.observe(nil)
 		case ctx.Err() == nil:
-			// A failed read says nothing about the wait, so it neither holds a reading back nor
-			// ends a run of empty ones: it is not observed at all.
+			// A failed read says nothing about the wait, so it is not observed at all: it neither
+			// holds a reading back nor ends a run of empty ones. Do not call observe here, even with
+			// nil: [named, empty, failed read, empty] would then name a holder that has left.
 			w.err = err
 			closeConn()
 		}
@@ -241,12 +243,10 @@ func (w *watch) observe(wait *LockWait) {
 		return
 	}
 	sameLock := w.wait != nil && w.wait.Mode == wait.Mode && w.wait.Object == wait.Object
-	if len(wait.Holders) == 0 && sameLock && len(w.wait.Holders) > 0 && !w.heldBack {
-		w.heldBack = true
-		return
+	w.heldBack = len(wait.Holders) == 0 && sameLock && len(w.wait.Holders) > 0 && !w.heldBack
+	if !w.heldBack {
+		w.wait = wait
 	}
-	w.heldBack = false
-	w.wait = wait
 }
 
 // stop ends the watch and returns the last wait it saw and the last error its reads met.

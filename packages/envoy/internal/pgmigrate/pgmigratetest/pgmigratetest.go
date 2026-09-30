@@ -19,8 +19,9 @@ import (
 // This is where the stores' embed rule is stated. pgmigrate.Load refuses a file named any other way
 // than a migration, but only a file it is given, and a //go:embed pattern can leave an entry out
 // without an error: a directory pattern without all: drops every name beginning with _ or ., so
-// both stores embed all:migrations; no directive embeds a symlink or an empty directory. An entry
-// left out would go unapplied while it sits in the tree. On today's tree the all: prefix changes
+// both stores embed all:migrations; no directive embeds a symlink or an empty directory. A migration
+// file left out would go unapplied while it sits in the tree, and an empty directory, which holds
+// nothing to apply, is still an entry Load never judges. On today's tree the all: prefix changes
 // nothing, since neither directory holds a _ or . name; this check fails when an entry on disk is
 // missing from the binary: such a name under a directive without all:, a symlink, or an empty
 // directory.

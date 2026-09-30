@@ -17,6 +17,7 @@ func TestObserveNamesOnlyAHolderTheLatestReadingsSupport(t *testing.T) {
 		return &LockWait{LockType: "relation", Mode: "AccessExclusiveLock", Object: "messages"}
 	}
 	otherLock := &LockWait{LockType: "relation", Mode: "AccessExclusiveLock", Object: "asks"}
+	otherMode := &LockWait{LockType: "relation", Mode: "ShareLock", Object: "messages"}
 	for _, tc := range []struct {
 		name     string
 		readings []*LockWait
@@ -24,8 +25,10 @@ func TestObserveNamesOnlyAHolderTheLatestReadingsSupport(t *testing.T) {
 	}{
 		{"one empty reading as the cancellation lands keeps the holder", []*LockWait{named(97), empty()}, named(97)},
 		{"two empty readings in a row name nobody", []*LockWait{named(97), empty(), empty()}, empty()},
-		{"a holder named after a held-back reading replaces it", []*LockWait{named(97), empty(), named(98)}, named(98)},
+		{"a holder named after a held-back reading replaces it, and the next empty reading is held back again", []*LockWait{named(97), empty(), named(98), empty()}, named(98)},
+		{"a holder that takes over replaces the one before it", []*LockWait{named(97), named(98)}, named(98)},
 		{"an empty reading of another lock replaces at once", []*LockWait{named(97), otherLock}, otherLock},
+		{"an empty reading of another mode on the same table replaces at once", []*LockWait{named(97), otherMode}, otherMode},
 		{"a reading of not waiting ends the run, so the next empty one is held back", []*LockWait{named(97), empty(), nil, empty()}, named(97)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
