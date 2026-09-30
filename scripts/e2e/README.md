@@ -595,11 +595,15 @@ before it, arms the design gate (`gates.design: root-issues`) and files tree 1 a
 admitted root's architect requests approval on its own. Tree 1's document leaves one choice (where
 the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `spec-posted` waits up
 to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
-It then fails unless the architect asked that choice as a decision block, its approval request at
-the approved version carries a summary after `Approve spec.md (version N)?`, and no approval request
-on the spec, retracted ones included, was made while a decision block was open
-([`lib/approvals-while-blocks-open.jq`](lib/approvals-while-blocks-open.jq), tested by
-`bun test scripts/e2e/lib`); it keeps the issue's asks as `<issue>-asks.json`.
+It then fails unless the architect's approval request at the approved version carries a summary
+after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
+and no approval request on the spec, retracted ones included, named a version that still held one
+of them open ([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by
+`bun test scripts/e2e/lib`). It reads each block's state from that version rather than comparing
+times, because Dispatch indexes a block as an ask only when it settles the document, after the edit
+that wrote it: a request sent in the same turn predates the block's ask. It keeps the issue's asks
+as `<issue>-asks.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
+`<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -1255,9 +1259,10 @@ where an agent runs:
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
 
-`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
-`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
-none, since it runs under its root's tree.
+`new_issue TITLE [PARENT] [SPEC]` creates each issue a proof drives. A root carries the Dispatch
+label `legion`, which hands it to the Go daemon (the daemon admits no root without it), and `SPEC`
+as its primary document, `smoke_spec` when `SPEC` is omitted. A child carries neither, since it runs
+under its root's tree.
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own

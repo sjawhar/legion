@@ -35,12 +35,9 @@ after `skill://dispatch/` is relative to this skill's base directory.
 ## Design changes are brainstormed here
 
 For a major design change the design conversation happens in Dispatch, in the spec: write it
-early, while it is still a draft with real alternatives, and put each open question in it as an
-`:::ask` block at the end of the section that discusses it, beside the options and trade-offs it depends
-on ([Writing a spec](#writing-a-spec), [Decision blocks](#decision-blocks)). The human answers in
-place and the document grows into the record. A finished spec dropped after a chat-only design is
-not that conversation, and neither is a compressed standalone ask, disconnected from the design and
-its trade-offs, pointing at a document.
+early, while it is still a draft with real alternatives, and let it grow as the human answers
+([Writing a spec](#writing-a-spec)). A finished spec dropped after a chat-only design is not that
+conversation.
 
 ## Writing for the human
 
@@ -53,10 +50,10 @@ vocabulary, and is often on a phone. Write for that person.
   not "fix 8c", "READY-target", "PR B", "spec@v3", "the pair", "the packet" — say what the thing is.
 - Expand every identifier the first time it appears: an issue key gets its title, a PR number its
   title, a file what it is for, a session id who it is. Link a URL rather than pasting a bare id.
-- A question lives beside the options and trade-offs it depends on, in the spec or discussion it
-  came from — never a compressed standalone ask ([Design changes are brainstormed
-  here](#design-changes-are-brainstormed-here)). Give the reader the options, what each costs, and
-  your recommendation with its reason; do not prescribe yourself a form.
+- A question lives in the spec or discussion it came from, placed as
+  [Decision blocks](#decision-blocks) says, never as a compressed standalone ask. Give the reader
+  the options, what each costs, and your recommendation with its reason; do not prescribe yourself
+  a form.
 - Describe a change by what its reader stands to lose, not by what the system does. The
   engineering sentence names the change; the reader's sentence names who can do what today, what
   they will not be able to do after it, what still works, and what you cannot tell. It is a
@@ -78,11 +75,8 @@ evidence for it, in plain words: what goes wrong, for whom, and the counts or ca
 It grows in place as the conversation goes. It is the issue's one primary document: extend it with
 a new version that keeps the human's own text, never a second "spec" artifact beside it.
 
-- **Each open question is a decision block** at the end of the section that discusses it, carrying the
-  options, what each costs, and your recommendation ([Decision blocks](#decision-blocks)). Because
-  it is an ask, it reaches the human's Inbox, and the answer lands next to its context. Never
-  gather questions into a list or an "open questions" section, and never ask one as a standalone
-  `dispatch_ask` that points at the spec.
+- **Each open question is a decision block**, placed as [Decision blocks](#decision-blocks) says.
+  Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
 - **A settled point records the human's own words and the date**, quoted, so no reader mistakes
   it for your inference. A point you inferred says so, with the reasoning.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
@@ -106,10 +100,12 @@ after the section on models.
 
 ## Decision blocks
 
-A decision a human must make is an `:::ask` block where the decision arises in the spec: inside
-the section whose content it is about, never gathered into a list at the top or bottom. Sami,
-LEGION-204 comment, 2026-09-20 14:47Z, verbatim: "Adding a bunch of decision blocks at the top is
-terrible!! Decisions should be in context in the spec".
+A decision a human must make is an `:::ask` block at the end of the section that discusses it,
+carrying the options, what each costs, and your recommendation. Never gather decisions into a
+list, at the top, at the bottom or in an "open questions" section, and never ask one as a
+standalone `dispatch_ask` that points at the spec. Sami, LEGION-204 comment, 2026-09-20 14:47Z,
+verbatim: "Adding a bunch of decision blocks at the top is terrible!! Decisions should be in
+context in the spec".
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
@@ -118,8 +114,8 @@ as a question, not an error: either no decision is needed and you say nothing, o
 make the decision a block and must fix the spec.
 
 **Wrong:** a **Decisions needed** list at the top of the spec with three bullets.
-**Right:** put each decision in the design section it belongs to as an `:::ask{#slug}` block, with
-2–4 options, a recommendation, and surrounding prose that explains the trade-off.
+**Right:** each decision an `:::ask{#slug}` block at the end of the design section that discusses
+it, with 2–4 options, a recommendation, and surrounding prose that explains the trade-off.
 
 A spec that already has the pile is repaired with `move`, not rewritten: `dispatch_doc_edit` with
 `{ op: "move", block: "<block-uuid>", after: "<the sentence that states the options>" }` relocates
@@ -406,8 +402,8 @@ an ordinary `dispatch_ask`, and never approve anything yourself: only humans app
 ## The Spec
 
 The spec holds the design and the decisions that shaped it, written as [Writing a spec](#writing-a-spec)
-says. It changes when the conversation changes it, and every version that records a decision is
-named with `summary`. What it never carries is in [Writing a spec](#writing-a-spec) too.
+says, which also lists what it never carries. It changes when the conversation changes it, and
+every version that records a decision is named with `dispatch_doc_edit`'s `summary`.
 
 Read the current document before changing it:
 

@@ -805,11 +805,11 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
     description:
       "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
-      "Request changes) in the human's Inbox whose question names the document and version, then " +
-      "summary; the answer pins a review to that version and arrives as artifact.approved or " +
-      "artifact.changes_requested. A later version makes an approval stale, and writing it retracts " +
-      "an open request for an older version; request again for the new one. A repeat at the version " +
-      "an open request names returns that request unchanged. " +
+      "Request changes) in the human's Inbox whose question names the document and version, " +
+      "followed by the summary; the answer pins a review to that version and arrives as " +
+      "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " +
+      "and writing it retracts an open request for an older version; request again for the new " +
+      "one. A repeat at the version an open request names returns that request unchanged. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),

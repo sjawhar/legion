@@ -6,11 +6,11 @@
 
 - A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
   the eight required headings: a spec starts as the problem and its evidence, puts each open
-  question in a decision block right after the text that discusses it, records a settled point in
-  the human's words with the date, and is rewritten in place as it changes. "Approval of a spec"
-  says to request approval only once no decision block is open and the spec proposes something
-  the human hasn't settled. The `dispatch_issue` and `dispatch_doc_edit` descriptions point at
-  that section instead of listing headings.
+  question in a decision block at the end of the section that discusses it, records a settled
+  point in the human's words with the date, and is rewritten in place as it changes. "Approval of
+  a spec" says to request approval only once no decision block is open and the spec proposes
+  something the human hasn't settled. The `dispatch_issue` and `dispatch_doc_edit` descriptions
+  point at that section instead of listing headings.
 - `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
   the human hasn't already agreed to, in one to three sentences. The Inbox shows it after "Approve
   spec.md (version N)?", and the result text quotes the question the human sees. It needs a

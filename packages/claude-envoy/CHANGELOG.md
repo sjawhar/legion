@@ -10,8 +10,8 @@
   It needs a Dispatch server that accepts `summary`; an older one refuses the call.
 - The `dispatch_issue` and `dispatch_doc_edit` descriptions no longer list spec headings; they
   point at the dispatch skill's "Writing a spec", which describes a spec as the design
-  conversation: the problem and its evidence, open questions as decision blocks after the text
-  that discusses them, and approval requested only once those are settled.
+  conversation: the problem and its evidence, each open question a decision block at the end of
+  the section that discusses it, and approval requested only once those are settled.
 
 ## [0.5.0]
 

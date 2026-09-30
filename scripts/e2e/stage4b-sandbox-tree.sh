@@ -1287,7 +1287,7 @@ if [ -n "$design_gate" ]; then
   [ -n "$until" ] || fail "STAGE4B_DESIGN_GATE is for a development run: set STAGE4B_UNTIL too"
   # Only tree 1 exists under the switch, so a checkpoint past spec-posted, which drives trees 2 to
   # 4, cannot run.
-  { [ "$until" = spec-posted ] || sed -n '/^begin spec-posted$/q; s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until"; } ||
+  sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
     fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
   note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
 fi
@@ -1475,14 +1475,9 @@ if [ -n "$design_gate" ]; then skipped "STAGE4B_DESIGN_GATE: tree 1 alone, so th
 
 # drive_spec ISSUE: the architect registers the gate on its own (architect_registers_gate); with
 # gates.design off the daemon approves the registered version itself and the issue moves to
-# planning. Under STAGE4B_DESIGN_GATE a human answers the spec's decision blocks and approves it,
-# so drive_gated_spec waits for that instead.
+# planning.
 drive_spec() {
   local issue=$1
-  if [ -n "$design_gate" ]; then
-    drive_gated_spec "$issue"
-    return
-  fi
   architect_registers_gate "$issue" "the $issue"
   wait_for_phase "$issue" planning
 }
@@ -1491,12 +1486,13 @@ gate_open() {
     '.issues[$issue].designGate as $g | $g.artifactId == $artifact and $g.approvedVersion != null and $g.approvedVersion == $g.currentVersion'
 }
 # drive_gated_spec ISSUE waits, up to 12 hours, for a human to answer the spec's decision blocks and
-# approve the version the architect asked about, then checks what the architect did: it asked the
-# document's open choice as a decision block, its approval request at the approved version carries
-# a summary after "Approve <name> (version N)?", and no approval request it made on the spec,
-# retracted ones included, came while a decision block was open (lib/approvals-while-blocks-open.jq).
+# approve the version the architect asked about, then checks what the architect did
+# (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
+# "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
+# approval request it made on the spec, retracted ones included, named a version holding one open.
 drive_gated_spec() {
-  local issue=$1 artifact approved asks request early blocks
+  local issue=$1 artifact approved asks version verdict request early blocks
+  local -a requested=()
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
   until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
@@ -1504,24 +1500,34 @@ drive_gated_spec() {
   approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
   asks=$(dispatch_get "issues/$issue/asks")
   jq . <<<"$asks" >"$evidence/$issue-asks.json"
-  request=$(jq -c --arg artifact "$artifact" --argjson version "$approved" \
-    '[.[] | select(.kind == "approval" and .approval.artifact_id == $artifact and .approval.version == $version)] | last // empty' <<<"$asks")
+  # Each version of the spec an approval request named, as the human was asked to approve it.
+  for version in $(jq -r --arg artifact "$artifact" '[.[] | select(.kind == "approval" and .approval.artifact_id == $artifact) | .approval.version] | unique | .[]' <<<"$asks"); do
+    dispatch_get "artifacts/$artifact/versions/$version" >"$evidence/$issue-spec-v$version.json" ||
+      fail "$issue: version $version of its spec could not be read"
+    requested+=("$evidence/$issue-spec-v$version.json")
+  done
+  verdict=$(jq -c -s --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "${requested[@]}")
+  printf '%s\n' "$verdict" >"$evidence/$issue-gate-verdict.json"
+  request=$(jq -r '.request // empty' <<<"$verdict")
   [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
-  jq -e '.question | test("^Approve .+ \\(version [0-9]+\\)\\? \\S")' <<<"$request" >/dev/null ||
-    fail "$issue: the approval request carries no summary: $(jq -r .question <<<"$request")"
-  early=$(jq -c --arg artifact "$artifact" -f "$root/scripts/e2e/lib/approvals-while-blocks-open.jq" <<<"$asks")
-  [ "$early" = "[]" ] || fail "$issue: approval was requested while decision blocks were open: $early"
-  blocks=$(jq '[.[] | select(.kind == "question" and .block_id != null)] | length' <<<"$asks")
-  [ "$blocks" -gt 0 ] || fail "$issue: the spec's open choice was never asked as a decision block ($evidence/$issue-asks.json)"
-  note "$issue: $blocks decision blocks, each settled before approval was requested"
-  note "$issue: the approval request at version $approved asked: $(jq -r .question <<<"$request")"
+  jq -e .summarized <<<"$verdict" >/dev/null || fail "$issue: the approval request carries no summary: $request"
+  early=$(jq -c .early <<<"$verdict")
+  [ "$early" = "[]" ] || fail "$issue: approval was requested for a version with a decision block still open: $early"
+  blocks=$(jq .blocks <<<"$verdict")
+  [ "$blocks" -gt 0 ] || fail "$issue: a human answered none of the spec's decision blocks, so its open choice was never settled as one ($evidence/$issue-asks.json)"
+  note "$issue: a human answered $blocks of the spec's decision blocks, and no version an approval request named held one open"
+  note "$issue: the approval request at version $approved asked: $request"
   wait_for_phase "$issue" planning
 }
 
 begin spec-posted
 specs=("$tree1")
-[ -n "$design_gate" ] || specs+=("$tree2")
-for issue in "${specs[@]}"; do drive_spec "$issue"; done
+if [ -n "$design_gate" ]; then
+  drive_gated_spec "$tree1"
+else
+  specs+=("$tree2")
+  for issue in "${specs[@]}"; do drive_spec "$issue"; done
+fi
 for issue in "${specs[@]}"; do
   version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   note "$issue: the architect posted its spec (version $version) and the daemon moved it to planning"

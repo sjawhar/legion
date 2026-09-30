@@ -85,12 +85,12 @@ Wave releases, child closures, and your own status are visible from the issue tr
 handoffs; do not narrate them into the spec or a `dispatch_message`. A blocker only Sami can
 clear is a `dispatch_ask`.
 
-The issue's primary document **is** the root specification. Extend it in place, as
-[Writing a spec](../dispatch/SKILL.md#writing-a-spec) says: a new version that keeps the human's
-own text and grows the design (the adoption or decomposition and its waves, how each outcome is
-proven, and the integration test), with each open question a decision block at the end of the
-section that discusses it. Never post a second "spec" artifact beside it (`dispatch_artifact` with the
-primary document's name replaces the human's document; do not do that).
+The issue's primary document **is** the root specification. Extend it in place: a new version
+that keeps the human's own text and grows the design (the adoption or decomposition and its
+waves, how each outcome is proven, and the integration test), each open question a
+[decision block](../dispatch/SKILL.md#decision-blocks). Never post a second "spec" artifact beside
+it (`dispatch_artifact` with the primary document's name replaces the human's document; do not do
+that).
 The design gate runs only when the "Design gate policy" line at the end of your system prompt
 says `gates.design: root-issues`. When it says `gates.design: off`, write the spec and continue
 to section 2 with no approval step at all: do not request approval, do not register a gate, and
@@ -113,11 +113,10 @@ legion({
 })
 ```
 
-The decision blocks come first. Each reaches the human's Inbox, and each answer reaches you,
-since you follow every ask you open; fold it into the text. Request approval only once no block is
-open: answering a block writes a new version, and a new version retracts a request made before it.
-`summary` says in one to three sentences what the tree will do that the human hasn't already
-agreed to; the Inbox shows it after "Approve spec.md (version N)?", and it names no open question.
+The decision blocks come first: request approval only once every one is answered and folded into
+the text, as [Approval of a spec](../dispatch/SKILL.md#approval-of-a-spec) says. Each answer
+reaches you, since you follow every ask you open. `summary` says in one to three sentences what
+the tree will do that the human hasn't already agreed to.
 
 `dispatch_request_approval` opens a system question on the document with the fixed options
 `Approve` and `Request changes`; a human answers it from the Inbox or approves from the
@@ -140,15 +139,16 @@ an approval is never lost to timing; you never approve anything yourself.
 
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake shows
 `design-approved` on the root. On `design-changes-requested`, revise the spec (a new version of
-the primary document), settle any decision block the revision raised, call
-`dispatch_request_approval` again with a `summary` of what the revision proposes — it opens the
-request at the new version — and stay parked. Approval is pinned to the spec version: editing the
-root spec after approval closes the gate again with no wake (you made the edit, or the
-`artifact.version` event on your issue tells you), so call `dispatch_request_approval` again, and
-release no new wave and spawn no new role until the next `design-approved` arrives — work already
-in flight continues. Later waves, re-scopes, and integration-failure children that leave the root
-spec untouched need no new approval, and a child issue's spec is never gated: the root approval
-covers the tree.
+the primary document), and once every decision block the revision raised is answered and folded
+in, call `dispatch_request_approval` again with a `summary` of what the revision proposes — it
+opens the request at the new version — and stay parked. Approval is pinned to the spec version:
+editing the root spec after approval closes the gate again with no wake (you made the edit, or
+the `artifact.version` event on your issue tells you), so, once every decision block the edit
+raised is answered and folded in, call `dispatch_request_approval` again with a `summary`, and
+release no new wave and spawn no new role until the next `design-approved` arrives — work
+already in flight continues. Later waves, re-scopes, and integration-failure children that leave
+the root spec untouched need no new approval, and a child issue's spec is never gated: the root
+approval covers the tree.
 
 ## 2. Children in flight
 
@@ -345,9 +345,10 @@ Sami directly with `dispatch_ask` the same way. Do not create a wait loop for an
 source.
 
 Never yield while waiting on a human. A human is waiting on you only where an open ask sits
-in their inbox, so open it — `dispatch_ask`, or `dispatch_request_approval` for the spec
-gate — before you stop. Otherwise proceed: proceeding is the default, and a stop that waits
-on nobody stalls the tree until someone notices.
+in their inbox, so open it before you stop: `dispatch_ask`, a decision block in the spec, or,
+once every decision block in the spec is answered and folded in, `dispatch_request_approval`
+for the spec gate. Otherwise proceed: proceeding is the default, and a stop that waits on
+nobody stalls the tree until someone notices.
 
 ## Architecture components
 
