@@ -297,13 +297,15 @@ function namesOwnCommit(text: string, commits: string[]): boolean {
 }
 
 /** tester-proof: the legion-worker skill's rule for a tester whose predecessor's proof holds.
- * worker_fixture writes the implement handoff through the handoff CLI, so it is valid, and its
- * proof reproduces, so the skill's answer is `verified` with a proof of the tester's own (a handoff
- * that failed validation would read as missing, and the answer would be `rejected`). A run passes
- * when all of these hold:
+ * worker_fixture writes the implement handoff through the handoff CLI, so it is valid, its proof
+ * reproduces, and its CLI meets all three acceptance criteria, so the skill's answer is `verified`
+ * with a proof of the tester's own and no red test to push (a handoff that failed validation would
+ * read as missing, and the answer would be `rejected`). A run passes when all of these hold:
  *   1. before the first accepted `handoff write --phase test`, the run's `bun` stand-in recorded a
  *      run of greet.ts (the first argument that is not a flag, after an optional `run`): the
- *      tester drove the CLI, whatever command line it wrote to do so;
+ *      tester drove the CLI, whatever command line it wrote to do so. The stand-in records only a
+ *      bun reached through PATH: `mise exec bun@… -- bun greet.ts` and a bun named by its absolute
+ *      path bypass it, and such a run reads as having run nothing;
  *   2. that write comes before the first push carrying .legion/test.json, which comes before an
  *      accepted `handoff complete`;
  *   3. the branch as the tester completed it (its last push before the completion) changes nothing

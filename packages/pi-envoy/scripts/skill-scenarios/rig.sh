@@ -460,7 +460,7 @@ export function greet(name: string): string {
 
 if (import.meta.main) {
   const name = Bun.argv[2];
-  if (name === undefined || name === "") {
+  if (name === undefined || name.trim() === "") {
     console.error("usage: greet.ts <name>");
     process.exit(2);
   }

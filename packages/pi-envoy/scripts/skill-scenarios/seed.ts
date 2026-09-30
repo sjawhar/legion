@@ -55,7 +55,7 @@ if (command === "project") {
         "## Acceptance",
         "",
         "1. `bun greet.ts Ada` prints `Hello, Ada!` and exits 0.",
-        "2. `bun greet.ts` with no name exits 2 and prints `usage: greet.ts <name>` to stderr.",
+        "2. `bun greet.ts` with no name, or a blank one, exits 2 and prints `usage: greet.ts <name>` to stderr.",
         "3. Surrounding whitespace in the name is trimmed.",
       ].join("\n"),
     },
