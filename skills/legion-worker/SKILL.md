@@ -360,12 +360,31 @@ cd -- "$LEGION_WORKSPACE" && \
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
 which authenticates as your role's App (`appRoleForLegionRole` in
-`packages/daemon/src/daemon/github-apps.ts`). `-r @-` puts the bookmark on the commit you just
+`packages/daemon/src/daemon/github-apps.ts`).
+
+**Under the Go daemon, every push is `legion push`,** run from bash in your workspace in place of
+the commands below. It runs this same procedure on `@-`: the ancestry check, against the remote
+branch or the tip you recorded before rewriting pushed commits (below), then the bookmark and the
+push. It also decides whether the push skips CI. A push skips CI only when none of its commits
+touches anything but handoffs whose phase guarantees a later push: the planner's
+`.legion/plan.json`, the tester's `.legion/test.json`, and a reviewer's `.legion/review.json` whose
+`verdict` is `"changes_requested"`. Its head then ends with GitHub's `skip-checks: true` trailer,
+and the Go daemon carries the code head's verdict to it. Every other push runs CI in full. Never
+add or remove that trailer yourself, never write one of GitHub's bracket keywords (`[skip ci]`,
+`[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`) into a commit message, and never push
+the issue branch with the commands below under the Go daemon: a hand-run push of a handoff that
+could skip CI runs it in full, and a hand-added trailer or keyword on any other push skips CI on a
+head a human may merge. `legion push` refuses a head whose message carries a keyword and pushes
+nothing until you take it out. Under the TypeScript daemon, whose `legion` has no `push` command,
+run the commands below yourself.
+
+`-r @-` puts the bookmark on the commit you just
 split off: the working copy left above it has no description, and `jj git push` refuses a
 commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
 can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
 provisioned bookmark on its first push — a bookmark not yet tracking a remote one is tracked
-automatically. This is the one push procedure; every push of the issue branch uses it:
+automatically. This is the one push procedure, run as `legion push` under the Go daemon and by
+hand under the TypeScript daemon; every push of the issue branch uses it:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
