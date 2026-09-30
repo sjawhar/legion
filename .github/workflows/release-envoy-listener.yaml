@@ -57,26 +57,27 @@ jobs:
           GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-listener ./cmd/listener
           tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@v4
-        with:
-          name: legion-envoy-${{ matrix.arch }}
-          path: packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
       # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
       # (packages/envoy/cmd/agent-secrets-helper, AGENTC-393/AGENTC-834): the same
       # legion-envoy-v* release also ships these for a host to install with mise's
-      # github backend (dotfiles installers/agent-secrets.sh), in the layout it expects —
-      # bin/agent-secrets, bin/agent-secrets-helper.
+      # github backend, in the layout its installer expects — bin/agent-secrets,
+      # bin/agent-secrets-helper. CGO_ENABLED=0 matches the existing agent-secrets
+      # builds (packages/envoy/docker/Dockerfile, packages/daemon/docker/worker.Dockerfile):
+      # without it, a same-arch build (amd64 here) links dynamically against the
+      # runner's glibc instead of producing a static binary.
       - name: Build agent-secrets binaries
         run: |
           mkdir -p bin
-          GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o bin/agent-secrets ./cmd/agent-secrets
-          GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o bin/agent-secrets-helper ./cmd/agent-secrets-helper
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o bin/agent-secrets ./cmd/agent-secrets
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o bin/agent-secrets-helper ./cmd/agent-secrets-helper
           tar czf agent-secrets-${{ matrix.arch }}.tar.gz bin
         working-directory: packages/envoy
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-secrets-${{ matrix.arch }}
-          path: packages/envoy/agent-secrets-${{ matrix.arch }}.tar.gz
+          name: legion-envoy-${{ matrix.arch }}
+          path: |
+            packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
+            packages/envoy/agent-secrets-${{ matrix.arch }}.tar.gz
 
   docker:
     needs: build
@@ -330,16 +331,14 @@ jobs:
           # Skip the *.dockerbuild attestation artifact uploaded automatically
           # by docker/build-push-action. It's not used by the release and has
           # been hanging in Azure blob download (failed both #607 and #608
-          # releases). The release only needs the binary artifacts.
+          # releases). The release only needs the binary artifacts (envoy-listener
+          # plus agent-secrets/agent-secrets-helper, bundled into the same
+          # per-arch artifact).
           pattern: legion-envoy-*
-      - uses: actions/download-artifact@v4
-        if: steps.publish.outputs.should_release == 'true'
-        with:
-          pattern: agent-secrets-*
       - name: Generate checksums
         if: steps.publish.outputs.should_release == 'true'
         run: |
-          for dir in legion-envoy-amd64 legion-envoy-arm64 agent-secrets-amd64 agent-secrets-arm64; do
+          for dir in legion-envoy-amd64 legion-envoy-arm64; do
             (cd "$dir" && sha256sum -- * >> ../SHA256SUMS)
           done
       - name: Create or update GitHub release
@@ -352,16 +351,12 @@ jobs:
             gh release upload "$TAG" --clobber \
               ./legion-envoy-amd64/* \
               ./legion-envoy-arm64/* \
-              ./agent-secrets-amd64/* \
-              ./agent-secrets-arm64/* \
               SHA256SUMS
           else
             gh release create "$TAG" \
               --title "$TAG" \
-              --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries (AGENTC-393/AGENTC-834)." \
+              --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
               ./legion-envoy-amd64/* \
               ./legion-envoy-arm64/* \
-              ./agent-secrets-amd64/* \
-              ./agent-secrets-arm64/* \
               SHA256SUMS
           fi
