@@ -11,7 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/sjawhar/legion/daemon/internal/testomp"
+	"github.com/sjawhar/legion/daemon/internal/testbin"
 )
 
 // The overlay holds off every setting a repository could name that sends a pod's conversation
@@ -136,7 +136,7 @@ func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T)
 // Without Apply the repository's endpoint is read, so a binary that stopped reading the
 // repository's settings cannot pass the first row by accident.
 func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
-	omp := testomp.Binary(t)
+	omp := testbin.OMP(t)
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "repo")
 	if err := os.MkdirAll(filepath.Join(repo, ".omp"), 0o700); err != nil {
