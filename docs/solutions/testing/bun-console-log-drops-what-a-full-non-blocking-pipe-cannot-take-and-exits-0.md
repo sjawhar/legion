@@ -1,5 +1,5 @@
 ---
-title: "Bun's console.log drops what a full non-blocking pipe cannot take and still exits 0: a script whose stdout a test parses prints through an awaited process.stdout.write"
+title: "Bun's console.log drops what a full non-blocking pipe cannot take and still exits 0: a Bun script hands its result back in a file the caller names, not on stdout"
 category: testing
 tags:
   - bun
@@ -11,7 +11,7 @@ tags:
   - load-dependent
 date: 2026-09-30
 status: active
-module: packages/envoy/internal/dispatch/pmdoc/gen/print.ts
+module: packages/envoy/internal/dispatch/pmdoc/gen
 applies_when:
   - A Go (or any) test runs a Bun script and parses what it prints, and fails now and then on invalid JSON or a bad encoding while the script exited 0
   - The failing case changes between runs and is always one of the larger outputs
@@ -58,19 +58,19 @@ On the same non-blocking pipe, `await Bun.write(Bun.stdout, text)` writes 4096 b
 was watched with its reader draining the pipe. Had that second write succeeded, the reader would have
 received the first 4096 bytes twice.
 
-## Fix
+## Fix: hand the result back in a file
 
-`gen/print.ts`'s `printLine` writes through `process.stdout.write` and awaits its callback.
-Bun keeps what the pipe cannot take and writes it as the reader drains; the callback runs after
-the last byte (measured: 9.6 s after the write, against a reader that waited 10 s) or with the
-error that stopped it, which the await throws, so the script exits non-zero rather than printing
-less than it says. `decode.ts` and `edit-blocks.ts` print through it.
+`decode.ts` and `edit-blocks.ts` take an output path as their last argument and `writeFileSync`
+their result there, as `differential.ts` and `gen.ts` already did, so no gen script a test reads
+returns anything over a pipe. A regular file takes the whole write, and a write that fails throws
+and exits non-zero. The Go runner (`genResult`, `update_test.go`) reads the file after exit 0 and
+fails the test when the script printed anything to stdout or exited 0 without writing the file,
+so a script moved back to `console.log` fails every test that runs it.
 
-The Go side frames the output: each script prints one line, so `wholeLine` (`update_test.go`)
-refuses output without its final line feed as cut short, naming the byte count, instead of
-handing it to `FromJSON` or `base64.DecodeString`. A truncated base64 update can still decode,
-so without the framing check `edit-blocks.ts` would have failed on a document mismatch far from
-its cause.
+A Bun script that has to print its result awaits `process.stdout.write`'s callback: Bun keeps
+what the pipe cannot take and writes it as the reader drains, and the callback runs after the
+last byte (measured: 9.6 s after the write, against a reader that waited 10 s) or with the error
+that stopped it. Never `Bun.write(Bun.stdout, ...)`.
 
 ## Reproduce it without load
 
@@ -82,10 +82,10 @@ Do not load the box. Shrink the pipe and stall the reader:
   `FIONREAD`, equals `F_GETPIPE_SZ`) for a second.
 
 A script that drops what does not fit exits with exactly one page read; one that waits is still
-there, blocked, and delivers everything once the reader drains.
-`TestGenScriptsWaitForAStalledReader` (`gen_output_linux_test.go`) does this for both scripts: with
-`console.log` it failed 4 of 4 runs at 4096 bytes, and with `printLine` it passes. With
-`Bun.write` it fails on its one-minute bound for the script's exit after draining starts.
+there, blocked, and delivers everything once the reader drains. A Go harness built this way read
+exactly 4096 bytes from `decode.ts` and `edit-blocks.ts` on 7 of 7 runs while they printed with
+`console.log`, received everything once they awaited `process.stdout.write`, and found the
+`Bun.write` version still running a minute after it began draining the pipe.
 
 ## Related
 

@@ -3,10 +3,9 @@ package pmdoc
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -189,18 +188,7 @@ func hasMark(node *Node, markType string) bool {
 
 func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	t.Helper()
-	if _, err := exec.LookPath("bun"); err != nil {
-		if os.Getenv("CI") == "" {
-			t.Skip("bun is not on PATH; cross-language decoder is required in CI")
-		}
-		t.Fatalf("bun is required in CI: %v", err)
-	}
-
-	encoded := base64.StdEncoding.EncodeToString(update)
-	output, stderr, err := runDecoder("decode.ts", encoded)
-	if err != nil {
-		t.Fatalf("run decode.ts: %v\nstderr:\n%s", err, stderr)
-	}
+	output := genResult(t, "decode.ts", update)
 	t.Log("y-prosemirror decoded with decode.ts")
 
 	decoded, err := FromJSON(output)
@@ -210,19 +198,36 @@ func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	return decoded
 }
 
-// runDecoder runs gen/<script> on encoded and returns the line it prints, without its line feed,
-// and its stderr when it fails.
-func runDecoder(script, encoded string) ([]byte, []byte, error) {
-	output, err := genScript(script, encoded).Output()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return output, exitErr.Stderr, err
+// genResult runs gen/<script> on the base64 of update and returns what the script wrote to the
+// file it is given as its last argument. A gen script hands its result back in a file, never on
+// stdout, which a Bun script can cut short while exiting 0
+// (docs/solutions/testing/bun-console-log-drops-what-a-full-non-blocking-pipe-cannot-take-and-exits-0.md),
+// so anything it prints to stdout fails the test rather than going unread, as does exiting 0
+// without writing the file.
+func genResult(t *testing.T, script string, update []byte) []byte {
+	t.Helper()
+	if _, err := exec.LookPath("bun"); err != nil {
+		if os.Getenv("CI") == "" {
+			t.Skipf("bun is not on PATH; %s is required in CI", script)
+		}
+		t.Fatalf("bun is required in CI: %v", err)
 	}
+	out := filepath.Join(t.TempDir(), "result")
+	cmd := genScript(script, base64.StdEncoding.EncodeToString(update), out)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
 	if err != nil {
-		return output, nil, err
+		t.Fatalf("%s: %v\nstderr:\n%s", script, err, stderr.Bytes())
 	}
-	line, err := wholeLine(script, output)
-	return line, nil, err
+	if len(stdout) > 0 {
+		t.Fatalf("%s printed %d bytes to stdout, which nothing reads: a gen script writes its result to the file it is given", script, len(stdout))
+	}
+	result, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("%s exited 0 without writing its result to the file it is given: %v", script, err)
+	}
+	return result
 }
 
 // genScript is the command that runs gen/<script> with args, as every test that reads the
@@ -233,20 +238,6 @@ func genScript(script string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// wholeLine is the one line a gen script printed, without its line feed. Each script prints its
-// result as one line, its line feed last, so output without that line feed at its end was cut
-// short, whatever the exit status said, and is refused as that rather than handed on as a result.
-func wholeLine(script string, output []byte) ([]byte, error) {
-	line, rest, found := bytes.Cut(output, []byte("\n"))
-	if !found {
-		return nil, fmt.Errorf("%s printed %d bytes without the line feed that ends its one line: its output was cut short", script, len(output))
-	}
-	if len(rest) > 0 {
-		return nil, fmt.Errorf("%s printed %d bytes after the line feed that ends its one line: %q", script, len(rest), rest)
-	}
-	return line, nil
-}
-
 // Every null attribute Go writes into the live document survives the browser editor: loaded as its
 // sync plugin loads it, with a header cell, a body cell and a code block typed into and an image's
 // alt text edited, written back as that plugin writes them, the document reads back with each
@@ -255,12 +246,6 @@ func wholeLine(script string, output []byte) ([]byte, error) {
 // holds "none", and a code block with no language and an image with no title come back holding ""
 // unless the read gives "" back as null (liveNulls).
 func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
-	if _, err := exec.LookPath("bun"); err != nil {
-		if os.Getenv("CI") == "" {
-			t.Skip("bun is not on PATH; the browser editor's sync is required in CI")
-		}
-		t.Fatalf("bun is required in CI: %v", err)
-	}
 	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n\n```\ncode\n```\n\n![alt](src.png) tail\n")
 	if err != nil {
 		t.Fatal(err)
@@ -274,14 +259,7 @@ func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, stderr, err := runDecoder("edit-blocks.ts", base64.StdEncoding.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
-	if err != nil {
-		t.Fatalf("run edit-blocks.ts: %v\nstderr:\n%s", err, stderr)
-	}
-	update, err := base64.StdEncoding.DecodeString(string(output))
-	if err != nil {
-		t.Fatalf("edit-blocks.ts output: %v\n%s", err, output)
-	}
+	update := genResult(t, "edit-blocks.ts", crdt.EncodeStateAsUpdateV1(doc, nil))
 	edited := crdt.New()
 	if err := crdt.ApplyUpdateV1(edited, update, nil); err != nil {
 		t.Fatal(err)
