@@ -16,6 +16,7 @@ symptoms:
   - "A test on a shared NATS server lists a key that a test two tests earlier wrote"
   - "A cache warm-up on a bucket a test just deleted and created again reports entries and delete_markers it never wrote"
   - "TestSessionList_CacheOnlyAfterNATSShutdown: expected ses_cache from cache after shutdown, got [... ses_wt ...]"
+  - "error creating store for stream"
 root_cause: race_condition
 resolution_type: test_fix
 severity: medium
@@ -62,10 +63,12 @@ tests then fail five runs out of five with CI's message. Loading the machine onl
 
 Never delete and recreate a stream name on a shared server. The session tests open their
 registries on a bucket named for the test (`setupNATS(t).OpenRegistry`, `envoy_sessions_<n>`), as
-`internal/store` (`testBuckets`) and `internal/cistore` (`testBucket`) already did for the other
-symptom of the same race ("error creating store for stream"). `setupNATS`'s cleanup fails a test
-that opened the production-named bucket on the shared server, so a test that bypasses the helper
-fails on its first run rather than flaking.
+`internal/store` (`testBuckets`) and `internal/cistore` (`testBucket`) already did against another
+symptom of deleting and recreating a stream name on a shared server ("error creating store for
+stream"), which more likely comes from a single delete and create racing the background cleanup
+(an inference from the code, not reproduced). Every test that reaches the shared server
+(`sharedTestNATSURI`) is checked on cleanup: one that opened the production-named bucket there
+fails on its first run rather than flaking, however it reached the server.
 
 ## Where the same race still applies
 

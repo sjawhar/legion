@@ -33,6 +33,9 @@ var (
 	sharedNATSContainer *tcnats.NATSContainer
 )
 
+// sharedTestNATSURI returns the package's shared NATS server, starting it for the first test that
+// asks. Every test that asks is checked on cleanup: one that opened the production session bucket
+// there, bypassing OpenRegistry, fails, however it reached the server (refuseProductionBucket).
 func sharedTestNATSURI(t *testing.T) string {
 	t.Helper()
 	sharedNATSOnce.Do(func() {
@@ -52,7 +55,9 @@ func sharedTestNATSURI(t *testing.T) string {
 	if sharedNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
 	}
-	return sharedNATSURI
+	uri := sharedNATSURI
+	t.Cleanup(func() { refuseProductionBucket(t, uri) })
+	return uri
 }
 
 // sessionBuckets numbers the session buckets the package's tests open on the shared server.
@@ -71,8 +76,7 @@ type testNATS struct {
 // directory aside and removes it from a background goroutine, a second delete of the same name
 // before that goroutine has run leaves the stream's files in place while still answering success,
 // and the next create of the name recovers its messages. Tests that each deleted and recreated
-// the one production-named bucket therefore read an earlier test's sessions. On cleanup it fails
-// a test that opened the production bucket there, past OpenRegistry.
+// the one production-named bucket therefore read an earlier test's sessions.
 func setupNATS(t *testing.T) testNATS {
 	t.Helper()
 	uri := sharedTestNATSURI(t)
@@ -81,7 +85,6 @@ func setupNATS(t *testing.T) testNATS {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	t.Cleanup(func() { refuseProductionBucket(t, uri) })
 	return testNATS{Client: client, Bucket: fmt.Sprintf("%s_%d", SessionBucket, sessionBuckets.Add(1))}
 }
 
@@ -91,8 +94,8 @@ func (n testNATS) OpenRegistry(options ...SessionRegistryOption) (*SessionRegist
 }
 
 // refuseProductionBucket fails t when the shared server holds SessionBucket, which only a registry
-// opened past OpenRegistry creates there, on the one name every such test would share. It deletes
-// the bucket, so no later test fails for it.
+// opened bypassing OpenRegistry creates there, on the one name every such test would share. It
+// deletes the bucket, so no later test fails for it.
 func refuseProductionBucket(t *testing.T, uri string) {
 	t.Helper()
 	conn := testnats.Connect(t, uri)
