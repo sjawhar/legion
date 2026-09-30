@@ -489,20 +489,29 @@ func TestSignEnrollmentRefusedInHelperMode(t *testing.T) {
 // AGENT_SECRETS_HELPER_SOCK, once with both unset and the files at the $XDG_RUNTIME_DIR defaults.
 func TestIdentity(t *testing.T) {
 	type paths struct{ home, keyDir, sock string }
-	// namedNotice: the notice appears only when AGENT_SECRETS_HELPER_SOCK names the absent socket,
+	// A row's notice gives the text it expects on stderr, "" for none; mode is "named" or "defaults".
+	type notice func(mode string, p paths) string
+	unreachable := func(_ string, p paths) string {
+		return "agent-secrets: helper unreachable at " + p.sock + "; not an agent session"
+	}
+	// namedOnly: the notice appears only when AGENT_SECRETS_HELPER_SOCK names the absent socket,
 	// since an explicit path says a helper was expected there.
+	namedOnly := func(mode string, p paths) string {
+		if mode == "named" {
+			return unreachable(mode, p)
+		}
+		return ""
+	}
 	cases := []struct {
-		name        string
-		setup       func(t *testing.T, p paths)
-		exit        int
-		notice      bool
-		namedNotice bool
-		slow        bool
-		noticeText  string // the notice's text, when it is not the unreachable one
+		name   string
+		setup  func(t *testing.T, p paths)
+		exit   int
+		stderr notice
+		slow   bool
 	}{
 		{name: "key.pem", setup: func(t *testing.T, p paths) { copyKeyDir(t, newKeyDir(t), p.keyDir) }, exit: 0},
 		{name: "fresh marker", setup: func(t *testing.T, p paths) { writePendingMarker(t, p.keyDir, 0) }, exit: 0},
-		{name: "stale marker", setup: func(t *testing.T, p paths) { writePendingMarker(t, p.keyDir, 200*time.Second) }, exit: 1, namedNotice: true},
+		{name: "stale marker", setup: func(t *testing.T, p paths) { writePendingMarker(t, p.keyDir, 200*time.Second) }, exit: 1, stderr: namedOnly},
 		{name: "helper OK", setup: func(t *testing.T, p paths) {
 			fakeHelperAt(t, p.sock, helper.Response{OK: true, Proof: "eyJ.fake.proof", EnrollmentID: "enr-h"})
 		}, exit: 0},
@@ -514,11 +523,13 @@ func TestIdentity(t *testing.T) {
 		}, exit: 1},
 		{name: "helper answers an unknown code", setup: func(t *testing.T, p paths) {
 			fakeHelperAt(t, p.sock, helper.Response{Code: "SOME_LATER_CODE", Error: "a code this client predates"})
-		}, exit: 1, notice: true, noticeText: "answered SOME_LATER_CODE: a code this client predates; not an agent session"},
-		{name: "nothing listening", setup: func(t *testing.T, p paths) { staleSocketAt(t, p.sock) }, exit: 1, notice: true},
-		{name: "unit installed, no socket", setup: func(t *testing.T, p paths) { installHelperUnit(t, p.home) }, exit: 1, notice: true},
-		{name: "helper never answers", setup: func(t *testing.T, p paths) { silentHelperAt(t, p.sock) }, exit: 1, notice: true, slow: true},
-		{name: "nothing", setup: func(t *testing.T, p paths) {}, exit: 1, namedNotice: true},
+		}, exit: 1, stderr: func(string, paths) string {
+			return "answered SOME_LATER_CODE: a code this client predates; not an agent session"
+		}},
+		{name: "nothing listening", setup: func(t *testing.T, p paths) { staleSocketAt(t, p.sock) }, exit: 1, stderr: unreachable},
+		{name: "unit installed, no socket", setup: func(t *testing.T, p paths) { installHelperUnit(t, p.home) }, exit: 1, stderr: unreachable},
+		{name: "helper never answers", setup: func(t *testing.T, p paths) { silentHelperAt(t, p.sock) }, exit: 1, stderr: unreachable, slow: true},
+		{name: "nothing", setup: func(t *testing.T, p paths) {}, exit: 1, stderr: namedOnly},
 	}
 	for _, mode := range []string{"named", "defaults"} {
 		for _, tc := range cases {
@@ -550,15 +561,14 @@ func TestIdentity(t *testing.T) {
 				if stdout.Len() != 0 {
 					t.Fatalf("identity printed to stdout: %q", stdout.String())
 				}
-				want := "agent-secrets: helper unreachable at " + p.sock + "; not an agent session"
-				if tc.noticeText != "" {
-					want = tc.noticeText
+				want := ""
+				if tc.stderr != nil {
+					want = tc.stderr(mode, p)
 				}
-				notice := tc.notice || (tc.namedNotice && mode == "named")
-				if notice && !strings.Contains(stderr.String(), want) {
+				if want != "" && !strings.Contains(stderr.String(), want) {
 					t.Fatalf("stderr %q, want the notice %q", stderr.String(), want)
 				}
-				if !notice && stderr.Len() != 0 {
+				if want == "" && stderr.Len() != 0 {
 					t.Fatalf("stderr %q, want nothing", stderr.String())
 				}
 				if tc.slow && (elapsed < 1500*time.Millisecond || elapsed > 4*time.Second) {

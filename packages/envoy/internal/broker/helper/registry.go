@@ -86,15 +86,33 @@ func (s *Session) setError(msg string) {
 	s.lastError = msg
 }
 
+// A session's lapsed id is an enrollment of its runtime that must be revoked before it enrolls
+// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the one its
+// record named (setLapsed, from Recover). enrollLoop revokes it first (clearLapsed once done), and
+// until then it stays on the session's record, so a restart in between still revokes it.
+
 // markLapsed is what a refused renew does: the broker no longer honours this enrollment (its lease
-// lapsed while the broker was unreachable), so the session stops counting as enrolled at once —
-// sign and sign-request answer as for any session still enrolling — and enrolls again once the
-// lapsed id is revoked. The id stays on the session's record until clearLapsed, so a helper
-// restart in between still revokes it (Recover's priorID). Returns the lapsed id.
+// lapsed, or it was revoked), so the session stops counting as enrolled at once — sign and
+// sign-request answer as for any session still enrolling — and the enrollment becomes the lapsed
+// id. Returns it.
 func (s *Session) markLapsed() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lapsedID, s.enrollmentID = s.enrollmentID, ""
+	return s.lapsedID
+}
+
+// setLapsed gives a re-pinned session its recorded enrollment as the lapsed id.
+func (s *Session) setLapsed(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lapsedID = id
+}
+
+// lapsed is the session's lapsed id, "" when it has none.
+func (s *Session) lapsed() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.lapsedID
 }
 
@@ -105,8 +123,8 @@ func (s *Session) clearLapsed() {
 	s.lapsedID = ""
 }
 
-// recordedEnrollmentID is the enrollment a restart must revoke: the live one, else one a refused
-// renew left that is not revoked yet.
+// recordedEnrollmentID is the enrollment a restart must revoke: the live one, else the lapsed id
+// not revoked yet.
 func (s *Session) recordedEnrollmentID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

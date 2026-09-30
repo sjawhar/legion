@@ -19,17 +19,10 @@ func TestVersionNamesTheStampedReleaseAndOtherwiseSaysDevel(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("stamped build: %v\n%s", err, out)
 	}
-	for _, tc := range []struct {
-		binary string
-		check  func(string) bool
-		want   string
-	}{
-		{stamped, func(s string) bool { return s == "agent-secrets legion-envoy-v9.9.9\n" }, "agent-secrets legion-envoy-v9.9.9"},
-		{buildAgentSecrets(t), func(s string) bool { return strings.HasPrefix(s, "agent-secrets devel") }, "agent-secrets devel…"},
-	} {
-		out, err := exec.Command(tc.binary, "--version").Output()
-		if err != nil || !tc.check(string(out)) {
-			t.Fatalf("%s --version: %q (%v); want %s", tc.binary, out, err, tc.want)
-		}
+	if out, err := exec.Command(stamped, "--version").Output(); err != nil || string(out) != "agent-secrets legion-envoy-v9.9.9\n" {
+		t.Fatalf("stamped --version: %q (%v); want agent-secrets legion-envoy-v9.9.9", out, err)
+	}
+	if out, err := exec.Command(buildAgentSecrets(t), "--version").Output(); err != nil || !strings.HasPrefix(string(out), "agent-secrets devel") {
+		t.Fatalf("local --version: %q (%v); want agent-secrets devel…", out, err)
 	}
 }

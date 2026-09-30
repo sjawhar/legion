@@ -24,6 +24,10 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
+// failAlways, set as a failure count (failFirst, revokeFailFirst), fails every such call a test
+// can make.
+const failAlways = 1 << 30
+
 // fakeBroker records enrollment traffic. It answers 201 for a new thumbprint, 200 for a repeat
 // (the contract's idempotent enroll), 401 LAUNCHER_INVALID for a missing or forced-invalid Proof
 // header, and verifies renew proofs against the thumbprint it enrolled. leaseExpiry models the
