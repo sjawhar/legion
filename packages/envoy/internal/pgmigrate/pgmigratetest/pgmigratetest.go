@@ -1,14 +1,47 @@
-// Package pgmigratetest holds the numbering rule Envoy's migration sets are held to in tests. It is
-// an ordinary package rather than a _test.go file so Dispatch's and the broker's store tests can
-// both call it; Go shares no test-only code across packages.
+// Package pgmigratetest holds the rules Envoy's migration sets are held to in tests: what a store
+// embeds is its whole migrations directory, and the set is numbered 1 to N. It is an ordinary
+// package rather than a _test.go file so Dispatch's and the broker's store tests can both call
+// it; Go shares no test-only code across packages.
 package pgmigratetest
 
 import (
 	"fmt"
 	"io/fs"
+	"os"
+	"slices"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
+
+// CheckEmbedsEveryFile reports an error unless embedded holds, in dir, every entry the directory
+// dir holds on disk, read from the test's working directory, the store's package directory.
+// pgmigrate.Load refuses a file named any other way than a migration, but only a file it is
+// given: a //go:embed pattern naming a directory without all: leaves out every name beginning
+// with _ or ., so a migration named _0054_x.up.sql would go unembedded and unapplied, with no
+// error, while its file sits in the tree.
+func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
+	onDisk, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list %s on disk: %w", dir, err)
+	}
+	inBinary, err := fs.ReadDir(embedded, dir)
+	if err != nil {
+		return fmt.Errorf("list embedded %s: %w", dir, err)
+	}
+	names := func(entries []fs.DirEntry) []string {
+		out := make([]string, len(entries))
+		for i, entry := range entries {
+			out[i] = entry.Name()
+		}
+		return out
+	}
+	for _, name := range names(onDisk) {
+		if !slices.Contains(names(inBinary), name) {
+			return fmt.Errorf("%s/%s is on disk but not embedded, so no runner would see it; embed the directory with all:", dir, name)
+		}
+	}
+	return nil
+}
 
 // CheckNumberedOneToN reports an error unless the set pgmigrate.Load reads from dir in fsys is
 // numbered 1 to N with no number missing. It reads file names alone, so it needs no database.

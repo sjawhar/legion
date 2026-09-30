@@ -13,6 +13,47 @@ import (
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
+// Processes that boot at once against an empty database all migrate it. The version table is
+// created under the runner's advisory lock, as the broker's runner creates its own; created before
+// it, two `create table if not exists` race on the catalog and the loser exits on pg_type's unique
+// index.
+func TestMigrateFromSeveralProcessesAtOnceOnAnEmptyDatabase(t *testing.T) {
+	ctx := context.Background()
+	first := openEmptyTestStore(t)
+	const processes = 4
+	stores := []*Store{first}
+	for len(stores) < processes {
+		another, err := Open(ctx, first.Pool.Config().ConnString())
+		if err != nil {
+			t.Fatalf("open another process's store: %v", err)
+		}
+		t.Cleanup(another.Pool.Close)
+		stores = append(stores, another)
+	}
+	set := fstest.MapFS{"migrations/0001_first.up.sql": {Data: []byte("create table guard_first (id integer)")}}
+	start := make(chan struct{})
+	errs := make(chan error, processes)
+	for _, process := range stores {
+		go func() {
+			<-start
+			errs <- process.migrate(ctx, set)
+		}()
+	}
+	close(start)
+	for range processes {
+		if err := <-errs; err != nil {
+			t.Errorf("a process migrating at the same moment failed: %v", err)
+		}
+	}
+	var recorded int
+	if err := first.Pool.QueryRow(ctx, "select count(*) from schema_migrations where version = 1").Scan(&recorded); err != nil {
+		t.Fatalf("count version 1: %v", err)
+	}
+	if recorded != 1 {
+		t.Errorf("version 1 recorded %d times, want once", recorded)
+	}
+}
+
 // A set in which two files share a version is refused whole, before the runner touches the
 // database. The runner records a migration by its version alone, so a set it accepted would apply
 // the first file numbered 2, pass over the second as already applied, and report success.

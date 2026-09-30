@@ -18,10 +18,12 @@ import (
 	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
-// The whole directory, not *.up.sql alone, so pgmigrate.Load sees a file named any other way and
-// refuses it rather than a migration going unembedded and unapplied while its file sits in the tree.
+// The whole directory, not *.up.sql alone, and with all:, which keeps names beginning with _ or .
+// that a bare directory pattern leaves out: pgmigrate.Load then sees every file in the tree and
+// refuses one named any other way, rather than a migration going unembedded and unapplied while
+// its file sits there.
 //
-//go:embed migrations
+//go:embed all:migrations
 var migrationFiles embed.FS
 
 type Store struct {

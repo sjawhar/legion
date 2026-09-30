@@ -211,6 +211,13 @@ func (w *watch) run(ctx context.Context, config *pgx.ConnConfig, pid uint32) {
 		err := conn.QueryRow(ctx, lockWaitQuery, pid).Scan(&wait.LockType, &wait.Mode, &wait.Object, &wait.Holders)
 		switch {
 		case err == nil:
+			// pg_locks and pg_blocking_pids read the lock table in separate passes, so a reading
+			// taken as the cancellation dequeues the migration can list its ungranted lock with no
+			// blocker. It does not replace a reading of the same lock that named its holders.
+			if len(wait.Holders) == 0 && w.wait != nil && len(w.wait.Holders) > 0 &&
+				w.wait.Mode == wait.Mode && w.wait.Object == wait.Object {
+				continue
+			}
 			w.wait = &wait
 		case errors.Is(err, pgx.ErrNoRows):
 			// Not waiting at this reading; an earlier wait the migration got past stays recorded,

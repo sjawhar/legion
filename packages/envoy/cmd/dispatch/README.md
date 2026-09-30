@@ -197,19 +197,24 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 ## Database migrations
 
 Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each
-version in `schema_migrations`. Version 8 is an empty file: that version was recorded from Go by
-the one-time conversion of pre-Proof `Y.Text` rooms and offset anchors into Proof trees and mark
-anchors, which every deployed database has already run.
+version in `schema_migrations`, which it creates under the runner's advisory lock, so processes
+booting together against an empty database migrate one after the other. Version 8 is an empty
+file: that version was recorded from Go by the one-time conversion of pre-Proof `Y.Text` rooms and
+offset anchors into Proof trees and mark anchors, which every deployed database has already run.
 
 The runner records a migration by its version alone, so before it touches the database it reads
 the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every
 file concerned, when two migrations share a version (it would apply the first and skip the rest as
-already applied), when a file is named other than `<version>_<name>.up.sql` or
-`<version>_<name>.down.sql` (a `.down.sql` is a rollback script an operator runs by hand, and needs
-its `.up.sql`), when a version is not decimal digits from 1 to 2147483647, and when a file cannot
-be read. Versions are applied by number, not by file name, and the store's tests require them to
-run 1 to N with no gap (`TestMigrationSetIsNumberedOneToN`, which reads file names alone), so take
-the next free number on `main`.
+already applied; keep the number on the file that merged to `main` first and renumber the rest),
+when a file is named other than `<version>_<name>.up.sql` or `<version>_<name>.down.sql` (a
+`.down.sql` is a rollback script an operator runs by hand, and needs its `.up.sql`), when a version
+is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
+embedded with `all:`, so a name beginning with `_` or `.` is refused like any other, and an editor's
+swap file left in the directory fails a local build's tests until it is gone. Versions are applied
+by number, not by file name, and the store's tests require every file on disk to be embedded
+(`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap
+(`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number
+on `main`.
 
 Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which
 `pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a

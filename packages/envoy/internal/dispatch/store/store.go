@@ -18,10 +18,12 @@ type Store struct {
 	Pool *Pool
 }
 
-// The whole directory, not *.up.sql alone, so pgmigrate.Load sees a file named any other way and
-// refuses it rather than a migration going unembedded and unapplied while its file sits in the tree.
+// The whole directory, not *.up.sql alone, and with all:, which keeps names beginning with _ or .
+// that a bare directory pattern leaves out: pgmigrate.Load then sees every file in the tree and
+// refuses one named any other way, rather than a migration going unembedded and unapplied while
+// its file sits there.
 //
-//go:embed migrations
+//go:embed all:migrations
 var migrationFiles embed.FS
 
 // poolSizeParam is the connection-string parameter Open refuses. Open fixes MaxConns at
@@ -96,13 +98,8 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	if err != nil {
 		return fmt.Errorf("migrations refused, none applied: %w", err)
 	}
-	if _, err := s.Pool.Exec(ctx, `
-		create table if not exists schema_migrations (
-			version integer primary key,
-			applied_at timestamptz not null default now()
-		)
-	`); err != nil {
-		return fmt.Errorf("create schema migrations table: %w", err)
+	if err := s.createVersionTable(ctx); err != nil {
+		return err
 	}
 	for _, migration := range migrations {
 		if err := s.applyMigration(ctx, migration); err != nil {
@@ -110,6 +107,35 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 		}
 	}
 	return nil
+}
+
+// migrationLockKey is the pg_advisory_xact_lock every Dispatch process's runner takes, so two
+// processes booting at once migrate one after the other.
+const migrationLockKey int64 = 8150001
+
+// createVersionTable creates schema_migrations under the runner's advisory lock, as the broker's
+// runner creates its own. Created outside it, two processes booting at once against an empty
+// database race `create table if not exists` on the catalog, and the loser exits on pg_type's
+// unique index.
+func (s *Store) createVersionTable(ctx context.Context) error {
+	ctx = WithTransactionTracking(ctx)
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock($1)", migrationLockKey); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		create table if not exists schema_migrations (
+			version integer primary key,
+			applied_at timestamptz not null default now()
+		)
+	`); err != nil {
+		return fmt.Errorf("create schema migrations table: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migration) error {
@@ -121,7 +147,7 @@ func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migratio
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock($1)", int64(8150001)); err != nil {
+	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock($1)", migrationLockKey); err != nil {
 		return fmt.Errorf("lock migrations: %w", err)
 	}
 	var applied bool

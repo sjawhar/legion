@@ -25,6 +25,14 @@ func TestMigrationSetIsNumberedOneToN(t *testing.T) {
 	}
 }
 
+// Every file in the broker's migrations directory reaches the runner;
+// pgmigratetest.CheckEmbedsEveryFile says why that needs a test.
+func TestEveryMigrationFileIsEmbedded(t *testing.T) {
+	if err := pgmigratetest.CheckEmbedsEveryFile(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The broker's runner applies its whole set in one transaction, so a set it accepted with two
 // files numbered 2 would apply the first, pass over the second as already applied, and commit.
 func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.T) {
