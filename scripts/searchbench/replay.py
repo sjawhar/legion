@@ -25,16 +25,17 @@ Run order (DATA is internal company text: keep it outside any repository, mode 0
   replay.py embed     --data DATA --model M --budget-usd X   each distinct chunk text once, one call at a
                                                   time; stops cleanly after --max-seconds, and a rerun resumes
   replay.py candidate --data DATA --model M --reranker R --out FILE --budget-usd X
-  env -u CI DATABASE_URL=<empty database> DISPATCH_E2E_PORT=PORT bash packages/dispatch/e2e/run-server.sh
-      (from the commit production runs: its /healthz names it), then
-  replay.py baseline  --data DATA --server http://127.0.0.1:PORT --out FILE
+  replay.py serve     --data DATA --checkout DIR --database-url <empty database> --port PORT
+      builds and runs the scratch server from DIR, a clean jj checkout of the commit production
+      runs (its /healthz names it), and records that launch in DATA/scratch_server.json; then
+  replay.py baseline  --data DATA --out FILE     against the server that record names
   replay.py report    --data DATA --baseline FILE --candidate FILE   markdown tables; writes results.json
 Embeddings are cached by the SHA-256 of each chunk's text, so identical text (an unchanged issue in
 another case, or an unchanged paragraph of a later spec version) is embedded once. The baseline's
 word check and the candidate share SEARCHBENCH_PG. Every command appends its run (arguments, start,
 end, outcome, load average) to DATA/../runs.jsonl; the embedding and rerank commands append their
-provider usage to DATA/../usage.jsonl; report copies both, with the production and scratch servers'
-/healthz readings, into results.json.
+provider usage to DATA/../usage.jsonl; report copies both, with the scratch server's launch record
+and the production and scratch servers' /healthz readings, into results.json.
 """
 
 import argparse
@@ -42,6 +43,8 @@ import hashlib
 import json
 import os
 import re
+import signal
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -509,7 +512,10 @@ class Scratch:
         self.base = self.root + "/api/v1"
 
     def health(self) -> dict:
-        """The scratch server's /healthz: the commit it was built from and its schema version."""
+        """The scratch server's /healthz: its schema version, and the build commit it reports. That
+        commit is only the string its build was stamped with (-ldflags main.buildCommit); `serve`
+        stamps it from the checkout's revision, so the launch record, not this reading, is the
+        build's identity."""
         at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         with urllib.request.urlopen(self.root + "/healthz", timeout=30) as resp:
             return {"read_at": at, **json.loads(resp.read())}
@@ -544,9 +550,127 @@ def production_status(text: str) -> dict:
         return {"status": int(m.group(1)), "error": m.group(2)[:200]}
 
 
+SCRATCH_RECORD = "scratch_server.json"
+
+
+def checkout_revision(checkout: str) -> dict:
+    """The revision a scratch server is built from, read with jj in its checkout (a jj workspace,
+    named by any directory in it). The read snapshots the working copy first, so an edit on disk
+    shows as a working-copy commit with changes, and that is refused: the server would not be the
+    revision it names. A path jj's ignore rules exclude is outside this check."""
+    def jj(*a: str) -> str:
+        return subprocess.run(["jj", "--no-pager", "--color=never", *a], cwd=checkout, check=True,
+                              capture_output=True, text=True).stdout
+
+    root = jj("workspace", "root").strip()
+    wc, state, parents = jj("log", "--no-graph", "-r", "@", "-T",
+                            'commit_id ++ "\\t" ++ if(empty, "clean", "changed") ++ "\\t" '
+                            '++ parents.map(|p| p.commit_id()).join(",")').split("\t")
+    if state != "clean":
+        raise SystemExit(f"{root}: the working copy holds changes, so a server built from it is not a revision:\n"
+                         + jj("diff", "--summary", "-r", "@"))
+    if "," in parents:
+        raise SystemExit(f"{root}: the working-copy commit is a merge ({parents}); check out one revision")
+    return {"checkout": root, "revision": parents, "working_copy_commit": wc, "working_copy": state,
+            "read_at": utcnow()}
+
+
+def redact_url(url: str) -> str:
+    p = urllib.parse.urlsplit(url)
+    if p.password is None:
+        return url
+    host = p.hostname + (f":{p.port}" if p.port else "")
+    return urllib.parse.urlunsplit(p._replace(netloc=f"{p.username}:***@{host}"))
+
+
+def cmd_serve(args):
+    """Build and run the scratch server from a clean checkout, in the foreground until it exits, and
+    keep DATA/scratch_server.json as the record of that launch: the command and the environment it
+    set, the checkout, revision and working-copy state it was built from, the Go toolchain
+    run-server.sh resolves there, the server's pid, its /healthz once it answers, and its exit."""
+    path = os.path.join(args.data, SCRATCH_RECORD)
+    url = f"http://127.0.0.1:{args.port}"
+    s = Scratch(url)
+    try:
+        held = s.health()
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        held = None
+    if held is not None:
+        raise SystemExit(f"{url} already answers /healthz ({held}): another server holds the port")
+    source = checkout_revision(args.checkout)
+    rev, cwd = source["revision"], source["checkout"]
+
+    def run(*a: str) -> str:
+        return subprocess.run(list(a), cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    goroot = run("go", "env", "GOROOT")  # the Go binary run-server.sh runs: $(go env GOROOT)/bin/go
+    argv = ["nice", "-n", "19", "bash", "packages/dispatch/e2e/run-server.sh"]
+    env_set = {"DATABASE_URL": args.database_url, "DISPATCH_E2E_PORT": str(args.port),
+               "GOFLAGS": f"-p=1 -ldflags=-X=main.buildCommit={rev}"}
+    env_unset = ["CI"]
+    rec = {"what": "The scratch Dispatch server's launch, written by replay.py serve: the command it ran from the "
+                   "checkout (argv, cwd, the environment it set and unset), the revision and working-copy state it "
+                   "was built from, the Go toolchain, the pid, /healthz once it answered, and its exit. The build "
+                   "commit /healthz reports is stamped from source.revision by the GOFLAGS here.",
+           "url": url, "argv": argv, "cwd": cwd,
+           "env_set": {**env_set, "DATABASE_URL": redact_url(args.database_url)}, "env_unset": env_unset,
+           "source": source, "go": {"goroot": goroot, "version": run(os.path.join(goroot, "bin", "go"), "version")},
+           "started_at": utcnow()}
+    env = {k: v for k, v in os.environ.items() if k not in env_unset} | env_set
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True)
+    rec["pid"] = proc.pid
+    write_json(path, rec)
+
+    def stop(*_):
+        raise SystemExit("serve: terminated")
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        deadline = time.time() + args.ready_seconds
+        while "health_at_ready" not in rec:
+            if proc.poll() is not None:
+                raise SystemExit(f"the scratch server exited ({proc.returncode}) before it answered /healthz")
+            try:
+                rec["health_at_ready"] = s.health()
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
+                if time.time() > deadline:
+                    raise SystemExit(f"the scratch server did not answer /healthz within {args.ready_seconds}s")
+                time.sleep(2)
+        if rec["health_at_ready"].get("commit") != rev:
+            raise SystemExit(f"{url} reports commit {rec['health_at_ready'].get('commit')!r}, not {rev}")
+        write_json(path, rec)
+        print(f"scratch server ready at {url}, pid {proc.pid}: built from {rev} in {cwd} (clean)", flush=True)
+        proc.wait()
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait()
+        rec["exit"] = {"at": utcnow(), "code": proc.returncode}
+        write_json(path, rec)
+
+
+def scratch_record(data: str) -> dict:
+    """The launch record of the scratch server serve is running now."""
+    path = os.path.join(data, SCRATCH_RECORD)
+    if not os.path.exists(path):
+        raise SystemExit(f"no {path}: start the scratch server with `replay.py serve`, which records the build it runs")
+    with open(path) as f:
+        rec = json.load(f)
+    if "health_at_ready" not in rec or "exit" in rec:
+        raise SystemExit(f"{path}: the server it records (started {rec['started_at']}) is not running")
+    try:
+        os.kill(rec["pid"], 0)
+    except ProcessLookupError:
+        raise SystemExit(f"{path}: its server's pid {rec['pid']} is gone; the record was left by a serve that was killed")
+    return rec
+
+
 def cmd_baseline(args):
     cases, snaps = load_cases(args.data)
-    s = Scratch(args.server)
+    server = scratch_record(args.data)
+    s = Scratch(server["url"])
+    if s.health().get("commit") != server["source"]["revision"]:
+        raise SystemExit(f"{server['url']} does not report the revision its launch record names: another server holds the port")
     have = {p["key"] for p in s.call("GET", "/projects")}
     for proj in PROJECTS:
         if proj not in have:
@@ -556,7 +680,7 @@ def cmd_baseline(args):
     for proj in PROJECTS:
         if s.call("GET", "/issues", params={"project": proj}):
             raise SystemExit(f"the scratch server already holds {proj} issues: start it on an empty database")
-    results = {"server": "scratch Dispatch (e2e run-server.sh)", "queries": {}, "loads": [],
+    results = {"server": "scratch Dispatch (e2e run-server.sh)", "scratch_server": server, "queries": {}, "loads": [],
                "health": {"start": {"scratch": s.health(), "production": dget.health()}}}
 
     for c in supported(cases):
@@ -737,10 +861,14 @@ def cmd_report(args):
                    "scratch Dispatch holding the issues as they stood when the duplicate was filed, and the candidate "
                    "setups on the same corpus. Ranks count from 1; null is a miss, an error, an unsupported case or a "
                    "pair that is not a duplicate, as the status and error fields say. revisions pins the inputs, the "
-                   "production server the export read and the harness code; baseline_health is /healthz of the "
-                   "scratch and production servers when the baseline started and ended; runs and usage are the "
+                   "production server the export read and the harness code; scratch_server is replay.py serve's "
+                   "record of the scratch server's launch: the command, the checkout, revision and working-copy "
+                   "state it was built from, and the Go toolchain; baseline_health is /healthz of the scratch and "
+                   "production servers when the baseline started and ended (the scratch server's commit there is "
+                   "the build stamp serve set from that revision, not evidence on its own); runs and usage are the "
                    "run and provider-usage ledgers of this replay.",
-           "revisions": cases["revisions"], "baseline_health": baseline["health"],
+           "revisions": cases["revisions"], "scratch_server": baseline["scratch_server"],
+           "baseline_health": baseline["health"],
            "systems": {name: label for label, name in summary_systems}, "candidate_model": m, "candidate_reranker": r,
            "summary": summary, "scratch_loads": baseline["loads"],
            "runs": jsonl("runs.jsonl"),
@@ -770,7 +898,7 @@ def cmd_report(args):
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("export", "load", "embed", "candidate", "baseline", "report"):
+    for name in ("export", "load", "embed", "candidate", "serve", "baseline", "report"):
         p = sub.add_parser(name)
         p.add_argument("--data", required=True)
         if name == "export":
@@ -784,18 +912,22 @@ def main():
         if name == "candidate":
             p.add_argument("--reranker", default="rerank-2.5")
             p.add_argument("--out", required=True)
+        if name == "serve":
+            p.add_argument("--checkout", required=True, help="a clean jj checkout of the commit production runs")
+            p.add_argument("--database-url", required=True, help="an empty Postgres database for the scratch server")
+            p.add_argument("--port", type=int, required=True)
+            p.add_argument("--ready-seconds", type=int, default=1800, help="how long the build may take to answer /healthz")
         if name == "baseline":
-            p.add_argument("--server", required=True)
             p.add_argument("--out", required=True)
         if name == "report":
             p.add_argument("--baseline", required=True)
             p.add_argument("--candidate", required=True)
     args = ap.parse_args()
-    run = {"cmd": args.cmd, "args": {k: v for k, v in vars(args).items() if k != "cmd"}, "started_at": utcnow(),
-           "loadavg_start": os.getloadavg()}
+    recorded = {k: redact_url(v) if k == "database_url" else v for k, v in vars(args).items() if k != "cmd"}
+    run = {"cmd": args.cmd, "args": recorded, "started_at": utcnow(), "loadavg_start": os.getloadavg()}
     try:
         {"export": cmd_export, "load": cmd_load, "embed": cmd_embed, "candidate": cmd_candidate,
-         "baseline": cmd_baseline, "report": cmd_report}[args.cmd](args)
+         "serve": cmd_serve, "baseline": cmd_baseline, "report": cmd_report}[args.cmd](args)
         run["outcome"] = "ok"
     except SystemExit as e:
         run["outcome"] = f"exit: {e.code}"
