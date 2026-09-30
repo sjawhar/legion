@@ -28,11 +28,16 @@ type Session struct {
 
 	mu           sync.Mutex
 	enrollmentID string
-	lapsedID     string // a refused renew's enrollment, until its revoke succeeds (markLapsed)
-	lastError    string
-	ready        chan struct{} // closed on the first successful enrollment
-	stop         chan struct{} // closed when the session is removed
-	peer         *Peer
+	// lapsedID is an enrollment of this session's runtime that must be revoked before it enrolls
+	// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the
+	// re-pinned session's prior one, the one its record named (setLapsed, from Recover).
+	// enrollLoop revokes it first (clearLapsed once done), and until then it stays on the
+	// session's record, so a restart in between still revokes it.
+	lapsedID  string
+	lastError string
+	ready     chan struct{} // closed on the first successful enrollment
+	stop      chan struct{} // closed when the session is removed
+	peer      *Peer
 }
 
 func newSession(pid int, ticks uint64, runtimeID string, peer *Peer) (*Session, error) {
@@ -85,11 +90,6 @@ func (s *Session) setError(msg string) {
 	defer s.mu.Unlock()
 	s.lastError = msg
 }
-
-// A session's lapsed id is an enrollment of its runtime that must be revoked before it enrolls
-// again: one whose renew the broker refused (markLapsed), or, after a helper restart, the one its
-// record named (setLapsed, from Recover). enrollLoop revokes it first (clearLapsed once done), and
-// until then it stays on the session's record, so a restart in between still revokes it.
 
 // markLapsed is what a refused renew does: the broker no longer honours this enrollment (its lease
 // lapsed, or it was revoked), so the session stops counting as enrolled at once — sign and
