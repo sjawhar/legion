@@ -9,6 +9,10 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
+# The token's only uses are release downloads (install-jj and MISE_GITHUB_TOKEN); nothing writes.
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-24.04
