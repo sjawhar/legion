@@ -813,6 +813,14 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		{"an approval ask whose approval is the JSON null", "approval", new("null"), true},
 		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
 		{"an approval ask naming no version", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md"}`), true},
+		// ScanAsk decodes the approval into model.AskApproval, whose version is an int and whose name
+		// is a string, so a number that is no int, or a name that is no string, fails every read of
+		// the ask: the ask itself, its issue, the inbox, answering it, and each new version of its
+		// document, which reads every open approval ask on the document to retract it.
+		{"an approval ask whose version is not a whole number", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.5}`), true},
+		{"an approval ask whose version is written with a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.0}`), true},
+		{"an approval ask whose version is past what an int holds", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":9223372036854775808}`), true},
+		{"an approval ask whose name is not a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":5,"version":1}`), true},
 		{"a question naming a document", "question", new(approval), true},
 		{"a question carrying the JSON null", "question", new("null"), true},
 		{"an approval ask naming its document", "approval", new(approval), false},
