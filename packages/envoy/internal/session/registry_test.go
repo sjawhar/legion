@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
@@ -110,6 +111,34 @@ func refuseProductionBucket(t *testing.T, uri string) {
 	t.Errorf("the shared NATS server holds the %s bucket: open the registry with setupNATS(t).OpenRegistry, on a bucket no other test uses", SessionBucket)
 	if err := js.DeleteKeyValue(SessionBucket); err != nil {
 		t.Errorf("delete the %s bucket: %v", SessionBucket, err)
+	}
+}
+
+// guardProbe runs TestSharedServerGuardFailsTheTestThatReachedTheServerWithoutSetupNATS's probe
+// in the child test binary that test starts.
+const guardProbe = "ENVOY_SESSION_GUARD_PROBE"
+
+// The guard fails the test that created the production-named bucket on the shared server however
+// that test reached the server, not the next test that calls setupNATS, and not no test at all
+// when it is the last. The probe reaches the server the way stopwatch_test.go reaches its own,
+// through the URL and testnats.Connect, and runs in a child test binary, since a test cannot pass
+// while one of its own cleanups fails it.
+func TestSharedServerGuardFailsTheTestThatReachedTheServerWithoutSetupNATS(t *testing.T) {
+	if os.Getenv(guardProbe) == "1" {
+		conn := testnats.Connect(t, sharedTestNATSURI(t))
+		t.Cleanup(conn.Close)
+		if _, err := OpenSessionRegistry(conn, WithSessionReplicas(1)); err != nil {
+			t.Fatalf("open the registry on the production name: %v", err)
+		}
+		return
+	}
+	probe := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
+	probe.Env = append(os.Environ(), guardProbe+"=1")
+	out, err := probe.CombinedOutput()
+	failed := strings.Contains(string(out), "--- FAIL: "+t.Name())
+	named := strings.Contains(string(out), "the shared NATS server holds the "+SessionBucket+" bucket")
+	if err == nil || !failed || !named {
+		t.Fatalf("a test that opened the %s bucket on the shared server without setupNATS was not failed by the guard (probe exit: %v):\n%s", SessionBucket, err, out)
 	}
 }
 
