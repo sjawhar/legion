@@ -42,15 +42,43 @@ function skillFiles(): string[] {
     .filter((file) => existsSync(file));
 }
 
+/**
+ * The lines outside fenced code blocks, where a Markdown reader finds headings: a fence opens on
+ * three or more backticks or tildes (up to three spaces in), closes on a line holding only a run of
+ * the same character at least as long, and an unclosed fence runs to the end of the file.
+ */
+function outsideFences(markdown: string): string[] {
+  const kept: string[] = [];
+  let fence: string | undefined;
+  for (const line of markdown.split("\n")) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence === undefined) {
+      if (marker === undefined) kept.push(line);
+      else fence = marker;
+    } else if (
+      marker?.[0] === fence[0] &&
+      marker.length >= fence.length &&
+      line.trim() === marker
+    ) {
+      fence = undefined;
+    }
+  }
+  return kept;
+}
+
 /** GitHub's heading anchor: lower-cased, punctuation dropped, each space a hyphen. */
 function anchors(markdown: string): Set<string> {
   return new Set(
-    [...markdown.matchAll(/^#{1,6}\s+(.+?)\s*#*$/gm)].map(([, heading]) =>
-      (heading ?? "")
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}\s_-]/gu, "")
-        .replace(/\s/g, "-")
-    )
+    outsideFences(markdown).flatMap((line) => {
+      const heading = /^#{1,6}\s+(.+?)\s*#*$/.exec(line)?.[1];
+      if (heading === undefined) return [];
+      return [
+        heading
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+          .replace(/\s/g, "-"),
+      ];
+    })
   );
 }
 
@@ -122,6 +150,21 @@ test("every skill://<name>/<path> link names a file that exists, and its #anchor
     return [];
   });
   expect(broken).toEqual([]);
+});
+
+test("a heading inside a code fence is no anchor, since a Markdown reader renders none", () => {
+  const markdown = [
+    "## Outside",
+    "```",
+    "## In backticks",
+    "```",
+    "~~~~",
+    "## In tildes",
+    "```",
+    "~~~~",
+    "# After",
+  ].join("\n");
+  expect([...anchors(markdown)]).toEqual(["outside", "after"]);
 });
 
 test("every legion-worker reference is linked from a skill or a prompt", () => {

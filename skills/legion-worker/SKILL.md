@@ -425,8 +425,8 @@ record of this issue's active phase. Do not add pipeline labels, run a controlle
 invent a different completion protocol — this is the whole contract.
 
 A reviewer's phase ends with its completion, not with its review; the order of a review round
-(the handoff push, the review of that head, CI settling, then the completion) is in
-`skill://legion-worker/references/merge-gate.md`.
+(the handoff push; for an approval, CI settled green at that head; the review of that head; then
+the completion) is in `skill://legion-worker/references/merge-gate.md`.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to
 the run whose task you took, and answers with what it found. What each answer carries, and what to
