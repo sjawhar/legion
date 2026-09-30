@@ -389,6 +389,82 @@ pr_with_findings 97 feat-q 9701 9702 "$(audit "$a_title" "$a_body")" '[]' "$(aud
 run_report
 check "one fixed, one ignored" "$(has "| #97 | 9701 | 9702 | 2 | 1 | 1 | 0 |")"
 
+echo "=== strict artifacts: a missing or malformed artifact fails the report, never a number ==="
+# fails_loudly LABEL MESSAGE: the report exited 2 with MESSAGE, and printed no decision.
+fails_loudly() {
+  check "$1: exits 2" "$(is "$rc" 2)"
+  check "$1: says so" "$(has "$2")"
+  check "$1: prints no decision" "$(lacks "DECISION:")"
+  check "$1: no traceback" "$(lacks "Traceback")"
+}
+one_new=$(zizmor_findings "$(audit "$a_artipacked")" '[]' "$(audit "$a_artipacked")")
+# pr_first_run NUMBER BRANCH RUN MARKER_JSON: a PR merged 5 days ago whose first run's zizmor-new
+# marker holds MARKER_JSON and whose zizmor-findings artifact is $one_new.
+pr_first_run() {
+  add_pr "$1" "$2" "$(iso '7 days ago')" "$(iso '5 days ago')"
+  add_run "$3" pull_request "$2" "$(iso '6 days ago')"
+  add_marker zizmor-new "$3" "$4"
+  add_findings "$3" "$one_new"
+}
+
+setup strict-a "15 days ago"
+pr_first_run 95 feat-r 9501 "$one_new"
+add_run 9502 pull_request feat-r "$(iso '5 days ago - 1 hour')"
+run_report
+fails_loudly "A. a PR's last run with no zizmor-findings artifact" "run 9502 has no zizmor-findings artifact"
+
+setup strict-a-error "15 days ago"
+pr_first_run 94 feat-u 9401 "$one_new"
+add_run 9402 pull_request feat-u "$(iso '5 days ago - 1 hour')"
+add_findings 9402 '{"tool_error": true, "head_count": null, "new_count": null}'
+run_report
+fails_loudly "a PR's last run recording a tool error with no zizmor-tool-error marker" \
+  "run 9402's zizmor-findings records a tool error, but the run has no zizmor-tool-error marker"
+
+setup strict-b "15 days ago"
+pr_first_run 96 feat-s 9601 "$(jq -c 'del(.new)' <<<"$one_new")"
+add_run 9602 pull_request feat-s "$(iso '5 days ago - 1 hour')"
+add_findings 9602 "$(zizmor_findings '[]' '[]' '[]')"
+run_report
+fails_loudly "B. a zizmor-new marker with no new key" "run 9601's zizmor-new artifact has no new list of findings"
+
+setup strict-b-empty "15 days ago"
+pr_first_run 93 feat-v 9301 "$(zizmor_findings "$pool" "$pool" "$pool")"
+add_run 9302 pull_request feat-v "$(iso '5 days ago - 1 hour')"
+add_findings 9302 "$(zizmor_findings '[]' '[]' '[]')"
+run_report
+fails_loudly "a zizmor-new marker listing nothing new" \
+  "run 9301's zizmor-new marker lists no new finding; the Security workflow uploads it only for new findings"
+
+setup strict-c "15 days ago"
+add_run 1001 schedule main "$(iso '1 day ago')"
+add_report 1001 "$(jq -c '.zizmor.count = .zizmor.head_count | del(.zizmor.head_count)' \
+  <<<"$(security_report "$(zizmor_findings "$pool")" clean)")"
+run_report
+fails_loudly "C. a main report with head_count renamed" \
+  "run 1001's security-report.json has a zizmor half without head_count"
+
+setup strict-report "3 days ago"
+add_run 1001 schedule main "$(iso '1 day ago')"
+run_report
+fails_loudly "a main run with no security-report artifact" "run 1001 has no security-report artifact"
+
+setup strict-expired "15 days ago"
+pr_with_findings 98 feat-t 9801 9802 "$(audit "$a_artipacked")" '[]' '[]'
+jq '.artifacts |= map(if .workflow_run.id == 9801 then .expired = true else . end)' "$d/markers-zizmor-new.json" \
+  > "$d/markers.next" && mv "$d/markers.next" "$d/markers-zizmor-new.json"
+run_report
+fails_loudly "an expired zizmor-new marker (exit 2, not the decision's 1)" \
+  "artifact 98013 (zizmor-new) of run 9801 has expired; its zizmor-findings.json can no longer be read"
+
+setup strict-tool-error "15 days ago"
+add_run 1001 schedule main "$(iso '1 day ago')"
+add_report 1001 "$(security_report '{"tool_error": true, "head_count": null, "new_count": null}' clean)"
+run_report
+check "a zizmor tool error on main's newest run: its row reads the tool error" \
+  "$(has "| 1001 | schedule | $(sha 1001 | cut -c1-7) | -/- | 0/0 | 0/0 | yes |")"
+check "and rule 1a reads the run before it" "$(has "zizmor on main: 0 findings (run 1000, push)")"
+
 echo "=== R9. rule 3: a fixed CodeQL alert adds the pull_request trigger ==="
 setup r9 "15 days ago"
 jq -n --arg fixed "$(iso '5 days ago')" --arg old "$(iso '20 days ago')" '[

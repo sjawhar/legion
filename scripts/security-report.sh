@@ -59,16 +59,22 @@
 #     against its base, and `fixed` otherwise.
 #   - Security[<tag>]: review threads opened inside the window, with the newest `Accepted:` reply
 #     of each, from the repository's review comments.
+# Every artifact is read strictly: a run's security-report or zizmor-findings artifact that is
+# missing, expired or not in the shape the Security workflow writes (.github/scripts/
+# deps-summary.sh, .github/scripts/zizmor-findings.sh), or a zizmor-new marker that lists nothing
+# new, stops the report with exit 2 naming it. Only a half that recorded a tool error reads as no
+# result.
 # Nothing published here carries a CodeQL location or a secret: alerts are counted by rule,
 # severity and state.
 #
 # Exit codes: 0 the report; 1 a DECISION block while report_only is true; 2 no Security workflow,
-# a usage error, or a read that failed for a reason other than 403.
+# a usage error, a read that failed for a reason other than 403, or an artifact read as above.
 # CI runs its tests (security-report.test.sh) in the test job of pr-and-main.yaml.
 set -euo pipefail
 
 python3 - "$@" <<'PY'
 import base64
+import functools
 import io
 import json
 import re
@@ -87,6 +93,8 @@ NARROW_AT = 3
 CODEQL_BLOCKED = "BLOCKED (caller lacks security-events read; the scheduled Security run has it)"
 SECRET_BLOCKED = "BLOCKED (caller lacks secret_scanning read; run as an admin)"
 SECURITY_TAG = re.compile(r"^Security\[([a-z][a-z-]*)\]:")
+# The counts of each half of a security-report.json (.github/scripts/deps-summary.sh report).
+REPORT_HALVES = {"zizmor": ("head_count",), "osv": ("total", "with_fix"), "govulncheck": ("reachable", "informational")}
 
 
 def fail(message, code=2):
@@ -163,40 +171,85 @@ def dash(value):
     return "-" if value is None else str(value)
 
 
-run_artifacts = {}
+def pair(section, first, second):
+    return "-/-" if section is None else f"{dash(section[first])}/{dash(section[second])}"
 
 
+@functools.cache
 def artifacts_of(run_id):
-    if run_id not in run_artifacts:
-        run_artifacts[run_id] = list(paged(f"repos/{repo}/actions/runs/{run_id}/artifacts", "artifacts"))
-    return run_artifacts[run_id]
+    return list(paged(f"repos/{repo}/actions/runs/{run_id}/artifacts", "artifacts"))
+
+
+def run_artifact(run_id, name):
+    """The run's newest artifact called NAME; the Security workflow uploads one on every run."""
+    found = [artifact for artifact in artifacts_of(run_id) if artifact["name"] == name]
+    if not found:
+        fail(f"run {run_id} has no {name} artifact")
+    return max(found, key=lambda artifact: artifact["id"])
 
 
 def artifact_file(artifact, filename):
-    if artifact.get("expired"):
-        return None
+    if artifact["expired"]:
+        fail(f"artifact {artifact['id']} ({artifact['name']}) of run {artifact['workflow_run']['id']} has expired; "
+             f"its {filename} can no longer be read")
     data = gh(f"repos/{repo}/actions/artifacts/{artifact['id']}/zip", raw=True)
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         names = [name for name in archive.namelist() if name.rsplit("/", 1)[-1] == filename]
         if not names:
             fail(f"artifact {artifact['id']} ({artifact['name']}) holds no {filename}")
-        return json.loads(archive.read(names[0]))
+        try:
+            return json.loads(archive.read(names[0]))
+        except ValueError as error:
+            fail(f"artifact {artifact['id']} ({artifact['name']}) holds a {filename} that is not JSON: {error}")
 
 
-def run_file(run_id, name, filename):
-    for artifact in artifacts_of(run_id):
-        if artifact["name"] == name and not artifact.get("expired"):
-            return artifact_file(artifact, filename)
-    return None
+def shape(condition, where, what):
+    if not condition:
+        fail(f"{where} {what}, not the shape the Security workflow writes")
 
 
-reports = {}
+def is_count(value):
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
-def report_of(run_id):
-    if run_id not in reports:
-        reports[run_id] = run_file(run_id, "security-report", "security-report.json")
-    return reports[run_id]
+@functools.cache
+def security_report(run_id):
+    """The run's security-report.json as {half: its counts, or None where that half recorded a tool
+    error, "tool_error": bool}; fails when the run has none or it is not in the security job's shape."""
+    report = artifact_file(run_artifact(run_id, "security-report"), "security-report.json")
+    where = f"run {run_id}'s security-report.json"
+    shape(isinstance(report, dict) and isinstance(report.get("tool_error"), bool), where, "has no tool_error")
+    halves = {"tool_error": report["tool_error"]}
+    for half, counts in REPORT_HALVES.items():
+        section = report.get(half)
+        shape(isinstance(section, dict) and isinstance(section.get("tool_error"), bool), where,
+              f"has no {half} half with a tool_error")
+        if section["tool_error"]:
+            halves[half] = None
+            continue
+        shape(all(is_count(section.get(count)) for count in counts), where,
+              f"has a {half} half without {' and '.join(counts)}")
+        if half == "zizmor":
+            shape("new_count" in section and (section["new_count"] is None or is_count(section["new_count"])),
+                  where, "has a zizmor half without new_count")
+        halves[half] = section
+    return halves
+
+
+def zizmor_findings(artifact):
+    """A pull_request run's zizmor-findings.json (its zizmor-findings artifact or zizmor-new marker),
+    None when it records a tool error; fails when it is in neither of zizmor-findings.sh's shapes."""
+    document = artifact_file(artifact, "zizmor-findings.json")
+    where = f"run {artifact['workflow_run']['id']}'s {artifact['name']} artifact"
+    shape(isinstance(document, dict), where, "is not an object")
+    if "tool_error" in document:
+        shape(document["tool_error"] is True, where, "has a tool_error that is not true")
+        return None
+    for key in ("new", "ignored"):
+        shape(isinstance(document.get(key), list) and all(
+            isinstance(found, dict) and isinstance(found.get("fingerprint"), str) and isinstance(found.get("ident"), str)
+            for found in document[key]), where, f"has no {key} list of findings")
+    return document
 
 
 # --- the workflow, the flag, the window ---------------------------------------------------------
@@ -258,27 +311,20 @@ print()
 print("| run | event | head | zizmor head/new | osv total/with-fix | govulncheck reachable/informational | tool error |")
 print("| --- | --- | --- | --- | --- | --- | --- |")
 for run in rows:
-    found = report_of(run["id"])
-    if found is None:
-        print(f"| {run['id']} | {run['event']} | {run['head_sha'][:7]} | no report | | | |")
-        continue
-    zizmor, osv, govulncheck = (found.get(key) or {} for key in ("zizmor", "osv", "govulncheck"))
-    print(f"| {run['id']} | {run['event']} | {run['head_sha'][:7]} "
-          f"| {dash(zizmor.get('head_count'))}/{dash(zizmor.get('new_count'))} "
-          f"| {dash(osv.get('total'))}/{dash(osv.get('with_fix'))} "
-          f"| {dash(govulncheck.get('reachable'))}/{dash(govulncheck.get('informational'))} "
-          f"| {'yes' if found.get('tool_error') else 'no'} |")
+    found = security_report(run["id"])
+    print(f"| {run['id']} | {run['event']} | {run['head_sha'][:7]} | {pair(found['zizmor'], 'head_count', 'new_count')} "
+          f"| {pair(found['osv'], 'total', 'with_fix')} | {pair(found['govulncheck'], 'reachable', 'informational')} "
+          f"| {'yes' if found['tool_error'] else 'no'} |")
 
 # Rule 1a reads the newest completed main run with a zizmor result, looking back ten runs at most:
 # a longer run of tool errors is itself the answer (no result on main).
 main_head_count = None
 for run in list(reversed(completed))[:10]:
-    found = report_of(run["id"])
-    count = ((found or {}).get("zizmor") or {}).get("head_count")
-    if count is not None:
-        main_head_count = count
+    zizmor = security_report(run["id"])["zizmor"]
+    if zizmor is not None:
+        main_head_count = zizmor["head_count"]
         print()
-        print(f"zizmor on main: {count} findings (run {run['id']}, {run['event']})")
+        print(f"zizmor on main: {main_head_count} findings (run {run['id']}, {run['event']})")
         break
 
 # --- tool errors (rule 2) ------------------------------------------------------------------------
@@ -329,13 +375,16 @@ for pr in merged:
         nothing_new.append(pr)
         continue
     first, last = runs[0], runs[-1]
-    new0 = artifact_file(markers[first["id"]], "zizmor-findings.json").get("new") or []
+    first_findings = zizmor_findings(markers[first["id"]])
+    new0 = first_findings["new"] if first_findings else []
     if not new0:
-        nothing_new.append(pr)
-        continue
-    final = run_file(last["id"], "zizmor-findings", "zizmor-findings.json") or {}
-    ignored = Counter(found["fingerprint"] for found in final.get("ignored") or [])
-    remaining = Counter(found["fingerprint"] for found in final.get("new") or [])
+        fail(f"run {first['id']}'s zizmor-new marker lists no new finding; "
+             "the Security workflow uploads it only for new findings")
+    final = zizmor_findings(run_artifact(last["id"], "zizmor-findings"))
+    if final is None:
+        fail(f"run {last['id']}'s zizmor-findings records a tool error, but the run has no zizmor-tool-error marker")
+    ignored = Counter(found["fingerprint"] for found in final["ignored"])
+    remaining = Counter(found["fingerprint"] for found in final["new"])
     counts = Counter()
     for found in new0:
         if ignored[found["fingerprint"]] > 0:
