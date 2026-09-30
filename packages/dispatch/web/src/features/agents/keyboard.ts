@@ -55,9 +55,11 @@ function inAgentComposer(): boolean {
 
 /** Registers the `agents` scope over the rows inside `listRef` for the page's lifetime. */
 export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
-  const rows = () => [
-    ...(listRef.current?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? []),
-  ];
+  // A closed fold's rows stay mounted, hidden (`AgentsPage`'s one list), and take no focus.
+  const rows = () =>
+    [...(listRef.current?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? [])].filter(
+      (row) => !row.hidden
+    );
   // Both actions that live inside a row's details open it first; the details render in the click's
   // own commit, so the control they want exists on the next frame.
   const inOpenRow = (act: (row: HTMLElement) => void) => {
@@ -97,10 +99,11 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       id: "issue-picker",
       keys: "i",
       label: "Pick an issue for the message",
-      // The picker takes focus itself once its list lands (`AgentsPage.tsx`'s `issueSelect`), so
-      // the key that opens it leaves the reader inside it, where the arrows choose an issue and
-      // Escape is the control's own way out. A collapsed row renders no picker, so the row says
-      // whether one can open; an open row's picker is disabled while its message is in flight.
+      // The picker takes focus itself once its list lands (`AgentMessageComposer.tsx`'s
+      // `issueSelect`), so the key that opens it leaves the reader inside it, where the arrows
+      // choose an issue and Escape is the control's own way out. A row not yet opened has no
+      // picker at all and a collapsed one's is hidden, so the row says whether one can open; an
+      // open row's picker is disabled while its message is in flight.
       run: () => inOpenRow((row) => row.querySelector<HTMLElement>(ISSUE_PICKER_SELECTOR)?.click()),
       when: () => {
         const row = focusedAgentRow();

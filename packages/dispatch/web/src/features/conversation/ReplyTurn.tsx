@@ -63,6 +63,7 @@ export function ReplyTurn({
   delivery,
   onReply,
   quote,
+  replyDisabled = false,
   turnID,
 }: {
   actions?: ReactNode;
@@ -73,6 +74,8 @@ export function ReplyTurn({
   delivery?: ReplyDelivery;
   onReply?: () => void;
   quote?: { readonly text: string; readonly to?: string };
+  /** Holds the Reply button while the composer it would address is busy with a send. */
+  replyDisabled?: boolean;
   turnID: string;
 }): ReactNode {
   return (
@@ -122,7 +125,7 @@ export function ReplyTurn({
       </div>
       <TurnActions>
         {actions}
-        {onReply === undefined ? null : <ReplyButton onClick={onReply} />}
+        {onReply === undefined ? null : <ReplyButton disabled={replyDisabled} onClick={onReply} />}
       </TurnActions>
     </li>
   );

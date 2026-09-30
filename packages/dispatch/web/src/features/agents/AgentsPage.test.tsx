@@ -460,11 +460,11 @@ test("Agents orders who needs you before Dispatch recency before liveness, folds
 
     const disclosure = within(region).getByRole("button", { name: "No Dispatch activity (1)" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(within(region).queryByRole("region", { name: "No Dispatch activity" })).toBeNull();
+    // The folded row is in the one list, mounted and hidden, so no reader can reach it yet.
+    expect(within(region).queryByRole("heading", { name: "None" })).toBeNull();
     fireEvent.click(disclosure);
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
-    const fold = within(region).getByRole("region", { name: "No Dispatch activity" });
-    const noneCard = card(fold, "None");
+    const noneCard = card(region, "None");
     expect(within(noneCard).getByText("No Dispatch activity", { exact: true })).toBeTruthy();
     expect(titles()).toEqual(["Planner", "Alpha", "Zulu", "None"]);
     expand(noneCard, "None");
@@ -539,12 +539,11 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
     expect(titles()).toEqual(["Planner", "Reviewer"]);
     const disclosure = within(region).getByRole("button", { name: "Inactive (1)" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(within(region).queryByRole("region", { name: "Inactive" })).toBeNull();
+    expect(within(region).queryByRole("heading", { name: "Stale" })).toBeNull();
 
     fireEvent.click(disclosure);
     expect(disclosure.getAttribute("aria-expanded")).toBe("true");
-    const fold = within(region).getByRole("region", { name: "Inactive" });
-    const staleCard = card(fold, "Stale");
+    const staleCard = card(region, "Stale");
     expect(
       within(staleCard).getByRole("status", { name: "Seen 10 minutes ago or longer" })
     ).toBeTruthy();

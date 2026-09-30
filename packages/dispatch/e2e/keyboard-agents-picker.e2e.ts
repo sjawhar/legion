@@ -1,18 +1,26 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { openAgents, plannerSession, seedAgents, setLiveSessions } from "./agents";
+import {
+  holdPosts,
+  openAgents,
+  plannerSession,
+  refusePosts,
+  seedAgents,
+  setLiveSessions,
+} from "./agents";
 import { createMessage, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// The issue picker's keyboard-step rule (`markKeyStep` in `AgentsPage.tsx`) holds only because
-// every engine dispatches a closed select's `change` inside the key's own task, where the HTML spec
-// queues it as a task of its own. These rows notice an engine that moves to the spec's queued task:
-// its first arrow or letter would commit at once. So the `webkit` and `firefox` projects run this
-// spec as well as Chromium, and its rows drive keys through `page.keyboard`, which every engine has.
-// The rows that step and then leave the select without Enter run in the same engines, since each
-// engine takes focus out of a select its own way. So do the rows about what the picker does to a
-// message on its way to the server, and to an issue closed after it was picked.
+// The issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`) holds only
+// because every engine dispatches a closed select's `change` inside the key's own task, where the
+// HTML spec queues it as a task of its own. These rows notice an engine that moves to the spec's
+// queued task: its first arrow or letter would commit at once. So the `webkit` and `firefox`
+// projects run this spec as well as Chromium, and its rows drive keys through `page.keyboard`,
+// which every engine has. The rows that step and then leave the select without Enter run in the
+// same engines, since each engine takes focus out of a select its own way. So do the rows about
+// what the picker and Reply do with a message on its way to the server, and about an issue closed
+// after it was picked.
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -31,38 +39,6 @@ async function sendAndCapturePath(page: Page, field: Locator): Promise<string> {
   await field.fill("Status please");
   await field.press("Control+Enter");
   return new URL((await sent).url()).pathname;
-}
-
-/** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them. */
-async function holdPosts(
-  page: Page,
-  pattern: string
-): Promise<{ posts: () => number; release: () => void }> {
-  const { promise: held, resolve: release } = Promise.withResolvers<void>();
-  let posts = 0;
-  await page.route(pattern, async (route) => {
-    if (route.request().method() !== "POST") return route.fallback();
-    posts += 1;
-    await held;
-    return route.fallback();
-  });
-  return { posts: () => posts, release };
-}
-
-/** Holds every `POST` to `pattern` until the returned call, then refuses it, as a server that is
- *  down: 503 with a reason the composer shows. */
-async function refusePosts(page: Page, pattern: string): Promise<() => void> {
-  const { promise: held, resolve: refuse } = Promise.withResolvers<void>();
-  await page.route(pattern, async (route) => {
-    if (route.request().method() !== "POST") return route.fallback();
-    await held;
-    return route.fulfill({
-      body: JSON.stringify({ code: "UNAVAILABLE", error: "the server is down" }),
-      contentType: "application/json",
-      status: 503,
-    });
-  });
-  return refuse;
 }
 
 test.describe("agents page", () => {
@@ -219,9 +195,9 @@ test.describe("agents page", () => {
     }
   });
 
-  // A message on its way to the server is addressed already, so its issue cannot change under it:
-  // a pick then would remount the composer with the text still in the air, and hand the new
-  // instance, enabled, a body the server was about to take - one Ctrl+Enter from sending it twice.
+  // A message on its way to the server is addressed already, so its issue cannot change under it,
+  // and the text the server is taking must never come back to the composer, enabled - one
+  // Ctrl+Enter from sending it twice.
   test("a send in flight holds the picker, and the sent text never comes back", async ({
     browser,
   }) => {
@@ -273,7 +249,7 @@ test.describe("agents page", () => {
   });
 
   // A reply to a message on an issue is written on that issue, and the send ends the reply, which
-  // takes the composer back to the direct channel: the remount that makes must start empty.
+  // takes the composer back to the direct channel: it must come back empty.
   test("a reply sent on an issue leaves the direct composer empty", async ({ browser }) => {
     const issueKey = await seedAgents();
     await createMessage(issueKey, {
@@ -312,8 +288,8 @@ test.describe("agents page", () => {
     }
   });
 
-  // Cancelling the reply while it is in the air changes the channel too; the composer that the
-  // change mounts is one the server's answer can still reach only if it waits for that answer.
+  // Cancelling the reply while it is in the air changes the channel too, and the text in the air
+  // must still not come back once the server has taken it.
   test("a reply cancelled mid-send never brings its text back", async ({ browser }) => {
     const issueKey = await seedAgents();
     await createMessage(issueKey, {
@@ -349,50 +325,8 @@ test.describe("agents page", () => {
     }
   });
 
-  // A reply started while a direct message is in the air belongs to an issue, but the composer
-  // holding the message is still the direct one, and its reset after the send seeds what a direct
-  // composer seeds - nothing - rather than the issue's mention for the channel it has not moved to.
-  test("a reply started mid-send leaves the direct composer as a direct one", async ({
-    browser,
-  }) => {
-    const issueKey = await seedAgents();
-    await createMessage(issueKey, {
-      body: "Can this ship?",
-      delivery: "btw",
-      target: `session:${plannerSession.session_id}`,
-    });
-    const context = await asUser(browser, "alice");
-    try {
-      const page = await context.newPage();
-      await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
-      const field = row.getByRole("textbox", { name: "Comment" });
-      const send = await holdPosts(page, "**/api/v1/agents/*/messages");
-
-      await page.keyboard.press("j");
-      await page.keyboard.press("Enter");
-      await expect(field).toBeFocused();
-      await page.keyboard.type("Status please");
-      await page.keyboard.press("Control+Enter");
-      await expect(field).toBeDisabled();
-      await row.getByRole("button", { name: "Reply" }).first().click();
-      send.release();
-
-      // The send ends the reply it outlived, and the composer is the direct one, empty.
-      await expect(row.getByRole("button", { name: "Cancel reply" })).toHaveCount(0);
-      await expect(row.getByRole("button", { name: "Choose issue" })).toContainText("No issue");
-      await expect(field).toBeEnabled();
-      await expect(field).toHaveValue("");
-      expect(send.posts()).toBe(1);
-    } finally {
-      await context.close();
-    }
-  });
-
-  // A send the server refuses after the reader cancelled their reply mid-flight has outlived the
-  // composer that sent it: the channel change remounts the composer once the answer is in. The
-  // refusal stays with the row, so the remounted composer says so, as the one that sent would
-  // have, with the unsent draft where the reader left it.
+  // A send the server refuses after the reader cancelled their reply mid-flight: the composer that
+  // sent is the one on screen, so it says so, beside the draft that was sent.
   test("a send refused after its reply is cancelled mid-flight still says so, beside its draft", async ({
     browser,
   }) => {
@@ -442,9 +376,11 @@ test.describe("agents page", () => {
     }
   });
 
-  // The same refusal after a reply was started mid-flight: the composer the reply remounts says
-  // the message did not go.
-  test("a send refused after a reply is started mid-flight still says so", async ({ browser }) => {
+  // A message on its way is addressed, so Reply holds until the server answers, as the picker
+  // does. A refusal hands back the draft that was sent, and Retry sends exactly that again.
+  test("Reply holds while a send is out, and a refusal's Retry posts exactly what was refused", async ({
+    browser,
+  }) => {
     const issueKey = await seedAgents();
     await createMessage(issueKey, {
       body: "Can this ship?",
@@ -457,6 +393,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       const row = page.locator("[data-agent-row]").nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
+      const reply = row.getByRole("button", { name: "Reply" }).first();
       const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
 
       await page.keyboard.press("j");
@@ -465,12 +402,68 @@ test.describe("agents page", () => {
       await page.keyboard.type("Status please");
       await page.keyboard.press("Control+Enter");
       await expect(field).toBeDisabled();
-      await row.getByRole("button", { name: "Reply" }).first().click();
+      await expect(reply).toBeDisabled();
       refuse();
 
       await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
-      await expect(row.getByRole("button", { name: "Cancel reply" })).toBeVisible();
       await expect(field).toBeEnabled();
+      await expect(field).toHaveValue("Status please");
+      await expect(reply).toBeEnabled();
+      const retried = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
+      await row.getByRole("button", { name: "Retry" }).click();
+      expect((await retried).postDataJSON()).toEqual({ body: "Status please", delivery: "steer" });
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A refusal is about the draft it turned down. Retry sends the draft as it stands, so it is
+  // offered only when Send would be; Discard drops the draft, and the notice goes with it.
+  test("Retry asks what Send asks, and Discard takes a refusal's notice with the draft", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const notice = row.getByText("Couldn't send — the server is down");
+      const retry = row.getByRole("button", { name: "Retry" });
+      let posts = 0;
+      page.on("request", (request) => {
+        if (request.method() === "POST" && new URL(request.url()).pathname.endsWith("/messages")) {
+          posts += 1;
+        }
+      });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Control+Enter");
+      refuse();
+      await expect(notice).toBeVisible();
+      await expect(retry).toBeVisible();
+
+      // Nothing Send would send, so nothing Retry may: the button goes, the notice stays.
+      await field.fill("");
+      await expect(retry).toHaveCount(0);
+      await expect(notice).toBeVisible();
+
+      await field.fill("Status please");
+      await field.press("Escape");
+      await row.getByRole("button", { name: "Discard" }).click();
+      await expect(notice).toHaveCount(0);
+      await expect(retry).toHaveCount(0);
+      await expect(field).toHaveValue("");
+      expect(posts).toBe(1);
     } finally {
       await context.close();
     }

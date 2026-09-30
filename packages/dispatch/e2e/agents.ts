@@ -142,3 +142,35 @@ export async function openAgents(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
   await page.locator("body").focus();
 }
+
+/** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them. */
+export async function holdPosts(
+  page: Page,
+  pattern: string
+): Promise<{ posts: () => number; release: () => void }> {
+  const { promise: held, resolve: release } = Promise.withResolvers<void>();
+  let posts = 0;
+  await page.route(pattern, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    posts += 1;
+    await held;
+    return route.fallback();
+  });
+  return { posts: () => posts, release };
+}
+
+/** Holds every `POST` to `pattern` until the returned call, then refuses it, as a server that is
+ *  down: 503 with a reason the composer shows. */
+export async function refusePosts(page: Page, pattern: string): Promise<() => void> {
+  const { promise: held, resolve: refuse } = Promise.withResolvers<void>();
+  await page.route(pattern, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    await held;
+    return route.fulfill({
+      body: JSON.stringify({ code: "UNAVAILABLE", error: "the server is down" }),
+      contentType: "application/json",
+      status: 503,
+    });
+  });
+  return refuse;
+}

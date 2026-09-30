@@ -113,10 +113,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "false");
     await expect(silentCard).toHaveCount(0);
     await expect(archivistCard).toHaveCount(0);
-    await expect(page.locator("article h2").allTextContents()).resolves.toEqual([
-      "Planner",
-      "Reviewer",
-    ]);
+    // A closed fold's rows stay in the one list, mounted and hidden, so the rows a reader sees are
+    // the ones not hidden.
+    const shownTitles = agents.locator("article:not([hidden]) h2");
+    await expect(shownTitles).toHaveText(["Planner", "Reviewer"]);
     // Each collapsed fold owns its own row: the second toggle starts below the first one, even
     // on the phone where the global inline-flex button rule would otherwise line them up.
     const quietBox = await quietToggle.boundingBox();
@@ -130,8 +130,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
 
     await quietToggle.click();
     await expect(quietToggle).toHaveAttribute("aria-expanded", "true");
-    const quiet = agents.getByRole("region", { name: "No Dispatch activity" });
-    await expect(quiet.locator("article h2")).toHaveText(["Silent"]);
+    await expect(shownTitles).toHaveText(["Planner", "Reviewer", "Silent"]);
     await expect(silentCard.getByText("No Dispatch activity", { exact: true })).toBeVisible();
     await expect(
       silentCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
@@ -141,8 +140,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
 
     await inactiveToggle.click();
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "true");
-    const inactive = agents.getByRole("region", { name: "Inactive" });
-    await expect(inactive.locator("article h2")).toHaveText(["Archivist"]);
+    await expect(shownTitles).toHaveText(["Planner", "Reviewer", "Archivist"]);
     await expect(
       archivistCard.getByRole("status", { name: "Seen 10 minutes ago or longer" })
     ).toBeVisible();

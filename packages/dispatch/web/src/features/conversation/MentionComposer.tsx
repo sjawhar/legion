@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { type MutationKey, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type ClipboardEvent,
   type DragEvent,
@@ -7,6 +7,7 @@ import {
   type ReactNode,
   type SyntheticEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -119,20 +120,17 @@ export interface AcceptedMention {
   readonly text: string;
 }
 
-/**
- * A draft in flight between two mounts of this composer. Opaque to the caller: hand back what
- * `onCarry` gave you and nothing else, since the records are offsets into that exact body.
- */
-export interface CarriedDraft {
+/** A draft as the composer holds it: the text, and the mentions accepted in it, which are offsets
+ *  into that exact text. */
+interface Draft {
   readonly body: string;
   readonly mentions: readonly AcceptedMention[];
-  /** The reply the draft was written under, so a mount under that same reply keeps the draft
-   *  rather than seeding the reply over it. */
-  readonly replyId?: string;
-  /** The refusal of this draft's last send, as the composer showed it. A send can end after the
-   *  composer that made it has unmounted - the host remounted it once the answer was in - so the
-   *  one mounted with the draft shows it instead, until it sends again. */
-  readonly failure?: string;
+}
+
+/** A send's own copy of the draft, taken when it starts: what the request is built from, and
+ *  what a refusal hands back. */
+interface SentDraft extends Draft {
+  readonly replacement: string;
 }
 
 interface MentionOption {
@@ -361,29 +359,31 @@ function ownTarget(owner: ComposerOwner): string | null {
 }
 
 /**
- * What a mount starts from: the reader's prose with the records still in step with it, and this
- * channel's own mentions seeded in front of whatever is not already there.
+ * What a draft becomes under a channel's seed: the reader's prose with the records still in step
+ * with it, and the channel's own mentions seeded in front of whatever is not already there. A
+ * mount applies it to no draft at all; a host that changes the seed - an Agents row's issue pick,
+ * or a reply that moves the message to another channel - has it applied to the live draft in
+ * place, so the draft never parts from the composer, or from a send it has in flight.
  *
- * A carry crosses a remount the host made to change the message's owner. Three rules keep the
- * text and the accepted records saying the same thing, because only the records reach the wire
- * (`survivingMentions` at send) while only the text reaches the reader:
+ * Three rules keep the text and the accepted records saying the same thing, because only the
+ * records reach the wire (`survivingMentions` at send) while only the text reaches the reader:
  *
- * - A carried record counts only while its span is untouched (`survivingMentions`). A span the
- *   reader edited is their prose: the record goes, the text stays.
+ * - A record counts only while its span is untouched (`survivingMentions`). A span the reader
+ *   edited is their prose: the record goes, the text stays.
  * - The channel's own mention belongs to the channel. Entering one that seeds none - a direct
  *   message, which already reaches its session - takes the untouched record for that session out
- *   of the text with its separating space. Every other surviving record travels, so a trip back
+ *   of the text with its separating space. Every other surviving record stays, so a trip back
  *   restores it.
  * - Seeding is by target, not by position: a mention this channel owes is added only when no
  *   surviving record already names it, wherever in the body that record sits.
  */
 function initialDraft(
   initialMentions: readonly { readonly target: string; readonly title: string }[],
-  carried: CarriedDraft | undefined,
+  draft: Draft | undefined,
   owner: ComposerOwner
 ): { body: string; mentions: AcceptedMention[] } {
-  let body = carried?.body ?? "";
-  let records = survivingMentions(body, carried?.mentions ?? []);
+  let body = draft?.body ?? "";
+  let records = survivingMentions(body, draft?.mentions ?? []);
   const own = ownTarget(owner);
   const addressed = own === null ? undefined : records.find((record) => record.target === own);
   if (addressed !== undefined) {
@@ -472,42 +472,21 @@ export function canSubmitComposer(
   return hasDraft(kind, body, replacement) && !isSaving && pendingUploads === 0;
 }
 
-/** What the composer says when the server refuses a send: a vanished anchor in the server's own
- *  words, anything else as the reason the send did not go. One wording, whether the composer
- *  showing it made the send or was handed the refusal with the draft (`CarriedDraft.failure`). */
-function sendFailure(error: unknown): string {
-  return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING"
-    ? error.message
-    : `Couldn't send — ${apiErrorMessage(error, "network error")}`;
-}
-
 interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
   readonly autoFocus?: boolean;
-  /** The draft a previous instance of this composer held, when the caller has remounted it to
-   *  change the message's owner (`AgentsPage`'s issue pick, where the owner decides which
-   *  mention the message needs). Body and accepted records travel together, so what the reader
-   *  sees and what reaches the wire cannot disagree: see `initialDraft` for the three rules,
-   *  including the one mention that does not travel - the session a direct message is already
-   *  addressed to. Omitted, the composer starts exactly as it always has. */
-  readonly carried?: CarriedDraft;
   readonly docked?: boolean;
   readonly edit?: { readonly body: string; readonly id: string };
+  /** The channel's own mentions, seeded at mount, again by every reset (a send, Discard), and
+   *  into the live draft whenever they change (`initialDraft`). */
   readonly initialMentions?: readonly { readonly target: string; readonly title: string }[];
   readonly inline?: boolean;
   readonly kind?: ComposerKind;
+  /** Names the send, so a host can read whether it is in flight (`useIsMutating`). */
+  readonly mutationKey?: MutationKey;
   readonly onCancelReply?: () => void;
-  /** Every change to the draft, for a caller that will hand it back after a remount of its own. */
-  readonly onCarry?: (draft: CarriedDraft) => void;
   readonly onClose: () => void;
-  /** Whether a send is in flight, from the send itself: its start, and its end once its outcome
-   *  is in the carry - a success's reset, or a refusal (`CarriedDraft.failure`) - both reported
-   *  through `onCarry` first. The mutation's own callbacks report it, so the end arrives even after
-   *  this composer has unmounted: a caller that mounts a new composer only once it reads `false`
-   *  hands on the draft the send left behind, and its refusal, never text the server is still
-   *  taking. */
-  readonly onSending?: (sending: boolean) => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: MentionReplyTarget | null;
@@ -520,16 +499,14 @@ export function MentionComposer({
   agents: suppliedAgents,
   anchor,
   autoFocus = false,
-  carried,
   docked = false,
   edit,
   initialMentions = [],
   inline = false,
   kind: initialKind = "comment",
+  mutationKey,
   onCancelReply,
-  onCarry,
   onClose,
-  onSending,
   onSent,
   owner,
   replyTo = null,
@@ -537,7 +514,7 @@ export function MentionComposer({
   showKindSwitch = false,
 }: MentionComposerProps): ReactNode {
   // Only the mount reads it, so it is computed once rather than on every keystroke.
-  const [initial] = useState(() => initialDraft(initialMentions, carried, owner));
+  const [initial] = useState(() => initialDraft(initialMentions, undefined, owner));
   const textarea = useRef<HTMLTextAreaElement>(null);
   const replacementTextarea = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -546,11 +523,7 @@ export function MentionComposer({
   const focusAddedOption = useRef(false);
   const previousBody = useRef(edit?.body ?? initial.body);
   const pendingTextEdit = useRef<{ before: string; range: TextEditRange } | undefined>(undefined);
-  // A mount under the reply its carried draft was written under has that draft already; seeding
-  // the reply again would put its prefill over the reader's text.
-  const previousReply = useRef<string | undefined>(
-    replyTo !== null && carried?.replyId === replyTo.id ? replyTo.id : undefined
-  );
+  const previousReply = useRef<string | undefined>(undefined);
   const queryClient = useQueryClient();
   const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
@@ -588,9 +561,7 @@ export function MentionComposer({
    *  mounted, and it must read as a new one would. That includes the channel's own mentions: an
    *  issue comment an Agents row writes reaches its agent only by mentioning it, so every message
    *  after the first is seeded as the first was. The kind, the urgency and `Allow multiple` are
-   *  the reader's settings, not the draft, and stay. The reset is reported as the carry at once,
-   *  not from the render that shows it: a send's end can land after this composer has unmounted,
-   *  and is reported (`onSending`) only after this. */
+   *  the reader's settings, not the draft, and stay. */
   const clearDraft = () => {
     const reset = initialDraft(initialMentions, undefined, owner);
     setBody(reset.body);
@@ -598,16 +569,28 @@ export function MentionComposer({
     setMentions(reset.mentions);
     setReplacement("");
     setAskOptions([emptyAskOption()]);
-    onCarry?.({ ...reset, replyId: replyTo?.id });
   };
   const references = useMemo(() => composerReferences(body), [body]);
   const submitGuard = useSubmitGuard();
   const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 
-  /** A refusal handed over with the carried draft (`CarriedDraft.failure`), shown as this
-   *  composer's own until it sends. */
-  const [carriedFailure, setCarriedFailure] = useState(carried?.failure);
+  // The seed belongs to the channel the host addresses. When it changes - an Agents row's issue
+  // pick, or a reply that moves the message to another channel - the live draft takes the new
+  // seed in place (`initialDraft`), the way a reply edits it: a remount would part the draft from
+  // this composer's own send, its refusal and its uploads. A layout effect, so no frame shows the
+  // old seed under the new channel; the reply prefill, a passive effect, still lands after it.
+  const seedKey = [owner.kind, ...initialMentions.map((mention) => mention.target)].join("\n");
+  const seededFor = useRef(seedKey);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `seedKey` is the trigger; the draft, the seed and the owner are read as they stand at the change
+  useLayoutEffect(() => {
+    if (seededFor.current === seedKey) return;
+    seededFor.current = seedKey;
+    const reseeded = initialDraft(initialMentions, { body, mentions }, owner);
+    setBody(reseeded.body);
+    previousBody.current = reseeded.body;
+    setMentions(reseeded.mentions);
+  }, [seedKey]);
   useEffect(() => {
     if (editBody === undefined) return;
     setBody(editBody);
@@ -715,11 +698,9 @@ export function MentionComposer({
   const save = useMutation({
     mutationFn: async ({
       body: draft,
+      mentions: sentMentions,
       replacement: nextReplacement,
-    }: {
-      body: string;
-      replacement: string;
-    }) => {
+    }: SentDraft) => {
       if (edit !== undefined) {
         return saveEdit === undefined
           ? api.editComment(edit.id, { body: draft.trim() })
@@ -760,7 +741,7 @@ export function MentionComposer({
             : { delivery: plan.delivery, target: replyTo.thread.target }),
         });
       }
-      const targets = survivingMentions(draft, mentions).map((mention) => mention.target);
+      const targets = survivingMentions(draft, sentMentions).map((mention) => mention.target);
       const baseBody =
         kind === "suggestion" && draft.trim() === "" ? "Suggested replacement." : draft;
       const plan = deliveryPlan(baseBody, targets.length === 0 ? undefined : "steer");
@@ -780,19 +761,16 @@ export function MentionComposer({
         ? api.createComment(owner.issueKey, input)
         : api.createArtifactComment(owner.artifactId, input);
     },
-    onError: (error) => {
-      // Reported at once, not from the render that shows it: the composer that sent may be gone,
-      // and the send's end (`onSending`) is reported after this.
-      onCarry?.({ body, mentions, replyId: replyTo?.id, failure: sendFailure(error) });
+    mutationKey,
+    // A refusal leaves the draft that was sent, not whatever the latest render holds: the draft
+    // can move while the send is out (a reply cancelled mid-flight reseeds it), and the reader
+    // gets back exactly the text and records the server turned down, for Retry or an edit.
+    onError: (_error, sent) => {
+      setBody(sent.body);
+      previousBody.current = sent.body;
+      setMentions([...sent.mentions]);
     },
-    onMutate: () => {
-      setCarriedFailure(undefined);
-      onSending?.(true);
-    },
-    onSettled: () => {
-      submitGuard.release();
-      onSending?.(false);
-    },
+    onSettled: () => submitGuard.release(),
     onSuccess: () => {
       clearDraft();
       onSent();
@@ -818,11 +796,6 @@ export function MentionComposer({
       if (!inline && edit === undefined) onClose();
     },
   });
-  const failure = save.isError ? sendFailure(save.error) : carriedFailure;
-  const replyId = replyTo?.id;
-  useEffect(() => {
-    onCarry?.({ body, failure, mentions, replyId });
-  }, [body, failure, mentions, onCarry, replyId]);
   const upload = useMutation({
     mutationFn: (file: File) => {
       if (owner.kind === "session")
@@ -929,8 +902,9 @@ export function MentionComposer({
     );
     setConfirmingDiscard(false);
   };
-  const currentDraft = () => ({
+  const currentDraft = (): SentDraft => ({
     body: textarea.current?.value ?? body,
+    mentions,
     replacement: replacementTextarea.current?.value ?? replacement,
   });
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
@@ -1049,6 +1023,8 @@ export function MentionComposer({
             className="font-semibold underline"
             onClick={() => {
               clearDraft();
+              // The refusal went with the draft it was about.
+              save.reset();
               setConfirmingDiscard(false);
               onClose();
             }}
@@ -1327,13 +1303,22 @@ export function MentionComposer({
           ) : null}
         </>
       )}
-      {failure === undefined ? null : (
+      {save.isError ? (
         <QueryError
-          message={failure}
-          onRetry={() => submitGuard.guard(() => save.mutate(currentDraft()))}
+          message={
+            save.error instanceof ApiError &&
+            save.error.status === 409 &&
+            save.error.code === "ANCHOR_MISSING"
+              ? save.error.message
+              : `Couldn't send — ${apiErrorMessage(save.error, "network error")}`
+          }
+          // Retry sends the draft as it stands, so it asks what Send asks of it.
+          onRetry={
+            canSubmit ? () => submitGuard.guard(() => save.mutate(currentDraft())) : undefined
+          }
           retrying={save.isPending}
         />
-      )}
+      ) : null}
       <button
         className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
         disabled={!canSubmit}

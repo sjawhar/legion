@@ -1,9 +1,8 @@
 import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
-  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -45,7 +44,6 @@ import {
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
-  secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
   secondaryButtonText,
   textMutedHoverToSecondary,
@@ -54,8 +52,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
-import type { CarriedDraft } from "../conversation/MentionComposer";
-import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
+import type { ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
@@ -65,17 +62,17 @@ import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { closestMatching } from "../shell/roving";
+import { closestMatching, focusOnDocument } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
+import {
+  AgentMessageComposer,
+  type AgentReply,
+  agentComposerMutationKey,
+} from "./AgentMessageComposer";
 import { deliveryAttempts } from "./attempts";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
-import {
-  AGENT_ROW_SELECTOR,
-  ISSUE_PICKER_SELECTOR,
-  leaveAgentComposer,
-  useAgentsKeymap,
-} from "./keyboard";
+import { AGENT_ROW_SELECTOR, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
@@ -89,14 +86,6 @@ const composerLine = `mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-s
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
-}
-
-/** Whether focus has fallen to the document, where a control that is disabled or leaves the page
- *  drops it. That is the only focus this page takes back on the reader's behalf: anywhere else,
- *  the reader put it there. */
-function focusOnDocument(): boolean {
-  const focused = document.activeElement;
-  return focused === null || focused === document.body;
 }
 
 /** Open asks from each session whose turn is the viewer's, keyed by session ID. */
@@ -188,42 +177,6 @@ export function partitionAgents(
   };
 }
 
-/** A reply the agent composer answers: the quoted message and the conversation it belongs to
- *  (an issue, or none), which decides the route the reply is created through. */
-interface AgentReply {
-  readonly issueKey: string | null;
-  readonly target: ReplyTarget;
-}
-
-/**
- * What the page keeps for one agent row, so that a remount drops none of it. A pin moves a row
- * between the open list and a fold, whose parents differ, so React mounts it afresh; the row and
- * its composer render from this instead of holding their own state, and a closure the old row left
- * behind - a send's end, landing after the move - still reaches the row on screen.
- */
-interface KeptRow {
-  readonly expanded: boolean;
-  /** What only a mount reads, kept outside render so typing re-renders nothing above the row. */
-  readonly memory: RowMemory;
-  readonly replyTo: AgentReply | null;
-  /** Whether the row's send is in flight (`MentionComposer`'s `onSending`). */
-  readonly sending: boolean;
-  readonly update: (change: Partial<RowView>) => void;
-}
-
-/** A kept row's rendered part: page state, so every change re-renders the row wherever it is. */
-type RowView = Pick<KeptRow, "expanded" | "replyTo" | "sending">;
-
-const CLOSED_ROW: RowView = { expanded: false, replyTo: null, sending: false };
-
-/** A kept row's mount-only part: the issue its composer is addressed to, and the draft in it -
- *  the composer's own carry (`CarriedDraft`), the one its channel remount hands on, which also
- *  carries a refused send's notice to the composer mounted after the refusal. */
-interface RowMemory {
-  draft: CarriedDraft | undefined;
-  issueKey: string;
-}
-
 /** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
  *  most recent attempt across the root and every delivered reply. */
 function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
@@ -266,6 +219,7 @@ function AgentExchangeReply({
   onReply,
   read,
   reply,
+  replyDisabled,
   titles,
 }: {
   agent: Agent;
@@ -273,6 +227,7 @@ function AgentExchangeReply({
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   reply: Message;
+  replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -336,6 +291,7 @@ function AgentExchangeReply({
                   }),
             }
       }
+      replyDisabled={replyDisabled}
       turnID={`message:${reply.id}`}
     />
   );
@@ -346,11 +302,13 @@ function AgentTargetedMessage({
   liveAgents,
   onReply,
   read,
+  replyDisabled,
 }: {
   agent: Agent;
   liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
+  replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
@@ -390,6 +348,7 @@ function AgentTargetedMessage({
       isClosed={false}
       onReply={() => onReply(agentReplyTo(agent, read, read.message, asker.label))}
       onRetry={retry.mutate}
+      replyDisabled={replyDisabled}
       retrying={retry.isPending}
       targetName={label}
       thread={
@@ -403,6 +362,7 @@ function AgentTargetedMessage({
                 onReply={onReply}
                 read={read}
                 reply={reply}
+                replyDisabled={replyDisabled}
                 titles={titles}
               />
             ))}
@@ -437,10 +397,17 @@ function AgentMessageList({
   agent,
   liveAgents,
   onReply,
+  open,
+  replyDisabled,
 }: {
   agent: Agent;
   liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
+  /** Whether the row is open. Its list stays mounted while it is collapsed, and marks nothing read
+   *  there: a reply is read once it is on screen. */
+  open: boolean;
+  /** Holds every Reply while the row's send is in flight, as the picker is held. */
+  replyDisabled: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
   const messages = useQuery(agentMessagesQuery(agent.session_id));
@@ -456,14 +423,14 @@ function AgentMessageList({
   // opened is shown, not left behind "Show N older". The watermark stays where it was while the
   // row is open, so marking those replies read does not fold them away from the viewer reading
   // them.
-  const unreadAtOpen = useUnreadAtOpen(messages.data);
+  const unreadAtOpen = useUnreadAtOpen(messages.data, open);
   const olderShown = older.filter((read) => unreadAtOpen?.has(read.message.id) === true);
   const olderFolded = older.filter((read) => !olderShown.includes(read));
   const rendered =
     newest === undefined ? [] : [newest, ...olderShown, ...(showOlder ? olderFolded : [])];
   useMarkRepliesRead(
     agent.session_id,
-    messages.isPending || agentState.isPending ? undefined : rendered
+    !open || messages.isPending || agentState.isPending ? undefined : rendered
   );
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
@@ -488,6 +455,7 @@ function AgentMessageList({
       liveAgents={liveAgents}
       onReply={onReply}
       read={read}
+      replyDisabled={replyDisabled}
     />
   );
   return (
@@ -546,320 +514,6 @@ function AgentMessageList({
   );
 }
 
-function AgentMessageComposer({
-  agent,
-  memory,
-  onCancelReply,
-  onClose,
-  onSending,
-  replyTo,
-  sending,
-}: {
-  agent: Agent;
-  memory: RowMemory;
-  onCancelReply: () => void;
-  /** One level out of the composer: the row it belongs to takes focus. The composer calls it on
-   *  Escape from an untouched draft and on Discard - and also right after a successful send,
-   *  which is NOT one level out; that case is filtered below. */
-  onClose: () => void;
-  onSending: (sending: boolean) => void;
-  replyTo: AgentReply | null;
-  /** Whether this row's send is in flight (`MentionComposer`'s `onSending`, kept by the page so
-   *  it outlives a remount). The message is addressed by then, so neither the picker nor the
-   *  channel the composer is mounted for may change until it lands. */
-  sending: boolean;
-}): ReactNode {
-  const queryClient = useQueryClient();
-  const [issueKey, setIssueKey] = useState(memory.issueKey);
-  const [issuePickerOpen, setIssuePickerOpen] = useState(false);
-  // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's
-  // `onSuccess`), and a reader who has just sent a message is still writing to this agent: moving
-  // focus to the row would turn their next letters into `x` / `i` / `Shift+P` shortcuts. The flag
-  // is set on the way past `onSent` and consumed by the `onClose` that follows it.
-  const sentJustNow = useRef(false);
-  const box = useRef<HTMLDivElement>(null);
-  // `MentionComposer` disables its textarea while a send is in flight (`disabled={save.isPending}`),
-  // and a disabled field hands focus back to the document. The reader is still writing to this
-  // agent, so focus returns the moment React re-enables the field - watched, rather than guessed
-  // at with a frame or a timer, because the write's latency is the server's.
-  const refocusWatcher = useRef<MutationObserver | null>(null);
-  useEffect(() => () => refocusWatcher.current?.disconnect(), []);
-  /** Only the focus the disable took is the composer's to give back: through the whole round trip
-   *  it sits on the document, so a reader who has clicked something else in the meantime keeps
-   *  where they went - otherwise the next keys, `Ctrl+Enter` included, would land in the composer
-   *  they have already sent from, addressed to another agent. */
-  const refocusComposer = () => {
-    const field = box.current?.querySelector("textarea");
-    if (field === null || field === undefined) return;
-    const takeBack = () => {
-      if (focusOnDocument()) field.focus();
-    };
-    refocusWatcher.current?.disconnect();
-    if (!field.disabled) {
-      takeBack();
-      return;
-    }
-    const watcher = new MutationObserver(() => {
-      if (field.disabled) return;
-      watcher.disconnect();
-      takeBack();
-    });
-    watcher.observe(field, { attributeFilter: ["disabled"] });
-    refocusWatcher.current = watcher;
-  };
-  const keepCarry = useCallback(
-    (draft: CarriedDraft) => {
-      memory.draft = draft;
-    },
-    [memory]
-  );
-  /** Whether this composer mounted while another one's send for this row was still out - the row
-   *  remounted under it, by a pin, say. The draft that send left behind is not known until it
-   *  lands (a success resets it, a refusal keeps it with its notice), so until then this composer
-   *  offers no field rather than one holding text the server may be taking. */
-  const [waitingForSend, setWaitingForSend] = useState(sending);
-  if (waitingForSend && !sending) setWaitingForSend(false);
-  /** What the picker's selection reads while it is open, which is the reader's until they commit
-   *  it: the select's own keys move it, `Enter`, or a pick made with the pointer or in the native
-   *  popup, takes it, and leaving the select without committing puts it back on `issueKey`. */
-  const [pendingIssue, setPendingIssue] = useState(issueKey);
-  /** Whether the change arriving now is a key on the select stepping its selection, which only
-   *  moves it: `Enter` is the pick. The test is the task the change arrives in, not the key.
-   *  Chromium, Firefox and WebKit all step a closed select from the key event's own default
-   *  action - the arrows, `Home`/`End` and the page keys from `keydown`, type-ahead from
-   *  `keypress` - and dispatch `change` in that same task. A key that opens the native popup
-   *  instead (the arrows on macOS; `Alt+ArrowDown` in Chromium and Firefox on Linux) steps
-   *  nothing, and the pick then made in the popup arrives in a later task, as a pointer's does:
-   *  that is a pick made, and it commits at once. So each key on the select marks the flag and
-   *  the next task clears it. */
-  const movedByKeyboard = useRef(false);
-  const markKeyStep = () => {
-    movedByKeyboard.current = true;
-    setTimeout(() => {
-      movedByKeyboard.current = false;
-    }, 0);
-  };
-  /** Bumped by every commit, the issue changed or not, since every commit unmounts the select the
-   *  reader is in. The hand-off keys on it rather than on `issueKey`, which re-confirming the
-   *  issue already held leaves alone. */
-  const [commits, setCommits] = useState(0);
-  const commitIssue = (value: string) => {
-    memory.issueKey = value;
-    setIssueKey(value);
-    setIssuePickerOpen(false);
-    setCommits((count) => count + 1);
-  };
-  // A layout effect, so the frame the commit paints already has the field focused rather than
-  // the document: the reader's next keystroke is the message, whichever hand made the pick. When
-  // the pick changes the channel the composer remounts in that same commit, and the field this
-  // finds is the new instance's.
-  useLayoutEffect(() => {
-    if (commits === 0) return;
-    box.current?.querySelector("textarea")?.focus();
-  }, [commits]);
-  const issues = useQuery({
-    enabled: issuePickerOpen,
-    queryFn: () => api.listIssues({ open: true }),
-    queryKey: ["agents", "issue-picker"],
-  });
-  /** The committed issue, once the open list has come back without it: closed since it was
-   *  picked. The select and the toggle keep naming it, marked, until the reader picks another -
-   *  the issue header's Status select keeps a closed issue's own status among its options the same
-   *  way - so what the picker shows, what the toggle says and where the message goes stay one
-   *  issue; a send to it is the server's to refuse (409 `ISSUE_CLOSED`). */
-  const committedClosed =
-    issueKey !== "" &&
-    issues.data !== undefined &&
-    !issues.data.some((issue) => issue.key === issueKey);
-  const committedLabel = committedClosed ? `${issueKey} (closed)` : issueKey;
-  // The picker exists to be used, so opening it hands over the control inside it - the same
-  // move `MultiSelect` makes with its search box. It is what `i` needs (a key that opened
-  // something no keystroke could then reach would be a dead end) and what a pointer wants too,
-  // and it waits for the list rather than a frame, since the select renders only once the read
-  // lands.
-  //
-  // That wait is the whole latency of `GET /issues`, and a reader who has roved on in the
-  // meantime keeps where they went - `takeBack`'s rule above, widened to the row this composer
-  // belongs to: focus is the picker's to take only while it is still where the open left it.
-  // Once per open, so a refetch behind the reader never pulls them back either.
-  const issueSelect = useRef<HTMLSelectElement>(null);
-  const pickerTookFocus = useRef(false);
-  useEffect(() => {
-    if (!issuePickerOpen) return;
-    setPendingIssue(issueKey);
-  }, [issueKey, issuePickerOpen]);
-  useEffect(() => {
-    if (!issuePickerOpen) {
-      pickerTookFocus.current = false;
-      return;
-    }
-    // The list is the dependency that matters: the select renders only once it lands.
-    if (issues.data === undefined || pickerTookFocus.current || issueSelect.current === null) {
-      return;
-    }
-    // Where the open can have left focus, named: the row `i` was pressed on, the toggle a
-    // pointer clicked, or nothing at all. A reader who has gone on - to another row, or into
-    // this composer's own field - keeps where they went.
-    const active = document.activeElement;
-    const openedOn =
-      active === null ||
-      active === document.body ||
-      active === box.current?.closest(AGENT_ROW_SELECTOR) ||
-      (active instanceof Element && active.matches(ISSUE_PICKER_SELECTOR));
-    if (!openedOn) return;
-    pickerTookFocus.current = true;
-    issueSelect.current.focus();
-  }, [issuePickerOpen, issues.data]);
-  // Replies retain their parent owner: issue-attached legacy messages stay on that issue's
-  // message route, while issue-less roots keep the S3-deferred direct session channel.
-  const replyIssueKey = replyTo?.issueKey;
-  const useDirectChannel =
-    replyIssueKey === null || (replyIssueKey === undefined && issueKey === "");
-  const composerOwner = useDirectChannel
-    ? { kind: "session" as const, sessionId: agent.session_id }
-    : { issueKey: replyIssueKey ?? issueKey, kind: "issue" as const };
-  const channel = useDirectChannel ? "session" : "issue";
-  /** The channel the mounted composer was built for. It follows `channel`, except while a send is
-   *  in flight: the instance holding that body is the one the server's answer reaches, so a
-   *  channel change made meanwhile - a reply started or cancelled, since the picker is disabled -
-   *  remounts only once the answer is in, when a success has already reset the draft the carry
-   *  (`memory.draft`) hands on. Remounted mid-send, the new instance would start from the body in
-   *  the air, enabled, where the old one's reset could not reach it: one Ctrl+Enter from sending it
-   *  twice. */
-  const [composerChannel, setComposerChannel] = useState(channel);
-  if (!sending && composerChannel !== channel) setComposerChannel(channel);
-  // A remount takes the focused field out of the page with the instance it belonged to - after a
-  // send whose channel change waited for it, say - while the reader is still writing to this
-  // agent. As in `refocusComposer`, only focus the remount dropped on the document is taken back.
-  const mountedChannel = useRef(composerChannel);
-  useLayoutEffect(() => {
-    if (mountedChannel.current === composerChannel) return;
-    mountedChannel.current = composerChannel;
-    if (focusOnDocument()) box.current?.querySelector("textarea")?.focus();
-  }, [composerChannel]);
-
-  return (
-    <div className={`mt-3 border-t pt-3 ${borderDefault}`} ref={box}>
-      {replyTo === null ? (
-        <button
-          aria-expanded={issuePickerOpen}
-          aria-label="Choose issue"
-          className={`min-h-11 rounded-lg border px-3 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
-          data-agent-issue-picker=""
-          disabled={sending}
-          onClick={() => setIssuePickerOpen((open) => !open)}
-          type="button"
-        >
-          Issue: {issueKey === "" ? "No issue" : committedLabel}
-        </button>
-      ) : null}
-      {issuePickerOpen && replyTo === null ? (
-        <div className="mt-2">
-          {issues.isPending ? (
-            <p className={`text-sm ${textMutedOnCanvas}`}>Loading issues…</p>
-          ) : null}
-          {issues.isError ? (
-            <p className={`text-sm ${dangerText}`}>Could not load issues.</p>
-          ) : null}
-          {issues.data === undefined ? null : (
-            <label className={`block text-sm font-medium ${textSecondaryOnCanvas}`}>
-              Issue (optional)
-              <select
-                aria-label="Issue"
-                className={`mt-1 block min-h-11 w-full rounded-lg px-3 py-2 text-sm font-normal disabled:cursor-not-allowed disabled:opacity-50 ${inputClasses(true)}`}
-                disabled={sending}
-                onBlur={() => {
-                  // A step is not a pick until `Enter`, so leaving the select any other way -
-                  // Tab, Shift+Tab, a click elsewhere - drops it, as Escape does: the open select
-                  // never shows an issue the message is not addressed to.
-                  setPendingIssue(issueKey);
-                }}
-                onChange={(event) => {
-                  setPendingIssue(event.target.value);
-                  // A step from the select's own keys only moves the selection, so a keyboard
-                  // reader can pass the first option to reach the second; `Enter` below is the
-                  // pick. Any other change - a pointer's, or one made in the native popup - is a
-                  // pick already made.
-                  if (movedByKeyboard.current) return;
-                  commitIssue(event.target.value);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    // The commit is this key's, and it stops here: left to bubble it would land
-                    // in the message the pick just addressed, as a newline at its top.
-                    event.preventDefault();
-                    commitIssue(event.currentTarget.value);
-                    return;
-                  }
-                  markKeyStep();
-                }}
-                onKeyPress={markKeyStep}
-                ref={issueSelect}
-                value={pendingIssue}
-              >
-                <option value="">No issue</option>
-                {committedClosed ? (
-                  <option disabled value={issueKey}>
-                    {committedLabel}
-                  </option>
-                ) : null}
-                {issues.data.map((issue) => (
-                  <option key={issue.key} value={issue.key}>
-                    {issue.key} · {issue.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-        </div>
-      ) : null}
-      {waitingForSend ? (
-        <p className={`mt-3 text-sm ${textMutedOnCanvas}`} role="status">
-          Sending…
-        </p>
-      ) : (
-        <MentionComposer
-          // The seed belongs to the channel this instance is built for, which is what its reset
-          // after a send re-seeds; a channel still waiting to remount gets its own on the remount.
-          initialMentions={
-            composerChannel === "session"
-              ? undefined
-              : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
-          }
-          carried={memory.draft}
-          onCarry={keepCarry}
-          // The channel decides which mention the message needs - an issue comment reaches this
-          // agent by mentioning it, a direct message does not - so the composer is remounted when
-          // the channel changes, and only then; one issue to another keeps the same instance. The
-          // pick carries the reader's draft across that remount (`memory.draft`), which waits for
-          // a send in flight to land (`composerChannel`).
-          key={composerChannel}
-          onCancelReply={onCancelReply}
-          onClose={() => {
-            if (sentJustNow.current) {
-              sentJustNow.current = false;
-              return;
-            }
-            onClose();
-          }}
-          onSending={onSending}
-          onSent={() => {
-            sentJustNow.current = true;
-            onCancelReply();
-            void queryClient.invalidateQueries({
-              queryKey: agentMessagesQuery(agent.session_id).queryKey,
-            });
-            // Focus went to the document when the field disabled itself; take it back.
-            refocusComposer();
-          }}
-          owner={composerOwner}
-          replyTo={replyTo?.target ?? null}
-        />
-      )}
-    </div>
-  );
-}
-
 /** A whose-turn pill: a non-zero ask count linking to the Inbox narrowed to this agent's asks. */
 function AskCountPill({
   agent,
@@ -889,23 +543,29 @@ function AskCountPill({
   );
 }
 
+/** The list a row sits in: the open list, or one of the two folds below it. */
+type AgentSection = "active" | "inactive" | "quiet";
+
 function AgentRow({
   agent,
-  kept,
+  hidden,
   liveAgents,
   needsYou,
   onPin,
   onSelect,
   pinned,
+  section,
   selected,
 }: {
   agent: Agent;
-  kept: KeptRow;
+  /** A row in a closed fold: still mounted, so a pin or a fold's toggle loses nothing it holds. */
+  hidden: boolean;
   liveAgents: readonly Agent[];
   needsYou: number;
   onPin: () => void;
   onSelect: (selected: boolean) => void;
   pinned: boolean;
+  section: AgentSection;
   selected: boolean;
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
@@ -915,16 +575,25 @@ function AgentRow({
   const waitingOnAgent = agent.open_asks - needsYou;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
-  const { expanded, replyTo, update } = kept;
+  const [expanded, setExpanded] = useState(false);
+  const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
+  // The conversation and the composer mount on the first open and stay mounted, hidden while the
+  // row is collapsed: the draft, a send in flight, its refusal, an upload, the unread set and what
+  // the reader unfolded each have one owner, which a collapse no more discards than a pin does.
+  const [opened, setOpened] = useState(false);
+  if (expanded && !opened) setOpened(true);
+  const sending = useIsMutating({ mutationKey: agentComposerMutationKey(agent.session_id) }) > 0;
   const detailsId = useId();
 
   return (
     <article
       className={`rounded-xl border outline-none focus-visible:ring-2 ${card} ${borderDefault} ${focusVisibleRing}`}
       data-agent-row={agent.session_id}
+      data-agent-section={section}
       // The issue picker renders only while this row is not answering a message, and a collapsed
-      // row has no picker in the DOM at all, so the row itself carries whether `i` can act.
+      // row's picker is not on screen, so the row itself carries whether `i` can act.
       data-agent-can-pick-issue={replyTo === null ? "" : undefined}
+      hidden={hidden}
       tabIndex={-1}
     >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
@@ -944,7 +613,7 @@ function AgentRow({
               aria-expanded={expanded}
               className={`flex min-h-11 max-w-full items-center gap-1 text-left md:min-h-8 ${textPrimaryOnCanvas}`}
               data-agent-toggle=""
-              onClick={() => update({ expanded: !expanded })}
+              onClick={() => setExpanded((open) => !open)}
               title={label}
               type="button"
             >
@@ -992,7 +661,7 @@ function AgentRow({
             <button
               aria-label={`${label} replied: ${unreadReplies} unread`}
               className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
-              onClick={() => update({ expanded: true })}
+              onClick={() => setExpanded(true)}
               title={`Replies from ${label} you have not read`}
               type="button"
             >
@@ -1028,8 +697,8 @@ function AgentRow({
           </span>
         </div>
       </div>
-      {expanded ? (
-        <div className={`border-t px-4 pb-4 ${borderDefault}`} id={detailsId}>
+      {opened ? (
+        <div className={`border-t px-4 pb-4 ${borderDefault}`} hidden={!expanded} id={detailsId}>
           <div
             className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
           >
@@ -1043,17 +712,17 @@ function AgentRow({
           <AgentMessageList
             agent={agent}
             liveAgents={liveAgents}
-            onReply={(reply) => update({ replyTo: reply })}
+            onReply={setReplyTo}
+            open={expanded}
+            replyDisabled={sending}
           />
           <div data-agent-composer="">
             <AgentMessageComposer
               agent={agent}
-              memory={kept.memory}
-              onCancelReply={() => update({ replyTo: null })}
+              onCancelReply={() => setReplyTo(null)}
               onClose={leaveAgentComposer}
-              onSending={(sending) => update({ sending })}
               replyTo={replyTo}
-              sending={kept.sending}
+              sending={sending}
             />
           </div>
         </div>
@@ -1062,59 +731,35 @@ function AgentRow({
   );
 }
 
-/** The two folds' labels, which also name them to the pin's focus hand-off (`data-agent-fold`). */
-const QUIET_FOLD = "No Dispatch activity";
-const INACTIVE_FOLD = "Inactive";
-
-/** A collapsed disclosure over rows the page keeps out of the way, labelled by `foldLabel`;
- * absent when empty, closed on every load, and open only while this page stays mounted. */
-function AgentFold({
+/**
+ * A fold's toggle: an item in the one list, between the open rows and the fold's own, labelled by
+ * `foldLabel`. Absent when the fold is empty; closed on every load, and open only while this page
+ * stays mounted. A block item rather than a bare button, so the toggle keeps its own width and the
+ * pin's focus hand-off has a handle on it (`data-agent-fold`).
+ */
+function FoldToggle({
   agents,
-  keptRow,
+  expanded,
+  fold,
   label,
-  liveAgents,
-  needsYouBySession,
-  onPin,
-  onSelect,
+  onToggle,
   selected,
 }: {
   agents: readonly Agent[];
-  keptRow: (sessionID: string) => KeptRow;
+  expanded: boolean;
+  fold: Exclude<AgentSection, "active">;
   label: string;
-  liveAgents: readonly Agent[];
-  needsYouBySession: NeedsYouBySession;
-  onPin: (sessionID: string) => void;
-  onSelect: (sessionID: string, selected: boolean) => void;
+  onToggle: () => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
-  const [expanded, setExpanded] = useState(false);
   if (agents.length === 0) return null;
   return (
-    // A block wrapper, not a fragment: the global `button { display: inline-flex }` would
-    // otherwise let two collapsed toggles share one line below the desktop breakpoint.
-    <div className="space-y-3" data-agent-fold={label}>
+    <div data-agent-fold={fold}>
       <DisclosureToggle
         expanded={expanded}
         label={foldLabel(label, agents, selected)}
-        onToggle={() => setExpanded((open) => !open)}
+        onToggle={onToggle}
       />
-      {expanded ? (
-        <section aria-label={label} className="space-y-3">
-          {agents.map((agent) => (
-            <AgentRow
-              agent={agent}
-              key={agent.session_id}
-              kept={keptRow(agent.session_id)}
-              liveAgents={liveAgents}
-              needsYou={needsYouBySession.get(agent.session_id) ?? 0}
-              onPin={() => onPin(agent.session_id)}
-              onSelect={(next) => onSelect(agent.session_id, next)}
-              pinned={false}
-              selected={selected.has(agent.session_id)}
-            />
-          ))}
-        </section>
-      ) : null}
     </div>
   );
 }
@@ -1497,10 +1142,11 @@ export function AgentsPage(): ReactNode {
   // reader never sees, and send them in it.
   const matching = [...active, ...quiet, ...inactive];
   /** The row a pin was made from while it held focus, until the render that moves it. A pin can
-   *  move a row between the open list and a fold, which remounts it, and focus leaves the page
-   *  with the old node; it follows the row to where it lands instead - or, when that is a closed
-   *  fold, to the fold's toggle, as `IssueBoard`'s `focusAfterMove` lands on a collapsed rail - so
-   *  the next `j`/`k` go on from the reader's place rather than from the top. */
+   *  move a row between the open list and a fold: React moves its node, which can drop focus to
+   *  the document, or the row lands in a closed fold, hidden. Focus follows the row to where it
+   *  lands - or, when that is a closed fold, to the fold's toggle, as `IssueBoard`'s
+   *  `focusAfterMove` lands on a collapsed rail - so the next `j`/`k` go on from the reader's
+   *  place rather than from the top. */
   const focusAfterPin = useRef<string | null>(null);
   const togglePin = (sessionID: string) => {
     if (
@@ -1521,53 +1167,74 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
-  // Every row's kept state (`KeptRow`), by session, for as long as the page is mounted - the same
-  // lifetime as the selection above.
-  const [rowViews, setRowViews] = useState<ReadonlyMap<string, RowView>>(() => new Map());
-  const rowMemories = useRef(new Map<string, RowMemory>());
-  const keptRow = (sessionID: string): KeptRow => {
-    let memory = rowMemories.current.get(sessionID);
-    if (memory === undefined) {
-      memory = { draft: undefined, issueKey: "" };
-      rowMemories.current.set(sessionID, memory);
-    }
-    return {
-      ...(rowViews.get(sessionID) ?? CLOSED_ROW),
-      memory,
-      update: (change) =>
-        setRowViews((current) => {
-          const previous = current.get(sessionID) ?? CLOSED_ROW;
-          const view = { ...previous, ...change };
-          // A send reports its end whether or not anything changed; an unchanged view keeps the
-          // same map, so it re-renders nothing.
-          if (
-            view.expanded === previous.expanded &&
-            view.replyTo === previous.replyTo &&
-            view.sending === previous.sending
-          ) {
-            return current;
-          }
-          return new Map(current).set(sessionID, view);
-        }),
-    };
-  };
+  // Each fold is closed on every load and open only while this page stays mounted.
+  const [quietOpen, setQuietOpen] = useState(false);
+  const [inactiveOpen, setInactiveOpen] = useState(false);
   const listRef = useRef<HTMLElement>(null);
   useAgentsKeymap(listRef);
   // A layout effect, so the frame the move paints already has focus where the row went.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `pinned` is the trigger, not a read; `quiet` is read from the render that moved the row
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `pinned` is the trigger, not a read
   useLayoutEffect(() => {
     const sessionID = focusAfterPin.current;
     if (sessionID === null) return;
     focusAfterPin.current = null;
-    // Only focus the move dropped on the document is the page's to give back.
-    if (!focusOnDocument()) return;
     const list = listRef.current;
     const row = [...(list?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? [])].find(
       (node) => node.dataset.agentRow === sessionID
     );
-    const fold = quiet.some((agent) => agent.session_id === sessionID) ? QUIET_FOLD : INACTIVE_FOLD;
-    (row ?? list?.querySelector<HTMLElement>(`[data-agent-fold="${fold}"] > button`))?.focus();
+    if (row === undefined) return;
+    const target = row.hidden
+      ? list?.querySelector<HTMLElement>(`[data-agent-fold="${row.dataset.agentSection}"] button`)
+      : row;
+    // Only the focus the move took is the page's to give back: still on the row, now hidden, or
+    // dropped to the document.
+    const focused = document.activeElement;
+    if (focused !== row && !focusOnDocument()) return;
+    if (focused !== target) target?.focus();
   }, [pinned]);
+  const rowIn = (section: AgentSection, hidden: boolean) => (agent: Agent) => (
+    <AgentRow
+      agent={agent}
+      hidden={hidden}
+      key={agent.session_id}
+      liveAgents={agents}
+      needsYou={needsYouBySession.get(agent.session_id) ?? 0}
+      onPin={() => togglePin(agent.session_id)}
+      onSelect={(next) => select(agent.session_id, next)}
+      pinned={pinned.includes(agent.session_id)}
+      section={section}
+      selected={selected.has(agent.session_id)}
+    />
+  );
+  // One list, keyed by session, with each fold's toggle as an item between the rows - the Inbox's
+  // pattern (`Inbox.tsx`). A row that moves between the open list and a fold moves within the one
+  // parent, so React moves its node instead of remounting it, and a closed fold's rows stay
+  // mounted, hidden: nothing a row holds is ever handed from one instance to another. One flat
+  // array, not three: each array in the children is a slot of its own, and a row changing slots
+  // would remount.
+  const rows = [
+    ...active.map(rowIn("active", false)),
+    <FoldToggle
+      agents={quiet}
+      expanded={quietOpen}
+      fold="quiet"
+      key="fold:quiet"
+      label="No Dispatch activity"
+      onToggle={() => setQuietOpen((open) => !open)}
+      selected={selected}
+    />,
+    ...quiet.map(rowIn("quiet", !quietOpen)),
+    <FoldToggle
+      agents={inactive}
+      expanded={inactiveOpen}
+      fold="inactive"
+      key="fold:inactive"
+      label="Inactive"
+      onToggle={() => setInactiveOpen((open) => !open)}
+      selected={selected}
+    />,
+    ...inactive.map(rowIn("inactive", !inactiveOpen)),
+  ];
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;
@@ -1603,41 +1270,7 @@ export function AgentsPage(): ReactNode {
               message="No agent matches these filters."
             />
           ) : (
-            <div className="space-y-3">
-              {active.map((agent) => (
-                <AgentRow
-                  agent={agent}
-                  key={agent.session_id}
-                  kept={keptRow(agent.session_id)}
-                  liveAgents={agents}
-                  needsYou={needsYouBySession.get(agent.session_id) ?? 0}
-                  onPin={() => togglePin(agent.session_id)}
-                  onSelect={(next) => select(agent.session_id, next)}
-                  pinned={pinned.includes(agent.session_id)}
-                  selected={selected.has(agent.session_id)}
-                />
-              ))}
-              <AgentFold
-                agents={quiet}
-                keptRow={keptRow}
-                label={QUIET_FOLD}
-                liveAgents={agents}
-                needsYouBySession={needsYouBySession}
-                onPin={togglePin}
-                onSelect={select}
-                selected={selected}
-              />
-              <AgentFold
-                agents={inactive}
-                keptRow={keptRow}
-                label={INACTIVE_FOLD}
-                liveAgents={agents}
-                needsYouBySession={needsYouBySession}
-                onPin={togglePin}
-                onSelect={select}
-                selected={selected}
-              />
-            </div>
+            <div className="flex flex-col gap-3">{rows}</div>
           )}
           {selected.size === 0 ? null : (
             <BroadcastComposer
