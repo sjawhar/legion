@@ -51,7 +51,7 @@ second renumbers.
 **Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
 another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
 bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
-`skills/legion-worker/SKILL.md`; a handoff split leaves `@` empty and undescribed, and `jj git
+`skills/legion-worker/references/conflicts-and-rewrites.md`; a handoff split leaves `@` empty and undescribed, and `jj git
 push` refuses a commit with no description). What follows records the earlier mechanism: done in
 the working copy after
 `jj rebase -s <first commit> -d main@origin`, then squashed into the first conflicted commit

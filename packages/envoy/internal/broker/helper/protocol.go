@@ -28,7 +28,7 @@ type Request struct {
 	URL          string   `json:"url,omitempty"`           // sign: its absolute URL
 	Secrets      []string `json:"secrets,omitempty"`       // sign-request: the requested agent_secret names
 	Reason       string   `json:"reason,omitempty"`        // sign-request: why they're needed
-	WaitSeconds  int      `json:"wait_seconds,omitempty"`  // register: block this long for the enrollment
+	WaitSeconds  int      `json:"wait_seconds,omitempty"`  // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
 	RuntimeID    string   `json:"runtime_id,omitempty"`    // enroll-box: the box's runtime id
 	Thumbprint   string   `json:"thumbprint,omitempty"`    // enroll-box: the box key's thumbprint
 	Kind         string   `json:"kind,omitempty"`          // enroll-box: always "box"
@@ -37,8 +37,9 @@ type Request struct {
 }
 
 // Response is the helper's one line. Code and Error are set only when OK is false, except that
-// a register reply carries the last broker error in Error while State is still "enrolling", and
-// a login/login-status reply carries the confirmation code in Code while OK is true.
+// a register reply carries the last broker error in Error while State is still "enrolling" (and
+// Code NO_CREDENTIAL while the helper holds no launcher credential to enroll it with), and a
+// login/login-status reply carries the confirmation code in Code while OK is true.
 type Response struct {
 	OK            bool          `json:"ok"`
 	Code          string        `json:"code,omitempty"`
@@ -64,8 +65,14 @@ type SessionInfo struct {
 }
 
 const (
-	CodeNotASession    = "NOT_A_SESSION"
-	CodeNotEnrolled    = "NOT_ENROLLED"
+	CodeNotASession = "NOT_A_SESSION"
+	// CodeNotEnrolled answers sign or sign-request for a registered session that is still
+	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
+	CodeNotEnrolled = "NOT_ENROLLED"
+	// CodeNoCredential answers them instead while the helper holds no launcher credential, from
+	// every restart until the operator logs the machine in: it enrolls no one, so the session has
+	// no broker identity. A register reply for such a session carries it too, beside OK.
+	CodeNoCredential   = "NO_CREDENTIAL"
 	CodeBadRequest     = "BAD_REQUEST"
 	CodeUnidentified   = "PEER_UNIDENTIFIED"
 	CodeLoginFailed    = "LOGIN_FAILED"
@@ -86,15 +93,16 @@ func DefaultSocket(getenv func(string) string) string {
 	return filepath.Join(dir, "agent-secrets", "helper.sock")
 }
 
-// Call sends one request and reads one reply. The dial has a 2 s limit of its own; timeout
-// bounds the whole exchange (a register with wait_seconds needs that much plus slack).
+// Call sends one request and reads one reply, all within timeout, the dial included (the dial
+// alone also gives up after 2 s). A register with wait_seconds needs that much plus slack.
 func Call(sock string, req Request, timeout time.Duration) (Response, error) {
-	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	deadline := time.Now().Add(timeout)
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second, Deadline: deadline}).Dial("unix", sock)
 	if err != nil {
 		return Response{}, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	_ = conn.SetDeadline(deadline)
 	data, err := json.Marshal(req)
 	if err != nil {
 		return Response{}, err

@@ -1365,14 +1365,14 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 AGENTC-393 v9's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
-box/pod-side client, which enrolls a runtime, requests grants, polls a pending decision to
-completion, and either prints session/grant state (`self`, `status --json`) or `syscall.Exec`s a
-command with the granted values injected into its environment. The broker holds no Dispatch
-credential and opens no Dispatch ask anywhere: every human decision — approving or denying a
-secret request, approving or denying a machine login, revoking a grant, registering or endorsing an
-approver key — is a WebAuthn assertion the broker verifies itself against its own persisted,
-attested key set (`internal/broker/approvers`) over a domain-separated challenge
-(`internal/broker/record`). Dispatch's server relays that assertion from a browser page on
+client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
+runtime, requests grants, polls a pending decision to completion, and either prints session/grant
+state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
+its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere: every human decision —
+approving or denying a secret request, approving or denying a machine login, revoking a grant,
+registering or endorsing an approver key — is a WebAuthn assertion the broker verifies itself
+against its own persisted, attested key set (`internal/broker/approvers`) over a domain-separated
+challenge (`internal/broker/record`). Dispatch's server relays that assertion from a browser page on
 Dispatch's own origin to the broker's UI routes; it never decides anything (contract v9, "The
 approval signal is a WebAuthn assertion..."). `internal/broker/enroll` turns a launcher credential
 into a leased enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a
@@ -1383,6 +1383,38 @@ that file's `approvers:` section (origin, AAGUID allowlist, per-login attested k
 enrollment or credential; `internal/broker/machine` decides typed-code machine logins and mints the
 launcher credentials they approve; and `internal/broker/secrets` reads the granted value from AWS
 Secrets Manager, or a fake local file for development.
+
+The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
+`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
+Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
+`helper.sock` inside it, used only when that file is there; a pod sets its variables and has no
+`XDG_RUNTIME_DIR`. The exec form's command keeps exactly those three variables, so an
+`agent-secrets` call it makes is the same session's. A box's key and enrollment arrive after the
+box starts, so its launcher writes `enrollment.pending` into the key dir before the box starts and
+removes it once it has written `enrollment` or `enrollment.error`. While that marker is there and
+younger than 160 s by mtime, a call waits for `key.pem` and `enrollment`, up to
+`AGENT_SECRETS_ENROLL_WAIT` (default 20s), then fails with its ordinary error; with no fresh marker
+nothing waits, and the Go shim never writes one, so a pod never waits. `agent-secrets identity`
+answers locally, with no broker call and no registration, whether the calling process has a
+session identity (exit 0 for a `key.pem`, a fresh marker, or the helper's sign probe answering OK
+or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but cannot be asked),
+for callers that choose between the broker and another backend. A helper holding no launcher
+credential, from every restart until the operator logs the machine in, enrolls no one: its sign
+and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
+with the same not-logged-in notice naming `agent-secrets launcher login`. The login that installs
+a credential wakes every registered session's enrollment retry, so those sessions reach the broker
+within about a second of it rather than when a backoff of up to a minute comes round.
+`agent-secrets launcher login-status`, which the helper answers, exits 0 only for an issued login
+whose credential the helper still holds; once the broker refuses it (401 `LAUNCHER_INVALID`,
+expired or revoked) the login reads `expired`.
+`register --wait N` answers at once while the helper holds no launcher credential, so the dotfiles
+launcher gate (`scripts/agent-secrets-session`) can pass `--wait 10` without first checking that
+login-status says `issued`, once the pinned release carries that answer and the helper has
+restarted on it; its login-status probe stays, since it also finds a helper that does not answer.
+Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
+exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
+with a warning that its `agent-secrets` calls fail, and secret-run uses secretsd, until the machine
+is logged in.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal

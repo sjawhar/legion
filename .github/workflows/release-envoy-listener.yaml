@@ -37,6 +37,12 @@ jobs:
 
   build:
     runs-on: ubuntu-24.04
+    # Only what the attestation step needs beyond the checkout: an OIDC token for its Sigstore
+    # signing certificate, and the attestations API to store the result.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: true
       matrix:
@@ -78,6 +84,12 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/agent-secrets/bin/agent-secrets-helper ./cmd/agent-secrets-helper
           tar czf agent-secrets-${{ matrix.arch }}.tar.gz -C out agent-secrets
         working-directory: packages/envoy
+      # Build provenance for the host binaries a mise pin installs, so `gh attestation verify
+      # agent-secrets-<arch>.tar.gz --repo sjawhar/legion` can check a downloaded asset against
+      # this workflow run. The release job uploads these exact bytes (artifact round trip).
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: packages/envoy/agent-secrets-${{ matrix.arch }}.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: legion-envoy-${{ matrix.arch }}

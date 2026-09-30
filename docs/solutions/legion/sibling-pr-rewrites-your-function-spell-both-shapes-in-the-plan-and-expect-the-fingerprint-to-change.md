@@ -76,7 +76,7 @@ the reviewer can hold the resolution to a written target.
 **Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
 another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
 bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
-`skills/legion-worker/SKILL.md`; a handoff split leaves `@` empty and undescribed, and `jj git
+`skills/legion-worker/references/conflicts-and-rewrites.md`; a handoff split leaves `@` empty and undescribed, and `jj git
 push` refuses a commit with no description). What follows records the earlier workflow.
 
 ```sh
@@ -100,8 +100,8 @@ Run only the plan's named test file (`reducers.test.ts`: 103 pass), set the book
 with `--allow-backwards` (it sits on `@` after every split), push, and read
 `legion gh -- pr view <n> --json mergeable,mergeStateStatus` again — GitHub recomputes lazily,
 so give it a few seconds. Today the rebase and squash above rewrite pushed commits, so record the
-pushed tip before the rebase and push with the procedure in `skills/legion-worker/SKILL.md`
-(*Rewriting pushed commits*).
+pushed tip before the rebase (*Rewriting pushed commits* in
+`skills/legion-worker/references/conflicts-and-rewrites.md`) and push with the procedure in `skills/legion-worker/SKILL.md`.
 
 ## 3. Reading jj's conflict display when one side is a diff
 

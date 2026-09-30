@@ -116,7 +116,7 @@ which is why it was the first choice after review round 1. Once GitHub reported 
 `DIRTY` and stopped running `pull_request` CI, the rule in
 `docs/solutions/github/conflicting-pr-gets-no-pull-request-ci.md` applied and the branch was
 rebased (`jj rebase -s <first branch commit> -d main`; superseded 2026-09-27 by LEGION-118 —
-resolve with a forward merge instead, `skills/legion-worker/SKILL.md`), resolving conflicts
+resolve with a forward merge instead, `skills/legion-worker/references/conflicts-and-rewrites.md`), resolving conflicts
 bottom-up with edit-and-squash and keeping `main`'s change wherever both sides touched a line. The
 old merge commit survived the rebase harmlessly (its second parent is now an ancestor of `main`).
 Review findings landed as their own commits on top, as
