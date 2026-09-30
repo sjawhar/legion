@@ -420,6 +420,12 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		writeError(w, "NO_VERSION", http.StatusConflict, "the document has no settled version to approve yet")
 		return
 	}
+	// The summary is checked on every path a request takes, including those that open nothing.
+	question, err := approvalQuestion(artifact.Name, version, summary)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	type response struct {
 		Ask        *model.Ask             `json:"ask"`
 		ArtifactID string                 `json:"artifact_id"`
@@ -433,11 +439,6 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	}
 	if artifact.Approval != nil && artifact.Approval.State == "approved" {
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
-		return
-	}
-	question, err := approvalQuestion(artifact.Name, version, summary)
-	if err != nil {
-		s.writeHandlerError(w, err)
 		return
 	}
 	open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID)

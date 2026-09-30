@@ -241,7 +241,8 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 		t.Fatalf("summarised approval ask = %#v", opened)
 	}
 
-	// A repeat at the same version returns the open ask as it stands, whatever it says.
+	// A repeat at the same version returns the open ask as it stands, whatever it says, though the
+	// summary is still checked.
 	other := "A different summary."
 	repeat := request(issue.PrimaryArtifactID, &other)
 	if repeat.Code != http.StatusOK {
@@ -249,6 +250,9 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 	}
 	if got := decodeBody[requestResponse](t, repeat).Ask; got.ID != opened.ID || got.Question != opened.Question {
 		t.Fatalf("repeat at the same version = %#v, want ask %s unchanged", got, opened.ID)
+	}
+	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) {
+		t.Fatalf("summary over the cap on a repeat at the same version: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 
 	// A repeat after a new version retracts that ask and opens one at the new version.
@@ -277,18 +281,41 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 		t.Fatalf("approval after the repeat = %#v, want awaiting on ask %s", got.Approval, reopened.Ask.ID)
 	}
 	// Followers of the old ask learn it closed, then the new ask opens, in that order.
+	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if log.Code != http.StatusOK {
+		t.Fatalf("read events: status=%d body=%s", log.Code, log.Body.String())
+	}
 	var events []struct {
 		Type    string `json:"type"`
 		Payload struct {
 			ID string `json:"id"`
 		} `json:"payload"`
 	}
-	if err := json.NewDecoder(dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice").Body).Decode(&events); err != nil {
+	if err := json.NewDecoder(log.Body).Decode(&events); err != nil {
 		t.Fatalf("decode events: %v", err)
 	}
-	tail := events[len(events)-2:]
-	if tail[0].Type != "ask.resolved" || tail[0].Payload.ID != opened.ID || tail[1].Type != "ask.opened" || tail[1].Payload.ID != reopened.Ask.ID {
-		t.Fatalf("last two events = %#v, want ask.resolved for %s then ask.opened for %s", tail, opened.ID, reopened.Ask.ID)
+	position := func(eventType, askID string) int {
+		for index, event := range events {
+			if event.Type == eventType && event.Payload.ID == askID {
+				return index
+			}
+		}
+		return -1
+	}
+	resolvedAt, openedAt := position("ask.resolved", opened.ID), position("ask.opened", reopened.Ask.ID)
+	if resolvedAt < 0 || openedAt < 0 || resolvedAt > openedAt {
+		t.Fatalf("events = %#v, want ask.resolved for %s before ask.opened for %s", events, opened.ID, reopened.Ask.ID)
+	}
+
+	// Once the latest version is approved a request opens nothing, and its summary is still checked.
+	if approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+reopened.Ask.ID+"/answer", map[string]any{"selected": []string{"Approve"}}, "alice"); approved.Code != http.StatusOK {
+		t.Fatalf("approve version 2: status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) {
+		t.Fatalf("summary over the cap on an approved document: status=%d body=%s", refused.Code, refused.Body.String())
+	}
+	if satisfied := request(issue.PrimaryArtifactID, &revised); satisfied.Code != http.StatusOK || !strings.Contains(satisfied.Body.String(), `"ask":null`) || !strings.Contains(satisfied.Body.String(), `"state":"approved"`) {
+		t.Fatalf("request on an approved document: status=%d body=%s", satisfied.Code, satisfied.Body.String())
 	}
 }
 
