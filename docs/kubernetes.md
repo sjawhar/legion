@@ -65,8 +65,9 @@ commit the workflow built, then the Go `legion probe-image`: the same three prob
 daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the Go
 daemon API contract (`legion.goDaemonApiVersion`) and every task agent and skill Legion's prompts
 name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
-`oracle`, `thermonuclear-deep-review` and `thermonuclear-code-quality` in `agents/`, and the pair's
-rubrics and `ce-simplify-code` with Legion's other skills in `dist/skills`). The build has none of
+`oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality` in
+`agents/`, and the pair's rubrics and `ce-simplify-code` with Legion's other skills in
+`dist/skills`). The build has none of
 the operator's model configuration, so it leaves those agents' models unresolved
 (`--skip-agent-models`), printing
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped go-daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
@@ -872,15 +873,16 @@ claim's pod and the image probe's.
   when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
   may not set, since they decide where Oh My Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` as `@oracle`, both
-  review agents as `@review`. The boot gate refuses, by agent, any whose role the operator's
-  settings (`modelRoles`, or `task.agentModelOverrides`) leave unconfigured, or whose model's key
-  does not work, because Oh My Pi's task tool would quietly run it on the parent session's model.
+  review agents as `@review`, and `deep-worker`, which writes the implementer's code, as `@deep`.
+  The boot gate refuses, by agent, any whose role the operator's settings (`modelRoles`, or
+  `task.agentModelOverrides`) leave unconfigured, or whose model's key does not work, because Oh My
+  Pi's task tool would quietly run it on the parent session's model.
   The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is
   `@smol` and `reviewer` is `@slow`. `smol` and `slow`, left unset in every layer, inherit the
   default role's model, which the gate accepts. Settings records merge
   key by key across layers, though, so a role the operator's overlay does not name can be named by a
-  repository's `.omp/config.yml`. Name each role those agents use (`review`, `oracle`, `smol`,
-  `slow`) to keep the choice the operator's.
+  repository's `.omp/config.yml`. Name each role those agents use (`review`, `oracle`, `deep`,
+  `smol`, `slow`) to keep the choice the operator's.
 - **The repository `.env`.** Oh My Pi's runtime loads the working directory's `.env` into its
   environment at start, filling every variable the pod left unset or empty. A repository can therefore set
   anything Oh My Pi reads from its environment: a provider's API key, `PI_SMOL_MODEL`,
@@ -1227,12 +1229,16 @@ keeping nothing until the daemon has answered, the command:
    refuses a pi-legion-envoy it does not load, or one speaking another Go daemon API contract;
 3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer`. The
    daemon compares it in constant time and mints a fresh controller capability, which replaces the
-   previous one and its registration and ends every controller grant: the last start wins;
+   previous one and its registration and ends every controller grant: the last start wins. The
+   answer also carries the daemon's `gates.design`, and an answer without `root-issues` or `off`
+   is refused with a request to upgrade the daemon;
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
    `$XDG_STATE_HOME/legion/<project>-controller`), beside the `gh` shim, the `legion` launcher and the
    deployment instructions;
 5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
-   `--append-system-prompt`, no `--resume`, no `--mode rpc`) with the controller's environment
+   `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
+   and the deployment instructions, a start message as Oh My Pi's first prompt so the controller's first turn runs its start
+   procedure with nothing typed, no `--resume`, no `--mode rpc`) with the controller's environment
    (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
