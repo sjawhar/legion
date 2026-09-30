@@ -282,16 +282,36 @@ function ArchitectureTreeView({
       when: () => document.activeElement?.matches(ROW_SELECTOR) === true,
     },
     {
+      // Out of the palette: where the focused row has children `o`'s Open row already goes into
+      // them, and on a leaf this row would do nothing.
       id: "descend",
-      keys: ["l", "ArrowRight"],
+      keys: "l",
       label: "Into the focused component's children",
+      palette: false,
+      run: descend,
+      when: () => rowAround(document.activeElement) !== null,
+    },
+    {
+      // The arrows are the letters' twins, so neither is a second palette row.
+      id: "descend-arrow",
+      keys: "ArrowRight",
+      label: "Into the focused component's children (arrow key)",
+      palette: false,
       run: descend,
       when: () => rowAround(document.activeElement) !== null,
     },
     {
       id: "ascend",
-      keys: ["h", "ArrowLeft"],
+      keys: "h",
       label: "Up one level",
+      run: ascend,
+      when: () => level !== undefined,
+    },
+    {
+      id: "ascend-arrow",
+      keys: "ArrowLeft",
+      label: "Up one level (arrow key)",
+      palette: false,
       run: ascend,
       when: () => level !== undefined,
     },

@@ -230,7 +230,8 @@ export interface Keymap {
    * innermost dialog, innermost scope first. Left out: a binding with `palette: false`, one that
    * fires in an editable, and one with more than one key alternative, whose `run` may pick what
    * it does by the key pressed (the arrows, `1`–`9`) where a row presses only its first. A row
-   * runs its binding only if the binding's `when()` still holds when the row is chosen.
+   * runs its binding only if the binding is still registered and its `when()` still holds when
+   * the row is chosen.
    */
   actions(): KeymapAction[];
   /** Every registered binding with its `when()` evaluated now — the source for `?`. */
@@ -373,9 +374,10 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
             keys,
             label: binding.label,
             // The rows are decided when the palette opens; by the time one is chosen its control
-            // may have gone (another writer reopened the issue), so the row asks again.
+            // may have gone (another writer reopened the issue) or its component unmounted (the
+            // page fell to its error view), so the row asks again.
             run: () => {
-              if (binding.when?.() !== false) {
+              if (registrations.includes(registration) && binding.when?.() !== false) {
                 binding.run(new KeyboardEvent("keydown", { key: keys[0] ?? "" }));
               }
             },
@@ -384,8 +386,11 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
         }
         // Registration order is mount timing — the same page reached by a navigation and by a
         // reload registers its scopes in a different order — so which row the palette highlights
-        // first would follow the load path. Within a scope the rows read alphabetically instead.
-        inScope.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+        // first would follow the load path. Within a scope the rows read alphabetically instead:
+        // collated, since a code-unit compare puts every capital before every lowercase letter
+        // ("Go to Settings" before "Go to project…"). English collation, as the labels are, so the
+        // order does not move with the reader's locale.
+        inScope.sort((a, b) => a.label.localeCompare(b.label, "en"));
         offered.push(...inScope);
       }
       return offered;

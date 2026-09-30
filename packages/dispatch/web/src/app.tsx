@@ -16,6 +16,7 @@ import { MarginProvider } from "./features/margin/margin-context";
 import { RefPreviewHost } from "./features/refs/RefPreview";
 import {
   AGENT_LIVE_PATH,
+  buildProjectPath,
   parseIssuePath,
   parseProjectPath,
   routeFillsViewport,
@@ -426,7 +427,11 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       id: "go-documents",
       keys: "g d",
       label: "Go to Documents",
-      run: () => navigate(`/projects/${routeProject}/documents`),
+      run: () => {
+        if (routeProject !== undefined) {
+          navigate(buildProjectPath({ kind: "documents", project: routeProject }));
+        }
+      },
       when: () => routeProject !== undefined,
     },
     {

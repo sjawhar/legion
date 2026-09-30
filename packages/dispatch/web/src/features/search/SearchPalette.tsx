@@ -37,7 +37,7 @@ import {
 import { statusText } from "../project/board-model";
 import { referenceRouteFromHref } from "../refs/RefLink";
 import { referenceTriggerProps } from "../refs/RefPreview";
-import type { DispatchReferenceRoute } from "../refs/routes";
+import { buildProjectPath, type DispatchReferenceRoute } from "../refs/routes";
 import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/keymap";
 import { KeyHints } from "../shell/ShortcutHelp";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
@@ -315,63 +315,13 @@ export function SearchPalette({
   mode: PaletteMode | null;
   onClose: () => void;
 }): ReactNode {
-  const open = mode !== null;
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const navigate = useNavigate();
-  // The rows this open offers, decided on the render that opened it — while focus is still on
-  // whatever opened the palette, since `useDialog` moves it into the input a frame later. Read
-  // any later and a `when()` that asks what is focused would answer "the palette", withdrawing
-  // every row bound to the card, row or control the reader was actually on.
-  const [opened, setOpened] = useState<{
-    actions: readonly KeymapAction[];
-    mode: PaletteMode | null;
-  }>({
-    actions: emptyActions,
-    mode: null,
-  });
-  if (opened.mode !== mode) {
-    setOpened({ actions: mode === "all" ? appKeymap.actions() : emptyActions, mode });
-    // Each open starts empty, on its first row. The palette stays mounted while closed, so a
-    // query left behind would come back on the next open and filter the new page's actions down
-    // to nothing, and a highlight would name a row this open may not have.
-    if (mode !== null) {
-      setQuery("");
-      setDebouncedQuery("");
-      setActiveId(null);
-    }
-  }
   // A chosen row runs once the palette is gone and `useDialog`'s cleanup has put focus back on
-  // that same element: running it here, with focus in the input, would act on nothing, and a row
-  // that moves focus would have its move undone by that cleanup a moment later.
+  // whatever opened it: run inside the palette, with focus in its input, it would act on nothing,
+  // and a row that moves focus would have its move undone by that cleanup a moment later.
   const pendingAction = useRef<(() => void) | null>(null);
-  const dialog = useDialog<HTMLDivElement>({ initialFocusRef: inputRef, onClose, open });
-  // The global `$mod+k` toggle is masked while any dialog is open; the palette keeps the key as
-  // its own close so pressing it twice still opens and closes.
-  useKeymap(
-    DIALOG_SCOPE,
-    open
-      ? [
-          {
-            id: "search-close",
-            inEditable: true,
-            keys: "$mod+k",
-            label: "Close search",
-            run: onClose,
-          },
-        ]
-      : []
-  );
-  const searchText = query.trim();
-  const needle = searchText.toLowerCase();
-  const searching = mode !== "projects";
-  const queryEnabled = searching && searchText.length >= 2;
-
-  // On the commit that closes the palette React runs every passive-effect cleanup before any
-  // passive-effect setup, whatever order they are declared in, so `useDialog`'s cleanup (the focus
-  // restore) has run by the time this effect runs the chosen row.
+  // On the commit that closes the palette React runs every passive-effect cleanup, the unmounted
+  // palette's `useDialog` among them, before any passive-effect setup, so focus is back by the
+  // time this effect runs the chosen row.
   useEffect(() => {
     if (mode !== null) {
       return;
@@ -380,6 +330,59 @@ export function SearchPalette({
     pendingAction.current = null;
     run?.();
   }, [mode]);
+
+  if (mode === null) {
+    return null;
+  }
+  // Mounted once per open, so each open starts with an empty query, its first row highlighted and
+  // the rows of the page it opened over; and a closed palette holds no search of its own.
+  return (
+    <PaletteDialog
+      key={mode}
+      mode={mode}
+      onAction={(run) => {
+        pendingAction.current = run;
+      }}
+      onClose={onClose}
+    />
+  );
+}
+
+function PaletteDialog({
+  mode,
+  onAction,
+  onClose,
+}: {
+  mode: PaletteMode;
+  onAction: (run: () => void) => void;
+  onClose: () => void;
+}): ReactNode {
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
+  // The rows this open offers, decided on its first render, while focus is still on whatever
+  // opened the palette, since `useDialog` moves it into the input after that commit. Read any
+  // later and a `when()` that asks what is focused would answer "the palette", withdrawing every
+  // row bound to the card, row or control the reader was actually on.
+  const [actions] = useState(() => (mode === "all" ? appKeymap.actions() : emptyActions));
+  const dialog = useDialog<HTMLDivElement>({ initialFocusRef: inputRef, onClose, open: true });
+  // The global `$mod+k` toggle is masked while any dialog is open; the palette keeps the key as
+  // its own close so pressing it twice still opens and closes.
+  useKeymap(DIALOG_SCOPE, [
+    {
+      id: "search-close",
+      inEditable: true,
+      keys: "$mod+k",
+      label: "Close search",
+      run: onClose,
+    },
+  ]);
+  const searchText = query.trim();
+  const needle = searchText.toLowerCase();
+  const searching = mode !== "projects";
+  const queryEnabled = searching && searchText.length >= 2;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(searchText), 150);
@@ -394,7 +397,7 @@ export function SearchPalette({
   const projects = useQuery({ ...projectsQuery(), enabled: mode === "projects" });
   const results = search.data?.results ?? emptyResults;
   const groups = groupResults(results);
-  const actionRows: ActionRow[] = opened.actions
+  const actionRows: ActionRow[] = actions
     .filter((action) => needle === "" || action.label.toLowerCase().includes(needle))
     .map((action) => ({
       action,
@@ -455,35 +458,36 @@ export function SearchPalette({
     ...commandSections.flatMap((section) => section.options.map((option) => option.row)),
     ...hitGroups.flatMap((group) => group.rows),
   ];
-  // The highlight follows its row, not a position: hits arriving below the actions, or a refetch
-  // re-ranking them, leave it on the row the reader arrowed to. A new query or a new open sends
-  // it to the head, and so does its row leaving the list.
-  const activeIndex = Math.max(
-    0,
-    rows.findIndex((row) => row.id === activeId)
-  );
-  const activeRow = rows[activeIndex];
+  // The highlight is the row the reader sees highlighted, held by its id: hits arriving below
+  // the actions, or a refetch re-ranking them, leave it on that row. A new query sends it to the
+  // head, and so does its row leaving the list; the head it lands on is then adopted, so the row
+  // coming back does not take the highlight back from it.
+  const activeRow = rows.find((row) => row.id === activeId) ?? rows[0];
+  const activeIndex = activeRow === undefined ? 0 : rows.indexOf(activeRow);
+  const shownId = activeRow?.id ?? null;
+  if (shownId !== activeId) {
+    setActiveId(shownId);
+  }
   // Focus stays in the input while the arrows move the highlight (`aria-activedescendant`), so
   // the list scrolls the highlighted row into its own view: an issue page offers more rows than
   // the list's height holds.
-  const activeRowId = activeRow?.id;
   useLayoutEffect(() => {
-    if (activeRowId !== undefined) {
-      document.getElementById(activeRowId)?.scrollIntoView({ block: "nearest" });
+    if (shownId !== null) {
+      document.getElementById(shownId)?.scrollIntoView({ block: "nearest" });
     }
-  }, [activeRowId]);
+  }, [shownId]);
 
-  useCloseOnNavigation(open, onClose);
-
-  if (!open) {
-    return null;
-  }
+  useCloseOnNavigation(true, onClose);
 
   const selectRow = (row: PaletteRow) => {
     if (row.kind === "action") {
-      pendingAction.current = row.action.run;
+      onAction(row.action.run);
     } else {
-      navigate(row.kind === "project" ? `/projects/${row.project.key}` : row.result.href);
+      navigate(
+        row.kind === "project"
+          ? buildProjectPath({ kind: "project", project: row.project.key })
+          : row.result.href
+      );
     }
     onClose();
   };
@@ -504,14 +508,17 @@ export function SearchPalette({
     <>
       <div aria-hidden="true" className={`fixed inset-0 z-40 ${backdrop50}`} onClick={onClose} />
       <div className="pointer-events-none fixed inset-x-0 top-12 z-50 flex justify-center xl:top-20 xl:px-4">
+        {/* A column no taller than the screen below its top offset (and a 1rem foot margin from
+            `xl`), so the list, the one part that scrolls, gives way first and the input, the
+            message and the key hints stay in view on a short window. */}
         <div
           aria-label="Search"
           aria-modal="true"
-          className={`pointer-events-auto w-full overflow-hidden rounded-b-lg border shadow-2xl xl:max-w-2xl xl:rounded-lg ${card} ${borderDefault}`}
+          className={`pointer-events-auto flex max-h-[calc(100dvh-3rem)] w-full flex-col overflow-hidden rounded-b-lg border shadow-2xl xl:max-h-[calc(100dvh-6rem)] xl:max-w-2xl xl:rounded-lg ${card} ${borderDefault}`}
           ref={dialog.containerRef}
           role="dialog"
         >
-          <div className={`border-b p-3 ${borderDefault}`}>
+          <div className={`shrink-0 border-b p-3 ${borderDefault}`}>
             <input
               aria-activedescendant={activeRow?.id}
               aria-controls="search-results"
@@ -532,7 +539,11 @@ export function SearchPalette({
             />
           </div>
           {rows.length === 0 ? null : (
-            <div className="max-h-[60vh] overflow-y-auto" id="search-results" role="listbox">
+            <div
+              className="max-h-[60vh] min-h-0 flex-1 overflow-y-auto"
+              id="search-results"
+              role="listbox"
+            >
               {commandSections.map((section) => (
                 <CommandGroup
                   activeId={activeRow?.id}
@@ -617,9 +628,11 @@ export function SearchPalette({
           )}
           {mode === "projects" ? (
             projects.isPending ? (
-              <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>Loading projects…</p>
+              <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
+                Loading projects…
+              </p>
             ) : projects.isError ? (
-              <div className="p-3">
+              <div className="shrink-0 p-3">
                 <QueryError
                   message="Could not load projects."
                   onRetry={() => {
@@ -629,16 +642,18 @@ export function SearchPalette({
                 />
               </div>
             ) : projectRows.length === 0 ? (
-              <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>
+              <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
                 {searchText === "" ? "No projects" : `No projects match "${searchText}"`}
               </p>
             ) : null
           ) : !queryEnabled ? (
-            <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>Type at least 2 characters</p>
+            <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
+              Type at least 2 characters
+            </p>
           ) : waitingForQuery || search.isPending ? (
-            <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>Searching…</p>
+            <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>Searching…</p>
           ) : search.isError ? (
-            <div className="p-3">
+            <div className="shrink-0 p-3">
               <QueryError
                 message="Search failed."
                 onRetry={() => {
@@ -648,7 +663,7 @@ export function SearchPalette({
               />
             </div>
           ) : results.length === 0 ? (
-            <p className={`px-3 py-3 text-sm ${textMutedOnSurface}`}>
+            <p className={`shrink-0 px-3 py-3 text-sm ${textMutedOnSurface}`}>
               No results for &quot;{searchText}&quot;
             </p>
           ) : null}
@@ -657,7 +672,7 @@ export function SearchPalette({
               that can hover, since a touch reader has none of these keys and the row would
               cost them 33px of hits. */}
           <div
-            className={`hidden flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-xs pointer-fine:flex ${borderDefault} ${textMutedOnSurface}`}
+            className={`hidden shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-xs pointer-fine:flex ${borderDefault} ${textMutedOnSurface}`}
             data-testid="search-keyboard-hints"
           >
             <span className="inline-flex items-center gap-1">
