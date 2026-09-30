@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -420,7 +421,9 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 	}
 	type document struct {
 		handler         http.Handler
+		database        *store.Store
 		documentService *docs.Service
+		broker          *events.Broker
 		issueKey        string
 		artifactID      string
 		askID           string
@@ -428,8 +431,9 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 	open := func(t *testing.T, settle time.Duration) document {
 		t.Helper()
 		var documentService *docs.Service
-		handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-			documentService = docs.New(docs.Deps{Store: database, Settle: settle})
+		broker := events.NewBroker()
+		handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+			documentService = docs.New(docs.Deps{Store: database, Events: broker, Settle: settle})
 			t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 			return documentService
 		})
@@ -445,7 +449,7 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 				ID string `json:"id"`
 			} `json:"ask"`
 		}](t, requested).Ask.ID
-		return document{handler, documentService, issue.Key, issue.PrimaryArtifactID, askID}
+		return document{handler, database, documentService, broker, issue.Key, issue.PrimaryArtifactID, askID}
 	}
 	type askRead struct {
 		Ask struct {
@@ -469,9 +473,32 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 		{"an edit", session, time.Hour, func(t *testing.T, doc document) {
 			edit(t, doc.handler, doc.artifactID, map[string]any{"summary": "revise"})
 		}},
-		{"a settled edit", session, 20 * time.Millisecond, func(t *testing.T, doc document) {
+		{"an edit with no summary", session, time.Hour, func(t *testing.T, doc document) {
 			edit(t, doc.handler, doc.artifactID, map[string]any{})
+		}},
+		{"a live write settlement versions", "alice", 20 * time.Millisecond, func(t *testing.T, doc document) {
+			// A live write that joins no transaction is versioned by settlement alone, so this
+			// retraction is settlement's, and it reaches subscribers once settlement commits.
+			published, stop := doc.broker.Subscribe()
+			defer stop()
+			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				t.Fatalf("revise document: %v", err)
+			}
 			waitForArtifactVersion(t, doc.handler, doc.artifactID, 2)
+			deadline := time.After(5 * time.Second)
+			for {
+				select {
+				case event, ok := <-published:
+					if !ok {
+						t.Fatal("the document service closed the subscription before settlement published the retraction")
+					}
+					if payload, isAsk := event.Payload.(model.AskEventPayload); isAsk && event.Type == "ask.resolved" && payload.ID == doc.askID {
+						return
+					}
+				case <-deadline:
+					t.Fatalf("settlement published no ask.resolved for %s", doc.askID)
+				}
+			}
 		}},
 		{"a named version", "alice", time.Hour, func(t *testing.T, doc document) {
 			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
@@ -504,7 +531,7 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 				t.Fatalf("approval after %s = %#v, want draft at version 2 with no ask open", write.name, got.Approval)
 			}
 			log := dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/issues/"+doc.issueKey+"/events", nil, "alice")
-			var events []struct {
+			var logged []struct {
 				Type  string `json:"type"`
 				Actor struct {
 					ID string `json:"id"`
@@ -513,11 +540,11 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 					ID string `json:"id"`
 				} `json:"payload"`
 			}
-			if err := json.NewDecoder(log.Body).Decode(&events); err != nil {
+			if err := json.NewDecoder(log.Body).Decode(&logged); err != nil {
 				t.Fatalf("decode events: %v", err)
 			}
 			resolved := 0
-			for _, event := range events {
+			for _, event := range logged {
 				if event.Type == "ask.resolved" && event.Payload.ID == doc.askID {
 					resolved++
 					if event.Actor.ID != write.writer {
@@ -545,6 +572,32 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 		}
 		if got := readApproval(t, doc.handler, doc.artifactID); got.Approval.State != "awaiting" || got.Approval.LatestVersion != 1 || got.Approval.AskID == nil || *got.Approval.AskID != doc.askID {
 			t.Fatalf("approval after an edit that versions nothing = %#v, want awaiting on ask %s", got.Approval, doc.askID)
+		}
+	})
+
+	t.Run("a version no writer is known for", func(t *testing.T) {
+		// Settlement names a version's writer from its pending authors, else the room's last
+		// actor, and after a room reload it can know neither; the retraction is then its own.
+		doc := open(t, time.Hour)
+		ctx := context.Background()
+		tx, err := doc.database.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx)
+		retractions, err := docs.RetractStaleApprovalAsks(ctx, tx, events.NewBroker(), doc.artifactID, 2, model.Actor{})
+		if err != nil {
+			t.Fatalf("retract with no known writer: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		if len(retractions) != 1 || !retractions[0].Actor.SameAs(docs.SettlementActor) {
+			t.Fatalf("retractions = %#v, want one ask.resolved by %#v", retractions, docs.SettlementActor)
+		}
+		retracted := decodeBody[askRead](t, dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/asks/"+doc.askID, nil, "alice")).Ask
+		if retracted.State != "resolved" || retracted.Resolution == nil || retracted.Resolution.Actor.ID != docs.SettlementActor.ID {
+			t.Fatalf("the ask after a version no writer is known for = %#v, want retracted by %s", retracted, docs.SettlementActor.ID)
 		}
 	})
 }

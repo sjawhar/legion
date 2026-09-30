@@ -56,23 +56,12 @@ func (r *settlementReconciliation) nameVersion(
 		}
 	}
 	for _, ask := range r.retracted {
-		resolution := model.AskResolution{
-			Kind:   "retracted",
-			Reason: fmt.Sprintf("%s %d", SettlementRetractionReason, version),
-			Actor:  SettlementActor,
-			At:     time.Now().UTC(),
-		}
-		encoded, err := json.Marshal(resolution)
+		retracted, err := WriteAskResolution(ctx, tx, ask, "retracted", fmt.Sprintf("%s %d", SettlementRetractionReason, version), SettlementActor)
 		if err != nil {
-			return fmt.Errorf("encode ask retraction: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, encoded); err != nil {
 			return fmt.Errorf("retract deleted ask block: %w", err)
 		}
-		ask.State = "resolved"
-		ask.Resolution = &resolution
 		r.events = append(r.events, documentAskEvent(
-			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
 		))
 	}
 	return nil
