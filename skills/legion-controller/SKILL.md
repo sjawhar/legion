@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when handling Legion controller wakes for root-issue triage, keeping the admission slots full from the backlog, the daily report, architect escalation, resync healing, or human interaction.
+description: Use when handling Legion controller wakes for root-issue triage, keeping the admission slots full from `todo` issues, the daily report, architect escalation, resync healing, or human interaction.
 ---
 
 # Legion Controller

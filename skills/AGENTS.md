@@ -10,7 +10,7 @@ event intake, process lifecycle, credentials, and role delivery.
 | `dispatch/` | every role, and any session writing to Dispatch | specs, asks, comments, artifacts, and messages on native Dispatch |
 | `envoy/` | every role | subscriptions, agent-to-agent messages, and topic formats |
 | `legion-architect/` | root and sub-architects | tree ownership, decomposition, waves, gates, integration, sign-off |
-| `legion-controller/` | the controller root process | wake routing, keeping the admission slots full from the backlog, the daily report, escalation |
+| `legion-controller/` | the controller root process | wake routing, keeping the admission slots full from `todo`, the daily report, escalation |
 | `legion-oracle/` | any role doing research | repository-grounded research |
 | `legion-retro/` | the implementer, at retro | the pre-merge retrospective and its Dispatch message |
 | `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |
