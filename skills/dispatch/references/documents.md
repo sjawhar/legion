@@ -130,11 +130,11 @@ still belongs inside a fenced code block, where it survives verbatim both ways.
 
 A table cell ends at every `|` not written `\|`, inside inline code and links too, so write
 `` `x: Promise<void> \| undefined` ``, never `` `x: Promise<void> | undefined` ``, in a cell. A row
-holding text in more cells than its table has is refused rather than stored without them, naming the
+holding text in a cell past its table's width is refused rather than stored without it, naming the
 row: write a `|` inside a cell as `\|`, or, where the row really has more cells, give the header and
-delimiter rows as many. A spec, an upload or a version answers `INVALID_MARKDOWN`, an insert of
-blocks `INVALID_OP` on `markdown`, and an insert of bare table rows `TABLE_WIDTH`, which names the
-cell counts only. Blank cells past the table's width are dropped.
+delimiter rows as many. Blank cells past the width are dropped, on every path. A spec, an upload or
+a version answers `INVALID_MARKDOWN`, an insert of blocks `INVALID_OP` on `markdown`, and an insert
+of bare table rows `TABLE_WIDTH`, which names the cell counts only.
 
 ## A document that is reloading
 

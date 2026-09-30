@@ -823,12 +823,14 @@ line does not continue, before it. So is a table a line opening another block wo
 list item that cannot interrupt a paragraph, whatever its marker, or indented code
 (`markBlockRows`): goldmark's table is a paragraph, which such a line continues, where that parser's
 table is no paragraph and ends there, reading the line as that block. So is a table a body row of
-which holds text in more cells than its delimiter row has (`markWideRows`), naming the row and both
+which holds text in a cell past its delimiter row's width (`markWideRows`), naming the row and both
 fixes (a pipe inside a cell written `\|`, or header and delimiter rows as wide as the row):
 goldmark drops the cells past the table's width, where that parser keeps them, and a cell ends at
 every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a row
 that fills its table lost the rest of the row's text when it was stored. A row whose cells past
-the width are blank loses nothing and is read at the table's width. Goldmark also drops a row's
+the width are blank loses nothing and is read at the table's width. A bare-row insert
+(`InsertTableRows`) applies the same rule before it parses, answering `TABLE_WIDTH`: both count a
+row's cells as goldmark splits them, through one function (`textPastWidth`). Goldmark also drops a row's
 closing `|` whatever stands before it, where that parser reads one after an odd run of backslashes
 as the last cell's text, so that pipe is put back in the cell (`keepEscapedClosingPipes`). The
 renderer writes a cell's pipe `\|` and the header as wide as the widest row (`tableGrid`), so no

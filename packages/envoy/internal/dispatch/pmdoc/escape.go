@@ -791,22 +791,25 @@ func altReadsBack(written, alt string, context inlineContext) bool {
 	return got == alt
 }
 
-// pipeAfterEvenBackslashes reports whether value holds a `|` after an even run of backslashes,
-// none included: the browser editor's parser, which pairs backslashes before a pipe, ends a table
-// cell at such a pipe.
+// pipeAfterEvenBackslashes reports whether value holds a `|` the browser editor's parser ends a
+// table cell at (escapedByBackslashes).
 func pipeAfterEvenBackslashes(value string) bool {
-	run := 0
 	for index := range len(value) {
-		switch value[index] {
-		case '\\':
-			run++
-			continue
-		case '|':
-			if run%2 == 0 {
-				return true
-			}
+		if value[index] == '|' && !escapedByBackslashes(value, index) {
+			return true
 		}
-		run = 0
 	}
 	return false
+}
+
+// escapedByBackslashes reports whether the character at index stands after an odd run of
+// backslashes. The browser editor's parser pairs backslashes before a pipe, so in a table row a
+// `|` after an odd run is the cell's text and one after an even run, none included, ends the cell;
+// goldmark takes any backslash right before a pipe as escaping it.
+func escapedByBackslashes[T string | []byte](value T, index int) bool {
+	run := 0
+	for run < index && value[index-1-run] == '\\' {
+		run++
+	}
+	return run%2 == 1
 }

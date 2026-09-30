@@ -232,6 +232,10 @@ func TestParseRefusesARowHoldingMoreCellsThanItsTable(t *testing.T) {
 	if _, err := ParseForWrite("| a | b |\n| - | - |\n| 1 | 2 | 3 |\n", nil); !errors.Is(err, ErrSchema) {
 		t.Errorf("a row of three plain cells under two = %v, want a schema refusal", err)
 	}
+	// The refusal quotes the row as its author wrote it, so its backslashes are not doubled.
+	if _, err := ParseForWrite("| a | b |\n| - | - |\n| p | q | z \\|\n", nil); err == nil || !strings.Contains(err.Error(), `written "| p | q | z \|"`) {
+		t.Errorf("a row holding a backslash is refused with %v, want it quoted as written", err)
+	}
 	// Past the table's width goldmark drops only blank cells here, and the text is all kept.
 	blank, err := ParseForWrite("| a | b |\n| - | - |\n| x | y | |\n", nil)
 	if err != nil {

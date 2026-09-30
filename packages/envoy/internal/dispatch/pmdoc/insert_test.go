@@ -111,6 +111,36 @@ func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
 	}
 }
 
+// One row gets one answer on every path: a table-row insert and a whole-document write each read a
+// blank cell past the table's width as dropped, and refuse a cell there holding text. Both count
+// the cells as goldmark splits them, so a `|` after an even run of backslashes ends no cell on
+// either path.
+func TestTableRowInsertAndDocumentWriteAgreeOnCellsPastTheWidth(t *testing.T) {
+	const table = "| Key | Value |\n| --- | --- |\n| A10 | old |\n"
+	for _, test := range []struct {
+		row     string
+		refused bool
+	}{
+		{"| A11 | new | |", false},
+		{"| A11 | new | extra |", true},
+		{`| A11 | new \\| extra |`, false},
+	} {
+		doc, err := Parse(table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		anchor, err := FindQuote(doc, "A10", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, insertErr := InsertTableRows(doc, anchor, test.row+"\n", true, NewTablePaddingBudget())
+		_, writeErr := ParseForWrite(table+test.row+"\n", nil)
+		if (insertErr != nil) != test.refused || (writeErr != nil) != test.refused {
+			t.Errorf("%q: insert = %v, document write = %v, want both refused: %v", test.row, insertErr, writeErr, test.refused)
+		}
+	}
+}
+
 func TestTableRowInsertPadsRowsToContainingTableWidth(t *testing.T) {
 	doc, err := Parse("| Key | Value |\n| --- | --- |\n| A10 | old |\n")
 	if err != nil {

@@ -436,15 +436,15 @@ func markBlockRows(table *extensionast.Table, lines []gmtext.Segment, source []b
 	}
 }
 
-// wideRowAttr marks a table one of whose body rows holds more cells than its delimiter row, with
-// the first such row (markWideRows). Goldmark drops the cells past the table's width, where the
-// browser editor's parser keeps them, so the row would be stored without their text. A cell ends
-// at every `|` not written `\|`, inside code and links too, so a code span holding a bare `|` in a
-// row that already fills its table makes one.
+// wideRowAttr marks a table one of whose body rows holds text in a cell past its delimiter row,
+// with the first such row (markWideRows). Goldmark drops the cells past the table's width, where
+// the browser editor's parser keeps them, so the row would be stored without their text. A cell
+// ends at every `|` not written `\|`, inside code and links too, so a code span holding a bare `|`
+// in a row that already fills its table makes one.
 var wideRowAttr = []byte("pmdoc-wide-row")
 
-// wideRow is the first body row markWideRows found holding more cells than its table: how many it
-// holds, the table's width, and the row's opening words, which name it in the refusal.
+// wideRow is the first body row markWideRows found holding text past its table's width: how many
+// cells it holds, the table's width, and the row's opening words, which name it in the refusal.
 type wideRow struct {
 	cells, width int
 	opening      string
@@ -452,23 +452,30 @@ type wideRow struct {
 
 // markWideRows marks table (wideRowAttr) where one of its body rows - the lines past its header
 // and delimiter rows, the first two of lines - holds text in a cell past the table's delimiter
-// row, each row split as goldmark's transformer splits it (rowCells). A row whose cells past the
-// width are all blank loses no text where goldmark drops them, and is read at the table's width.
+// row (textPastWidth).
 func markWideRows(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
 	width := len(table.Alignments)
 	for index := 2; index < len(lines); index++ {
 		line := tabExpandedLine(lines[index], source)
-		cells, text := 0, false
-		rowCells(line, source, func(cell int, value []byte) {
-			cells++
-			text = text || cell >= width && !util.IsBlank(value)
-		})
-		if text {
+		if cells, text := textPastWidth(line, source, width); text {
 			opening := openingWords(strings.TrimSpace(string(line.Value(source))))
 			table.SetAttribute(wideRowAttr, wideRow{cells: cells, width: width, opening: opening})
 			return
 		}
 	}
+}
+
+// textPastWidth is the width rule every write path applies to a table row (markWideRows for a
+// whole document, parseTableRows for bare rows): it splits the row as goldmark's transformer
+// splits it (rowCells) and reports how many cells it holds and whether one past width holds text.
+// Goldmark drops the cells past the table's width, so text there would be stored short; a row
+// whose cells past the width are all blank loses nothing and is read at the table's width.
+func textPastWidth(segment gmtext.Segment, source []byte, width int) (cells int, text bool) {
+	rowCells(segment, source, func(cell int, value []byte) {
+		cells++
+		text = text || cell >= width && !util.IsBlank(value)
+	})
+	return cells, text
 }
 
 // keepEscapedClosingPipes puts a row's closing `|` back into its last cell where an odd run of
@@ -484,29 +491,22 @@ func keepEscapedClosingPipes(table *extensionast.Table, lines []gmtext.Segment, 
 		if index > 0 {
 			line++
 		}
-		if line >= len(lines) {
-			return
-		}
 		segment := tabExpandedLine(lines[line], source)
 		segment = segment.TrimRightSpace(source)
 		value := segment.Value(source)
-		if len(value) < 2 || value[len(value)-1] != '|' {
+		if len(value) < 2 || value[len(value)-1] != '|' || !escapedByBackslashes(value, len(value)-1) {
 			continue
 		}
-		run := 0
-		for run < len(value)-1 && value[len(value)-2-run] == '\\' {
-			run++
-		}
+		// The last written cell holds the backslash, so it is never empty; a row writing past the
+		// table's width (`| x | y | z \|` under two columns), which the refusal walk refuses, has
+		// no such cell.
 		written := tableRowWidth(segment, source)
-		if run%2 == 0 || written == 0 || written > row.ChildCount() {
+		if written > row.ChildCount() {
 			continue
 		}
 		cell := row.FirstChild()
 		for range written - 1 {
 			cell = cell.NextSibling()
-		}
-		if cell.Lines().Len() == 0 {
-			continue
 		}
 		last := cell.Lines().At(cell.Lines().Len() - 1)
 		last.Stop = segment.Stop

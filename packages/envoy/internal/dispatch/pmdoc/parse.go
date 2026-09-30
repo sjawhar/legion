@@ -13,6 +13,7 @@ import (
 	"github.com/yuin/goldmark/extension"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
+	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
@@ -418,15 +419,20 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 		return nil, false, nil
 	}
 
+	source := []byte(fragment)
 	lines := strings.Split(fragment, "\n")
+	start := 0
 	for _, line := range lines {
 		cells, ok := tableRowCells(line)
 		if !ok || tableDelimiterRow(cells) {
 			return nil, false, nil
 		}
-		if len(cells) > width {
-			return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, len(cells), width)
+		// The width rule a whole document's rows get (textPastWidth), so one row gets one answer on
+		// every write path.
+		if written, text := textPastWidth(gmtext.NewSegment(start, start+len(line)), source, width); text {
+			return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, written, width)
 		}
+		start += len(line) + 1
 	}
 
 	parsed, err := parseStamped(syntheticTableHeader(width)+fragment+"\n", budget)
@@ -461,25 +467,18 @@ func tableRowCells(line string) ([]string, bool) {
 
 	cells := make([]string, 0, 2)
 	var cell strings.Builder
-	escaped := false
 	separatorCount := 0
 	endsWithSeparator := false
-	for _, char := range line {
-		switch {
-		case char == '\\':
-			cell.WriteRune(char)
-			escaped = !escaped
-			endsWithSeparator = false
-		case char == '|' && !escaped:
+	for index, char := range line {
+		if char == '|' && !escapedByBackslashes(line, index) {
 			cells = append(cells, cell.String())
 			cell.Reset()
 			separatorCount++
 			endsWithSeparator = true
-		default:
-			cell.WriteRune(char)
-			escaped = false
-			endsWithSeparator = false
+			continue
 		}
+		cell.WriteRune(char)
+		endsWithSeparator = false
 	}
 	cells = append(cells, cell.String())
 	if separatorCount == 0 {

@@ -356,7 +356,8 @@ its delimiter row, the header included, is matched as the text it is.
 
 Table-row fragments contain body rows only: omit the table header and delimiter row. Short rows are
 padded to the table width while all operations in the edit request add at most 10,000 cells; a
-larger request is rejected as `INVALID_OP` on `markdown`. Rows wider than the table are rejected.
+larger request is rejected as `INVALID_OP` on `markdown`. A row holding text in a cell past the
+table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
 
 ## Document errors
 
@@ -365,11 +366,11 @@ larger request is rejected as `INVALID_OP` on `markdown`. Rows wider than the ta
 | `404 TARGET_NOT_FOUND` | The quote requested by an anchor or document edit is absent. |
 | `409 TARGET_AMBIGUOUS` | A quote matches more than once without an `occurrence`; the response includes candidate ranges and context. |
 | `400 TARGET_SPANS_BLOCKS` | A document edit quote crosses textblock boundaries. |
-| `400 TABLE_WIDTH` | A table-row fragment has more cells than its target table. |
+| `400 TABLE_WIDTH` | A table-row fragment holds text in a cell past its target table's width; blank cells there are dropped. |
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
-| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding more cells than its delimiter row, which a pipe inside code or a link that is not backslash-escaped makes. Malformed edit replacements report `INVALID_OP`. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. Malformed edit replacements report `INVALID_OP`. |
 | `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely. |
 
 ## Comment errors

@@ -43,7 +43,8 @@ within one textblock; split changes that span separate blocks into separate oper
 `block` plus a zero-based `index`. An insert or move anchor is a quote, `"start"`, `"end"`, `"heading:Title"`, or `"block:<id>"`.
 Ordinary inserts create a sibling block before or after the quote, heading, or block's enclosing document block, and a move lands the
 block at that same boundary; `"start"` and `"end"` select the document edges. At a table-cell quote, a body-row fragment (no header or
-delimiter rows) extends that table before or after the matched row instead; short rows are padded, wider rows are rejected, and deleting
+delimiter rows) extends that table before or after the matched row instead; short rows are padded, a row holding text past the
+table's width is rejected as `TABLE_WIDTH` (blank cells there are dropped), and deleting
 a cell's quoted text removes only that text. `delete_row` / `delete_column` instead mutate their named table in place, keeping the
 table's block id. A row index includes the header: row `0` is the header and its deletion promotes the first body row. The last body
 row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is

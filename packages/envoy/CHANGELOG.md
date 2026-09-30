@@ -44,11 +44,13 @@
   `markdown` answers `INVALID_OP`), naming the row's cells, its table's width and its opening
   words, and both fixes: write a `|` inside a cell as `\|`, or give the header and delimiter rows
   as many cells as the row. A row whose cells past the width are all blank is still read at the
-  table's width. Versions written before 2026-09-19 hold such rows, since the renderer then wrote a
-  code span's pipe unescaped; re-uploading one is refused rather than stored short. A row's closing
-  `|` after an odd run of backslashes (`| x | y \|`) is now kept as the last cell's text, as the
-  browser editor reads it, where it was dropped (`y \`). An image's alt holding a backslash before a
-  pipe in a table cell is written so that the browser editor reads it as one cell too.
+  table's width, and a bare-row insert, which refused any cell past the width as `TABLE_WIDTH`,
+  now drops blank ones too, refusing only text there. Versions written before 2026-09-19 hold
+  such rows, since the renderer then wrote a code span's pipe unescaped; re-uploading one is
+  refused rather than stored short. A row's closing `|` after an odd run of backslashes
+  (`| x | y \|`) is now kept as the last cell's text, as the browser editor reads it, where it was
+  dropped (`y \`). An image's alt holding a backslash before a pipe in a table cell is written so
+  that the browser editor reads it as one cell too.
 
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before
