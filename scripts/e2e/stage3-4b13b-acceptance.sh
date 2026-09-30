@@ -147,13 +147,14 @@ cleanup() {
   printf "the run's evidence is %s\n" "$evidence" >&2
   # A diagnostic for a failed run, hard or soft: it never sets the status. A hard failure's notes
   # are for its check. A run that ends on its soft failures sets ok after its last check, once every
-  # pane has stopped, so its notes are for its first soft-failing check, from that check's start.
-  # A hangup, an interrupt or a termination (129, 130, 143, as trapped below) stopped the run and
-  # gets none.
+  # pane has stopped, so its notes are for its first soft-failing check, from that check's start. A
+  # run that sets ok with no soft failure and still exits non-zero (its PASS line could not be
+  # written) failed no check, and gets none. A hangup, an interrupt or a termination (129, 130,
+  # 143, as trapped below) stopped the run and gets none.
   if [ "$status" != 0 ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
     local since=$check_started failed=$check
     [ -z "${ok:-}" ] || { since=$first_soft_since failed=$first_soft_check; }
-    bash "$unserved_reader" --notes "$evidence/model-gateway" "$since" "$failed" >&2 || true
+    [ -z "$failed" ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$since" "$failed" >&2 || true
   fi
   return 0
 }
