@@ -321,7 +321,8 @@ document's start (`start`, or before the first block); the accept and the insert
 one rule (`docs.opensDocument`). A document with nothing in it holds one empty paragraph
 (`pmdoc.EmptyDocument`: an issue created without a spec, or a document whose last block was
 deleted), and an insert into it takes that paragraph's place wherever it is anchored, rather than
-leaving an empty line beside what it writes.
+leaving an empty line beside what it writes; it therefore lands at the document's start, and reads
+front matter there whatever its anchor.
 
 A write runs on its transaction's fork of the room, so a browser change made while it is in flight
 merges with it rather than blocking it, and the merge can annihilate the write: `pmdoc.Update`

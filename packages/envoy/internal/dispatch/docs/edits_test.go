@@ -2597,13 +2597,20 @@ func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 
 // A document with nothing in it holds one empty paragraph, as the primary document of an issue
 // created without a spec does. The first insert takes that paragraph's place wherever it is
-// anchored, rather than leaving an empty line beside what it writes.
+// anchored, rather than leaving an empty line beside what it writes, and so lands at the
+// document's start, where a closed front-matter block is front matter.
 func TestApplyOperationInsertIntoAnEmptyDocumentTakesItsPlace(t *testing.T) {
-	for _, markdown := range []string{"The problem.", "## Problem\n\nAgents retry forever.\n", "- one\n- two\n"} {
+	for _, markdown := range []string{
+		"The problem.",
+		"## Problem\n\nAgents retry forever.\n",
+		"- one\n- two\n",
+		"---\ntitle: x\n---\n\nBody text.\n",
+	} {
 		for _, op := range []model.EditOp{
 			{Op: "insert", After: "start", Markdown: markdown},
 			{Op: "insert", Before: "start", Markdown: markdown},
 			{Op: "insert", After: "end", Markdown: markdown},
+			{Op: "insert", Before: "end", Markdown: markdown},
 		} {
 			tree, err := parseInput("")
 			if err != nil {
