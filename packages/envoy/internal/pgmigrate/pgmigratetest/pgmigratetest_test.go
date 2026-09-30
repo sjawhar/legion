@@ -11,7 +11,8 @@ import (
 
 // Each entry the binary leaves out gets the advice that fixes it: all: brings in a _ or . name, and
 // nothing embeds a symlink, a version-control name, an empty directory or an irregular file, so
-// those are named for what they are rather than sent back to all:.
+// those are named for what they are rather than sent back to all:. Each row is the entry that
+// tells one branch of the advice from its absence.
 func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -44,6 +45,24 @@ func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 				}
 			},
 			want: "migrations/_0002_b.up.sql is on disk but not embedded, so no runner would see it; embed the directory with all:",
+		},
+		{
+			name: "an editor's swap file, a . name",
+			place: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, ".0001_a.up.sql.swp"), []byte("swap"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "migrations/.0001_a.up.sql.swp is on disk but not embedded, so no runner would see it; embed the directory with all:",
+		},
+		{
+			name: "a regular file the store's pattern leaves out",
+			place: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "0002_b.up.sql"), []byte("select 2"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "migrations/0002_b.up.sql is on disk but not embedded, so no runner would see it; check the store's //go:embed pattern",
 		},
 		{
 			name: "a version-control directory, which all: does not bring in",

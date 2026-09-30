@@ -168,7 +168,7 @@ type watch struct {
 	wait *LockWait
 	err  error
 	// heldBack is true exactly when the latest reading observed was held back: an empty reading of
-	// the recorded wait, which named holders, taken just after a reading that was not held back.
+	// the recorded wait, taken just after a reading that was not held back.
 	// Only the watch's goroutine touches it.
 	heldBack bool
 }
@@ -243,7 +243,7 @@ func (w *watch) observe(wait *LockWait) {
 		return
 	}
 	sameLock := w.wait != nil && w.wait.Mode == wait.Mode && w.wait.Object == wait.Object
-	w.heldBack = len(wait.Holders) == 0 && sameLock && len(w.wait.Holders) > 0 && !w.heldBack
+	w.heldBack = len(wait.Holders) == 0 && sameLock && !w.heldBack
 	if !w.heldBack {
 		w.wait = wait
 	}
