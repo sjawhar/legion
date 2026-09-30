@@ -657,12 +657,16 @@ The idempotency key carries no attempt number: it is `<message>:<mode>` and
 `<comment>:<target>:<mode>`, stable across every attempt of that pair. The listener prefixes the
 recipient (`agent.<session>.<key>`) and the JetStream MsgId appends the topic, so the key's real
 scope is **(message, mode, recipient session)**, and a retry of a send that already landed is a
-duplicate JetStream drops before the agent's subject ever sees it. That is what makes a retry
-after a receipt timeout safe: the listener publishes the envelope before it answers, so an
-answer that misses the client's window says nothing about whether the message landed, and only
-the same key can be recognised as the repeat it is. **This holds for as long as the stream's
+duplicate JetStream does not store again: the listener answers `duplicate: true`. The publish still
+reaches the agent's subject, so a session subscribed to it receives the envelope again, and it is
+the receiver that drops it, by the envelope's dedupe key (pi-envoy remembers the last 1,000 it
+delivered, in memory, so a restarted session has forgotten them). That is what makes a retry after
+a receipt timeout safe: the listener publishes the envelope before it answers, so an answer that
+misses the client's window says nothing about whether the message landed, and only the same key
+can be recognised as the repeat it is. **This holds for as long as the stream's
 duplicate window, which equals its retention by construction (both are `streamDuplicateWindow`,
-`internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.**
+`internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`,
+and while the receiving session still remembers the key.**
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
 the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
 mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it
@@ -688,7 +692,8 @@ Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the stri
 dashboard keys on cannot drift.
 
 An attempt the stream recognised records `duplicate` and no envelope id: it reached the listener
-and put nothing new on the recipient's subject, so it reads as "already delivered" rather than as
+and added nothing to the stream (its envelope still reached the recipient's subject, where a
+session that remembers the key drops it), so it reads as "already delivered" rather than as
 a fresh send. The flag rides the attempt read, the `message.delivery` payload and the comment
 delivery payload, and every surface that renders an attempt - the targeted-message card, the
 comment thread's mention list, and the issue event feed - reads it.
@@ -1241,10 +1246,9 @@ resume; null on a row from before migration 0053), and at most one attempt of a 
 `accepted_at` and `accepted_as: "user_turn"`: the session it went to took it as its user's own turn,
 through `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` (its conditions are that route's
 row in `packages/envoy/cmd/dispatch/AGENTS.md`). Because a bearer's retry records a session as its
-requester, re-sending a person's message through the retry route never opens an attempt that can
-be accepted. The accept answers the stored body, and pi-envoy injects that and nothing else
-(`packages/pi-envoy/AGENTS.md`). The Agents page reads `accepted_as` on the latest attempt: only
-an accepted attempt says it reached the session's conversation.
+requester, and another person's retry records that person rather than the author, re-sending a
+person's message through the retry route opens an attempt that can be accepted only when its
+author sends it. What a session does with the answer is `packages/pi-envoy/AGENTS.md`'s.
 
 A human reaches many sessions at once with `POST /api/v1/broadcasts`
 `{body, delivery, session_ids}`. A broadcast is a grouping over the targeted messages above,

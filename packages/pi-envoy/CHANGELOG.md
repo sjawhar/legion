@@ -52,22 +52,20 @@
 
 - A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
   turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
-  (LEGION-394). The extension asks Dispatch to accept the frame's attempt with its own bearer
-  (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), and Dispatch's accept is the only
-  gate: it allows one acceptance per message, for a person's own Send or Aside to this session,
-  on no issue and from no broadcast, at its latest attempt, which a person asked for within the
-  last minute and which did not fail, and it answers the body it stored. Only then is that stored
-  body sent, never the frame's text: Send (no `deliverAs`, as Enter does) or Aside
-  (`deliverAs: "aside"`), as the accepted attempt says. The extension never accepts an attempt it
-  already delivered, as a card or as a turn: it records each one in the session's transcript
-  (`envoy-dispatch-handled-attempt`) before it goes out and reads every such entry back on
+  (LEGION-394). The extension asks Dispatch, with its own bearer, to accept the frame's attempt
+  (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`, which takes only a person's own fresh
+  Send or Aside to this session; its conditions are that route's row in
+  `packages/envoy/cmd/dispatch/AGENTS.md`), and only on that 200 sends the body Dispatch stored,
+  never the frame's text: Send (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`), as
+  the accepted attempt says. Its own checks can only keep a card: it never accepts an attempt it
+  already delivered, as a card or as a turn, recording each one in the session's transcript
+  (`envoy-dispatch-handled-attempt`) before it goes out and reading every such entry back on
   restore, so a replayed frame, or one forged for a Send that arrived as a card, is a card, even
   after a restart, while a person's retry of that Send can still be their turn. Anything else, a
   refused accept, an error, a timeout or a Dispatch configuration that no longer resolves, keeps
-  its card and posts nothing. A frame naming a broadcast is a card with no call to Dispatch. The
-  live stream tags that user message with `dispatchMessageId`, so Dispatch's conversation view
-  shows it once. In a Legion phase worker it counts as an inbound event, as its card did, and
-  never opens a phase.
+  its card and posts nothing. The live stream tags that user message with `dispatchMessageId`, so
+  Dispatch's conversation view shows it once. In a Legion phase worker it counts as an inbound
+  event, as its card did, and never opens a phase.
 - The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
   in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
   threshold, where the 75 KB single file used to reach agents with its middle cut out.

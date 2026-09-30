@@ -16,35 +16,53 @@ renderer: it produces a tolerant TOON block and never exposes raw envelope bytes
 Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn` on Oh My Pi 18.3,
 `pi.askEphemeral` on the earlier fork releases Legion pins) and posts its body or error to the
 correlated delivery attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective
-delivery mode. A person's direct Send or Aside from Dispatch's Agents page is the exception: it
-becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
+delivery mode, except a person's direct Send or Aside (below). On a host with
+`ctx.runEphemeralTurn` (the fork's 18.3 releases included, since the context's call wins there), a
+BTW side turn still running when the handler that subscribed the agent subject (`session_start`, a
+session switch, or a Legion handler re-establishing through the claim bridge) reaches the host's
+30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
+`pi.askEphemeral` does not inherit the handler's signal, so the pin is unaffected.
+
+A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
+steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
 (`isUserTurnCandidate`: Dispatch's `message.created` on no issue, a person as actor, aside or
-steer, naming no broadcast), since the listener takes a frame's source from whoever sends it; a
-frame that names a broadcast keeps its card with no call to Dispatch. For a candidate the
-extension asks Dispatch to accept that attempt
-(`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`, with its own Dispatch bearer), and the
-accept is the only gate: Dispatch allows it once per message, only for a person's own Send or
-Aside to this session, on no issue and from no broadcast, at its latest attempt, which a person
-asked for within the last minute and which did not fail, and answers the body it stored. Only on
-that 200 does the extension send that stored body with `pi.sendUserMessage` (`deliverAs: "aside"`
-for an Aside, nothing for a Send, as the accepted attempt says; `turnFromAccept`), never the
-frame's text. The one check the extension makes itself is that it never accepts an attempt it
-already delivered, as a card or as a turn: before either goes out it writes a transcript entry
-(`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), rebuilt from every entry of the session
-file (`sessionManager.getEntries()`) on each restore, and a frame naming a recorded attempt is a
-card with no accept call. So a replay, a frame forged inside the minute for a Send that arrived as
-a card, and one forged after a restart are each a card, while a person's retry, a new attempt, can
-still be their turn. Every refusal, error and timeout (10 s), a Dispatch configuration that no
-longer resolves included, keeps the card and posts nothing. The stream
-tags that user message with the message id (`dispatchMessageId`, passed to
+steer, naming no broadcast), since the listener takes a frame's source from whoever sends it; any
+other frame keeps its card with no call to Dispatch. For a candidate the extension asks Dispatch,
+with its own Dispatch bearer, to accept that attempt
+(`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`; its conditions are that route's row in
+`packages/envoy/cmd/dispatch/AGENTS.md`, in short a person's own fresh Send or Aside to this
+session), and only on that 200 sends the stored body the accept answers with
+`pi.sendUserMessage` (`deliverAs: "aside"` for an Aside, nothing for a Send, as the accepted
+attempt says; `turnFromAccept`), never the frame's text. Only the accept's success makes a turn;
+the extension's own checks can only keep a card. Besides the candidate filter, it never accepts an
+attempt it already delivered, as a card or as a turn: before either goes out it writes a
+transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), rebuilt from every
+entry of the session file (`sessionManager.getEntries()`) on each restore, and a frame naming a
+recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
+a Send that arrived as a card, and one forged after a restart are each a card, while a person's
+retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
+configuration that no longer resolves included, keeps the card and posts nothing.
+
+That record has a limit, reproduced on #1592. It keys on the attempt a frame names, so a forger who
+reads `message.created` (every authenticated caller's event stream carries it, and Dispatch
+publishes it before its own frame goes out) and names the attempt first spends it: the forged frame
+beat Dispatch's in all 8 runs that raced it. If the accept answers 200, the person's stored body is
+the turn and Dispatch's frame then a duplicate card. If it answers 404 because the attempt row is
+not committed yet, the person's Send is a card and never a turn, or is not shown at all when the
+forger used Dispatch's own idempotency key (`<message>:<mode>`), since the session's dedupe then
+drops Dispatch's frame. Naming attempts not written yet spends each later retry of the message the
+same way. A forged frame's own text is never a turn, so this is the class of the accept route's
+self-claimed actor, which already lets any bearer spend a session's acceptance. Skipping the record
+on a 404 is not a fix: the route answers 404 for a transient database error too, and a frame
+another subscription's pump carded while that accept was in flight would be forgotten, so a carded
+Send could become a turn on a later forged frame, round 2's defect.
+
+The stream tags that user message with the message id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
 message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the
 first user message with the sent text, remembered under its host timestamp, forgotten at the run's
-`agent_end`). On a host with `ctx.runEphemeralTurn` (the fork's 18.3 releases included, since the
-context's call wins there), a BTW side turn still running when the handler that subscribed the agent
-subject (`session_start`, a session switch, or a Legion handler re-establishing through the claim
-bridge) reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the
-reply's error. `pi.askEphemeral` does not inherit the handler's signal, so the pin is unaffected.
+`agent_end`).
+
 Role claims are routed by the listener: this extension receives a receipt-backed request on its
 direct agent subject instead of subscribing to a role subject itself. The agent pump replies the
 moment the envelope is decoded — before the inbox update, any Dispatch call, or the session

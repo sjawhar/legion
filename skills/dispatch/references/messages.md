@@ -6,7 +6,8 @@ human messages you directly from the Agents page.
 ## Targeted agent messages
 
 A human — or any bearer caller over HTTP, such as a test rig — can target the issue message at a
-live Envoy session or role as **BTW**, **Aside**, or **Steer**. The incoming Dispatch frame names
+live Envoy session or role as **BTW**, **Aside**, or **Steer** (the dashboard calls a steer
+**Send**). The incoming Dispatch frame names
 the issue and includes a `reply_with` hint (`{ tool, args }`, ready to issue on any host); reply on the same open issue with the existing
 tool, never a new targeted send:
 
