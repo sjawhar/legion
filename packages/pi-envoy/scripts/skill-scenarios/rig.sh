@@ -143,8 +143,7 @@ cmd_profile() {
 }
 
 # Writes the variables every agent gets to $R/pane.env: the label's home and profile, the run's
-# stand-ins first on PATH, its own TMPDIR, where the model gateway's key command records a call it
-# serves no key (score.ts's unscored reads it), and nothing else from the caller's environment.
+# stand-ins first on PATH, its own TMPDIR, and nothing else from the caller's environment.
 base_env() {
   mkdir -p "$R/tmp"
   {
@@ -157,7 +156,6 @@ base_env() {
     echo "PI_NOTIFICATIONS=off"
     echo "PI_NO_TITLE=1"
     echo "SKILL_SCENARIO_RUN=$R"
-    echo "MODEL_GATEWAY_UNSERVED_FILE=$R/model-gateway-unserved"
     echo "PATH=$R/bin:$PATH"
   } >"$R/pane.env"
 }

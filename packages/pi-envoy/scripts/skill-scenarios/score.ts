@@ -348,11 +348,10 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
 
 /** Why the rig cannot score a run, or undefined when it can:
  *   - it never finished: out.txt has no `exit=` line;
- *   - its agent reached no model: the model gateway's key command recorded a call it served no key
- *     (`<run>/model-gateway-unserved`, which rig.sh names in MODEL_GATEWAY_UNSERVED_FILE and
- *     scripts/e2e/lib/model-gateway-unserved.sh reads once a checkout's install-model-gateway.sh
- *     writes it), or, for a checkout whose key command records nothing, it left no transcript or
- *     one with no assistant message;
+ *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
+ *     the profile's gateway key command ran past its budget. The key command's own record of each
+ *     call, judged by scripts/e2e/lib/model-gateway-unserved.sh, is the better signal; no checkout
+ *     writes that record yet;
  *   - it compared the wrong text: a tool call's arguments name the other label's checkout, or a
  *     skill file (a path to skills/dispatch, skills/dispatch-first or skills/legion-worker)
  *     anywhere but its own label's profile or checkout. An agent reads the whole filesystem, and
@@ -361,9 +360,6 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
 function unscored(runDir: string, label: string, labels: Map<string, string>): string | undefined {
   if (!lines(path.join(runDir, "out.txt")).at(-1)?.startsWith("exit="))
     return "out.txt has no exit= line: the run never finished";
-  const unserved = lines(path.join(runDir, "model-gateway-unserved"));
-  if (unserved.length > 0)
-    return `the model gateway served no key (${unserved.length} calls): ${unserved[0]}`;
   const entries = session(runDir);
   if (!entries.some((entry) => entry.message?.role === "assistant"))
     return "the agent got no model turn: no transcript, or one with no assistant message";
