@@ -36,7 +36,9 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   v2's `aws` — all at `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned
   release whose linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the
   `ARG`s at the top of `worker.Dockerfile`). A corepack shim runs the version a project's
-  `packageManager` names, or corepack's default, fetched on first use into the user's corepack cache.
+  `packageManager` names, or else the default that corepack ships (the image sets
+  `COREPACK_DEFAULT_TO_LATEST=0`, so never npm's newest release), fetched on first use into the user's
+  corepack cache.
   The image bakes no Python: `uv` installs each project's own, from its `.python-version` or
   `requires-python`, the first time the project runs (`uv sync`, `uv run`). In a Sandbox pod that is on
   the tree volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
@@ -75,10 +77,10 @@ tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.g
 `docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
 (`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
-The same final step runs every toolchain command (`uv`, `uvx`, `node`, `npm`, `npx`, `corepack`, `aws`,
-and the `pnpm`, `pnpx`, `yarn` and `yarnpkg` shims, which fetch corepack's default versions into a
-scratch `COREPACK_HOME` the step removes) as `legion`, from the image `PATH`, so a toolchain command that
-does not run on the base fails the build.
+A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
+the image `PATH`, the corepack shims fetching their shipped default pnpm and yarn into a scratch
+directory the step removes. It reruns only when the toolchain or an earlier layer changes, so a commit
+that only rebuilds the Go `legion` needs no package registry.
 To check a published image's toolchain end to end, Python install included:
 `docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
@@ -144,12 +146,10 @@ set to public — a package-settings action on GitHub with no API.
 
 ### Per-deployment toolchains layer on top
 
-The base image carries Legion's own tools and the generic toolchain above (`uv`, Node 24 LTS with npm
-and corepack's pnpm and yarn, the AWS CLI v2), and nothing in it is specific to one repository: `uv`
-takes each project's Python from the project itself, a corepack shim takes its version from the
-project's `packageManager`, and the rest is the same for every project. A Python or Node repository
-therefore runs on the published image as it is. A deployment whose repositories need more than that (a
-system library, another language, a different Node line) builds its own image in **its** repo:
+The base image carries Legion's own tools and the generic toolchain listed above, and nothing in it is
+specific to one repository, so a Python or Node repository runs on the published image as it is. A
+deployment whose repositories need more than that (a system library, another language, a different Node
+line) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
@@ -503,15 +503,20 @@ projected twice: its boot half into the worker, read-only, and its provisioning 
 Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon has a
 NATS nkey seed. State, `/tmp` and the XDG config home are in-memory.
 
-The worker is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python`, `UV_CACHE_DIR=/legion/uv/cache` and
-`UV_LINK_MODE=copy`. uv keeps the Pythons it installs and its cache on the tree volume beside the
-workspaces, so a project's `.venv`, which links to its interpreter there, runs as it is in every later
-pod of the tree, and those pods reuse the packages an earlier pod downloaded. uv copies each package
-from that cache into a `.venv`. With the cache and the `.venv` on one filesystem it would otherwise
-hardlink them, and an edit made in place inside one workspace's `.venv` would change the cache and
-every other `.venv` of the tree that installed the package, including ones installed later. So each
-`.venv` is a full copy of its packages on the tree volume, beside the cache, and a deployment sizes
-`tree_volume` for one copy per workspace of a tree.
+The worker is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a DNS label),
+`UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs and its cache
+on the tree volume beside the workspaces, so a project's `.venv`, which links to its interpreter there,
+runs as it is in every later pod of the issue, and every pod of the tree reuses the packages an earlier
+pod downloaded. uv's own file locks stop at the pod (a gVisor pod's lock reaches no other pod), so two
+pods that first install one Python into a shared directory at the same moment can each delete the
+other's interpreter. Each issue therefore gets its own Python directory, which only that issue's pods
+share, at the cost of one download per issue. uv copies each package from the shared cache into a
+`.venv`. With the cache and the `.venv` on one filesystem it would otherwise hardlink them, and an edit
+made in place inside one workspace's `.venv` would change the cache and every other `.venv` of the tree
+that installed the package, including ones installed later. So each `.venv` is a full copy of its
+packages on the tree volume, beside the cache, and a deployment sizes `tree_volume` for one copy per
+workspace of a tree. `uv cache clean` and `uv cache prune` remove cache entries under a lock that also
+stops at the pod, so neither may run while another pod of the tree is using uv.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;

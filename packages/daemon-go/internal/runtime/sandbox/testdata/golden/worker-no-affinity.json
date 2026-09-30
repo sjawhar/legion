@@ -166,7 +166,7 @@
               },
               {
                 "name": "UV_PYTHON_INSTALL_DIR",
-                "value": "/legion/uv/python"
+                "value": "/legion/uv/python/legion-208"
               },
               {
                 "name": "UV_CACHE_DIR",

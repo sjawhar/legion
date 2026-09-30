@@ -14,14 +14,14 @@
 # and linked into the isolated OMP profile `legion`; the role prompts (packages/pi-envoy/roles) at
 # /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
-# repositories the workers work, specific to none of them: uv and uvx, Node 24 LTS with npm and
-# corepack's pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last two RUNs gate
-# the publish, as the runtime user: the first checks every binary runs on the base, proves jj accepts
-# the image's git with a network-free `jj git clone` of a scratch repository, and executes the three
-# launch probes (the daemon's two plus the session-storage probe) through `legion probe-image`; the last
-# runs the Go `legion version` and the Go `legion probe-image`, which runs the same three probes, holds
-# the plugin to the Go daemon API contract, prints the OK line the Go daemon's probe Sandbox reads, and
-# checks that every toolchain command runs as the runtime user. A broken image never publishes.
+# repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
+# pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last three RUNs gate the
+# publish, as the runtime user: the first checks every binary runs on the base, proves jj accepts the
+# image's git with a network-free `jj git clone` of a scratch repository, and executes the three launch
+# probes (the daemon's two plus the session-storage probe) through `legion probe-image`; the second runs
+# every toolchain command; the last runs the Go `legion version` and the Go `legion probe-image`, which
+# runs the same three probes, holds the plugin to the Go daemon API contract, and prints the OK line the
+# Go daemon's probe Sandbox reads. A broken image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -46,6 +46,9 @@ ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
 ARG NODE_VERSION=24.21.0
 ARG NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
 ARG AWS_CLI_VERSION=2.37.6
+# AWS publishes no SHA-256 for the CLI, only a PGP signature. This pin is the SHA-256 of the zip whose
+# `.sig` gpg verified as a good signature from the AWS CLI Team key
+# FB5DB77FD5C118B80511ADA8A6310ACC4672475C. A version bump repeats that check before taking its hash.
 ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6fbb2
 # apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
 # archive serves only a suite's current version of a package, so a pinned version stops resolving at
@@ -152,7 +155,8 @@ RUN test -n "$LEGION_REVISION" \
 # symlinks into them that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir`
 # writes its two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
 # beside node, which the runtime user cannot: each runs the version a project's `packageManager` names,
-# or corepack's default, fetched on first use into the user's own corepack cache.
+# or else the default this corepack ships (COREPACK_DEFAULT_TO_LATEST=0, the runtime stage's ENV),
+# fetched on first use into the user's own corepack cache.
 FROM debian:trixie-slim AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
@@ -256,14 +260,31 @@ RUN set -eu; \
 COPY --from=toolchain /opt/node /opt/node
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
+# Corepack resolves a project with no `packageManager` to the pnpm and yarn it ships as defaults,
+# never to npm's newest release, so every place the image runs (a pod, `docker run`, the check below)
+# gets one version until the Node pin moves. It is image ENV, not a pod variable, for that reason.
+ENV COREPACK_DEFAULT_TO_LATEST=0
+# The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
+# corepack shims fetching their shipped default pnpm and yarn, with TMPDIR and COREPACK_HOME in a
+# scratch directory the step removes, so the layer keeps nothing. No Python is checked: uv installs
+# each project's own at run time. Being its own layer above the Go `legion`, it reruns only when the
+# toolchain or a layer before it changes, so a commit that only rebuilds the Go `legion` fetches
+# nothing from a registry.
+RUN set -eu; \
+    scratch="$(mktemp -d)"; export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack"; \
+    uv --version; uvx --version; node --version; npm --version; npx --version; corepack --version; \
+    aws --version; \
+    for shim in pnpm pnpx yarn yarnpkg; do "$shim" --version; done; \
+    rm -rf "$scratch"
 # The Go `legion` goes in after the probe layer and the toolchain: its binary differs on every commit (it
 # links the commit), so a new commit rebuilds only the layers from here down, never the probe layer and
 # its natives.
 COPY --from=go /out/legion /opt/legion/go/bin/legion
 # agent-secrets (packages/envoy/cmd/agent-secrets, AGENTC-393): the pod's secrets client — the shim
 # runs `keygen` before its hello and `renew` after its enrollment, and the agent's tools call it
-# from PATH, which /opt/legion/go/bin leads in every worker container (sandbox/manifest.go:536,
-# mainEnvironment). The daemon's Tools.AgentSecrets names this path.
+# from PATH, which /opt/legion/go/bin leads in every worker container (the PATH mainEnvironment sets in
+# packages/daemon-go/internal/runtime/sandbox/manifest.go). The daemon's Tools.AgentSecrets names this
+# path.
 COPY --from=go /out/agent-secrets /opt/legion/go/bin/agent-secrets
 # The final step: the Go `legion` runs on this base and names the commit the workflow built. git resolves
 # to /usr/bin/git on the image PATH and the step refuses any other path, so git's absolute path is as fixed
@@ -278,10 +299,7 @@ COPY --from=go /out/agent-secrets /opt/legion/go/bin/agent-secrets
 # Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
 # resolving every agent's model, and refuses a skipped result, before any claim runs on the image
 # (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
-# the cached probe layer above carries. Last, every toolchain command runs, as the runtime user from the
-# image PATH; the corepack shims fetch their default pnpm and yarn into a scratch COREPACK_HOME, which
-# the step removes, so nothing lands under HOME. No Python is checked: uv installs each project's own
-# at run time.
+# the cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
@@ -289,11 +307,6 @@ RUN set -eu; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
     /opt/legion/go/bin/legion probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models; \
     /opt/legion/go/bin/agent-secrets --help >/dev/null; \
-    uv --version; uvx --version; node --version; npm --version; npx --version; corepack --version; \
-    aws --version; \
-    corepack_home="$(mktemp -d)"; \
-    for shim in pnpm pnpx yarn yarnpkg; do COREPACK_HOME="$corepack_home" "$shim" --version; done; \
-    rm -rf "$corepack_home"; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs

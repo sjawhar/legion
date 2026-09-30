@@ -543,19 +543,28 @@ func xdgEnvironment() []corev1.EnvVar {
 
 // uv's settings in the worker container, which the pod's environment hands the image's uv.
 const (
-	// uvPythonDir and uvCacheDir are where uv keeps the Pythons it installs and its cache, on the
-	// tree volume beside the workspaces. A project's .venv, in a workspace on that volume, links to
-	// an interpreter under uvPythonDir, so every later pod of the tree finds the interpreter and the
-	// environment works there as it is; uvCacheDir on the same volume lets those pods reuse what an
-	// earlier one downloaded.
-	uvPythonDir = TreeRoot + "/uv/python"
-	uvCacheDir  = TreeRoot + "/uv/cache"
+	// uvPythonRoot holds the Pythons uv installs, one directory per issue (uvPythonDir), and
+	// uvCacheDir its cache, both on the tree volume beside the workspaces. A project's .venv, in an
+	// issue's workspace on that volume, links to an interpreter in that issue's directory, so every
+	// later pod of the issue finds the interpreter and the environment works there as it is; the
+	// cache lets every pod of the tree reuse what an earlier one downloaded.
+	uvPythonRoot = TreeRoot + "/uv/python"
+	uvCacheDir   = TreeRoot + "/uv/cache"
 	// uvLinkMode is how uv puts a package from uvCacheDir into a .venv: a copy. With the cache and
 	// the .venv on one filesystem uv would otherwise hardlink them, and an edit made in place in one
 	// workspace's .venv would change the cache and every other .venv of the tree that installed the
 	// package, the shared-inode failure LEGION-198 hit with bun's cache.
 	uvLinkMode = "copy"
 )
+
+// uvPythonDir is issue's own directory under uvPythonRoot, named by the issue as a DNS label
+// (dnsName). uv serializes the installs into a directory with a file lock there, and a gVisor
+// pod's lock reaches no other pod (awaitTreeInitialized), so two pods first installing one Python
+// into a shared directory at once can each delete the other's interpreter. One directory per issue
+// keeps every other issue's pods out; only the pods of one issue share it.
+func uvPythonDir(issue string) string {
+	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
+}
 
 // fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, and the
 // mounted provisioning token. Its git reads no configuration but its own, so it is told no config
@@ -603,10 +612,7 @@ func (r *Runtime) initWaitSeconds() int64 {
 // them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned), and the
 // daemon an operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
 // runtime.GrantFile on the state volume, which is empty at start: the extension makes its
-// directory. POD_UID is the pod's own incarnation, from the downward API. UV_PYTHON_INSTALL_DIR and
-// UV_CACHE_DIR put uv's Pythons and cache on the tree volume (uvPythonDir, uvCacheDir), so a later
-// pod of the tree runs a .venv an earlier one made, and UV_LINK_MODE (uvLinkMode) makes uv copy
-// from that shared cache into a .venv rather than hardlink.
+// directory. POD_UID is the pod's own incarnation, from the downward API.
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
 	spec := l.spec
 	var env []corev1.EnvVar
@@ -645,7 +651,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
 	env = append(env, xdgEnvironment()...)
-	add("UV_PYTHON_INSTALL_DIR", uvPythonDir)
+	add("UV_PYTHON_INSTALL_DIR", uvPythonDir(spec.Issue))
 	add("UV_CACHE_DIR", uvCacheDir)
 	add("UV_LINK_MODE", uvLinkMode)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
