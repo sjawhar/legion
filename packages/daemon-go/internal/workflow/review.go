@@ -11,20 +11,19 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // checks applies a CI settlement to the pull request and then decides, with the issue's phase in
-// hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. Else
-// the open review round is asked first (advanceReview), since the settlement can be what an
-// approval waits for, and a round whose halves are in ends as it always does, its decision reaching
-// the next implementer and its round counted. Only a settlement that ended no round can send the
-// issue back to implementing (classify.RedSendsBack), from testing or reviewing, the phases whose
-// TriggerChecksRed rows the table has. The implementer's task and the architect's checks-red
-// notice name the failing checks, and the implementer's next push is a counted fix attempt, as any
-// new head on a red verdict is (classify.AdvancePullRequestHead). A settlement that leaves a
-// completed round stuck, where it was not stuck so before, tells the architect (tellStuckReview).
+// hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. In
+// reviewing, the round decides what the settlement comes to (reviewRound, settleRound): it can be
+// what an approval waits for, a red at a code head sends the work back, and a round the settlement
+// leaves stuck another way than before is told. In testing, a red at a code head
+// (classify.RedSendsBack) sends the work back. The implementer's task and the architect's
+// checks-red notice name the failing checks, and the implementer's next push is a counted fix
+// attempt, as any new head on a red verdict is (classify.AdvancePullRequestHead).
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
@@ -71,12 +70,16 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if issue == nil {
 		return intake.Result{}, nil
 	}
-	ended, err := e.advanceReview(ctx, tx, *issue, pr)
-	if err != nil || ended {
+	if issue.Phase == phase.Reviewing {
+		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), reviewRound(*issue, reviewer, &prior), "a CI result")
 		return intake.Result{}, err
 	}
 	if !classify.RedSendsBack(*pr) {
-		return intake.Result{}, e.tellStuckReviewSince(ctx, tx, *issue, &prior, pr)
+		return intake.Result{}, nil
 	}
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, redAt(*pr))
 }
@@ -92,9 +95,27 @@ func redAt(pr record.PullRequest) string {
 	return reason
 }
 
-// answerSkew is how much later than the reviewer's completion a review must be submitted to be its
-// answer to a round it left undecided (review).
-const answerSkew = 2 * time.Minute
+// answerSkew bounds how far GitHub's clock, which stamps a review's submission, and the daemon's,
+// which stamps the reviewer's completion (record.PhaseRow.CompletedAt), may disagree. No ordering
+// between the two avoids comparing those clocks: the delivery order is the race itself, and the
+// completion has no GitHub-side stamp. GitHub's review ids come closest, but GitHub assigns one
+// when a review is created, not when it is submitted, so a draft created before the completion
+// and submitted after it would read as already seen; reading them would also put a GitHub call on
+// the completion path. The bound is sized to skew alone, since a real answer follows the completion
+// within the minute the stuck notice, the architect's request and the reviewer's review take. Its
+// two costs: a GitHub clock more than answerSkew ahead makes a review submitted before the
+// completion read as the reviewer's answer, and tell again; an answer submitted within answerSkew
+// of the completion reads as delivered late, and tells only when the round's stuck cause changes.
+const answerSkew = 10 * time.Second
+
+// reviewersAnswer says whether fact is the reviewer's answer to a round it completed undecided: a
+// review the review App submitted, with a body - GitHub records a reply on a review thread as a
+// review with no body - more than answerSkew after the completion was applied. A review submitted
+// before the completion but delivered after it is not, since the completion comes through the API
+// and the review by webhook; nor is one with no submission time, or anyone else's.
+func (e *Engine) reviewersAnswer(fact intake.PullRequestReview, reviewer record.PhaseRow) bool {
+	return e.byReviewApp(fact.Author) && fact.Body != "" && fact.SubmittedAt.After(reviewer.CompletedAt.Add(answerSkew))
+}
 
 func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestReview) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
@@ -109,25 +130,18 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil {
 		return intake.Result{}, err
 	}
-	// A review the reviewer submitted after completing its round (the review App's, with a body,
-	// submitted after the completion was applied) is its answer to a round it left undecided, and
-	// every one that leaves the round stuck is told. Anything else tells only when it changes why
-	// the round is stuck: a review submitted before the completion but delivered after it, since the
-	// completion comes through the API and the review by webhook; a reply on a review thread, which
-	// GitHub records as a review with no body; a review with no submission time; anyone else's.
-	// GitHub stamps the review and the daemon stamps the completion, and no ordering between the two
-	// avoids comparing their clocks: the delivery order is the race itself, and the completion has no
-	// GitHub-side stamp. answerSkew bounds the two clocks' disagreement, far above an NTP-synced skew
-	// and far below the architect's request and the reviewer's reply after the stuck notice.
-	before := ""
-	if !e.byReviewApp(fact.Author) || fact.Body == "" || !fact.SubmittedAt.After(reviewer.CompletedAt.Add(answerSkew)) {
-		before = stuckReview(*issue, reviewer, pr)
+	// The reviewer's answer tells whenever it leaves the round stuck; any other review, only when it
+	// changes how the round is stuck.
+	before, by := reviewRound(*issue, reviewer, pr), "a review that is not the reviewer's answer"
+	if e.reviewersAnswer(fact, reviewer) {
+		before, by = round{}, "the reviewer's review"
 	}
 	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
 	// comment written after a decision but delivered before it cannot make the decision look old.
 	state := strings.ToLower(fact.State)
 	if state != "changes_requested" && state != "approved" {
-		return intake.Result{}, e.tellStuckReview(ctx, tx, *issue, reviewer, pr, before)
+		_, err := e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), before, by)
+		return intake.Result{}, err
 	}
 	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id
 	// (record.ReviewOrder). Among reviews that all carry a time and arrive before the round ends,
@@ -162,33 +176,120 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err := e.store.PutPhase(ctx, tx, reviewer); err != nil {
 		return intake.Result{}, err
 	}
-	ended, err := e.advanceReview(ctx, tx, *issue, pr)
-	if err != nil || ended {
-		return intake.Result{}, err
-	}
-	return intake.Result{}, e.tellStuckReview(ctx, tx, *issue, reviewer, pr, before)
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), before, by)
+	return intake.Result{}, err
 }
 
-// advanceReview ends a review once both of its halves are in, and says whether it did: the
-// reviewer's completion, which is its handoff landing — part of its phase's contract, as every
-// role's is — and the decision it posted on GitHub, recorded on the round. Either may arrive
-// second, and an approval also waits for the head's checks to settle green, which the settlement
-// asks about in turn. A review whose reviewer never completes is not ended by the decision alone:
-// the reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
-// phase-stall check), and past that the issue stays in reviewing, as a tester's that never
-// completes stays in testing. A round its reviewer completed that no decision ends stays in
-// reviewing too, and its architect is told (tellStuckReview).
-func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
-	// Only a round in reviewing ends: one held from reviewing ends after the retry restores it.
+// roundOutcome is what a review round comes to after a fact (reviewRound).
+type roundOutcome int
+
+const (
+	// roundOpen is a round still owed its reviewer's completion or its decision, or waiting on the
+	// head's checks or on a head a push that may change code is bringing; or an issue not in
+	// reviewing, since one held from reviewing ends only once the retry restores it.
+	roundOpen roundOutcome = iota
+	// roundApproved ends the round: its reviewer completed, and its approval approves the head's code
+	// (classify.ApprovalStands) on green checks.
+	roundApproved
+	// roundRejected ends the round: its reviewer completed, and it requested changes.
+	roundRejected
+	// roundSentBack is CI red at a head a push that may change code made (classify.RedSendsBack): the
+	// work goes back to implementing whatever the round holds, since only a red at the reviewer's own
+	// handoff head is the round's to decide.
+	roundSentBack
+	// roundStuck is a round its reviewer completed that nothing on its way will end (stuckCause).
+	roundStuck
+)
+
+// stuckCause is why a completed round is stuck.
+type stuckCause int
+
+const (
+	// stuckUndecided: no review decided it. A COMMENT decides nothing, and neither does a review in
+	// any state but approved or changes_requested.
+	stuckUndecided stuckCause = iota + 1
+	// stuckApprovedRed: its approval stands on CI red at the reviewer's own head.
+	stuckApprovedRed
+	// stuckApprovedOtherCode: its approval is of a head whose code the current head may not carry.
+	stuckApprovedOtherCode
+)
+
+// round is reviewRound's account of a review round. A stuck round names its cause, the head it is
+// stuck at, and what the architect and a restarted reviewer are told of it.
+type round struct {
+	outcome roundOutcome
+	cause   stuckCause
+	head    string
+	reason  string
+}
+
+// stuckAs says whether r is stuck in the same way as other: the same cause at the same head. A
+// fact that is not the reviewer's own tells only when the round is stuck in a new way, so a second
+// red settlement at the same head, failing other checks, tells nothing.
+func (r round) stuckAs(other round) bool {
+	return r.outcome == roundStuck && other.outcome == roundStuck && r.cause == other.cause && r.head == other.head
+}
+
+// reviewRound is what issue's review round comes to, row being its reviewer's and pr its pull
+// request as a fact left them. A round ends once both of its halves are in: the reviewer's
+// completion, which is its handoff landing - part of its phase's contract, as every role's is - and
+// the decision it posted on GitHub, recorded on the round. Either may arrive second, and an
+// approval also waits for the head's checks to settle green. A red at a code head sends the work
+// back first. A round whose reviewer never completes is not ended by the decision alone: the
+// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
+// phase-stall check), and past that the issue stays in reviewing, as a tester's that never completes
+// stays in testing. A completed round that nothing on its way would end is stuck, its reason naming
+// the head, since the decision it needs is of the head.
+func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
-		return false, nil
+		return round{}
 	}
-	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil || row.HandoffCommit == "" || row.Decision == nil {
-		return false, err
+	completed := row.HandoffCommit != ""
+	decided := ""
+	if row.Decision != nil {
+		decided = row.Decision.State
 	}
-	switch row.Decision.State {
-	case "changes_requested":
+	if completed && decided == "changes_requested" {
+		return round{outcome: roundRejected}
+	}
+	if pr == nil {
+		return round{}
+	}
+	verdict := classify.HeadVerdict(*pr)
+	switch {
+	case completed && decided == "approved" && verdict == "green" && classify.ApprovalStands(*pr, row.Decision.Head):
+		return round{outcome: roundApproved}
+	case classify.RedSendsBack(*pr):
+		return round{outcome: roundSentBack}
+	case !completed:
+		return round{}
+	case decided == "":
+		return round{outcome: roundStuck, cause: stuckUndecided, head: pr.HeadSHA,
+			reason: fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES ends the round, and a COMMENT decides nothing",
+				pr.Number, pr.HeadSHA)}
+	case verdict == "red":
+		return round{outcome: roundStuck, cause: stuckApprovedRed, head: pr.HeadSHA,
+			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but %s; a red at the reviewer's own head is its round's to decide, with a REQUEST_CHANGES naming the failing checks",
+				row.Decision.Head, pr.Number, redAt(*pr))}
+	case verdict == "green" && !classify.CodeOnItsWay(*pr):
+		return round{outcome: roundStuck, cause: stuckApprovedOtherCode, head: pr.HeadSHA,
+			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, which does not approve head %s: a push since may have changed code, so only an APPROVE of %s or a REQUEST_CHANGES ends the round",
+				row.Decision.Head, pr.Number, pr.HeadSHA, pr.HeadSHA)}
+	}
+	return round{}
+}
+
+// settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and
+// pr its pull request as the fact left them), and says whether it moved the issue. An ended round
+// moves on, its request for changes counting a round; a red code head sends the work back to
+// implementing; a stuck round is told to the architect unless it was stuck the same way (stuckAs)
+// before the fact, by being the fact that wrote the notice: the reviewer's completion and answer
+// pass an empty before, so each that leaves the round stuck is told. The issue stays in reviewing
+// and the architect asks the reviewer, at the notice's topic, for the decision. Linger holds a
+// member of a closed tree where it stood (record.TreeLingers).
+func (e *Engine) settleRound(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest, r, before round, by string) (bool, error) {
+	switch r.outcome {
+	case roundRejected:
 		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 			return false, err
 		}
@@ -196,76 +297,29 @@ func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issu
 			return false, err
 		}
 		return true, e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Decision.Body)
-	case "approved":
-		if pr == nil || classify.HeadVerdict(*pr) != "green" || !classify.ApprovalStands(*pr, row.Decision.Head) {
+	case roundApproved:
+		return true, e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")
+	case roundSentBack:
+		return true, e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, redAt(*pr))
+	case roundStuck:
+		if r.stuckAs(before) {
 			return false, nil
 		}
-		return true, e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")
+		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+			return false, err
+		}
+		project, err := claim.ProjectToken(issue.Project)
+		if err != nil {
+			return false, err
+		}
+		reviewer, err := claim.NewToken(project, issue.Key, claim.RoleReviewer)
+		if err != nil {
+			return false, err
+		}
+		return false, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "review-stuck", Role: claim.RoleReviewer, Phase: phase.Reviewing,
+			Summary: by, Reason: r.reason, Topic: notify.RoleTopicPrefix + string(reviewer)})
 	}
 	return false, nil
-}
-
-// stuckReview says why issue's review round stays open with nothing on its way that would end it,
-// its reviewer (row) having completed it: no review decided it (a COMMENT decides nothing, and
-// neither does a review in any state but approved or changes_requested), or its approval cannot end
-// it, CI being red at the head, which in reviewing only the round decides (classify.RedSendsBack),
-// or the head carrying code the approved head does not (classify.ApprovalStands). It is "" for an
-// issue not in reviewing, a round still owed its reviewer's completion, one that ends
-// (advanceReview), and one waiting on the head's checks or on a head a push that may change code is
-// bringing. The reason names the head, since the decision the round needs is of the head.
-func stuckReview(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) string {
-	if issue.Phase != phase.Reviewing || row.HandoffCommit == "" || pr == nil {
-		return ""
-	}
-	if row.Decision == nil {
-		return fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES ends the round, and a COMMENT decides nothing",
-			pr.Number, pr.HeadSHA)
-	}
-	if row.Decision.State != "approved" {
-		return ""
-	}
-	switch classify.HeadVerdict(*pr) {
-	case "red":
-		return fmt.Sprintf("the reviewer approved %s on pull request #%d, but %s; a red at the reviewer's own head is its round's to decide, with a REQUEST_CHANGES naming the failing checks",
-			row.Decision.Head, pr.Number, redAt(*pr))
-	case "green":
-		if classify.ApprovalStands(*pr, row.Decision.Head) || classify.CodeOnItsWay(*pr) {
-			return ""
-		}
-		return fmt.Sprintf("the reviewer approved %s on pull request #%d, which does not approve head %s: a push since may have changed code, so only an APPROVE of %s or a REQUEST_CHANGES ends the round",
-			row.Decision.Head, pr.Number, pr.HeadSHA, pr.HeadSHA)
-	}
-	return ""
-}
-
-// tellStuckReview tells issue's architect that its review round is stuck (stuckReview, with row
-// the reviewer's and pr the pull request as the fact left them), unless it was stuck for the same
-// reason, before, when the fact arrived: the reviewer's own completion or review passes "", since
-// each of its acts that leaves the round stuck is told. The issue stays in reviewing; the architect
-// asks the reviewer for the decision. Linger holds a member of a closed tree where it stood
-// (record.TreeLingers), so nothing is told of it.
-func (e *Engine) tellStuckReview(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest, before string) error {
-	reason := stuckReview(issue, row, pr)
-	if reason == "" || reason == before {
-		return nil
-	}
-	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
-		return err
-	}
-	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: "review-stuck", Role: claim.RoleReviewer, Phase: phase.Reviewing, Reason: reason})
-}
-
-// tellStuckReviewSince is tellStuckReview for a fact that is not the reviewer's own and that moved
-// the pull request from prior to pr: it tells only when the fact changed why the round is stuck.
-func (e *Engine) tellStuckReviewSince(ctx context.Context, tx pgx.Tx, issue record.Issue, prior, pr *record.PullRequest) error {
-	if issue.Phase != phase.Reviewing {
-		return nil
-	}
-	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil {
-		return err
-	}
-	return e.tellStuckReview(ctx, tx, issue, row, pr, stuckReview(issue, row, prior))
 }
 
 func (e *Engine) recordRound(ctx context.Context, tx pgx.Tx, issue string) error {

@@ -169,10 +169,7 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return err
 	}
 	cleared := row
-	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision = "", "", "", nil
-	if !row.CompletedAt.IsZero() {
-		cleared.CompletedAt = time.Time{}
-	}
+	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt = "", "", "", nil, time.Time{}
 	if cleared == row {
 		return nil
 	}

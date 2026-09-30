@@ -1546,15 +1546,20 @@ record_pair || fail "the reviewer's session and its review pair could not be rec
 note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
 until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_number" reviewer_commented
 until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
-# Read at the completion, before the architect can have asked anything: no approval yet, the round
-# still open, and the head the notice must name.
-stuck_head=$(gh api "repos/$repo/pulls/$pr_number" --jq .head.sha)
-if reviewer_approved_head; then fail "the reviewer approved $stuck_head before anyone asked it for the round's decision"; fi
+# At the completion, before the architect can have asked anything: no approval yet, and the round
+# still open.
+[ -z "$(review_app_reviews '.state == "APPROVED"' id)" ] || fail "the reviewer approved pull request #$pr_number before anyone asked it for the round's decision"
 issue_phase "$tree1" reviewing >/dev/null || fail "$tree1 left reviewing on a round no review decided"
 until_true 300 "the review-stuck notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle review-stuck "$tree1")"
-stuck=$({ claim_session_text "$tree1" architect || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$(notice_needle review-stuck "$tree1")" | head -1 || true)
+stuck=$(notice_line "$tree1" architect "$(notice_needle review-stuck "$tree1")" | head -1 || true)
 printf '%s\n' "$stuck" >"$evidence/notice-review-stuck.jsonl"
-grep -qF -- "$stuck_head" <<<"$stuck" || fail "the review-stuck notice on $tree1's architect does not name the head $stuck_head: $stuck"
+# The head the notice names is the one the completion left, which GitHub's current head can have
+# moved past since: it must be a commit of the pull request, and the reviewer's completion wrote it.
+stuck_head=$(grep -oE 'APPROVE of head [0-9a-f]{40}' <<<"$stuck" | head -1 | awk '{print $4}' || true)
+[ -n "$stuck_head" ] || fail "the review-stuck notice on $tree1's architect names no head: $stuck"
+pr_commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha') || fail "read the commits of pull request #$pr_number"
+grep -qx -- "$stuck_head" <<<"$pr_commits" || fail "the review-stuck notice names $stuck_head, which is no commit of pull request #$pr_number"
+grep -qF -- "the reviewer's completion" <<<"$stuck" || fail "the review-stuck notice was not written by the reviewer's completion: $stuck"
 note "the reviewer commented and completed; $tree1 stayed in reviewing and its architect was told review-stuck naming $stuck_head (kept in $evidence/notice-review-stuck.jsonl)"
 architect_asked() { [ "$(architect_messages "$tree1" reviewer)" -gt "$asked_before" ]; }
 until_true 900 "$tree1's architect to ask the reviewer for the round's decision" architect_asked

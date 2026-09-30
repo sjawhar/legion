@@ -275,7 +275,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			seedPR(t, pool, pr)
 			// The implementer is one round short of the review round cap, so a counted round would
 			// post the cap message and notify the architect. A review ends when both of its halves
-			// are in (advanceReview), so the reviewer of a child in reviewing has completed its round,
+			// are in (reviewRound), so the reviewer of a child in reviewing has completed its round,
 			// and the review decides the rest.
 			reviewer := record.PhaseRow{Role: claim.RoleReviewer, Decision: tc.decision}
 			if tc.at == phase.Reviewing {

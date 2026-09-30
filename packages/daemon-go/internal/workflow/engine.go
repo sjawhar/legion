@@ -30,8 +30,8 @@ type Config struct {
 	MergeQueueRole string
 	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
-	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits is the
-	// reviewer's own (tellStuckReview). Empty matches no one.
+	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits can be
+	// the reviewer's answer to a round it left undecided (reviewersAnswer). Empty matches no one.
 	ReviewAppLogin string
 }
 
@@ -313,11 +313,8 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
 	case phase.Reviewing:
-		ended, err := e.advanceReview(ctx, tx, *issue, pr)
-		if err != nil || ended {
-			return intake.Result{}, err
-		}
-		return intake.Result{}, e.tellStuckReview(ctx, tx, *issue, row, pr, "")
+		_, err := e.settleRound(ctx, tx, *issue, row, pr, reviewRound(*issue, row, pr), round{}, "the reviewer's completion")
+		return intake.Result{}, err
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
 	case phase.ProductionCheck:
@@ -431,6 +428,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
+	prior := *pr
 	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
 	*pr = classify.ApplyPush(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
 		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
@@ -442,12 +440,17 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		return intake.Result{}, err
 	}
 	// A push classified after its head arrived can be what lets an approval of an earlier head
-	// stand, so an open review is asked again.
+	// stand, or what shows the current head carries code the approved one does not, so the round
+	// is settled again.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil {
+	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
 		return intake.Result{}, err
 	}
-	_, err = e.advanceReview(ctx, tx, *issue, pr)
+	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, pr), reviewRound(*issue, reviewer, &prior), "a push")
 	return intake.Result{}, err
 }
 
@@ -584,31 +587,29 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 		return intake.Result{}, err
 	}
 	// A review round held open may already have both of its halves: the reviewer completed before
-	// the hold, and its review was recorded while held. The round ends here, and the reviewer is
-	// started only if it is still open - a second completion of the same commit would be refused as
-	// not new. A round its reviewer completed that no decision ends is stuck (stuckReview): the
-	// architect is told, and the reviewer's task says why, so the restarted reviewer decides it.
+	// the hold, and its review was recorded while held. The round ends here (reviewRound), or goes
+	// back to implementing on a red code head that settled while held, and the reviewer is started
+	// only if it is still open - a second completion of the same commit would be refused as not new.
+	// A round its reviewer completed that nothing would end is stuck: the reviewer's task says why,
+	// so the restarted reviewer decides it. The architect, who ordered the retry, is told nothing: a
+	// notice now would read as the reviewer's answer to its request.
 	reason := "retry held phase"
 	if from == phase.Reviewing {
 		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if _, err := e.advanceReview(ctx, tx, *issue, pr); err != nil {
-			return intake.Result{}, err
-		}
-		if issue, err = e.store.Issue(ctx, tx, issue.Key); err != nil || issue == nil || issue.Phase != phase.Reviewing {
-			return intake.Result{}, err
-		}
 		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if stuck := stuckReview(*issue, reviewer, pr); stuck != "" {
-			if err := e.tellStuckReview(ctx, tx, *issue, reviewer, pr, ""); err != nil {
-				return intake.Result{}, err
-			}
-			reason += ": " + stuck
+		// The retry tells nothing of a stuck round: passed as its own before, it is stuck the same way.
+		r := reviewRound(*issue, reviewer, pr)
+		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, r, ""); err != nil || moved {
+			return intake.Result{}, err
+		}
+		if r.outcome == roundStuck {
+			reason += ": " + r.reason
 		}
 	}
 	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, reason))

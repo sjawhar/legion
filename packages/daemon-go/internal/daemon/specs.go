@@ -11,15 +11,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// roleTopicPrefix is the Envoy subject a role token is reached on
-// (ROLE_TOPIC_PREFIX, packages/contracts/src/subject.ts).
-const roleTopicPrefix = "notifications.role."
+// roleTopicPrefix is the Envoy subject a role token is reached on (notify.RoleTopicPrefix).
+const roleTopicPrefix = notify.RoleTopicPrefix
 
 var _ supervise.Specs = specs{}
 
