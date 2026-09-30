@@ -182,6 +182,8 @@ func TestListIssuesOrdersTiesByKeyAmongOtherIssues(t *testing.T) {
 		// A project's first issue is rank U, the rest rank after it.
 		tied = append(tied, createListedIssues(t, handler, project, 4)[0])
 	}
+	// The rows are tied in reverse key order, but the order is incidental: tied forwards, the
+	// listing without the key fails the same way (a reviewer's run, 2 of 2).
 	for index := len(tied) - 1; index >= 0; index-- {
 		if _, err := database.Pool.Exec(context.Background(),
 			"update issues set created_at = '2026-09-30T12:00:00Z' where key = $1", tied[index]); err != nil {
