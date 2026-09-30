@@ -188,7 +188,7 @@ func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []s
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available
 // capacity using the same promotion effects Apply emits. It performs no Dispatch I/O itself.
 //
-// The read is a snapshot with no actor on it: in it, an agent's own status write during a restart
+// The read is a snapshot with no actor on it: in it, a session's own status write during a restart
 // looks exactly like a human's move. Dispatch says how far each issue's event log has run, so a
 // key the listing shows behind that log — recorded or not, whatever its listed status — is held
 // back rather than decided on now: the stream still holds those events (or the outbox that would
@@ -318,8 +318,8 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// move to the snapshot's status with no suspend and no linger, and the record's
 		// LastDispatchSeq would reach the snapshot's own sequence, so the real event, once it
 		// finally arrives, would be dropped by that same sequence fence — nothing would ever run
-		// the transition this snapshot stands in for. A snapshot no newer than the record — an
-		// agent's own status write the daemon already recorded through agentStatusWrite, echoed
+		// the transition this snapshot stands in for. A snapshot no newer than the record — a
+		// session's own status write the daemon already recorded through sessionStatusWrite, echoed
 		// back by a boot listing taken before the daemon's own reassert landed — is level, not a
 		// change to apply: status stays what recordObservation below already knows, an admitted
 		// root's or a live tree's own state, not the record it briefly showed on Dispatch. Re-read

@@ -136,14 +136,14 @@ func TestReconcileReentersAParkedChildSetBackToTodoInABootSummary(t *testing.T) 
 	}
 }
 
-// An agent writes an issue's Dispatch status directly
-// (agentStatusWrite records it, LastDispatchSeq included, but never changes issue.Status — the
-// daemon reasserts its own through the outbox instead). A boot listing taken before that reassert
-// lands still shows the agent's own out-of-workflow write, level with what the daemon already
-// recorded (same sequence): not a change to apply, since the daemon's reassert — not the
-// snapshot — is the record's own truth. Before this fix, recordObservation wrote it anyway,
-// releaseInactiveSlots freed the slot, and the next waiting root was admitted alongside the first
-// tree, which kept running unslotted: two trees at cap 1.
+// A session writes an issue's Dispatch status directly
+// (sessionStatusWrite records a session's own status write, LastDispatchSeq included, but never
+// changes issue.Status — the daemon reasserts its own through the outbox instead). A boot listing
+// taken before that reassert lands still shows the session's own out-of-workflow write, level with
+// what the daemon already recorded (same sequence): not a change to apply, since the daemon's
+// reassert — not the snapshot — is the record's own truth. Before this fix, recordObservation
+// wrote it anyway, releaseInactiveSlots freed the slot, and the next waiting root was admitted
+// alongside the first tree, which kept running unslotted: two trees at cap 1.
 func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfWorkflowWrite(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))

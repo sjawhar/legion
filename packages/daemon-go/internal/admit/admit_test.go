@@ -773,6 +773,79 @@ func TestOnlyAPersonOrTheDaemonTakesAnAdmittedRootOutOfTheWorkflow(t *testing.T)
 	}
 }
 
+// The record takes a status the moment the daemon queues its write, and Dispatch shows it only once
+// the outbox has run that write. Until then every issue event still carries the status the write was
+// queued over, so an event carrying that status changes no status, whoever wrote it: a rank, title
+// or label edit. It is recorded, the daemon's status kept, and nothing is set back, told or ended —
+// an outside session is not reported for a status it never wrote, and a person's title edit does
+// not park the tree on the backlog the daemon is setting back. A status the event does change is
+// still a write, whatever the daemon has queued.
+func TestAnEventCarryingTheStatusADaemonWriteWasQueuedOverChangesNoStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		phase   phase.Phase
+		status  string
+		pending record.StatusWrite
+		actor   string
+		wrote   string
+		changes bool
+	}{
+		{name: "an outside session edits the rank before the daemon's testing reaches Dispatch", phase: phase.Testing, status: "testing",
+			pending: record.StatusWrite{Status: "testing", ObservedStatus: "in_progress"}, actor: "ses-outsider", wrote: "in_progress"},
+		{name: "an outside session edits the title before the daemon sets its backlog back", phase: phase.Implementing, status: "in_progress",
+			pending: record.StatusWrite{Status: "in_progress", ObservedStatus: "backlog"}, actor: "ses-outsider", wrote: "backlog"},
+		{name: "a person edits the title before the daemon sets an outside backlog back", phase: phase.Implementing, status: "in_progress",
+			pending: record.StatusWrite{Status: "in_progress", ObservedStatus: "backlog"}, actor: "", wrote: "backlog"},
+		{name: "an outside session writes backlog while the daemon's testing is on its way", phase: phase.Testing, status: "testing",
+			pending: record.StatusWrite{Status: "testing", ObservedStatus: "in_progress"}, actor: "ses-outsider", wrote: "backlog", changes: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			seedSlotted(t, pool, "LEGION-1", "A")
+			inTx(t, pool, func(tx pgx.Tx) {
+				records, ctx := record.NewStore(), context.Background()
+				root, err := records.Issue(ctx, tx, "LEGION-1")
+				if err != nil {
+					t.Fatalf("read root: %v", err)
+				}
+				root.Phase, root.Status, root.LastDispatchSeq = tc.phase, tc.status, 1
+				if err := records.PutIssue(ctx, tx, *root); err != nil {
+					t.Fatalf("put root: %v", err)
+				}
+				row, err := record.NewOutboxRow("LEGION-1", tc.pending, fixedNow)
+				if err != nil {
+					t.Fatalf("build the pending status write: %v", err)
+				}
+				if err := records.Enqueue(ctx, tx, row); err != nil {
+					t.Fatalf("queue the pending status write: %v", err)
+				}
+			})
+
+			apply(t, pool, admission, "edited-by-"+tc.name, intake.DispatchIssue{Key: "LEGION-1", Seq: 2, Type: "issue.updated", Status: tc.wrote,
+				Title: "LEGION-1 renamed", Rank: "B", HandedOver: true, ActorSession: tc.actor}, engine)
+			got := issue(t, pool, "LEGION-1")
+			if got.Phase != tc.phase || got.LingerUntil != nil || got.Status != tc.status || got.LastDispatchSeq != 2 || got.Title != "LEGION-1 renamed" || got.Rank != "B" {
+				t.Fatalf("root after the event = %#v, want phase %s, not lingering, status %s kept, and the event's seq, title and rank", got, tc.phase, tc.status)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}})
+			pending := effect{kind: record.OutboxKindDispatchStatus, issue: "LEGION-1", payload: tc.pending}
+			if !tc.changes {
+				assertEffects(t, pool, []effect{pending})
+				return
+			}
+			rows := effects(t, pool)
+			if len(rows) != 3 || !reflect.DeepEqual(rows[0], pending) || !reflect.DeepEqual(rows[1].payload, record.StatusWrite{Status: tc.status, ObservedStatus: tc.wrote}) {
+				t.Fatalf("outbox effects = %#v, want the pending write, %s set back over %s, and a notice", rows, tc.status, tc.wrote)
+			}
+			if notice, ok := rows[2].payload.(record.Notice); !ok || notice.Kind != "status-reasserted" || !strings.Contains(notice.Reason, tc.actor) || !strings.Contains(notice.Reason, tc.wrote) {
+				t.Fatalf("third effect = %#v, want a status-reasserted notice naming %s and %s", rows[2].payload, tc.actor, tc.wrote)
+			}
+		})
+	}
+}
+
 // The boot read re-admits a lingering root the human set back to todo while the daemon was down,
 // exactly as the live event does: a new generation, admitted, its linger cleared.
 func TestReconcileReadmitsALingeringRootSetBackToTodo(t *testing.T) {
