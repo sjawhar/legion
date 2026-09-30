@@ -92,7 +92,7 @@ test("a duplicate attempt says the listener already had the message", () => {
   );
   try {
     expect(
-      screen.getByText("Delivered; the listener already had this message, so it wasn't sent again")
+      screen.getByText("Delivered by an earlier attempt, so not delivered again")
     ).toBeTruthy();
   } finally {
     view.unmount();

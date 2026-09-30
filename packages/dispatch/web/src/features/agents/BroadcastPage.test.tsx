@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { DELIVERY_DUPLICATE_WINDOW_MS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -129,6 +130,24 @@ test("a pending attempt nobody is carrying offers a same-mode retry and no mode 
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")
     );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The row's promise is the dashboard's one promise, and it expires with the same window: past it
+// nothing recognises the resumed frame as a repeat (`DELIVERY_DUPLICATE_WINDOW_MS`).
+test("a stranded send older than the duplicate window is not promised a single delivery", async () => {
+  const aged = attempt({
+    created_at: new Date(Date.now() - DELIVERY_DUPLICATE_WINDOW_MS - 60_000).toISOString(),
+  });
+  const page = renderBroadcast(broadcast([aged]));
+  try {
+    const row = await screen.findByRole("article", { name: "Planner" });
+    expect(within(row).queryByText(/cannot deliver it twice/)).toBeNull();
+    expect(within(row).getByText(/may deliver it twice/)).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();

@@ -25,6 +25,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import { insideDuplicateWindow } from "../conversation/delivery";
 import {
   capabilitiesForTarget,
   DeliveryRetry,
@@ -131,8 +132,9 @@ function BroadcastRecipientRow({
             Retry
           </button>
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
-            Nobody is carrying this send. Retry uses {latest?.delivery ?? delivery} again, which
-            cannot deliver it twice.
+            {latest === undefined || insideDuplicateWindow(latest.createdAt)
+              ? `Nobody is carrying this send. Retry uses ${latest?.delivery ?? delivery} again, which cannot deliver it twice.`
+              : `Nobody is carrying this send. Retry uses ${latest.delivery} again, and may deliver it twice: the send is older than the window in which a repeat is recognised.`}
           </p>
         </div>
       ) : null}

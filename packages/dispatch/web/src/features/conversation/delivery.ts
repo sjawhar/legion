@@ -34,14 +34,25 @@ export interface DeliveryOutcome {
  * genuine second delivery. `Number.isFinite` still rejects an unparseable stamp.
  */
 export function isSafeRetry(attempt: DeliveryOutcome, now: number = Date.now()): boolean {
-  if (attempt.state !== "failed" || attempt.duplicate === true) return false;
-  const age = now - Date.parse(attempt.createdAt);
+  return (
+    attempt.state === "failed" &&
+    attempt.duplicate !== true &&
+    insideDuplicateWindow(attempt.createdAt, now)
+  );
+}
+
+/**
+ * Whether a send made at `createdAt` can still be recognised as a repeat, so re-sending it in its
+ * own mode cannot deliver it twice. The one age check every surface's promise makes; its
+ * negative-age reading is `isSafeRetry`'s, above.
+ */
+export function insideDuplicateWindow(createdAt: string, now: number = Date.now()): boolean {
+  const age = now - Date.parse(createdAt);
   return Number.isFinite(age) && age < DELIVERY_DUPLICATE_WINDOW_MS;
 }
 
 /** What a duplicate attempt reads as: an earlier attempt landed, so this one added nothing. */
-export const duplicateText =
-  "Delivered; the listener already had this message, so it wasn't sent again";
+export const duplicateText = "Delivered by an earlier attempt, so not delivered again";
 
 /**
  * The guidance a failed attempt earns while a same-mode retry is still safe.
