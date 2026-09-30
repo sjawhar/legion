@@ -28,6 +28,21 @@
   "Delivered by an earlier attempt". The card now says the session answered with an error and
   points at its mode-change actions; the mention list points at a new comment. Sending that Retry
   under a new key is LEGION-431.
+- `GET /api/v1/issues` pages with `limit` (1–250) and `offset` (0 or more; `offset` alone pages
+  50), answering `{issues, total, limit, offset}` with `total` counting every issue the filters
+  match; without either parameter it answers the whole listing as an array, as before. It used to
+  ignore both, and `cursor`, answering 200 with every row (on production, `?project=LEGSMOKE` with
+  `limit=5`, `offset=5`, `cursor=abc` or `limit=999` each answered the whole project), which a caller
+  that asked for a page cannot tell from one (LEGION-406). A repeated, blank, non-integer or
+  out-of-range `limit` or `offset` is `400 INVALID_QUERY` naming the parameter, and so is `cursor`,
+  which the listing does not page with. The page is cut after every filter, `route_status`
+  included. The listing's order now ends on the issue key. Status, rank and creation time can tie
+  (every project's first issue has rank `U`, and nothing makes a rank unique), and Postgres
+  returned such ties in an order of its own: in a project whose issues share one creation time and
+  alternate between two ranks, the old order listed one rank as `S8-2 S8-6 S8-4 S8-8`. A walk of
+  the pages is exact only while the listing does not change. The Stage 4b live proof no longer
+  sends `limit=200` (its preflight) or `limit=250` (its daily-report check); each would now answer
+  a page its `jq` cannot read.
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it

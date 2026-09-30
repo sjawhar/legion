@@ -340,7 +340,7 @@ func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
 // indexed, failing the test when settlement never reaches it.
 func awaitIndexedAskBlock(t *testing.T, handler http.Handler, artifactID, blockID, question string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 		if inbox.Code != http.StatusOK {

@@ -3,8 +3,10 @@ import { dirname, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
+  DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
   MAX_BROADCAST_RECIPIENTS,
+  MAX_ISSUE_PAGE_LIMIT,
   RECEIPT_TIMEOUT_CAUSE,
 } from "../src/dispatch-api";
 import { SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
@@ -107,6 +109,13 @@ const SearchQueryMax = ${SEARCH_QUERY_MAX}
 // SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
+
+// MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
+// DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
+// MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
+// and the dispatch_issues tool's cannot drift apart.
+const MaxIssuePageLimit = ${MAX_ISSUE_PAGE_LIMIT}
+const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

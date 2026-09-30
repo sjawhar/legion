@@ -209,6 +209,15 @@ type IssueSummary struct {
 	OpenAsks  int       `json:"open_asks"`
 }
 
+// IssueSummaryPage is one page of GET /api/v1/issues?limit=&offset=: the issues at [offset,
+// offset+limit) of the filtered listing, in its order, and Total, how many the filters matched.
+type IssueSummaryPage struct {
+	Issues []IssueSummary `json:"issues"`
+	Total  int            `json:"total"`
+	Limit  int            `json:"limit"`
+	Offset int            `json:"offset"`
+}
+
 // SearchOwner identifies the issue or standalone project document that owns a search result.
 // An issue owner carries Key, Title and Status; a document owner carries Project, Slug,
 // ArtifactID and Name.
