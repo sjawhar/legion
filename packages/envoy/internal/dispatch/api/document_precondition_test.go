@@ -39,21 +39,11 @@ type documentPreconditionConflict struct {
 	Mismatches []documentPreconditionMismatch `json:"mismatches"`
 }
 
-func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, *docs.Service) {
+// preconditionTestHandler is newTestServer with settlement held back for the test's duration.
+func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, docs.API) {
 	t.Helper()
-	var service *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		service = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := service.Shutdown(ctx); err != nil {
-				t.Errorf("shutdown document service: %v", err)
-			}
-		})
-		return service
-	})
-	return handler, database, service
+	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
+	return handler, database, deps.Docs
 }
 
 func readDocumentPrecondition(t *testing.T, handler http.Handler, artifactID string) documentPreconditionRead {

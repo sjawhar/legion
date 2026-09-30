@@ -279,6 +279,31 @@ export interface IssueSummary
   readonly open_asks: number;
 }
 
+/**
+ * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
+ * as `contracts.MaxIssuePageLimit`, which the server enforces, and the `dispatch_issues` tool's
+ * `limit` takes the same bound, so the two ends agree.
+ */
+export const MAX_ISSUE_PAGE_LIMIT = 250;
+
+/**
+ * The page size of `GET /api/v1/issues` when a caller pages with `offset` alone, and of
+ * `dispatch_issues` when it names no `limit`. Generated into Go as `contracts.DefaultIssuePageLimit`.
+ */
+export const DEFAULT_ISSUE_PAGE_LIMIT = 50;
+
+/**
+ * `GET /api/v1/issues?limit=&offset=`: one page of the filtered listing in its order, with `total`,
+ * how many issues the filters matched, and the `limit` and `offset` that chose the page. Without
+ * either parameter the route answers the plain `IssueSummary[]`.
+ */
+export interface IssueSummaryPage {
+  readonly issues: IssueSummary[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
 export interface IssueChild {
   readonly key: string;
   readonly title: string;

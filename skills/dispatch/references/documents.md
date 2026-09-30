@@ -133,6 +133,14 @@ dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|te
 document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,
 still belongs inside a fenced code block, where it survives verbatim both ways.
 
+A table cell ends at every `|` not written `\|`, inside inline code and links too, so write
+`` `x: Promise<void> \| undefined` ``, never `` `x: Promise<void> | undefined` ``, in a cell. A row
+holding text in a cell past its table's width is refused rather than stored without it, naming the
+row: write a `|` inside a cell as `\|`, or, where the row really has more cells, give the header and
+delimiter rows as many. Blank cells past the width are dropped, on every path. A spec, an upload or
+a version answers `INVALID_MARKDOWN`, an insert of blocks `INVALID_OP` on `markdown`, and an insert
+of bare table rows `TABLE_WIDTH`, which names the cell counts only.
+
 ## A document that is reloading
 
 These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its
