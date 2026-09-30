@@ -25,7 +25,7 @@ work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
-# A reused STAGE3_EVIDENCE_DIR holds an earlier run's key command and evidence, which this run must
+# A reused STAGE3_EVIDENCE_DIR that is not empty holds an earlier run's evidence, which this run must
 # neither write into nor read as its own: refused before anything is written or any trap is set.
 if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
   echo "FAIL setup: $reason" >&2

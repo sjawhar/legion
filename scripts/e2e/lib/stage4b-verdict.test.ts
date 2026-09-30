@@ -3,9 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Stage 4b's own blocked, cleanup and audit_verdict, taken from the script by name and run after a
-// checkpoint that ends in blocked, with the teardown's cluster, NATS and GitHub helpers stubbed and
-// production_audit's Dispatch read replaced by its result: a write outside LEGSMOKE, or none.
+// Stage 4b's own blocked, cleanup, audit_verdict and audit_failure, taken from the script by name
+// and run after a checkpoint that ends in blocked, with the teardown's cluster, NATS and GitHub
+// helpers stubbed and production_audit's Dispatch read replaced by its result: a write outside
+// LEGSMOKE, or none. cleanup is taken by name, so a helper it newly calls must be taken or stubbed
+// here too: under the trap's set +e an undefined one is only a command-not-found warning, and the
+// run carries on.
 const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
 const fn = (name: string) => {
   const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
@@ -30,7 +33,7 @@ function blockedRun(outside: string) {
       `set -Eeuo pipefail
 root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
-gateway_dest=$evidence/model-gateway check=controller check_started=2026-09-30T12:00:00Z
+check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
 tree1= tree2= tree3= tree4= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
 mkdir -p "$work"
@@ -45,6 +48,7 @@ production_audit() {
   audit_verdict "$evidence/production-issues-touched-outside.json" "$evidence/production-interests-outside.json"
 }
 ${fn("audit_verdict")}
+${fn("audit_failure")}
 ${fn("blocked")}
 ${fn("cleanup")}
 trap cleanup EXIT
@@ -71,5 +75,14 @@ describe("stage 4b's verdict line", () => {
     // The audit is the one check whose failure the run's verdict must carry.
     expect(outside.stdout).toContain("stage 4b e2e: FAIL");
     expect(outside.stdout).not.toContain("stage 4b e2e: BLOCKED");
+    // The transcript says why: the audit's own failure line, the verdict naming it rather than the
+    // checkpoint that could not run, and no model-key notes for a checkpoint that never failed.
+    expect(outside.stdout).toContain(
+      "CHECK production-audit: FAIL: the run wrote outside LEGSMOKE or subscribed outside it:"
+    );
+    expect(outside.stdout).toContain(
+      "stage 4b e2e: FAIL (check production-audit, in the teardown after check controller)"
+    );
+    expect(outside.stdout).not.toContain("model-gateway-unserved:");
   });
 });

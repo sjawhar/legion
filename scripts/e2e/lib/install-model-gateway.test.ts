@@ -323,14 +323,18 @@ describe("the model gateway key command", () => {
     expect(existsSync(join(run, "model-gateway", "hawk-token.calls"))).toBe(false);
   });
 
-  test("refuses a stage proof's evidence directory an earlier run left a key command in", () => {
+  test("refuses any stage proof's evidence directory that is not empty, whether or not it reached its key command", () => {
     const evidence = join(dir, "evidence");
+    expect(unserved("--fresh", evidence)).toMatchObject({ code: 0, stdout: "" });
     mkdirSync(evidence);
     expect(unserved("--fresh", evidence)).toMatchObject({ code: 0, stdout: "" });
+    // An earlier Stage 4b run that stopped before its controller checkpoint left only these.
+    writeFileSync(join(evidence, "transcript.log"), "== setup\n");
+    const stopped = unserved("--fresh", evidence);
+    expect(stopped.code).toBe(1);
+    expect(stopped.stdout).toContain(`${evidence} is not an empty directory`);
     mkdirSync(join(evidence, "model-gateway"));
-    const reused = unserved("--fresh", evidence);
-    expect(reused.code).toBe(1);
-    expect(reused.stdout).toContain("is an earlier run's key command");
+    expect(unserved("--fresh", evidence).code).toBe(1);
   });
 
   test("a stage proof that refuses a reused evidence directory lists none of the earlier run's agents", async () => {
@@ -367,9 +371,7 @@ describe("the model gateway key command", () => {
       )?.[1];
       if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
       expect(result.exitCode).toBe(1);
-      expect(stderr).toContain(
-        `FAIL setup: ${join(evidence, "model-gateway")} is an earlier run's key command`
-      );
+      expect(stderr).toContain(`FAIL setup: ${evidence} is not an empty directory`);
       // The earlier run's tester could not have failed this run's setup, which never started one.
       expect(`${result.stdout}${stderr}`).not.toContain("may have failed check");
     }

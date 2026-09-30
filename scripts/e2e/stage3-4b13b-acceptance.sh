@@ -41,9 +41,9 @@ base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
-# A reused ACCEPT_EVIDENCE_DIR holds an earlier run's key command and evidence (its
-# soft-failures.txt included), which this run must neither write into nor read as its own: refused
-# before anything is written or any trap is set.
+# A reused ACCEPT_EVIDENCE_DIR that is not empty holds an earlier run's evidence (its
+# soft-failures.txt, perhaps its key command), which this run must neither write into nor read as
+# its own: refused before anything is written or any trap is set.
 if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
   echo "FAIL setup: $reason" >&2
   rmdir "$work"

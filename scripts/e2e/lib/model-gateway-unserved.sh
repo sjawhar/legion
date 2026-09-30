@@ -52,9 +52,10 @@
 #   - An agent served again before that window held a key through the whole check, and is left out.
 # It says nothing when no agent is listed, or when <dest> holds no record yet.
 #
-# --fresh is the stage proofs' refusal of a reused evidence directory: it exits 0 when
-# <evidence-dir>/model-gateway does not exist, and otherwise prints why the run cannot use it and
-# exits 1, for the stage to fail with.
+# --fresh is the stage proofs' refusal of a reused evidence directory, the first thing each does:
+# it exits 0 when <evidence-dir> does not exist or is an empty directory, and otherwise prints why
+# the run cannot use it and exits 1, for the stage to fail with. Any content is an earlier run's
+# evidence, whether or not that run got as far as installing its key command.
 #
 # Every form exits 2 on an argument refusal, and --record and --notes 1 on a record line they
 # cannot read.
@@ -158,8 +159,9 @@ case "${1:-}" in
   ;;
 --fresh)
   [ $# = 2 ] || refuse "$usage"
-  [ -e "$2/model-gateway" ] || exit 0
-  echo "$2/model-gateway is an earlier run's key command, and its calls are not this run's: give this run an evidence directory of its own"
+  [ -e "$2" ] || exit 0
+  if [ -d "$2" ] && [ -z "$(ls -A -- "$2")" ]; then exit 0; fi
+  echo "$2 is not an empty directory: it holds an earlier run's evidence, which this run must neither write into nor read as its own; give this run an evidence directory of its own"
   exit 1
   ;;
 *) refuse "$usage" ;;

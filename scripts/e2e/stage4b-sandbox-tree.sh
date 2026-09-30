@@ -60,9 +60,10 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
-# A reused STAGE4B_EVIDENCE_DIR holds an earlier run's key command and evidence (its transcript.log
-# included), which this run must neither write into nor read as its own: refused before anything is
-# written, the transcript's tee started or any trap set, so it prints the run's verdict line itself.
+# A reused STAGE4B_EVIDENCE_DIR that is not empty holds an earlier run's evidence (its transcript.log
+# and daemon log from the first checkpoint on; its key command only from controller), which this run
+# must neither write into nor read as its own: refused before anything is written, the transcript's
+# tee started or any trap set, so it prints the run's verdict line itself.
 if ! reason=$(bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --fresh "$evidence"); then
   echo "CHECK setup: FAIL: $reason"
   echo "stage 4b e2e: FAIL (check setup)"
