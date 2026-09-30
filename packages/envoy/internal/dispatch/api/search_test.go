@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -488,6 +491,78 @@ func TestSearchRejectsInvalidQueries(t *testing.T) {
 				t.Fatalf("search %q code=%q, want %q", query, body.Code, code)
 			}
 		})
+	}
+}
+
+// dispatch_search refuses a query over contracts.SearchQueryMax UTF-16 units before sending it;
+// the server holds the same line in the same unit, so a query the tool accepts is never refused
+// here, and a longer one from any other client is refused by name.
+func TestSearchRefusesAQueryOverTheLimit(t *testing.T) {
+	handler := newTestHandler(t)
+	search := func(q string) *httptest.ResponseRecorder {
+		return searchRequest(t, handler, url.Values{"q": {q}}.Encode())
+	}
+
+	// 1,000 two-byte characters: at the limit in UTF-16 units, twice it in bytes.
+	if atLimit := search(strings.Repeat("é", contracts.SearchQueryMax)); atLimit.Code != http.StatusOK {
+		t.Fatalf("query at the limit: status=%d body=%s", atLimit.Code, atLimit.Body.String())
+	}
+
+	cases := map[string]struct {
+		q      string
+		length int
+	}{
+		"one character over": {strings.Repeat("a", contracts.SearchQueryMax+1), contracts.SearchQueryMax + 1},
+		// 501 characters outside the Basic Multilingual Plane are 1,002 UTF-16 units.
+		"counted in UTF-16 units": {strings.Repeat("😀", contracts.SearchQueryMax/2+1), contracts.SearchQueryMax + 2},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			response := search(test.q)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			body := decodeBody[struct {
+				Code  string `json:"code"`
+				Error string `json:"error"`
+			}](t, response)
+			want := fmt.Sprintf("q is %d characters over the %d-character limit (%d/%d); %s",
+				test.length-contracts.SearchQueryMax, contracts.SearchQueryMax, test.length, contracts.SearchQueryMax, contracts.SearchQueryHint)
+			if body.Code != "CAP_EXCEEDED" || body.Error != want {
+				t.Fatalf("refusal = %+v, want CAP_EXCEEDED %q", body, want)
+			}
+		})
+	}
+}
+
+// A project is a key or nothing. A value no project can have, a lowercased key among them, is
+// refused by name instead of answering an empty result; an empty project still searches every
+// project, and a key is read after trimming, as q is.
+func TestSearchRefusesAProjectThatIsNotAKey(t *testing.T) {
+	handler := newTestHandler(t)
+	seedSearchCorpus(t, handler)
+	search := func(project string) *httptest.ResponseRecorder {
+		return searchRequest(t, handler, url.Values{"q": {"astrolabe"}, "project": {project}}.Encode())
+	}
+
+	for _, project := range []string{"", "  SRCH  "} {
+		response := search(project)
+		if response.Code != http.StatusOK {
+			t.Fatalf("project %q: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+		if hits := decodeBody[model.SearchResponse](t, response).Results; len(hits) == 0 {
+			t.Fatalf("project %q: no hits, want the SRCH issue", project)
+		}
+	}
+	for _, project := range []string{"srch", "SRCH-1", strings.Repeat("中", 100)} {
+		response := search(project)
+		body := decodeBody[struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}](t, response)
+		if response.Code != http.StatusBadRequest || body.Code != "INVALID_PROJECT" || body.Error != "project must be a project key such as CORE" {
+			t.Fatalf("project %q: status=%d refusal=%+v, want 400 INVALID_PROJECT", project, response.Code, body)
+		}
 	}
 }
 

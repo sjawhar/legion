@@ -159,10 +159,12 @@ do with each hit. What it leaves out:
 dispatch_search({ query, project?, limit? })
 ```
 Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. It returns the best `limit` hits (20
-by default, 50 at most) across issues, documents, comments, asks, and messages. Issue-owned hit
-lines start with the issue key; standalone project-document hit lines start with
-`dispatch://PROJECT/artifact/<slug>`, followed by the absolute link. Cite the hit you build on
-(`dispatch://KEY` or the document reference), or state "no prior issue" in the spec.
+by default, 50 at most) across issues, documents, comments, asks, and messages. A query over
+1,000 characters is refused before it is sent: search with the few words `skill://dispatch-first`
+describes, never a pasted passage. Issue-owned hit lines start with the issue key; standalone
+project-document hit lines start with `dispatch://PROJECT/artifact/<slug>`, followed by the
+absolute link. Cite the hit you build on (`dispatch://KEY` or the document reference), or state
+"no prior issue" in the spec.
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.

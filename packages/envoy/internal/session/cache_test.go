@@ -97,8 +97,7 @@ func TestGet_ValidReturnsEntry(t *testing.T) {
 
 func TestPingPrunesExpiredLastSeen(t *testing.T) {
 	client := setupNATS(t)
-	registry, err := OpenSessionRegistry(
-		client.Conn,
+	registry, err := client.OpenRegistry(
 		WithSessionReplicas(1),
 		WithSessionTTL(time.Minute),
 	)
@@ -190,7 +189,7 @@ func TestSessionWatch_BootstrapPopulatesExistingKeys(t *testing.T) {
 	client := setupNATS(t)
 	// Pre-populate via a first registry, then open a second to simulate a
 	// listener restart against existing KV state.
-	reg1, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg1, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
@@ -198,7 +197,7 @@ func TestSessionWatch_BootstrapPopulatesExistingKeys(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 
-	reg2, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg2, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("second open: %v", err)
 	}
@@ -219,7 +218,7 @@ func TestSessionWatch_BootstrapPopulatesExistingKeys(t *testing.T) {
 
 func TestSessionWatch_PropagatesExternalPut(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -239,7 +238,7 @@ func TestSessionWatch_PropagatesExternalPut(t *testing.T) {
 
 func TestSessionWatch_PropagatesDelete(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -258,7 +257,7 @@ func TestSessionWatch_PropagatesDelete(t *testing.T) {
 
 func TestSessionWatch_PropagatesPurge(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -275,7 +274,7 @@ func TestSessionWatch_PropagatesPurge(t *testing.T) {
 
 func TestSessionPut_WriteThroughVisibleImmediately(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -302,7 +301,7 @@ func TestSessionPut_WriteThroughVisibleImmediately(t *testing.T) {
 
 func TestSessionDelete_WriteThroughRemovesImmediately(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -324,7 +323,7 @@ func TestSessionList_CacheOnlyAfterNATSShutdown(t *testing.T) {
 	// is the core regression: the old List() did Keys()+per-key Get() and timed
 	// out on a remote KV leader.
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -361,13 +360,13 @@ func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 	client := setupNATS(t)
 	// Create the bucket with a 2-minute TTL — deliberately different from the
 	// 5-minute hardcoded default in OpenSessionRegistry.
-	if _, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Minute)); err != nil {
+	if _, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(2*time.Minute)); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 	// Open a second registry WITHOUT a TTL option, so opts.ttl is the 5-minute
 	// default. It must adopt the bucket's real 2-minute TTL via Status(), not
 	// the default — otherwise pruning is computed against the wrong window.
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -395,7 +394,7 @@ func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 
 func TestSessionWatch_DeadWatcherFailsPing(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(time.Minute))
+	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

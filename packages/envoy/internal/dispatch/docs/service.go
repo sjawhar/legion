@@ -1108,6 +1108,9 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if stamped > 0 {
 		s.finishSuppressedPersistence(slot, update)
 	}
+	// This release runs before the publish below, the order Ledger.Commit keeps for every other
+	// version write, so a subscriber acting on this version's artifact.version event acts after
+	// it. Publishing first would let that subscriber's write be credited to these authors again.
 	state.mu.Lock()
 	if state.gen == generation {
 		state.settleFailures = 0

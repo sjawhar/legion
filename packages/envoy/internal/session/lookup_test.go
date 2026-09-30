@@ -7,7 +7,7 @@ import (
 
 func TestOpenSessionRegistry_ImplementsSessionLookup(t *testing.T) {
 	client := setupNATS(t)
-	lookup, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
+	lookup, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("expected success, got: %v", err)
 	}

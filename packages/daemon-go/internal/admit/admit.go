@@ -86,6 +86,15 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if position, ok := fact.(intake.DispatchConsumerPosition); ok {
 		return a.release(ctx, tx, position)
 	}
+	if _, ok := fact.(intake.ControllerTick); ok {
+		if _, err := a.promote(ctx, tx); err != nil {
+			return nil, err
+		}
+		// The tick wakes the controller whatever the slots: with every slot taken, it is the only
+		// wake a tree waiting on a refused root claim gets, since only the controller's recheck of
+		// that claim moves it, and it is the turn that posts the day's report.
+		return nil, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
+	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
@@ -125,7 +134,14 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
-			return nil, nil
+			// An issue in todo that nobody handed to Legion is a candidate for the controller's
+			// walk, which otherwise runs only at its start and when a slot frees. The notice waits
+			// todoWakeDelay, so the events of one edit burst find it pending and fold into it.
+			free, err := a.slotFree(ctx, tx)
+			if err != nil || !free {
+				return nil, err
+			}
+			return nil, a.wakeController(ctx, tx, record.TodoNotice, observation.Key, a.now().Add(todoWakeDelay))
 		}
 		a.mu.Lock()
 		summary, held := a.pending[observation.Key]
@@ -164,31 +180,63 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 
 // wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left
 // free: a tree finished or left the workflow and no waiting root took its place, so the controller
-// picks the next root to hand to Legion (skill://legion-controller). It is one controller notice,
-// `slot-free` on the first issue whose slot was released; a slot the waiting line refilled wakes
-// nobody. Free is the capacity promote itself counts against the cap.
+// picks the next root to hand to Legion (skill://legion-controller). It is one `slot-free` notice
+// on the first issue whose slot was released, under the same rules as every walk wake: a slot
+// free by slotFree, a registered controller, none already unsent (wakeController).
 func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []string) error {
 	if len(released) == 0 {
 		return nil
 	}
+	free, err := a.slotFree(ctx, tx)
+	if err != nil || !free {
+		return err
+	}
+	return a.wakeController(ctx, tx, record.SlotFreeNotice, released[0], a.now())
+}
+
+// todoWakeDelay is how long a `todo` controller notice waits in the outbox before it is published.
+// Every Dispatch event of an unlabelled todo issue within it finds the notice still pending, so a
+// burst of edits is one wake rather than one a poll.
+const todoWakeDelay = 30 * time.Second
+
+// slotFree says whether an admission slot stands free for the controller to fill: fewer slots in
+// use than the cap, counting a slot a waiting root will take as taken.
+func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
+	if a.cap <= 0 {
+		return false, nil
+	}
 	issues, err := a.store.Issues(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("list admission issues: %w", err)
+		return false, fmt.Errorf("list admission issues: %w", err)
 	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("list admission slots: %w", err)
+		return false, fmt.Errorf("list admission slots: %w", err)
 	}
-	if len(ownSlots(issues, slots)) >= a.cap {
-		return nil
+	own := ownSlots(issues, slots)
+	return len(own)+len(record.Waiting(issues, own)) < a.cap, nil
+}
+
+// wakeController queues a controller notice of kind on issue, due at dueAt, when a controller is
+// registered and no notice of the same kind still waits in the outbox, so a burst of events or
+// ticks queues one wake. The wake needs no record: the controller reads Dispatch and the daemon's
+// state (skill://legion-controller).
+func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.NoticeKind, issue string, dueAt time.Time) error {
+	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
+	if err != nil || !registered {
+		return err
 	}
-	return a.enqueue(ctx, tx, released[0], record.ControllerNotice{Kind: record.SlotFreeNotice}, a.now())
+	pending, err := a.store.ControllerNoticePending(ctx, tx, a.project, kind)
+	if err != nil || pending {
+		return err
+	}
+	return a.enqueue(ctx, tx, issue, record.ControllerNotice{Kind: kind}, dueAt)
 }
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available
 // capacity using the same promotion effects Apply emits. It performs no Dispatch I/O itself.
 //
-// The read is a snapshot with no actor on it: in it, an agent's own status write during a restart
+// The read is a snapshot with no actor on it: in it, a session's own status write during a restart
 // looks exactly like a human's move. Dispatch says how far each issue's event log has run, so a
 // key the listing shows behind that log — recorded or not, whatever its listed status — is held
 // back rather than decided on now: the stream still holds those events (or the outbox that would
@@ -262,6 +310,7 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		Rank:            observation.Rank,
 		HandedOver:      observation.HandedOver,
 		LastDispatchSeq: observation.Seq,
+		DispatchStatus:  observation.Status,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
@@ -318,8 +367,8 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// move to the snapshot's status with no suspend and no linger, and the record's
 		// LastDispatchSeq would reach the snapshot's own sequence, so the real event, once it
 		// finally arrives, would be dropped by that same sequence fence — nothing would ever run
-		// the transition this snapshot stands in for. A snapshot no newer than the record — an
-		// agent's own status write the daemon already recorded through agentStatusWrite, echoed
+		// the transition this snapshot stands in for. A snapshot no newer than the record — a
+		// session's own status write the daemon already recorded through sessionStatusWrite, echoed
 		// back by a boot listing taken before the daemon's own reassert landed — is level, not a
 		// change to apply: status stays what recordObservation below already knows, an admitted
 		// root's or a live tree's own state, not the record it briefly showed on Dispatch. Re-read
@@ -335,6 +384,14 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		if err != nil {
 			return fmt.Errorf("re-read %s after its engine transition: %w", summary.Key, err)
 		}
+		// The engine consumed the snapshot when it recorded the snapshot's sequence: it kept its own
+		// status over a status Dispatch already showed (keepStatus), or re-entered a child, and wrote
+		// the observation itself. Recording the snapshot's status now would put a set-back's backlog
+		// on a running tree, whose slot releaseInactiveSlots would then free. Otherwise the snapshot's
+		// move is recorded, as the live event's would be.
+		if refreshed.LastDispatchSeq >= summary.LastSeq {
+			return nil
+		}
 		stored, status = refreshed, summary.Status
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
@@ -347,7 +404,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	}
 	return a.recordObservation(ctx, tx, *stored, observed{
 		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-		Status: status, HandedOver: handed, Seq: seq,
+		Status: status, Shown: summary.Status, HandedOver: handed, Seq: seq,
 	})
 }
 
@@ -373,7 +430,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
-		Status: observation.Status, HandedOver: handed, Seq: observation.Seq,
+		Status: observation.Status, Shown: observation.Status, HandedOver: handed, Seq: observation.Seq,
 	})
 }
 
@@ -402,26 +459,31 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 }
 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
-// the boot read.
+// the boot read: Shown is the status Dispatch showed, and Status the one the record takes, which is
+// Shown except from a boot listing no newer than the record, which keeps the record's own.
 type observed struct {
-	Title, Parent, Rank, Status string
-	HandedOver                  bool
-	Seq                         int64
+	Title, Parent, Rank, Status, Shown string
+	HandedOver                         bool
+	Seq                                int64
 }
 
-// recordObservation is the one place a Dispatch observation reaches an issue record: a live
+// recordObservation is where admission writes a Dispatch observation to an issue record: a live
 // event's and the boot read's, so a rename, a re-rank, a re-parent, a label or a status change is
 // written the same way whichever brought it. Each caller owns its own guards — the stream's
-// sequence fence, the boot read's — and this writes what they let through.
+// sequence fence, the boot read's — and this writes what they let through. The engine, which runs
+// first, writes the observation itself when it keeps its own status over the event's (its
+// keepStatus: a session's write it sets back, or an edit that changed no status), and a live event
+// it wrote then stops at the sequence fence here.
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
-	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.HandedOver == o.HandedOver &&
-		sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
+	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
+		stored.HandedOver == o.HandedOver && sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
 		return nil
 	}
 	stored.Title = o.Title
 	stored.Parent = record.ParentOf(o.Parent)
 	stored.Rank = o.Rank
 	stored.Status = o.Status
+	stored.DispatchStatus = o.Shown
 	stored.HandedOver = o.HandedOver
 	stored.LastDispatchSeq = o.Seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
@@ -451,7 +513,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Tree = stored.Key
 	stored.Phase = phase.Admitted
 	stored.Generation++
-	stored.Status = "todo"
+	stored.Status, stored.DispatchStatus = "todo", "todo"
 	stored.Rank = rank
 	stored.LingerUntil = nil
 	stored.Hold = nil

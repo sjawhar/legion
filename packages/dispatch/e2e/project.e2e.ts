@@ -132,19 +132,21 @@ test("project page groups issues by status in board order; filters narrow issues
     await page.getByRole("button", { name: "Remove Status: Triage filter" }).click();
     await expect(page.getByText("Backlog work")).toBeVisible();
 
-    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    // Removing the last filter leaves the strip open under the user; only they close it.
+    await expect(page.getByRole("button", { name: "Filters · 0 active" })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
     await page.getByRole("button", { exact: true, name: "Needs you" }).click();
     await expect(page.getByText("Needs attention")).toBeVisible();
     await expect(page.getByText("Triage work")).toHaveCount(0);
     await page.getByRole("button", { exact: true, name: "Needs you" }).click();
 
-    await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await page.getByRole("button", { exact: true, name: "Unread" }).click();
     await expect(page.getByText("Unread work")).toBeVisible();
     await expect(page.getByText("Needs attention")).toHaveCount(0);
     await page.getByRole("button", { exact: true, name: "Unread" }).click();
 
-    await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await pickFilterOption(page, "Labels", "frontend");
     await expect(page.getByText("Needs attention")).toBeVisible();
     await expect(page.getByText("Unread work")).toHaveCount(0);
@@ -184,6 +186,79 @@ test("project page groups issues by status in board order; filters narrow issues
     }
   } finally {
     await context.close();
+  }
+});
+
+// The search filter holds up to 1,000 characters, and its chip stays inside its row: that text
+// on one line makes the page 7,535 px wide at 1280, and a phone zooms out until it is 1,560 px.
+test("a 1,000-character search filter's chip ends in an ellipsis inside its row", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Core work" });
+  const query = "x".repeat(1_000);
+  const label = `Search: ${query}`;
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 800, width: 1280 });
+  }
+
+  try {
+    await page.goto(`/projects/CORE/issues?q=${query}`);
+    const chip = page.getByRole("button", { name: `Remove ${label} filter` });
+    await expect(chip).toBeVisible();
+    const layout = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      innerWidth: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    // A phone zooms out to fit a page wider than the device, which widens the layout viewport
+    // with it, so there `innerWidth` is the measure: `scrollWidth` alone compares against the
+    // zoomed-out width and passes.
+    expect(layout.innerWidth).toBe(page.viewportSize()?.width);
+    expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth);
+    const text = await chip.getByTitle(label).evaluate((node) => ({
+      clipped: node.scrollWidth > node.clientWidth,
+      textOverflow: getComputedStyle(node).textOverflow,
+    }));
+    expect(text).toEqual({ clipped: true, textOverflow: "ellipsis" });
+  } finally {
+    await alice.close();
+  }
+});
+
+// Clearing the box takes the active count to 0, and the strip stays open through it: the input
+// being typed in stays on screen and focused, so the next key lands in it.
+test("clearing the issue search keeps the strip open and the next keystroke in the search box", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Core work" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto("/projects/CORE/issues");
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    const search = page.getByRole("searchbox", { name: "Search issues" });
+    await search.click();
+    await page.keyboard.type("core");
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues\?q=core$/);
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
+    await expect(page.getByRole("button", { name: "Filters · 0 active" })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
+    await expect(search).toBeFocused();
+    await page.keyboard.type("w");
+    await expect(search).toHaveValue("w");
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues\?q=w$/);
+  } finally {
+    await alice.close();
   }
 });
 

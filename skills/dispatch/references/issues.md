@@ -23,8 +23,10 @@ In-flight issues with no owner at all go
 back to `backlog` as well: no claim or route held by a live session, no Dispatch activity in the
 last day, and no pull request moving on GitHub (an owner working there leaves no Dispatch trace).
 The order keeper sweeps those. Never write the status of an issue that carries the `legion`
-label, or of any issue under one: the Legion daemon writes those statuses, and moving one of its
-admitted roots out of its flow parks the tree and stops its workers.
+label, or of any issue under one: the Legion daemon writes those statuses. A status your session
+writes on the root of a tree Legion is running is set back and the tree's architect told who wrote
+it; only a person in the dashboard, or `legion status`, stops that tree. On an issue under one, a
+status that takes it out of the flow parks that issue and stops its workers.
 
 One agent keeps the backlog's order against those priorities, with Sami
 (dispatch://AGENTC-34/ask/f6780f9e-8b96-49eb-9be7-7c7f2036d5cc). Setting an issue's priority
@@ -138,8 +140,11 @@ when it last changed — a roadmap or backlog pass without opening every issue. 
 (a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
 `null` for an issue with no priority: `[0, 1]` is every P0 and P1), `route_status` (below), or
 `updated_since` (an RFC3339 timestamp, for "what moved this week"). `limit` is the page size, 50 by
-default and 250 at most, and `offset` is where the page starts: repeat with the next offset until a
-page comes back short to list every matching issue.
+default and 250 at most, and `offset` is where the page starts; the answer says how many issues
+match. Repeating with the next offset walks every matching issue only while the list does not
+change: an issue that enters or leaves what your filters match, or whose status or rank changes,
+between two pages shifts rows across a page boundary, and the walk then shows one issue twice and
+misses another.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.

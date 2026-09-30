@@ -854,6 +854,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
 			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
 		}
+		// Rows first, judged against the target table's width; the block path below reads the
+		// fragment as a document of its own, whose tables are its own.
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
+			return out, invalidSchemaOp("markdown", err)
+		}
 		position := target.From
 		if after {
 			position = target.To
@@ -874,9 +879,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, at.From), budget)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
-		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
-			return out, invalidSchemaOp("markdown", err)
 		}
 		out, err := pmdoc.Splice(tree, at, with)
 		if err != nil {
