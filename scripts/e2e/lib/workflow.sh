@@ -520,7 +520,7 @@ worker_notices() {
   while IFS=$'\t' read -r f role; do
     jq -R -r --arg file "${f##*/}" --arg role "$role" '
       fromjson? | select(.customType == "envoy-message") | (.content | tostring)
-      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up|checks-red|review-stuck) on [^\\n]*)")
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up|checks-red|review-stuck|status-reasserted) on [^\\n]*)")
       | "\($file) \($role) \(.summary)"' "$f"
   done < <(worker_sessions "$1")
 }
