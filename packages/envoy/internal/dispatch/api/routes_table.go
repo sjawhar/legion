@@ -1,8 +1,11 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // routeAuth names who may call a route. It describes the check the handler performs; the
@@ -64,7 +67,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodDelete, "/api/v1/me/agent-tokens/{id}", authHuman, "Revoke a personal agent token.", s.revokeAgentToken},
 		{http.MethodGet, "/api/v1/users", authHuman, "The humans who may sign in; the assignee picker's options.", s.listUsers},
 		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login} or {kind: agent, owner, service} (owner is a personal token's lowercase login, null for the shared token; service is a verified service-account token's Kubernetes subject, null otherwise).", s.whoami},
-		{http.MethodGet, "/api/v1/issues", authAny, "List issues; filters project, status, parent, label, priority (repeatable: 0-3, or none for unset), open, updated_since, route_status (live, no_holder or unknown; open issues only); ?pinned=true is human-only.", s.listIssues},
+		{http.MethodGet, "/api/v1/issues", authAny, fmt.Sprintf("List issues; filters project, status, parent, label, priority (repeatable: 0-3, or none for unset), open, updated_since, route_status (live, no_holder or unknown; open issues only); ?pinned=true is human-only. Pages with limit (1-%d) and offset (0 or more; alone it pages %d): a paged answer is {issues, total, limit, offset}, total counting every issue the filters match; without either it is every matching issue as an array. cursor is 400 INVALID_QUERY.", contracts.MaxIssuePageLimit, contracts.DefaultIssuePageLimit), s.listIssues},
 		{http.MethodPost, "/api/v1/issues", authAny, "Create an issue (native, or from a GitHub owner/repo#n ref); assignee defaults to the creating human, the personal token's owner, or the parent's assignee.", s.createIssue},
 		{http.MethodGet, "/api/v1/issues/resolve", authAny, "Resolve ?ref=<KEY | owner/repo#n> to an issue key.", s.resolveIssue},
 		{http.MethodGet, "/api/v1/issues/{key}", authAny, "Read an issue with its open asks and primary document.", s.getIssue},
@@ -85,7 +88,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries/{attempt}/accept", authBearer, "The attempt's session records that it took the message as its user's own turn; the session names itself in actor (403 ACCEPT_FORBIDDEN for another's attempt). One compare-and-set: only a direct message to that session, on no issue, neither a broadcast's copy nor a reply in a broadcast's thread, in a thread whose root targets it (409 ACCEPT_NOT_DIRECT), that a person wrote (409 ACCEPT_NOT_WRITTEN_BY_PERSON), sent as a Send or an Aside (409 ACCEPT_NOT_ASIDE_OR_STEER); only the message's latest attempt (409 ACCEPT_SUPERSEDED), when no attempt of it was accepted before (409 ACCEPT_ALREADY_ACCEPTED), which a person requested (409 ACCEPT_NOT_REQUESTED_BY_PERSON), that person being the message's author (409 ACCEPT_NOT_REQUESTED_BY_AUTHOR), which did not fail (409 ACCEPT_FAILED; a pending or sent attempt is taken), within the last minute (409 ACCEPT_STALE). Answers the attempt with accepted_at and accepted_as and the message's stored body; leaves the attempt's state to the send, and appends message.accepted.", s.acceptDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/reply", authBearer, "The targeted session's reply to a delivery; the session names itself in actor. Once the attempt is answered, ?follow_up=true posts other text as the session's follow-up, threaded under its first reply; with follow_up=false or absent, or with text the session already posted there, nothing is posted and the stored message comes back marked duplicate. Any other follow_up is 400 MESSAGE_INPUT.", s.replyMessage},
 		{http.MethodGet, "/api/v1/inbox", authHuman, "Open asks waiting on the caller, grouped by whose turn it is; ?project= and ?assignee=me|unassigned|<login> filter (unassigned includes document asks; an unlisted login is 400 ASSIGNEE_NOT_ALLOWED).", s.listInbox},
-		{http.MethodGet, "/api/v1/search", authAny, "Full-text search ?q= across issues, documents, asks, and comments.", s.search},
+		{http.MethodGet, "/api/v1/search", authAny, fmt.Sprintf("Full-text search ?q= across issues, documents, asks, and comments; a q over %d characters is 400 CAP_EXCEEDED.", contracts.SearchQueryMax), s.search},
 		{http.MethodGet, "/api/v1/agents", authAny, "Live sessions with roles, capabilities, open asks, and last activity.", s.listAgents},
 		{http.MethodGet, "/api/v1/agents/{session_id}/messages", authHuman, "A session's targeted messages, newest first.", s.listAgentMessages},
 		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session.", s.createAgentMessage},
@@ -123,8 +126,8 @@ func (s *server) routes() []apiRoute {
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authHuman, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
-		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document version.", s.createArtifactReview},
-		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open (or return) the approval ask for a document.", s.requestArtifactApproval},
+		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the approval ask open at that version, and retracts one naming an older version.", s.createArtifactReview},
+		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open the approval ask for a document's latest version, with an optional summary; a repeated request returns the ask open at that version and replaces a stale one, which names an older version.", s.requestArtifactApproval},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks", authAny, "A document's blocks with markdown ranges, tokens, and reference counts.", s.getArtifactBlocks},
 		{http.MethodGet, "/api/v1/artifacts/{id}/text", authAny, "A document's canonical markdown and whole-document token.", s.getArtifactText},
 		{http.MethodGet, "/api/v1/artifacts/{id}/versions/{number}", authAny, "One named or settled document version.", s.getArtifactVersion},

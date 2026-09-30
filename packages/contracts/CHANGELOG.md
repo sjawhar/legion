@@ -4,6 +4,9 @@
 
 ### Added
 
+- `LegionGoControllerSecretResponse` carries `designGate` (`root-issues` or `off`): the Go daemon
+  tells `legion controller start` its design gate policy, which the controller's take comment
+  reads before it promises a design approval.
 - Added `claimHolds(claim, titles)` and its `ClaimHolding` answer (`holds`, `lapsed`, `unknown`):
   whether a claim still holds its issue against the live agent registry. A person's always holds;
   a session's holds while the loaded registry lists it; with no registry it is `unknown`. The
@@ -12,6 +15,9 @@
 - Added the `Agent` row type behind Dispatch's `GET /api/v1/agents`.
 - Added required `Ask.opened_event_id`, the canonical event ID for an ask's opening turn.
 - Added `MAX_BROADCAST_RECIPIENTS`, the most sessions one `POST /api/v1/broadcasts` sends to, generated into Go as `contracts.MaxBroadcastRecipients`.
+- Added `SEARCH_QUERY_MAX`, the longest `dispatch_search` query (`GET /api/v1/search`'s `q`), generated into Go as `contracts.SearchQueryMax`; `dispatch_search`'s `query` now refuses a longer one before any request (LEGION-386).
+- Added `SEARCH_QUERY_HINT`, the sentence a refusal over `SEARCH_QUERY_MAX` adds, generated into Go as `contracts.SearchQueryHint`.
+- Added `maxHint` to `SchemaApi.string`'s options: text appended to the over-cap message, saying what to send instead.
 - Added `LegionGoChildRequest`, the body of the Go daemon's `POST /legion/v1/children/park` and `/rerun` (an architect's `park_child` and `rerun_child`), whose answers are `LegionGoEmptyResponse`.
 - Added optional `legionAppLogins` to `LegionGoGitHubTokenResponse` and to `LegionDaemonApi.GitHubToken`'s response: each Legion role App's login keyed by its App role (`{implement, review}`), on `/legion/v1/gh-token`, which `legion threads resolve` keeps out of its bot-thread rule and whose `review` login's `Accepted:` closes a bot's thread (LEGION-208).
 - Added optional `Message.broadcast_id`, the broadcast a message is one recipient's copy of: null
@@ -22,6 +28,16 @@
   accept route's answer: the attempt with the message's stored `body`), the `message.accepted`
   event (`MessageAcceptedEventPayload`), and `broadcast_id` on
   `DispatchTargetedMessagePayloadSchema` (LEGION-394).
+- Added `IssueSummaryPage` (`{issues, total, limit, offset}`), the answer of
+  `GET /api/v1/issues?limit=&offset=`, and `MAX_ISSUE_PAGE_LIMIT` (250) and
+  `DEFAULT_ISSUE_PAGE_LIMIT` (50), generated into Go as `contracts.MaxIssuePageLimit` and
+  `contracts.DefaultIssuePageLimit`, so the server's bounds and the `dispatch_issues` tool's `limit`
+  are one pair of numbers (LEGION-406).
+
+### Changed
+
+- The `dispatch_issues` description says Dispatch pages the listing and the answer names how many
+  issues match, where it said the rows were paged after the server returned the full response.
 
 ### Removed
 

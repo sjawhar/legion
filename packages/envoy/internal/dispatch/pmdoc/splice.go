@@ -613,13 +613,15 @@ func afterRange(node *Node, path []int, textblockStart, cut int) (*Node, error) 
 	return out, nil
 }
 
-func emptyDocument(doc *Node) bool {
+// EmptyDocument reports whether doc holds nothing but the one empty paragraph a document with no
+// content holds (Parse of empty markdown, DeleteBlock of its last block).
+func EmptyDocument(doc *Node) bool {
 	return len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0
 }
 
 func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool) ([]*Node, bool) {
 	var source []*Node
-	if !emptyDocument(with) {
+	if !EmptyDocument(with) {
 		source = make([]*Node, 0, len(with.Children))
 		for _, node := range with.Children {
 			source = append(source, cloneNode(node))
