@@ -332,4 +332,46 @@ describe("the model gateway key command", () => {
     expect(reused.code).toBe(1);
     expect(reused.stdout).toContain("is an earlier run's key command");
   });
+
+  test("a stage proof that refuses a reused evidence directory lists none of the earlier run's agents", async () => {
+    // The earlier run's evidence directory: its key command, and a record whose last call starved.
+    const { run: evidence, mints, keyCommand } = install();
+    await call(keyCommand, join(evidence, "issue-workspace"), mints, {
+      mode: "refused",
+      role: "tester",
+      generation: "1",
+    });
+    // Stage 3's teardown removes its containers; this run starts none, and needs no Docker.
+    const stageBin = join(dir, "stage-bin");
+    mkdirSync(stageBin, { recursive: true });
+    writeFileSync(join(stageBin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const stages: [string, Record<string, string>][] = [
+      ["stage3-devbox-workflow.sh", { STAGE3_EVIDENCE_DIR: evidence }],
+      [
+        "stage3-4b13b-acceptance.sh",
+        {
+          ACCEPT_EVIDENCE_DIR: evidence,
+          ACCEPT_PG_CONTAINER: "none",
+          ACCEPT_PG_PORT: "1",
+          ACCEPT_NATS_BIN: "/bin/false",
+        },
+      ],
+    ];
+    for (const [script, inputs] of stages) {
+      const result = Bun.spawnSync(["bash", join(lib, "..", script)], {
+        env: { PATH: `${stageBin}:${process.env.PATH}`, HOME: operatorHome, ...inputs },
+      });
+      const stderr = result.stderr.toString();
+      const scratch = /the run's scratch workspace(?:, kept for review,)? is (\S+)/.exec(
+        stderr
+      )?.[1];
+      if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+      expect(result.exitCode).toBe(1);
+      expect(stderr).toContain(
+        `FAIL setup: ${join(evidence, "model-gateway")} is an earlier run's key command`
+      );
+      // The earlier run's tester could not have failed this run's setup, which never started one.
+      expect(`${result.stdout}${stderr}`).not.toContain("may have failed check");
+    }
+  }, 120_000);
 });
