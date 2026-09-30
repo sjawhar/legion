@@ -66,16 +66,33 @@ func (s *Session) EnrollmentID() string {
 }
 
 func (s *Session) State() string {
-	if s.EnrollmentID() == "" {
-		return "enrolling"
-	}
-	return "enrolled"
+	return s.snapshot().State
 }
 
 func (s *Session) LastError() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastError
+}
+
+// sessionState is a session's enrollment as one read sees it: its id, the state that id means,
+// and the last attempt's error.
+type sessionState struct {
+	EnrollmentID string
+	State        string
+	LastError    string
+}
+
+// snapshot reads the session's enrollment under one lock, so a reply built from it cannot pair
+// one moment's id with another's state or error, however a lapse or an enrollment interleaves.
+func (s *Session) snapshot() sessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := "enrolled"
+	if s.enrollmentID == "" {
+		state = "enrolling"
+	}
+	return sessionState{EnrollmentID: s.enrollmentID, State: state, LastError: s.lastError}
 }
 
 func (s *Session) setEnrolled(id string) {
@@ -153,7 +170,8 @@ func (s *Session) recordedEnrollmentID() string {
 }
 
 func (s *Session) Info() SessionInfo {
-	return SessionInfo{PID: s.PID, RuntimeID: s.RuntimeID, EnrollmentID: s.EnrollmentID(), State: s.State(), RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339)}
+	st := s.snapshot()
+	return SessionInfo{PID: s.PID, RuntimeID: s.RuntimeID, EnrollmentID: st.EnrollmentID, State: st.State, RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339)}
 }
 
 // Record is a Session without its key: enough to re-pin the process after a helper restart and

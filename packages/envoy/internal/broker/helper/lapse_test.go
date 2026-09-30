@@ -396,11 +396,11 @@ func blockedInRegisterReply() bool {
 func TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne(t *testing.T) {
 	r := startRig(t, "")
 	sess, _ := newSession(1, 1, "h:1:1", nil)
-	if got := r.srv.notEnrolled(sess); got.Code != CodeNotEnrolled || got.Error != "this session is not enrolled with the broker yet" {
+	if got := r.srv.notEnrolled(sess.snapshot()); got.Code != CodeNotEnrolled || got.Error != "this session is not enrolled with the broker yet" {
 		t.Fatalf("no attempt yet: %+v", got)
 	}
 	sess.setError("broker 503 DATABASE: postgres unreachable")
-	if got := r.srv.notEnrolled(sess); got.Error != "this session is not enrolled with the broker yet; last attempt: broker 503 DATABASE: postgres unreachable" {
+	if got := r.srv.notEnrolled(sess.snapshot()); got.Error != "this session is not enrolled with the broker yet; last attempt: broker 503 DATABASE: postgres unreachable" {
 		t.Fatalf("after a failed attempt: %+v", got)
 	}
 }
