@@ -129,9 +129,13 @@ ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<id> …}`
 **Right:** put each decision in the design section it belongs to as an `:::ask{#slug}` block, with
 2–4 options, a recommendation, and surrounding prose that explains the trade-off.
 
-A spec that already has the pile is repaired with `move`, not rewritten, keeping each ask, its answer
-and its followers: see [Editing a document](skill://dispatch/references/document-edits.md), which
-also tells an ask's block id from its ask id.
+A spec that already has the pile is repaired with `move`, not rewritten: `dispatch_doc_edit` with
+`{ op: "move", block: "<block-uuid>", after: "<the sentence that states the options>" }` relocates
+the block and keeps its ask, its answer and its followers; the context paragraphs that were lifted
+out of Design move the same way, and the emptied section is deleted (the same repair, made on
+AGENTC-397 after Sami's 2026-09-20 request: "move the decisions items to be in context of their
+discussion in the spec, not just all piled up at the start with no context"). An ask block has two
+ids that differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
 
 See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
 [Asking](#asking) to decide whether the question is a real decision at all.

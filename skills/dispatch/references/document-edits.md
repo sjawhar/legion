@@ -175,14 +175,8 @@ deletion cannot undo a removal.
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
 an existing paragraph is the question that should become a decision.
 
-A spec whose decisions were piled at the top is repaired with `move`, not rewritten: `dispatch_doc_edit` with
-`{ op: "move", block: "<block-id>", after: "<the sentence that states the options>" }` relocates
-the block and keeps its ask, its answer and its followers; the context paragraphs that were lifted
-out of Design move the same way, and the emptied section is deleted (the same repair, made on
-AGENTC-397 after Sami's 2026-09-20 request: "move the decisions items to be in context of their
-discussion in the spec, not just all piled up at the start with no context"). An ask block has two
-ids: the block id, shown as `:::ask{#<id> …}` in the rendered document and taken bare by
-`move`/`delete` in `block` (the `block:<id>` form is only for `before`/`after` anchors), and the
-ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read` and
-`dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
+An ask block has two ids: the block id, shown as `:::ask{#<id> …}` in the rendered document and
+taken bare by `move`/`delete` in `block` (the `block:<id>` form is only for `before`/`after`
+anchors), and the ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read`
+and `dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
 `not found`.
