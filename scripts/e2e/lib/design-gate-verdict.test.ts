@@ -168,6 +168,39 @@ describe("design-gate-verdict.jq", () => {
     ]);
   });
 
+  // The flow legion-architect prescribes: the human answers the version-3 request with Request
+  // changes, the revision raises a second block, the human answers it, and the architect requests
+  // again. The version-3 request was answered, so only its version judges it.
+  test("a request the human answered with Request changes is not early for a block the revision raised", () => {
+    const raised = {
+      ...block,
+      block_id: "block-2",
+      question: "Which date format?",
+      created_at: "2026-09-30T10:10:00Z",
+      answer: { at: "2026-09-30T10:15:00Z" },
+    };
+    const asks = [
+      block,
+      approval(3, "2026-09-30T10:06:00Z", "answered"),
+      raised,
+      approval(6, "2026-09-30T10:16:00Z", "answered"),
+    ];
+    expect(verdict(asks, [specAt(3, "answered"), specAt(6, "answered")], 6)).toMatchObject({
+      blocks: 2,
+      early: [],
+    });
+  });
+
+  // Dispatch writes a list item that opens with code on its marker line, so a fence reader takes
+  // that item's closing fence for an opener and would hide every block after it.
+  test("a block after a list item that opens with code is still read", () => {
+    const listed = specAt(5, "open");
+    listed.markdown = `## Setup\n\n- \`\`\`sh\n  make smoke\n  \`\`\`\n${listed.markdown}`;
+    expect(
+      verdict([block, approval(5, "2026-09-30T10:06:00Z", "answered")], [listed]).early
+    ).toEqual(["version 5: Where does the smoke file go?"]);
+  });
+
   test("a block quoted in a fenced code block is not an open block", () => {
     const quoted = specAt(5, "answered");
     quoted.markdown +=
