@@ -141,34 +141,34 @@ it.
 `admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything
 you add). With none free, stop.
 
-**Candidates.** Every open issue of the project in `todo`, `backlog`, or `triage`. List each of
-the three statuses in full (`status: "backlog"` and `status: "triage"` the same way); the project
-has hundreds of issues, so read every page:
+**Candidates.** The project's open issues in `todo`, `backlog`, or `triage`, taken one priority at
+a time: `priority: [0]` first, then `[1]`, `[2]`, `[3]`, and `[null]` (no priority) last. Within
+one priority, list `todo`, then `backlog`, then `triage`, since `todo` is what a person already
+called ready; within one status, keep the listing's order, which is the board's rank:
 
 ```text
-dispatch_issues({ project: "<PROJECT>", status: "todo", limit: 250, offset: 0 })
+dispatch_issues({ project: "<PROJECT>", status: "todo", priority: [0], limit: 250, offset: 0 })
 ```
 
-When the first line ends `(showing 1-250 of N)`, call again with `offset: 250`, then `500`, until
-the page's last row is row N. `<PROJECT>` is the Dispatch project key, the prefix of this
-deployment's issue keys (`AGENTC-12` → `AGENTC`), never the lowercase project token that
-`legion state --json` shows as `daemon.project`. Order the rows by priority first: `P0`, `P1`,
-`P2`, `P3`, then rows with no priority. Within one priority, take `todo` rows first, then
-`backlog`, then `triage`, since `todo` is what a person already called ready; within one status,
-keep the listing's order, which is the board's rank.
+When the first line ends `(showing 1-250 of N)`, the next page is `offset: 250`, then `500`. Read
+pages only as far as you need: stop listing once the free slots are filled. `<PROJECT>` is the
+Dispatch project key, the prefix of this deployment's issue keys (`AGENTC-12` → `AGENTC`), which is
+also `daemon.project` in `legion state --json`: the project key exactly as `legion.yaml` writes it.
+A row whose line shows `claimed by …` without a closing `· not running` is claimed (the table
+below): skip it without reading it.
 
-**Walk.** Take the candidates in that order until the free slots are filled. Read each one with
+**Walk.** Take the remaining rows in that order until the free slots are filled. Read each one with
 `dispatch_read({ issue: "<KEY>" })` and skip it when any of these holds:
 
 | Skip when | How you check it |
 |---|---|
 | It is not a root | `Links:` names a `child_of` issue. Its parent's architect owns it. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
-| Legion already has it | `legion state --json` lists it in `admission.active` or `admission.waiting`, or records it under `issues` while it is in `triage`: a person pulled it back, so name it in your summary as step 2 above says. |
+| Legion ran it before | `legion state --json` records it under `issues`, whatever its status: a running tree, a waiting one, a tree a person pulled back to `triage` or parked, or one you parked yourself. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion; only a person does, by moving it to `todo` or labelling it again. |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
 | Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
 | A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. You cannot read GitHub, so an open, merged, or closed pull request all count. A person who wants Legion on it anyway hands it over themselves: the label, then `todo`. |
 | Its assignee is working it | `Assignee:` names a person who holds the claim (the row above), or whose own comment or message among `Events:` says they are working on it. The assignee alone is who answers the issue's questions, not who works it. |
-| A person parked it with a reason | It is in `backlog`, the `Events:` line that moved it there (`issue.updated · user <login> · … · status backlog`) is a person's, and a comment or message says why. When the events the read shows do not reach back to that move, you cannot tell who parked it: skip it. A session's move is not a person's parking. |
+| It was parked on purpose | It is in `backlog`, and the `Events:` line that moved it there (`issue.updated · … · status backlog`) is a person's (`user <login>`) with a comment or message saying why, or yours: its actor is your own session, which `dispatch_whoami({})` names, or it sits beside a controller's triage note. When the events the read shows do not reach back to that move, you cannot tell who parked it: skip it. |
 | It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch_doc_read({ issue: "<KEY>" })`). When in doubt, skip it. |
 
 **Take.** For each candidate that passes, in order:
