@@ -69,6 +69,7 @@ case "$path" in
     if [ -e "$d/runs.capped.json" ]; then serve "$d/runs.capped.json" '{"total_count":0,"workflow_runs":[]}'
     else serve "$d/runs.json" '{"total_count":0,"workflow_runs":[]}'; fi ;;
   repos/*/actions/runs/*/artifacts*) serve "$d/artifacts-run-$(id_in runs).json" '{"total_count":0,"artifacts":[]}' ;;
+  repos/*/actions/runs/*/jobs*) serve "$d/jobs-run-$(id_in runs).json" '{"total_count":0,"jobs":[]}' ;;
   repos/*/actions/artifacts/*/zip)
     zip="$d/zip-$(id_in artifacts).zip"
     [ -e "$zip" ] || not_found
@@ -217,6 +218,15 @@ add_run_artifact() {
   [ -e "$file" ] || echo '{"total_count": 0, "artifacts": []}' > "$file"
   append "$file" .artifacts "$(artifact_json "$id" "$3" "$1" "$(run_created "$1")")"
   zip_artifact "$id" "$4" "$5"
+}
+
+# add_security_job RUN_ID CONCLUSION: the run's jobs listing, whose security job's `Upload the
+# report` step concluded CONCLUSION (success, skipped, failure), or holds no such step (-).
+add_security_job() {
+  local steps='[{"name": "Build the report", "conclusion": "failure"}]'
+  if [ "$2" != - ]; then steps=$(jq -c --arg c "$2" '. + [{name: "Upload the report", conclusion: $c}]' <<<"$steps"); fi
+  jq -n --argjson steps "$steps" '{total_count: 2, jobs: [{name: "window", conclusion: "success", steps: []},
+    {name: "security", conclusion: "failure", steps: $steps}]}' > "$d/jobs-run-$1.json"
 }
 
 # add_marker NAME RUN_ID [JSON]: a marker artifact of a run (zizmor-new, zizmor-tool-error or
@@ -515,8 +525,41 @@ fails_loudly "C. a main report with head_count renamed" \
 
 setup strict-report "3 days ago"
 add_run 1001 schedule main "$(iso '1 day ago')"
+add_security_job 1001 success
 run_report
-fails_loudly "a main run with no security-report artifact" "run 1001 has no security-report artifact"
+fails_loudly "a main run whose security job uploaded a report that is not there" \
+  "run 1001 has no security-report artifact, though its security job's Upload the report step succeeded"
+
+echo "=== main's rows are bounded by the window; a run whose security job never uploaded its report is named and skipped ==="
+setup bounded-only "15 days ago"
+add_run 1001 schedule main "$(iso '5 days ago')"
+add_report 1001 "$clean_report"
+add_run 1003 schedule main "$(iso '12 hours ago')"
+add_report 1003 "$clean_report"
+run_report
+check "every run with a report: the one inside the window has a row" "$(has "| 1001 | schedule |")"
+check "and the one after the window closed has none" "$(lacks "| 1003 |")"
+check "which rule 1a still reads, as main's newest run" "$(has "zizmor on main: 0 findings (run 1003, schedule)")"
+setup bounded "15 days ago"
+add_run 1001 schedule main "$(iso '5 days ago')"
+add_report 1001 "$clean_report"
+# 1002's security job failed before its upload; 1004 has no security job at all.
+add_run 1002 schedule main "$(iso '4 days ago')" failure
+add_security_job 1002 skipped
+add_run 1003 schedule main "$(iso '12 hours ago')"
+add_report 1003 "$clean_report"
+add_run 1004 workflow_dispatch main "$(iso '2 hours ago')" failure
+run_report
+check "exits 1, the decision, not 2" "$(is "$rc" 1)"
+check "a scheduled run inside the window has a row" "$(has "| 1001 | schedule |")"
+check "a scheduled run after the window closed has none" "$(lacks "| 1003 |")"
+check "a run whose security job skipped its upload has no row" "$(lacks "| 1002 |")"
+check "and is named, with why" \
+  "$(has "skipped: run 1002 (schedule, $(run_created 1002)) has no security-report; its security job's Upload the report step skipped")"
+check "a run with no security job is named" \
+  "$(has "skipped: run 1004 (workflow_dispatch, $(run_created 1004)) has no security-report; it has no security job")"
+check "rule 1a reads past it to main's newest run with a report" "$(has "zizmor on main: 0 findings (run 1003, schedule)")"
+check "each skipped run is named once" "$(is "$(grep -c "skipped: run 1004 " <<<"$output")" 1)"
 
 setup strict-expired "15 days ago"
 pr_with_findings 98 feat-t 9801 9802 "$(audit "$a_artipacked")" '[]' '[]'
@@ -527,7 +570,7 @@ fails_loudly "an expired zizmor-new marker (exit 2, not the decision's 1)" \
   "artifact 98013 (zizmor-new) of run 9801 has expired; its zizmor-findings.json can no longer be read"
 
 setup strict-tool-error "15 days ago"
-add_run 1001 schedule main "$(iso '1 day ago')"
+add_run 1001 schedule main "$(iso '2 days ago')"
 add_report 1001 "$(security_report '{"tool_error": true, "head_count": null, "new_count": null}' clean)"
 run_report
 check "a zizmor tool error on main's newest run: its row reads the tool error" \

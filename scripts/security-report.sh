@@ -62,9 +62,9 @@
 # these), `zizmor-tool-error` (the run has no zizmor result; rule 1b skips it) and `zizmor-new` (a
 # pull_request run found zizmor findings new against its base; its zip is that run's
 # zizmor-findings.json).
-#   - runs on main: every scheduled and dispatched run since the window opened, and main's newest
-#     push run, each with its security-report; rule 1a reads the newest completed one with a
-#     zizmor result.
+#   - runs on main: every scheduled and dispatched run inside the window, and main's newest push
+#     run, each with its security-report; rules 1a and 2 read the newest completed one with a
+#     result, looking back through main's newest ten runs.
 #   - merged pull requests (merged inside the window): a PR's runs are matched by head branch and
 #     time, since GitHub empties a run's pull_requests list once the PR closes, and a run with a
 #     zizmor-tool-error marker is skipped. new₀ is the new set of its first run (from that run's
@@ -79,8 +79,11 @@
 # Every artifact is read strictly: a run's security-report or zizmor-findings artifact that is
 # missing, expired or not in the shape the Security workflow writes (.github/scripts/
 # security-run.sh, .github/scripts/zizmor-findings.sh), or a zizmor-new marker that lists nothing
-# new, stops the report with exit 2 naming it. Only a half that recorded a tool error reads as no
-# result.
+# new, stops the report with exit 2 naming it. The one exception is a main run whose security job
+# never reached its `Upload the report` step, as the run's jobs listing shows: it has no report to
+# read, so it is named on a `skipped:` line and has no result; one whose upload step succeeded and
+# left no artifact still stops the report. Only a half that recorded a tool error, or a skipped
+# run, reads as no result.
 # Nothing published here carries a CodeQL location or a secret: alerts are counted by rule,
 # severity and state.
 #
@@ -213,12 +216,18 @@ def artifacts_of(run_id):
     return list(paged(f"repos/{repo}/actions/runs/{run_id}/artifacts", "artifacts"))
 
 
+def newest_artifact(run_id, name):
+    """The run's newest artifact called NAME, or None."""
+    found = [artifact for artifact in artifacts_of(run_id) if artifact["name"] == name]
+    return max(found, key=lambda artifact: artifact["id"]) if found else None
+
+
 def run_artifact(run_id, name):
     """The run's newest artifact called NAME; the Security workflow uploads one on every run."""
-    found = [artifact for artifact in artifacts_of(run_id) if artifact["name"] == name]
-    if not found:
+    artifact = newest_artifact(run_id, name)
+    if artifact is None:
         fail(f"run {run_id} has no {name} artifact")
-    return max(found, key=lambda artifact: artifact["id"])
+    return artifact
 
 
 def artifact_file(artifact, filename):
@@ -245,11 +254,47 @@ def is_count(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+# The security job's step that uploads its security-report (.github/workflows/security.yaml).
+UPLOAD_STEP = "Upload the report"
+
+
+@functools.cache
+def missing_report(run_id):
+    """Why a completed run has no security-report artifact: its security job never reached UPLOAD_STEP,
+    as the run's jobs listing shows. Fails when that step succeeded: the artifact is then lost, not
+    never made."""
+    jobs = [job for job in paged(f"repos/{repo}/actions/runs/{run_id}/jobs", "jobs") if job.get("name") == "security"]
+    if not jobs:
+        return "it has no security job"
+    steps = [step for step in jobs[-1].get("steps") or [] if step.get("name") == UPLOAD_STEP]
+    if not steps:
+        return f"its security job has no {UPLOAD_STEP} step"
+    if steps[-1].get("conclusion") == "success":
+        fail(f"run {run_id} has no security-report artifact, though its security job's {UPLOAD_STEP} step succeeded")
+    return f"its security job's {UPLOAD_STEP} step {steps[-1].get('conclusion')}"
+
+
+named_skips = set()
+
+
+def name_skipped(run):
+    """Names, once, a main run the report skips for having no security-report (missing_report)."""
+    if run["id"] not in named_skips:
+        named_skips.add(run["id"])
+        print(f"skipped: run {run['id']} ({run['event']}, {run['created_at']}) has no security-report; "
+              f"{missing_report(run['id'])}")
+
+
 @functools.cache
 def security_report(run_id):
     """The run's security-report.json as {half: its counts, or None where that half recorded a tool
-    error, "tool_error": bool}; fails when the run has none or it is not in the security job's shape."""
-    report = artifact_file(run_artifact(run_id, "security-report"), "security-report.json")
+    error, "tool_error": bool}, or None when its security job never uploaded one (missing_report);
+    fails when a report is missing otherwise or is not in the security job's shape."""
+    artifact = newest_artifact(run_id, "security-report")
+    if artifact is None:
+        missing_report(run_id)
+        return None
+    report = artifact_file(artifact, "security-report.json")
     where = f"run {run_id}'s security-report.json"
     shape(isinstance(report, dict) and isinstance(report.get("tool_error"), bool), where, "has no tool_error")
     halves = {"tool_error": report["tool_error"]}
@@ -356,28 +401,35 @@ def completed(runs):
 
 
 def print_main_runs(done, window):
-    """A row for every scheduled and dispatched run since the window opened, and main's newest push."""
-    rows = [run for run in done if run["event"] != "push" and when(run["created_at"]) >= window.start]
+    """A row for every scheduled and dispatched run inside the window, and main's newest push; a run
+    with no security-report is named after the table instead (name_skipped)."""
+    rows = [run for run in done if run["event"] != "push" and window.holds(run["created_at"])]
     rows += [run for run in done if run["event"] == "push"][-1:]
+    reports = [(run, security_report(run["id"])) for run in sorted(rows, key=lambda run: run["created_at"])]
     print()
     print("## Runs on main")
     print()
     print("| run | event | head | zizmor head/new | osv total/with-fix | govulncheck reachable/informational | tool error |")
     print("| --- | --- | --- | --- | --- | --- | --- |")
-    for run in sorted(rows, key=lambda run: run["created_at"]):
-        found = security_report(run["id"])
-        print(f"| {run['id']} | {run['event']} | {run['head_sha'][:7]} | {pair(found['zizmor'], 'head_count', 'new_count')} "
-              f"| {pair(found['osv'], 'total', 'with_fix')} | {pair(found['govulncheck'], 'reachable', 'informational')} "
-              f"| {'yes' if found['tool_error'] else 'no'} |")
+    for run, found in reports:
+        if found is not None:
+            print(f"| {run['id']} | {run['event']} | {run['head_sha'][:7]} | {pair(found['zizmor'], 'head_count', 'new_count')} "
+                  f"| {pair(found['osv'], 'total', 'with_fix')} | {pair(found['govulncheck'], 'reachable', 'informational')} "
+                  f"| {'yes' if found['tool_error'] else 'no'} |")
+    for run, found in reports:
+        if found is None:
+            name_skipped(run)
 
 
 def newest_on_main(done, *halves):
     """(run, its security_report) of the newest completed main run with a result for every one of
     HALVES, looking back LOOKBACK runs at most, or None: a longer run of tool errors is itself the
-    answer (no result on main)."""
+    answer (no result on main). A run with no security-report is named and has no result."""
     for run in list(reversed(done))[:LOOKBACK]:
         found = security_report(run["id"])
-        if all(found[half] is not None for half in halves):
+        if found is None:
+            name_skipped(run)
+        elif all(found[half] is not None for half in halves):
             return run, found
     return None
 
