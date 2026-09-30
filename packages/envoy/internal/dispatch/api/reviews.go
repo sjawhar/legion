@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -78,23 +78,6 @@ func (s *server) loadReviews(ctx context.Context, q queryer, artifactID string) 
 		reviews = []model.ArtifactReview{}
 	}
 	return reviews, nil
-}
-
-// openApprovalAsk is the open approval ask about an artifact, if any.
-func (s *server) openApprovalAsk(ctx context.Context, q queryer, artifactID string) (*model.Ask, error) {
-	ask, err := scanAskRow(q.QueryRow(ctx, `
-		select `+askRowColumns+`
-		`+askRowFrom+`
-		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = $1
-		order by a.created_at desc limit 1
-	`, artifactID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &ask, nil
 }
 
 // attachApprovals fills Approval for every document in place: one query for the
@@ -263,8 +246,9 @@ func reviewFromAnswer(selected []string, text *string) (string, *string, error) 
 
 // refuseStaleApprovalAsk refuses an answer to an approval ask that names an older version than
 // the document's latest settled one, since its question never named what the review would pin.
-// The caller holds the document owner's row, which every version write takes first, so the
-// version cannot move between this read and the review.
+// Every version this server writes retracts such an ask (docs.RetractStaleApprovalAsks), so this
+// guards one an older server left open. The caller holds the document owner's row, which every
+// version write takes first, so the version cannot move between this read and the review.
 func refuseStaleApprovalAsk(ctx context.Context, q queryer, ask model.Ask) error {
 	version, err := settledVersionNumber(ctx, q, ask.Approval.ArtifactID)
 	if err != nil {
@@ -355,20 +339,15 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NO_VERSION", http.StatusConflict, "the document has no settled version to review yet")
 		return
 	}
-	var events []model.Event
-	var askID *string
-	if open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID); err != nil {
+	// An open ask naming an older version is retracted, so the review cites no ask about another
+	// version; one at this version is answered by it.
+	open, events, err := docs.ApprovalAskAt(r.Context(), tx, s.deps.Events, artifact.ID, version, actor, "that version was reviewed from the document header instead")
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	} else if open != nil && open.Approval.Version != version {
-		// The open ask names a version the document has moved past, which no answer can review any
-		// more (APPROVAL_ASK_STALE), so this review retracts it and cites no ask.
-		retraction := fmt.Sprintf("%s moved on to version %d; that version was reviewed from the document header instead", artifact.Name, version)
-		if _, events, err = s.closeAskTx(r.Context(), tx, open.ID, actor, s.resolveTransition(actor, "retracted", retraction)); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	} else if open != nil {
+	}
+	var askID *string
+	if open != nil {
 		selected := approvalOptionApprove
 		if state == "changes_requested" {
 			selected = approvalOptionRequestChanges
@@ -378,7 +357,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = answeredEvents
+		events = append(events, answeredEvents...)
 		askID = &answered.ID
 	}
 	review, event, err := s.writeReview(r.Context(), tx, artifact, version, state, actor, reason, askID)
@@ -469,28 +448,25 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
-	open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID)
+	// An open ask naming a version the document has moved past, which no answer can approve any
+	// more (APPROVAL_ASK_STALE), is replaced by this request; one at this version is returned.
+	open, events, err := docs.ApprovalAskAt(r.Context(), tx, s.deps.Events, artifact.ID, version, actor, "approval is requested for that version instead")
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if open != nil && open.Approval.Version == version {
+	if open != nil {
 		if err := s.attachOpenedEventIDs(r.Context(), tx, []*model.Ask{open}); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
-		return
-	}
-	var events []model.Event
-	if open != nil {
-		// The open request names a version the document has moved past, which no answer can
-		// approve any more (APPROVAL_ASK_STALE), so this request replaces it.
-		reason := fmt.Sprintf("%s moved on to version %d; approval is requested for that version instead", artifact.Name, version)
-		if _, events, err = s.closeAskTx(r.Context(), tx, open.ID, actor, s.resolveTransition(actor, "retracted", reason)); err != nil {
+		if err := tx.Commit(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		s.publish(events...)
+		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
+		return
 	}
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {

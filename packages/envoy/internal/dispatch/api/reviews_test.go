@@ -173,7 +173,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 // version and opens one at the latest.
 func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -255,15 +255,10 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 		t.Fatalf("summary over the cap on a repeat at the same version: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 
-	// A repeat after a new version retracts that ask and opens one at the new version.
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("revise document: %v", err)
-	}
-	if named := dispatchRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
-		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
-		t.Fatalf("settle revised version: status=%d body=%s", named.Code, named.Body.String())
-	}
+	// A repeat after a new version retracts that ask and opens one at the new version. This
+	// server's version writes retract the ask themselves, so the version here is one an older
+	// server wrote.
+	writeVersionAsAnOlderServer(t, database, issue.PrimaryArtifactID)
 	revised := "Adds the retry budget."
 	second := request(issue.PrimaryArtifactID, &revised)
 	if second.Code != http.StatusCreated {
@@ -319,13 +314,28 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 	}
 }
 
+// writeVersionAsAnOlderServer writes version 2 of the document straight into the table, as a
+// server that predates the version writer's retraction wrote every version: an approval ask
+// naming version 1 stays open, which no version this server writes leaves.
+func writeVersionAsAnOlderServer(t *testing.T, database *store.Store, artifactID string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		select $1, max(number) + 1, 'A revised spec', '[{"kind":"user","id":"alice"}]'
+		from artifact_versions where artifact_id = $1
+	`, artifactID); err != nil {
+		t.Fatalf("write a version as an older server: %v", err)
+	}
+}
+
 // An answer to an approval ask pins its review to the document's latest settled version, so an ask
 // naming an older version is not answered: its question never named what the review would
-// approve. The human reviews from the document header, or waits for a new request; the header's
-// review retracts the old ask rather than citing it.
+// approve. This server retracts such an ask when it writes the version; one an older server left
+// open is refused. The human reviews from the document header, or waits for a new request; the
+// header's review retracts the old ask rather than citing it.
 func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -344,15 +354,8 @@ func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
 		} `json:"ask"`
 	}](t, requested).Ask.ID
 
-	// The document moves on to version 2, and nobody asks again.
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("revise document: %v", err)
-	}
-	if named := dispatchRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
-		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
-		t.Fatalf("settle revised version: status=%d body=%s", named.Code, named.Body.String())
-	}
+	// The document moves on to version 2 on an older server, and nobody asks again.
+	writeVersionAsAnOlderServer(t, database, issue.PrimaryArtifactID)
 	for _, answer := range []map[string]any{
 		{"selected": []string{"Approve"}},
 		{"selected": []string{"Request changes"}, "text": "Keep the old budget."},
@@ -398,6 +401,152 @@ func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
 	if retracted.State != "resolved" || retracted.Resolution == nil || retracted.Resolution.Kind != "retracted" || !strings.Contains(retracted.Resolution.Reason, "version 2") || retracted.Resolution.Actor.ID != "alice" {
 		t.Fatalf("the ask naming version 1 after the header approve = %#v, want retracted by alice with a reason naming version 2", retracted)
 	}
+}
+
+// A new version of a document retracts an approval ask naming an older one in the same
+// transaction, in the writer's name and with a reason naming the new version, since no answer
+// could review that ask any more; its followers learn from the ask.resolved that approval has to
+// be requested again. Every path that writes a version does it, and a write that versions nothing
+// leaves the ask open.
+func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
+	session := sessionActor()["id"].(string)
+	edit := func(t *testing.T, handler http.Handler, artifactID string, body map[string]any) {
+		t.Helper()
+		body["ops"] = []map[string]string{{"op": "replace", "find": "A spec", "with": "A revised spec"}}
+		body["actor"] = sessionActor()
+		if edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", body); edited.Code != http.StatusOK {
+			t.Fatalf("edit the document: status=%d body=%s", edited.Code, edited.Body.String())
+		}
+	}
+	type document struct {
+		handler         http.Handler
+		documentService *docs.Service
+		issueKey        string
+		artifactID      string
+		askID           string
+	}
+	open := func(t *testing.T, settle time.Duration) document {
+		t.Helper()
+		var documentService *docs.Service
+		handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+			documentService = docs.New(docs.Deps{Store: database, Settle: settle})
+			t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+			return documentService
+		})
+		issue := createInteractionIssue(t, handler, "TEST", "Retracted approval", "A spec")
+		requested := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests", map[string]any{
+			"actor": sessionActor(), "summary": "Caps retries at three attempts.",
+		})
+		if requested.Code != http.StatusCreated {
+			t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+		}
+		askID := decodeBody[struct {
+			Ask struct {
+				ID string `json:"id"`
+			} `json:"ask"`
+		}](t, requested).Ask.ID
+		return document{handler, documentService, issue.Key, issue.PrimaryArtifactID, askID}
+	}
+	type askRead struct {
+		Ask struct {
+			State      string `json:"state"`
+			Resolution *struct {
+				Kind   string `json:"kind"`
+				Reason string `json:"reason"`
+				Actor  struct {
+					ID string `json:"id"`
+				} `json:"actor"`
+			} `json:"resolution"`
+		} `json:"ask"`
+	}
+
+	for _, write := range []struct {
+		name   string
+		writer string
+		settle time.Duration
+		write  func(t *testing.T, doc document)
+	}{
+		{"an edit", session, time.Hour, func(t *testing.T, doc document) {
+			edit(t, doc.handler, doc.artifactID, map[string]any{"summary": "revise"})
+		}},
+		{"a settled edit", session, 20 * time.Millisecond, func(t *testing.T, doc document) {
+			edit(t, doc.handler, doc.artifactID, map[string]any{})
+			waitForArtifactVersion(t, doc.handler, doc.artifactID, 2)
+		}},
+		{"a named version", "alice", time.Hour, func(t *testing.T, doc document) {
+			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				t.Fatalf("revise document: %v", err)
+			}
+			if named := dispatchRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+				t.Fatalf("name a version: status=%d body=%s", named.Code, named.Body.String())
+			}
+		}},
+		{"an upload", session, time.Hour, func(t *testing.T, doc document) {
+			if uploaded := sessionRequest(t, doc.handler, http.MethodPost, "/api/v1/issues/"+doc.issueKey+"/artifacts", map[string]any{
+				"actor": sessionActor(), "name": "spec.md", "content": "A revised spec",
+			}); uploaded.Code != http.StatusCreated {
+				t.Fatalf("upload a version: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+			}
+		}},
+	} {
+		t.Run(write.name, func(t *testing.T) {
+			doc := open(t, write.settle)
+			write.write(t, doc)
+
+			retracted := decodeBody[askRead](t, dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/asks/"+doc.askID, nil, "alice")).Ask
+			if retracted.State != "resolved" || retracted.Resolution == nil || retracted.Resolution.Kind != "retracted" || retracted.Resolution.Actor.ID != write.writer || !strings.Contains(retracted.Resolution.Reason, "version 2") {
+				t.Fatalf("the ask naming version 1 after %s = %#v, want retracted by %s with a reason naming version 2", write.name, retracted, write.writer)
+			}
+			if strings.HasPrefix(retracted.Resolution.Reason, docs.SettlementRetractionReason) {
+				t.Fatalf("retraction reason %q is one only document settlement writes", retracted.Resolution.Reason)
+			}
+			if got := readApproval(t, doc.handler, doc.artifactID); got.Approval.State != "draft" || got.Approval.LatestVersion != 2 || got.Approval.AskID != nil {
+				t.Fatalf("approval after %s = %#v, want draft at version 2 with no ask open", write.name, got.Approval)
+			}
+			log := dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/issues/"+doc.issueKey+"/events", nil, "alice")
+			var events []struct {
+				Type  string `json:"type"`
+				Actor struct {
+					ID string `json:"id"`
+				} `json:"actor"`
+				Payload struct {
+					ID string `json:"id"`
+				} `json:"payload"`
+			}
+			if err := json.NewDecoder(log.Body).Decode(&events); err != nil {
+				t.Fatalf("decode events: %v", err)
+			}
+			resolved := 0
+			for _, event := range events {
+				if event.Type == "ask.resolved" && event.Payload.ID == doc.askID {
+					resolved++
+					if event.Actor.ID != write.writer {
+						t.Fatalf("ask.resolved actor = %q, want the writer %s", event.Actor.ID, write.writer)
+					}
+				}
+			}
+			if resolved != 1 {
+				t.Fatalf("ask.resolved events for %s = %d, want 1", doc.askID, resolved)
+			}
+		})
+	}
+
+	t.Run("a write that versions nothing", func(t *testing.T) {
+		doc := open(t, time.Hour)
+		unchanged := sessionRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/edits", map[string]any{
+			"ops":     []map[string]string{{"op": "replace", "find": "A spec", "with": "A spec"}},
+			"summary": "nothing", "actor": sessionActor(),
+		})
+		if unchanged.Code != http.StatusOK || !strings.Contains(unchanged.Body.String(), `"changed":false`) {
+			t.Fatalf("an edit that changes nothing: status=%d body=%s", unchanged.Code, unchanged.Body.String())
+		}
+		if still := decodeBody[askRead](t, dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/asks/"+doc.askID, nil, "alice")).Ask; still.State != "open" {
+			t.Fatalf("the ask at the latest version after an edit that versions nothing = %#v, want open", still)
+		}
+		if got := readApproval(t, doc.handler, doc.artifactID); got.Approval.State != "awaiting" || got.Approval.LatestVersion != 1 || got.Approval.AskID == nil || *got.Approval.AskID != doc.askID {
+			t.Fatalf("approval after an edit that versions nothing = %#v, want awaiting on ask %s", got.Approval, doc.askID)
+		}
+	})
 }
 
 func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
