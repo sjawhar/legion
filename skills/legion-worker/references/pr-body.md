@@ -27,8 +27,6 @@ left open <thread URL> — newest reply by <login> is not its opener's or the Le
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
 
-**Security:** `Security` run <run-id> at <head-sha>: <n> new findings against the base (report-only until the window closes) or 0; pair: <the review's Security: line>. (omitted with Thermo on a docs-only PR)
-
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
 Negative control: <deliberately broken input> → <refusal or failure observed>.
 
