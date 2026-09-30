@@ -373,3 +373,21 @@ test("running an action fires its binding once with a keydown carrying its first
   // not about the row order `actions()` chose (pinned by its own test above).
   expect([...fired].sort()).toEqual(["close:", "snooze:s"]);
 });
+
+test("a row runs its binding only if the binding still applies when the row is chosen", () => {
+  const { keymap } = harness();
+  let closed = true;
+  const reopen = binding("reopen", [], { label: "Reopen issue", when: () => closed });
+  keymap.register("issue", [reopen.definition]);
+  keymap.pushScope("issue");
+  const [row] = keymap.actions();
+
+  // The issue was reopened elsewhere while the palette was open: the row's control has gone.
+  closed = false;
+  row?.run();
+  expect(reopen.fired()).toBe(0);
+
+  closed = true;
+  row?.run();
+  expect(reopen.fired()).toBe(1);
+});

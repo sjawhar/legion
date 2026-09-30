@@ -1,7 +1,16 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { openAgents, seedAgents, setLiveSessions } from "./agents";
-import { createAsk, createIssue, createProject, getIssue } from "./api";
+import {
+  createAsk,
+  createIssue,
+  createProject,
+  getIssue,
+  patchIssue,
+  putArchitectureSource,
+  syncArchitectureSource,
+} from "./api";
+import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -52,15 +61,11 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     ]);
     await expect(actions.getByRole("option", { name: "Set priority P2" })).toBeVisible();
     await expect(actions.getByRole("option", { name: "Reopen issue" })).toHaveCount(0);
-    // A binding whose whole job is to open a palette cannot be a palette row: selecting one runs
-    // it and then closes the palette in the same batch, so the row would do nothing at all.
-    for (const opensThePalette of [
-      "Go to project…",
-      "Search",
-      "Search only",
-      "Keyboard shortcuts",
-    ]) {
-      await expect(actions.getByRole("option", { name: opensThePalette })).toHaveCount(0);
+    // `$mod+k` fires inside an input, as the palette's own close, so it is no row, and `/` would
+    // only reopen this palette with its actions taken away. A binding that opens anything else is
+    // a row: it runs once this palette has closed (the rows below).
+    for (const absent of ["Search and actions", "Search only"]) {
+      await expect(actions.getByRole("option", { exact: true, name: absent })).toHaveCount(0);
     }
     await page.screenshot({
       path: testInfo.outputPath(`palette-actions-${testInfo.project.name}.png`),
@@ -657,6 +662,271 @@ test("the Agents page offers a row's picker, which then commits a keyboard pick 
     const field = row.getByRole("textbox", { name: "Comment" });
     await expect(field).toBeFocused();
     await expect(field).toHaveValue("@Planner");
+  } finally {
+    await context.close();
+  }
+});
+
+test("hits that arrive after the reader has arrowed keep the highlight on the row they chose", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held issue search" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    // Hold the search the way a slow network would, so the reader arrows before the hits arrive.
+    const release = Promise.withResolvers<void>();
+    let held = 0;
+    await page.route(
+      (url) => url.pathname === "/api/v1/search",
+      async (route) => {
+        held += 1;
+        await release.promise;
+        await route.continue();
+      }
+    );
+    await openIssue(page, issue.key, "Held issue search");
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const input = page.getByRole("combobox", { name: "Search" });
+    const rows = dialog.getByRole("group", { name: "Actions" }).getByRole("option");
+    await input.fill("issue");
+    const create = rows.filter({ hasText: "Create issue" });
+    await expect(create).toHaveCount(1);
+    const createId = await create.getAttribute("id");
+    const ids = await rows.evaluateAll((options) => options.map((option) => option.id));
+    for (let step = 0; step < ids.indexOf(createId ?? ""); step += 1) {
+      await input.press("ArrowDown");
+    }
+    await expect(input).toHaveAttribute("aria-activedescendant", createId as string);
+    await expect.poll(() => held).toBeGreaterThan(0);
+
+    release.resolve();
+    await expect(dialog.getByRole("option").last()).toHaveAttribute("id", /^search-option-issue-/);
+    await expect(input).toHaveAttribute("aria-activedescendant", createId as string);
+    await input.press("Enter");
+    await expect(page.getByRole("dialog", { name: "Create issue" })).toBeVisible();
+    expect((await getIssue(issue.key)).status).not.toBe("done");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a row whose control has gone since the palette opened does nothing", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Stale row" });
+  await patchIssue(issue.key, { status: "done" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    let patches = 0;
+    page.on("request", (request) => {
+      if (request.method() === "PATCH" && request.url().endsWith(`/api/v1/issues/${issue.key}`)) {
+        patches += 1;
+      }
+    });
+    await openIssue(page, issue.key, "Stale row");
+    await expect(page.getByRole("button", { name: "Reopen issue" })).toBeVisible();
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const reopen = dialog
+      .getByRole("group", { name: "Actions" })
+      .getByRole("option", { name: "Reopen issue" });
+    await expect(reopen).toBeVisible();
+
+    // Someone else reopens the issue while the palette is open; the header's Reopen button goes.
+    // A CSS locator, since what is asserted is the header behind the modal palette.
+    await patchIssue(issue.key, { status: "in_progress" }, { login: "bob" });
+    await expect(
+      page.locator('[data-testid="issue-header"] button[aria-label="Reopen issue"]')
+    ).toHaveCount(0);
+
+    // The row checks its control again when it runs, so it writes nothing.
+    await reopen.click();
+    await expect(dialog).toHaveCount(0);
+    await page.waitForTimeout(500);
+    expect(patches).toBe(0);
+    expect((await getIssue(issue.key)).status).toBe("in_progress");
+  } finally {
+    await context.close();
+  }
+});
+
+test("below xl the margin is the route's own sheet, so Shift+M and its row change nothing", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Compact margin" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ height: 800, width: 1024 });
+    await openIssue(page, issue.key, "Compact margin");
+    const stored = () => page.evaluate(() => localStorage.getItem("dispatch.shell.margin:alice"));
+    const before = await stored();
+
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const actions = dialog.getByRole("group", { name: "Actions" });
+    await expect(actions.getByRole("option", { name: "Create issue" })).toBeVisible();
+    // Soft, so one run names both rows if either is offered.
+    for (const absent of ["Toggle margin", "Toggle sidebar"]) {
+      await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
+    }
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    await page.locator("body").focus();
+    await page.keyboard.press("Shift+M");
+    await page.waitForTimeout(300);
+    expect(await stored()).toBe(before);
+  } finally {
+    await context.close();
+  }
+});
+
+test("the Architecture tab offers its focused component's Open row, and not its movement keys", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  await seedFakeGithub({
+    "legion/arch": {
+      contents: "read",
+      files: { "platform.md": "---\ntitle: Platform\n---\nEverything that runs.\n" },
+      installation_id: 101,
+    },
+  });
+  await putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
+  expect((await syncArchitectureSource("CORE")).last_error).toBeNull();
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE/architecture");
+    const row = page.locator('[data-component-row="platform"]');
+    await expect(row).toBeVisible();
+    await page.locator("body").focus();
+    await page.keyboard.press("j");
+    await expect(row).toBeFocused();
+
+    await page.keyboard.press("Control+k");
+    const actions = page.getByRole("dialog", { name: "Search" }).getByRole("group", {
+      name: "Actions",
+    });
+    const open = actions.getByRole("option", {
+      name: "Open the focused component: its children, else its details",
+    });
+    await expect(open).toHaveCount(1);
+    // `Enter` on the row opens it too, and `o`'s row is already that action's. Soft, so one run
+    // names every row that should not be there.
+    for (const absent of [
+      "Next component",
+      "Previous component",
+      "Open the focused component from its row",
+    ]) {
+      await expect.soft(actions.getByRole("option", { name: absent })).toHaveCount(0);
+    }
+    await open.click();
+    await expect(page).toHaveURL(/\/projects\/CORE\/architecture\?component=platform$/);
+  } finally {
+    await context.close();
+  }
+});
+
+test("Go to project… and Keyboard shortcuts are rows, and each opens its own dialog", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Operations" });
+  const issue = await createIssue({ project: "CORE", title: "Openers" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openIssue(page, issue.key, "Openers");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const actions = dialog.getByRole("group", { name: "Actions" });
+
+    // A row runs once the palette has closed, so a row that opens the projects list opens it.
+    await page.keyboard.press("Control+k");
+    await actions.getByRole("option", { name: "Go to project…" }).click();
+    await expect(dialog.getByRole("group", { name: "Projects" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Search" })).toHaveAttribute(
+      "placeholder",
+      "Go to project"
+    );
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    await page.locator("body").focus();
+    await page.keyboard.press("Control+k");
+    await actions.getByRole("option", { name: "Keyboard shortcuts" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("the arrows keep the highlighted row in view when the list is longer than the palette", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "desktop keyboard navigation is covered by chromium"
+  );
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Long list" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openIssue(page, issue.key, "Long list");
+    await page.keyboard.press("Control+k");
+    const input = page.getByRole("combobox", { name: "Search" });
+    const rows = page
+      .getByRole("dialog", { name: "Search" })
+      .getByRole("group", { name: "Actions" })
+      .getByRole("option");
+    await expect(rows.first()).toBeInViewport();
+    // The issue page's rows run past what the list shows at once; were they to fit, this row
+    // would prove nothing.
+    const last = rows.last();
+    await expect(last).not.toBeInViewport();
+
+    // ArrowUp from the first row wraps to the last, which the list scrolls into view.
+    await input.press("ArrowUp");
+    await expect(input).toHaveAttribute(
+      "aria-activedescendant",
+      (await last.getAttribute("id")) as string
+    );
+    await expect(last).toBeInViewport();
   } finally {
     await context.close();
   }
