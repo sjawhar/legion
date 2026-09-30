@@ -304,8 +304,8 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
  * (`resolveAcceptedThreads`). GitHub grants resolving to the
  * pull request's author's App, and the implementer opens every Legion pull request
  * (`daemon/AGENTS.md`, GitHub Apps), so the threads the reviewer opens are resolved here by the
- * implementer — before every push that answers a review — and by the merger once more before
- * READY. Both flags are
+ * implementer — after every push that answers a review, before its completion — and by the merger
+ * once more before READY. Both flags are
  * validated before any grant is redeemed. With `gh`, a session outside a Legion pane, which has
  * no grant, applies the same rule through its own `gh` (`ghGraphql`), from any directory: GH_REPO
  * names the repository a routed `gh` would otherwise read from a checkout, and gh's stderr is

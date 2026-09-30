@@ -158,10 +158,11 @@ The architect's end-game assignment reads mergeability *first*:
 2. `CONFLICTING` → do **not** push the `.legion/` deletion. Rebase as above, post the
    fingerprint comment, push, the `legion` tool's `handoff_complete` with both fingerprints. The architect
    routes the next round.
-3. `MERGEABLE` → `legion threads resolve --pr <n> --repo <owner>/<repo>` (expect `No unresolved
-   threads` when the review was clean), `rm -r .legion`, `jj split -m "chore: remove .legion/
-   handoffs after clean review (<KEY>)" .legion`, bookmark on `@-`, push, and confirm
-   `jj diff --from <reviewed head> --to <new head> --summary` prints only `D .legion/…` lines.
+3. `MERGEABLE` → `rm -r .legion`, `jj split -m "chore: remove .legion/ handoffs after clean
+   review (<KEY>)" .legion`, bookmark on `@-`, push, confirm
+   `jj diff --from <reviewed head> --to <new head> --summary` prints only `D .legion/…` lines,
+   then `legion threads resolve --pr <n> --repo <owner>/<repo>` before the completion (expect
+   `no unresolved threads` when the review was clean).
 
 LEGION-79 took branch 2 on its first end-game (the sibling had merged in the 40 minutes since
 approval) and branch 3 on the second. Reading `mergeable` before acting is what kept the

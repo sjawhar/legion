@@ -172,10 +172,12 @@ opened, and the implement App's reads `true` (read-only readings, 2026-09-25; `#
 same for unresolve). On `sjawhar/legion-smoke#228`, which the review App opened, the review App's
 token read `viewerCanResolve: true` on its own thread, and its `resolveReviewThread` returned
 `isResolved: true` (2026-09-25; the PR is closed and its branch deleted). The implementer opens
-every Legion pull request, so the implementer — before every push that answers a review — and
-the merger — once more before READY — resolve every thread the reviewer has accepted with
-`legion threads resolve --pr <number> --repo <owner>/<repo>` (`cli/review-threads.ts`,
-`cmdThreadsResolve` in `cli/index.ts`). The implementer also pushes the `.legion/` deletion at
+every Legion pull request, so the implementer — after every push that answers a review, before
+its completion — and the merger — once more before READY, the run that resolves the threads the
+reviewer accepted in the last round, since it approves on its own `Accepted:` — resolve every
+thread the reviewer has accepted with `legion threads resolve --pr <number> --repo
+<owner>/<repo>` (`cli/review-threads.ts`, `cmdThreadsResolve` in `cli/index.ts`). The
+implementer also pushes the `.legion/` deletion at
 the reviewer's direction. The command redeems the caller's grant through the same
 `/gh-token` path `legion gh` uses and reads every review thread over GitHub GraphQL with an
 injected `fetch`; with no grant, its refusal names `--gh`. With `--gh`, for a session outside a

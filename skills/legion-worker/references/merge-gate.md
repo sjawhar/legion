@@ -36,8 +36,9 @@ conflict-forced merge changes the fingerprint (`skill://legion-worker/references
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
   nothing restarts. Different: a new round — thermo again, one review.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
-  Apps, as `skill://legion-worker/references/review-threads.md` says, and approve only once every
-  thread you opened carries your `Accepted:` and the implementer's run has resolved it.
+  Apps, as `skill://legion-worker/references/review-threads.md` says, and approve once each of
+  those threads has your own `Accepted:` as its newest submitted comment. Resolving them is the
+  implementer's next run or the merger's before READY, and never gates your approval.
 
 A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
 takes this order: write, commit and push the handoff; submit the review of the head that push

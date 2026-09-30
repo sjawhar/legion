@@ -308,8 +308,8 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 
 - **Review threads** are disposed of one by one, never in bulk, and only an `Accepted:` from the
   thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
-  runs `legion threads resolve` before every push that answers a review, and the merger before
-  READY: `skill://legion-worker/references/review-threads.md`.
+  runs `legion threads resolve` after every push that answers a review, before its completion,
+  and the merger before READY: `skill://legion-worker/references/review-threads.md`.
 - **No deferrals.** A finding that changes behaviour, hides an error, or breaks a gate is fixed in
   this pull request; naming, duplication, or wording cleanup is the one `Fast-follow:` line.
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a

@@ -52,13 +52,16 @@ Plan the probe into the review round, not into the tester's E2E:
 2. **The reviewer answers it in the machine-readable form** on re-review — here
    `Accepted: not a defect — acceptance-2 probe; …` — and nothing after it.
 3. **The other App's phase runs the mechanism against it** at the point the process already
-   requires (the implementer, before its next push) and pastes the output into the PR body. On
+   requires (the implementer, after its next push) and pastes the output into the PR body. On
    #1003 that was `resolved https://github.com/sjawhar/legion/pull/1003#discussion_r3998955772`
    next to `left open …#discussion_r3998955769 — newest reply by legion-reviewer is not an
    acceptance` for the still-open blocking thread — positive and negative control in one run.
 4. **The reviewer verifies on GitHub, not in the body** (`gh api graphql … reviewThreads { id
    isResolved }`, `PRRT_kwDORFy7ds6h3A8X` → `true`) and quotes that fragment in the approval. The
-   quote is the acceptance's recorded check.
+   quote is the acceptance's recorded check. (2026-09-30, LEGION-316: approval no longer waits on
+   resolution. The reviewer approves once its own `Accepted:` is each thread's newest comment, and
+   the merger's run before READY resolves the last round's; the #1003 quote records how that
+   probe was checked then.)
 
 The probe costs one inline comment and one reply; it turns "the review round" into the only
 production-like surface that exists for the cross-App case, and it produces the same `Threads`
