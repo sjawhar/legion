@@ -37,6 +37,7 @@ import {
   ASK_URGENCIES,
   actorLabel,
   claimHolds,
+  DEFAULT_ISSUE_PAGE_LIMIT,
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
@@ -1980,19 +1981,25 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
-      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
-      const issues = await client.listIssues({
-        project,
-        ...(status === undefined ? {} : { status }),
-        ...(parent === undefined ? {} : { parent }),
-        ...(label === undefined ? {} : { label }),
-        ...(priority === undefined ? {} : { priority }),
-        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
-        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
-      });
-      const total = issues.length;
-      const rows = issues.slice(offset, offset + limit).map((row) => ({
+      const page = await client.listIssuePage(
+        {
+          project,
+          ...(status === undefined ? {} : { status }),
+          ...(parent === undefined ? {} : { parent }),
+          ...(label === undefined ? {} : { label }),
+          ...(priority === undefined ? {} : { priority }),
+          ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+          ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
+        },
+        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
+        // negative or fractional offset.
+        {
+          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+          offset: optionalNumber(args, "offset") ?? 0,
+        }
+      );
+      const { total, limit, offset } = page;
+      const rows = page.issues.map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,

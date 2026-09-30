@@ -196,10 +196,33 @@ The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 
 ## Database migrations
 
-Boot applies `internal/dispatch/store/migrations/*.up.sql` in filename order and records each
-version in `schema_migrations`. Version 8 is an empty file: that version was recorded from Go by
-the one-time conversion of pre-Proof `Y.Text` rooms and offset anchors into Proof trees and mark
-anchors, which every deployed database has already run.
+Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each
+version in `schema_migrations`, which it creates under the runner's advisory lock, so processes
+booting together against an empty database migrate one after the other. Version 8 is an empty
+file: that version was recorded from Go by the one-time conversion of pre-Proof `Y.Text` rooms and
+offset anchors into Proof trees and mark anchors, which every deployed database has already run.
+
+The runner records a migration by its version alone, so before it touches the database it reads
+the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every
+file concerned, when two migrations share a version (it would apply the first and skip the rest as
+already applied; keep the number on the file that merged to `main` first and renumber the rest),
+when a file is named other than `<version>_<name>.up.sql` or `<version>_<name>.down.sql` (a
+`.down.sql` is a rollback script an operator runs by hand, and needs its `.up.sql`), when a version
+is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
+embedded with `all:`, so a name beginning with `_` or `.` is refused like any other, and an editor's
+swap file left in the directory fails a local build's tests until it is gone. Versions are applied
+by number, not by file name, and the store's tests require every file on disk to be embedded
+(`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap
+(`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number
+on `main`.
+
+Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout`, which
+`pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a
+migration queued behind a long transaction fails the boot instead of holding every read and write
+of its table behind its request. The failure names the migration, the lock it wanted, the sessions
+it was queued behind, and the `pg_stat_activity` query that lists the holders; end the holder or
+let it finish and start the server again. A migration that needs another bound sets its own
+`SET LOCAL lock_timeout`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -283,7 +306,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's lowercase login, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
-| `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=` | GET | cookie, trusted header, or bearer | List issue summaries. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
+| `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). `400 INVALID_QUERY` under 2 characters or stop words only; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
