@@ -41,9 +41,10 @@ import {
   linkText,
   liveDotBg,
   offlineDotBg,
+  primaryButtonAriaDisabled,
+  primaryButtonAvailableHoverBg,
   primaryButtonBg,
   primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
@@ -1030,9 +1031,26 @@ export function filterAgents(agents: readonly Agent[], filters: AgentFilters): A
 /** A session a broadcast would leave out, worded the way the server reports it, so the
  *  composer and the create response say the same thing. */
 interface BroadcastExclusionPlan {
+  /** The live session the chosen mode leaves out; absent when it has left the registry. */
+  readonly agent: Agent | undefined;
   readonly reason: string;
   readonly sessionID: string;
-  readonly title: string;
+}
+
+/** The sessions a broadcast of the current selection reaches, and the selected ones it leaves out. */
+interface BroadcastPlan {
+  readonly excluded: readonly BroadcastExclusionPlan[];
+  readonly recipients: readonly Agent[];
+}
+
+/** What Send shows (`label`, and `compactLabel` on a narrow or short screen), why it cannot be
+ *  pressed (`reason`, null while it can), and the mode that would reach a selection this one
+ *  reaches none of (`hint`). */
+interface BroadcastSendState {
+  readonly compactLabel: string;
+  readonly hint: string | null;
+  readonly label: string;
+  readonly reason: string | null;
 }
 
 /**
@@ -1046,23 +1064,98 @@ export function broadcastPlan(
   selected: ReadonlySet<string>,
   agents: readonly Agent[],
   delivery: MessageDeliveryMode
-): { excluded: BroadcastExclusionPlan[]; recipients: Agent[] } {
+): BroadcastPlan {
   const live = new Map(agents.map((agent) => [agent.session_id, agent]));
   const excluded: BroadcastExclusionPlan[] = [];
   const recipients: Agent[] = [];
   for (const sessionID of selected) {
     const agent = live.get(sessionID);
     if (agent === undefined) {
-      excluded.push({ reason: "no live session", sessionID, title: "" });
+      excluded.push({ agent: undefined, reason: "no live session", sessionID });
       continue;
     }
     if (!agent.capabilities.includes(delivery)) {
-      excluded.push({ reason: `does not advertise ${delivery}`, sessionID, title: agent.title });
+      excluded.push({ agent, reason: `does not advertise ${delivery}`, sessionID });
       continue;
     }
     recipients.push(agent);
   }
   return { excluded, recipients };
+}
+
+/**
+ * What Send says about the send it would make: its `label`, and the `reason` it cannot be
+ * pressed (null while it can). A button that only counts - `Send to 0` - reads as a number, not
+ * a refusal, so each cause reads differently: a selection none of whom this mode reaches (split
+ * into sessions that do not advertise the mode and sessions that have left the registry), the
+ * recipient limit, and an empty message. The limit's reason is also its notice line, word for
+ * word. A send in flight is the caller's `Sending…`, and an empty selection has no composer.
+ *
+ * When the mode is what leaves everyone out, `hint` names the mode that reaches the most of
+ * them - by what it would do, not by the control that picks it, so it holds however the mode is
+ * chosen. The Excluded line carries it, since that line is what a dead button points at.
+ *
+ * On a narrow or short screen Send shares its row with that line, and a label as wide as
+ * `No live recipient for btw` would squeeze the line to nothing - the reason a phone reader most
+ * needs - so there the refusal reads `No recipient`, about as wide as a count.
+ */
+export function broadcastSendState(
+  { excluded, recipients }: BroadcastPlan,
+  delivery: MessageDeliveryMode,
+  body: string
+): BroadcastSendState {
+  const label = `Send to ${recipients.length}`;
+  if (recipients.length > 0) {
+    const reason =
+      recipients.length > MAX_BROADCAST_RECIPIENTS
+        ? `At most ${MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach ${recipients.length}.`
+        : body.trim() === ""
+          ? "Type a message first."
+          : null;
+    return { compactLabel: label, hint: null, label, reason };
+  }
+  // No recipient means every selected session is excluded, and the composer mounts only with a
+  // selection, so `excluded` is the whole selection here.
+  const selected = excluded.length;
+  const lacking = excluded.flatMap((item) => (item.agent === undefined ? [] : [item.agent]));
+  const gone = selected - lacking.length;
+  const sentences: string[] = [];
+  if (lacking.length > 0) {
+    sentences.push(
+      selected === 1
+        ? `The selected agent does not advertise ${delivery}.`
+        : lacking.length === selected
+          ? `None of the ${selected} selected agents advertises ${delivery}.`
+          : `${lacking.length} of the ${selected} selected agents ${lacking.length === 1 ? "does" : "do"} not advertise ${delivery}.`
+    );
+  }
+  if (gone > 0) {
+    sentences.push(
+      selected === 1
+        ? "The selected agent is no longer live."
+        : gone === selected
+          ? `None of the ${selected} selected agents is live any more.`
+          : `${gone} ${gone === 1 ? "is" : "are"} no longer live.`
+    );
+  }
+  let best: { count: number; mode: MessageDeliveryMode } | undefined;
+  for (const mode of DELIVERY_CAPABILITIES) {
+    if (mode === delivery) continue;
+    const count = lacking.filter((agent) => agent.capabilities.includes(mode)).length;
+    if (count > (best?.count ?? 0)) best = { count, mode };
+  }
+  const hint =
+    best === undefined
+      ? null
+      : selected === 1
+        ? `Sending as ${best.mode} would reach it.`
+        : `Sending as ${best.mode} would reach ${best.count} of them.`;
+  return {
+    compactLabel: "No recipient",
+    hint,
+    label: lacking.length === 0 ? "No live recipient" : `No live recipient for ${delivery}`,
+    reason: hint === null ? sentences.join(" ") : `${sentences.join(" ")} ${hint}`,
+  };
 }
 
 /** The machines, roles and directories the live sessions actually occupy: a filter can only
@@ -1212,11 +1305,15 @@ function BroadcastComposer({
 }): ReactNode {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { excluded, recipients } = broadcastPlan(selected, agents, delivery);
+  const plan = broadcastPlan(selected, agents, delivery);
+  const { excluded, recipients } = plan;
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
   // and refuses a send over it; saying so before Send saves the round trip. The same predicate
   // gives the limit the notice slot.
   const overLimit = recipients.length > MAX_BROADCAST_RECIPIENTS;
+  const sendState = broadcastSendState(plan, delivery, body);
+  const noticeId = useId();
+  const reasonId = useId();
   const send = useMutation({
     mutationFn: () =>
       api.createBroadcast({
@@ -1237,6 +1334,24 @@ function BroadcastComposer({
       void navigate(`/agents/broadcasts/${created.id}`, { state: { excluded: created.excluded } });
     },
   });
+  // The notice slot holds one line, highest first: the limit, then a refused send, then the
+  // exclusions. The exclusions outrank a refused send once nobody is left to reach, since then
+  // they are why Send is dead and the refusal is about a send already over. A higher notice
+  // hiding the Excluded line hides no name: every excluded session's chip still carries its
+  // reason. Whatever the line says bears on the send, so Send is described by it.
+  const notice = overLimit
+    ? "limit"
+    : send.isError && recipients.length > 0
+      ? "refused"
+      : excluded.length > 0
+        ? "excluded"
+        : null;
+  // The limit and the exclusions give Send's reason on the notice line; an empty message has no
+  // line of its own, so its reason is read from a hidden one.
+  const hiddenReason = overLimit || recipients.length === 0 ? null : sendState.reason;
+  const describedBy = [hiddenReason === null ? null : reasonId, notice === null ? null : noticeId]
+    .filter((id) => id !== null)
+    .join(" ");
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
   // so it takes about a third of a phone screen: the heading on one line, the recipients in one
@@ -1301,34 +1416,53 @@ function BroadcastComposer({
         rows={3}
         value={body}
       />
-      {/* One notice at a time, in priority order: the limit, then a refused send, then the
-          exclusions. A higher notice hiding the Excluded line hides no name: every excluded
-          session's chip still carries its reason. */}
-      {overLimit ? (
-        <p className={composerLine}>
-          At most {MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach{" "}
-          {recipients.length}.
+      {notice === "limit" ? (
+        <p className={composerLine} id={noticeId}>
+          {sendState.reason}
         </p>
-      ) : send.isError ? (
-        <p className={composerLine}>
+      ) : notice === "refused" ? (
+        <p className={composerLine} id={noticeId}>
           Could not send: {send.error instanceof Error ? send.error.message : "network error"}
         </p>
-      ) : excluded.length === 0 ? null : (
-        <p className={composerLine}>
+      ) : notice === "excluded" ? (
+        <p className={composerLine} id={noticeId}>
           Excluded:{" "}
           {excluded
-            .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
+            .map((item) => `${sessionLabel(item.sessionID, item.agent?.title)} (${item.reason})`)
             .join(", ")}
           . Nothing is sent to them, and no other mode is substituted.
+          {sendState.hint === null ? null : ` ${sendState.hint}`}
         </p>
+      ) : null}
+      {hiddenReason === null ? null : (
+        <span className="sr-only" id={reasonId}>
+          {hiddenReason}
+        </span>
       )}
+      {/* Refused with `aria-disabled` rather than `disabled`, so the button stays in the tab order
+          and its reason - `title`, and what it is described by - reaches a keyboard. Only a send
+          in flight disables it outright, and its label says so. */}
       <button
-        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={recipients.length === 0 || overLimit || body.trim() === "" || send.isPending}
-        onClick={() => send.mutate()}
+        aria-describedby={describedBy === "" ? undefined : describedBy}
+        aria-disabled={sendState.reason === null ? undefined : true}
+        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonAvailableHoverBg} ${primaryButtonDisabled} ${primaryButtonAriaDisabled}`}
+        disabled={send.isPending}
+        onClick={() => {
+          if (sendState.reason === null) send.mutate();
+        }}
+        title={sendState.reason ?? undefined}
         type="button"
       >
-        {send.isPending ? "Sending…" : `Send to ${recipients.length}`}
+        {send.isPending ? (
+          "Sending…"
+        ) : sendState.compactLabel === sendState.label ? (
+          sendState.label
+        ) : (
+          <>
+            <span className="narrow-or-short:hidden">{sendState.label}</span>
+            <span className="hidden narrow-or-short:inline">{sendState.compactLabel}</span>
+          </>
+        )}
       </button>
     </section>
   );

@@ -280,16 +280,42 @@ test("reopening the same reply restores its canonical prefills after cancel", as
   }
 });
 
-test("a token-only direct-session draft cannot submit an empty message", () => {
+/** Send's refusal as a reader meets it: `aria-disabled`, and the reason on `title` and in the
+ *  element `aria-describedby` names. */
+interface SendRefusal {
+  readonly description: string | null;
+  readonly disabled: string | null;
+  readonly title: string | null;
+}
+
+function sendRefusal(): SendRefusal {
+  const send = screen.getByRole("button", { name: "Send" });
+  const describedBy = send.getAttribute("aria-describedby");
+  return {
+    description:
+      describedBy === null ? null : (document.getElementById(describedBy)?.textContent ?? null),
+    disabled: send.getAttribute("aria-disabled"),
+    title: send.getAttribute("title"),
+  };
+}
+
+test("a token-only direct-session draft cannot submit an empty message, and Send says why", () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/aside " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    for (const command of ["/btw", "/aside"]) {
+      fireEvent.change(screen.getByLabelText("Comment"), { target: { value: `${command} ` } });
+      const reason = `Type the message after ${command}.`;
+      expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    }
+    expect(createAgentMessage).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw status?" } });
+    expect(sendRefusal()).toEqual({ description: null, disabled: null, title: null });
   } finally {
     view.unmount();
+    createAgentMessage.mockRestore();
   }
 });
 
@@ -408,7 +434,8 @@ test("a command on a plain legacy reply stays verbatim and sends no delivery", a
   }
 });
 
-test("a token-only targeted legacy reply cannot submit", () => {
+test("a token-only targeted legacy reply cannot submit, and Send says why", () => {
+  const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
       author: "Planner",
@@ -421,9 +448,13 @@ test("a token-only targeted legacy reply cannot submit", () => {
 
   try {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    const reason = "Type the message after /btw.";
+    expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(createMessage).not.toHaveBeenCalled();
   } finally {
     view.unmount();
+    createMessage.mockRestore();
   }
 });
 

@@ -7,6 +7,7 @@ import {
   type ReactNode,
   type SyntheticEvent,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -45,9 +46,10 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
+  primaryButtonAriaDisabled,
+  primaryButtonAvailableHoverBg,
   primaryButtonBg,
   primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   quoteAccentBorder,
   quoteBodyText,
   referencePillBorder,
@@ -463,6 +465,29 @@ export function canSubmitComposer(
   pendingUploads: number
 ): boolean {
   return hasDraft(kind, body, replacement) && !isSaving && pendingUploads === 0;
+}
+
+/**
+ * Why Send refuses a draft it is not busy with, or undefined when it would take it. A save or an
+ * upload in flight names itself on the button; an empty draft, and a delivery command with
+ * nothing after it - `/btw ` alone, where the box holds text and Send is still dead - have no
+ * other place to say so.
+ */
+function draftRefusal(
+  kind: ComposerKind,
+  body: string,
+  replacement: string,
+  outbound: DeliveryPlan
+): string | undefined {
+  if (kind === "suggestion") {
+    return replacement.trim() === "" ? "Type the replacement text first." : undefined;
+  }
+  if (body.trim() === "")
+    return kind === "ask" ? "Type the question first." : "Type a message first.";
+  if (kind === "comment" && outbound.delivery !== undefined && outbound.body.trim() === "") {
+    return `Type the message after ${outbound.delivery === "btw" ? "/btw" : "/aside"}.`;
+  }
+  return undefined;
 }
 
 interface MentionComposerProps {
@@ -893,9 +918,11 @@ export function MentionComposer({
           ? "steer"
           : undefined;
   const outbound = deliveryPlan(body, inheritedDelivery);
+  const submitReason = draftRefusal(kind, body, replacement, outbound);
+  const submitReasonId = useId();
   const canSubmit =
     canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads) &&
-    (kind !== "comment" || outbound.delivery === undefined || outbound.body.trim() !== "");
+    submitReason === undefined;
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) submitGuard.guard(() => save.mutate(currentDraft()));
@@ -1290,13 +1317,25 @@ export function MentionComposer({
           retrying={save.isPending}
         />
       ) : null}
+      {/* A draft Send refuses leaves it `aria-disabled` rather than `disabled`, so it stays in the
+          tab order and its reason reaches a keyboard and a screen reader; only a save or an
+          upload in flight disables it outright, and its label says which. The submit handler
+          checks `canSubmit` either way. */}
       <button
-        className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={!canSubmit}
+        aria-describedby={submitReason === undefined ? undefined : submitReasonId}
+        aria-disabled={submitReason === undefined ? undefined : true}
+        className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonAvailableHoverBg} ${primaryButtonDisabled} ${primaryButtonAriaDisabled}`}
+        disabled={save.isPending || pendingUploads > 0}
+        title={submitReason}
         type="submit"
       >
         {save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : title}
       </button>
+      {submitReason === undefined ? null : (
+        <span className="sr-only" id={submitReasonId}>
+          {submitReason}
+        </span>
+      )}
       <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
         Ctrl/Cmd+Enter to send · Enter for a new line
       </p>

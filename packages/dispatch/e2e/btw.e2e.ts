@@ -113,3 +113,57 @@ test("an unsupported selected mode warns but does not prevent Send", async ({ br
     await alice.close();
   }
 });
+
+test("/btw with nothing after it keeps an agent's direct composer from sending, and Send says why", async ({
+  browser,
+}) => {
+  // No `last_seen`: the fixture stamps one, so the session lists as live rather than inactive.
+  const worker: FakeSession = {
+    capabilities: ["aside", "btw", "steer"],
+    dir: "/w/legion",
+    machine_id: "e2e",
+    roles: [],
+    session_id: "s3",
+    title: "worker",
+  };
+  await setLiveSessions([worker]);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const posts: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().includes("/api/v1/agents/")) {
+        posts.push(request.url());
+      }
+    });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    await agents.getByRole("button", { name: /^No Dispatch activity/ }).click();
+    const card = agents
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "worker" }) });
+    await card.getByRole("button", { exact: true, name: "worker" }).click();
+    const field = card.getByRole("textbox", { name: "Comment" });
+    const send = card.getByRole("button", { exact: true, name: "Send" });
+
+    // The box holds text, and the command strips to an empty message: Send refuses, and says why.
+    await field.fill("/btw ");
+    await expect(send).toBeDisabled();
+    await expect(send).toHaveAccessibleDescription("Type the message after /btw.");
+    await expect(send).toHaveAttribute("title", "Type the message after /btw.");
+    // A keyboard reaches it, so the reason does too: Tab from the message lands on Send.
+    await field.press("Tab");
+    await expect(send).toBeFocused();
+    await send.click({ force: true });
+    await field.press("Control+Enter");
+    await page.waitForTimeout(500);
+    expect(posts).toEqual([]);
+
+    await field.fill("/btw status?");
+    await expect(send).toBeEnabled();
+    await expect(send).not.toHaveAttribute("aria-describedby");
+  } finally {
+    await alice.close();
+  }
+});

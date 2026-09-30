@@ -1080,6 +1080,36 @@ test.describe("the composer's notices share one slot, highest first, within budg
       await alice.close();
     }
   });
+
+  test("nobody to reach: neither of 2 selected advertises BTW, and the Excluded line keeps room beside Send", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const fixture = await openNoticeFixture(page, [
+        builder("a", ["steer"]),
+        builder("b", ["steer"]),
+      ]);
+      // The refusal reads short here: the full label would squeeze the line that explains it to
+      // nothing on a narrow screen, where the line shares Send's row.
+      const send = fixture.composer.getByRole("button", { name: "No recipient" });
+      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+        await expect.soft(fixture.excludedLine, at).toContainText("Sending as steer would reach 2");
+        await expect.soft(send, at).toBeDisabled();
+        const [line, button] = await Promise.all([
+          fixture.excludedLine.boundingBox(),
+          send.boundingBox(),
+        ]);
+        expect
+          .soft(line?.width ?? 0, `${at}: the Excluded line keeps at least half Send's width`)
+          .toBeGreaterThanOrEqual((button?.width ?? Number.POSITIVE_INFINITY) / 2);
+      });
+    } finally {
+      await alice.close();
+    }
+  });
 });
 
 test("a typed broadcast survives clearing the selection, picking again and a refused send", async ({
@@ -1171,6 +1201,142 @@ test("a selection over the broadcast limit says so and never asks the server", a
     await agents.getByRole("checkbox", { name: "Select Planner 101 for broadcast" }).uncheck();
     await expect(composer.getByText(/^At most 100 recipients/)).toHaveCount(0);
     await expect(composer.getByRole("button", { name: "Send to 100" })).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A live session advertising only `capabilities`, titled `Builder <ID>`. */
+function builder(id: string, capabilities: string[]): FakeSession {
+  return {
+    capabilities,
+    dir: `/workspaces/${id}`,
+    machine_id: "build-host",
+    roles: ["builder"],
+    session_id: `${id}-session`,
+    title: `Builder ${id.toUpperCase()}`,
+  };
+}
+
+test("a mode no selected agent advertises leaves Send dead, and Send says so and names the mode that would reach them", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the reason");
+  // Both advertise `steer` only, so the default BTW mode leaves every selected agent out.
+  await setLiveSessions([builder("a", ["steer"]), builder("b", ["steer"])]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posts: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
+        posts.push(request.url());
+      }
+    });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const mode = composer.getByRole("combobox", { name: "Delivery mode" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
+    await message.fill("Report status.");
+    await expect(mode).toHaveValue("btw");
+
+    // The label refuses rather than counting, and the reason rides the button itself.
+    const dead = composer.getByRole("button", { name: "No live recipient for btw" });
+    await expect(dead).toBeDisabled();
+    await expect(dead).toHaveAccessibleDescription(
+      "Excluded: Builder A (does not advertise btw), Builder B (does not advertise btw). Nothing is sent to them, and no other mode is substituted. Sending as steer would reach 2 of them."
+    );
+    await expect(dead).toHaveAttribute(
+      "title",
+      "None of the 2 selected agents advertises btw. Sending as steer would reach 2 of them."
+    );
+    // A keyboard reaches it, so the reason does too: Tab from the message lands on Send.
+    await message.press("Tab");
+    await expect(dead).toBeFocused();
+    // Refused, not merely grey: pressing it anyway asks nothing of the server.
+    await dead.click({ force: true });
+    await dead.press("Enter");
+    await page.waitForTimeout(500);
+    expect(posts).toEqual([]);
+    expect(await getSentMessages()).toEqual([]);
+
+    // The mode was the whole cause: switching to the one named brings Send back.
+    await mode.selectOption("steer");
+    const send = composer.getByRole("button", { name: "Send to 2" });
+    await expect(send).toBeEnabled();
+    await expect(send).not.toHaveAttribute("title");
+    await expect(composer.getByText(/^Excluded:/)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("with one of two selected agents gone from the registry, Send reaches the live one and names the one left out", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the reason");
+  // The page learns of a departure on its 15 s agent poll, which this row waits out.
+  test.setTimeout(60_000);
+  const [alpha, bravo] = [builder("alpha", ["btw"]), builder("bravo", ["btw"])];
+  await setLiveSessions([alpha, bravo]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
+    await expect(composer.getByRole("button", { name: "Send to 2" })).toBeEnabled();
+
+    // Bravo leaves; the page learns of it on its next agent poll, and names it by its ID since
+    // the registry no longer holds its title.
+    await setSessionLive(bravo.session_id, false);
+    const send = composer.getByRole("button", { name: "Send to 1" });
+    await expect(send).toBeEnabled({ timeout: 30_000 });
+    await expect(send).toHaveAccessibleDescription(
+      "Excluded: session:bravo-se… (no live session). Nothing is sent to them, and no other mode is substituted."
+    );
+    await expect(
+      composer.getByRole("button", { name: /^session:bravo-se… · no live session/ })
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+// This row cannot go red on a build without the button's reasons: an empty selection has
+// unmounted the composer since the broadcast shipped. It pins that nothing selected is a
+// different state from everything excluded - no Send at all, rather than a dead one to explain.
+test("with nothing selected there is no Send to explain: the composer leaves with the last chip", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the selection rule");
+  await setLiveSessions([builder("a", ["steer"]), builder("b", ["steer"])]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const anySend = page.getByRole("button", { name: /^(Send to |No live recipient)/ });
+    await expect(header).toHaveAccessibleDescription("2 matching");
+    await expect(anySend).toHaveCount(0);
+
+    await header.click();
+    await expect(composer).toBeVisible();
+    await composer.getByRole("button", { name: /^Builder A · / }).click();
+    await composer.getByRole("button", { name: /^Builder B · / }).click();
+    await expect(header).toHaveAccessibleDescription("2 matching");
+    await expect(composer).toHaveCount(0);
+    await expect(anySend).toHaveCount(0);
+    await expect(page.getByText(/does not advertise|No live recipient/)).toHaveCount(0);
   } finally {
     await alice.close();
   }

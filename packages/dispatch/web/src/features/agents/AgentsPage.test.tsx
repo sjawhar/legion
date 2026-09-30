@@ -13,7 +13,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
-import { orderAgents, partitionAgents } from "./AgentsPage";
+import { broadcastPlan, broadcastSendState, orderAgents, partitionAgents } from "./AgentsPage";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -1476,6 +1476,57 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
     page.view.unmount();
     page.restore();
   }
+});
+
+test("Send says which of its reasons stops it, and names the mode that would reach a selection this one reaches none of", () => {
+  const [planner, reviewer] = agents;
+  const deaf = { ...reviewer, capabilities: [], session_id: "deaf-session", title: "Deaf" };
+  const state = (
+    selected: readonly string[],
+    live: readonly Agent[],
+    delivery: "aside" | "btw" | "steer",
+    body = "Report status."
+  ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
+  const both = [planner.session_id, reviewer.session_id];
+
+  // Every selected session has left the registry: no mode would help, and the label names none.
+  expect(state(both, [], "btw")).toEqual({
+    compactLabel: "No recipient",
+    hint: null,
+    label: "No live recipient",
+    reason: "None of the 2 selected agents is live any more.",
+  });
+  // One gone, one without the mode: both causes, and the mode that reaches the live one.
+  expect(state(both, [reviewer], "btw")).toEqual({
+    compactLabel: "No recipient",
+    hint: "Sending as aside would reach 1 of them.",
+    label: "No live recipient for btw",
+    reason:
+      "1 of the 2 selected agents does not advertise btw. 1 is no longer live. Sending as aside would reach 1 of them.",
+  });
+  // The hint picks the mode that reaches the most: aside reaches both, btw only the Planner.
+  expect(state(both, agents, "steer").hint).toBe("Sending as aside would reach 2 of them.");
+  // A session advertising nothing gets no hint at all.
+  expect(state([deaf.session_id], [deaf], "btw")).toEqual({
+    compactLabel: "No recipient",
+    hint: null,
+    label: "No live recipient for btw",
+    reason: "The selected agent does not advertise btw.",
+  });
+  // Reachable sessions: the count stays the label, on every screen, and only a reason explains
+  // the refusal.
+  expect(state([planner.session_id], agents, "btw", "  ")).toEqual({
+    compactLabel: "Send to 1",
+    hint: null,
+    label: "Send to 1",
+    reason: "Type a message first.",
+  });
+  expect(state([planner.session_id], agents, "btw")).toEqual({
+    compactLabel: "Send to 1",
+    hint: null,
+    label: "Send to 1",
+    reason: null,
+  });
 });
 
 test("the header checkbox follows the filters and its count never hides a selected row the filter hides", async () => {
