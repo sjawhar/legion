@@ -26,11 +26,14 @@
 # the status the run is exiting with, <dest> the key command's directory this run created
 # (install-model-gateway.sh --dest) or empty until it did, since a directory an earlier run left
 # holds that run's calls, <since> the time the failing check began (%FT%TZ, UTC, as the record
-# writes it) and <check> its name. When <status> is not 0 it prints, for each agent (the calls from
-# one working directory) whose last call got no key and came at or after <since>, that call: when,
-# from which directory, and why. A run-wide "not scored" could not be honest: in Stage 4b the key
-# command's one caller is the operator's controller, while every pod uses its projected token. So
-# the notes say only whether starvation could explain the failing check, and a person reads them.
+# writes it) and <check> its name. When <status> is not 0 it prints each agent (the calls from one
+# working directory) that got no key at or after <since>: when, from which directory, and why. One
+# whose last call got no key is still without one. One served again later is listed too, marked with
+# when: Oh My Pi backs a failed key command off 30 s before it retries, so that agent recovered but
+# spent the wait, which can time out a check that waited on it. A run-wide "not scored" could not be
+# honest: in Stage 4b the key command's one caller is the operator's controller, while every pod
+# uses its projected token. So the notes say only whether starvation could explain the failing
+# check, and a person reads them.
 #
 # Either form exits 2 on an argument refusal, and 1 on a record line whose outcome it does not know.
 set -euo pipefail
@@ -83,21 +86,29 @@ case "${1:-}" in
   [[ $4 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || refuse "--notes <since> $4 is not a UTC time as %FT%TZ"
   if [ "$2" = 0 ] || [ -z "$3" ] || [ ! -e "$3/hawk-token.calls" ]; then exit 0; fi
   record=$3/hawk-token.calls
-  declare -A last_outcome=() last_at=() last_line=()
+  declare -A last_outcome=() last_at=() starve_at=() starve_line=()
   while IFS=$'\t' read -r at pid cwd outcome detail; do
     known "$outcome"
     last_outcome[$cwd]=$outcome
     last_at[$cwd]=$at
-    last_line[$cwd]="  $at in $cwd (pid $pid): $outcome: $detail"
+    if [ "$outcome" != served ]; then
+      starve_at[$cwd]=$at
+      starve_line[$cwd]="  $at in $cwd (pid $pid): $outcome: $detail"
+    fi
   done <"$record"
   lines=()
-  for cwd in "${!last_outcome[@]}"; do
-    [ "${last_outcome[$cwd]}" != served ] || continue
-    [[ ! ${last_at[$cwd]} < $4 ]] || continue
-    lines+=("${last_line[$cwd]}")
+  without=0
+  for cwd in "${!starve_at[@]}"; do
+    [[ ! ${starve_at[$cwd]} < $4 ]] || continue
+    if [ "${last_outcome[$cwd]}" = served ]; then
+      lines+=("${starve_line[$cwd]}; served again at ${last_at[$cwd]}")
+    else
+      lines+=("${starve_line[$cwd]}")
+      without=$((without + 1))
+    fi
   done
   [ "${#lines[@]}" != 0 ] || exit 0
-  echo "$me: since check $5 began ($4), ${#lines[@]} agent(s) got no model key on their last call; if the check waited on one of them, that may be why it failed ($3/hawk-token.calls):"
+  echo "$me: since check $5 began ($4), ${#lines[@]} agent(s) got no model key, $without of them still without one on their last call; if the check waited on one of them, that may be why it failed ($3/hawk-token.calls):"
   printf '%s\n' "${lines[@]}" | sort
   ;;
 *) refuse "$usage" ;;

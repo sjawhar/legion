@@ -1169,9 +1169,12 @@ checkout whose key command predates the record carries the same signal without t
 session file at all.
 
 `--notes` is a stage proof's diagnostic, and never changes its exit status. A failed run prints,
-after the check's own failure, each agent (the calls from one working directory) whose last call got
-no key and came at or after `<since>`, the time the failing check began: when, from which directory,
-and why. A person then sees whether starvation could explain the failure. A run-wide "not scored"
+after the check's own failure, each agent (the calls from one working directory) that got no key at
+or after `<since>`, the time the failing check began: when, from which directory, and why. One whose
+last call got no key is still without one. One served again later is listed too, with when, since
+Oh My Pi backs a failed key command off 30 s before retrying: that agent recovered but spent the
+wait, which can time out a check that waited on it. A starve before the check began is not listed.
+A person then sees whether starvation could explain the failure. A run-wide "not scored"
 would not be honest: in Stage 4b the key command's one caller is the operator's controller, while
 every pod uses its projected token, so a worker's failure cannot come from a starved controller.
 `<dest>` is the key command's directory this run created, and empty until it did: each stage proof

@@ -179,7 +179,7 @@ describe("the model gateway key command", () => {
     expect(unserved("--record", file)).toMatchObject({ code: 0, stdout: "" });
   });
 
-  test("tells a failed stage proof which agents' last calls since its failing check got no key, and never changes its status", async () => {
+  test("tells a failed stage proof which agents got no key since its failing check began, and never changes its status", async () => {
     const { run, dest, mints, keyCommand } = install();
     await call(keyCommand, join(run, "pane-earlier"), mints, { mode: "budget" });
     // The failing check begins after that call. The record's times are whole seconds, so it begins
@@ -194,16 +194,20 @@ describe("the model gateway key command", () => {
     const notes = unserved("--notes", "1", dest, since, "held-worker");
     expect(notes.code).toBe(0);
     expect(notes.stdout).toStartWith(
-      `model-gateway-unserved: since check held-worker began (${since})`
+      `model-gateway-unserved: since check held-worker began (${since}), 3 agent(s) got no model key, 2 of them still without one`
     );
     const listed = notes.stdout.split("\n").filter((line) => line.startsWith("  "));
-    expect(listed).toHaveLength(2);
+    // The starve before the check began is not the check's.
+    expect(listed).toHaveLength(3);
     const of = (pane: string) =>
       listed.find((line) => line.includes(`in ${join(run, pane)} `)) ?? "";
     expect(of("pane-refused")).toContain(
       ": failed: hawk-token exited 1 without a key: error: no usable hawk login"
     );
     expect(of("pane-starved")).toContain(": timeout: hawk-token: mint produced no token");
+    expect(of("pane-starved")).not.toContain("served again");
+    // An agent served again after its starve recovered, but spent the wait the check may have needed.
+    expect(of("pane-recovered")).toMatch(/: timeout: .*; served again at \d{4}-/);
     // A pass says nothing, nor does a run that failed before it installed the key command (an
     // empty directory), since a directory an earlier run left holds that run's calls.
     expect(unserved("--notes", "0", dest, since, "held-worker")).toMatchObject({
