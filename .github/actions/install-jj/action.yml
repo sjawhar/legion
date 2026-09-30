@@ -13,7 +13,7 @@ runs:
       shell: bash
       env:
         MISE_GITHUB_TOKEN: ${{ github.token }}
-      run: |
+      run: | # zizmor: ignore[github-env] writes $HOME/.local/bin to GITHUB_PATH, never event data; no workflow here uses pull_request_target or workflow_run
         set -euo pipefail
         dockerfile=packages/daemon/docker/worker.Dockerfile
         jj_tool=$(sed -n 's/^ARG JJ_TOOL=//p' "$dockerfile")

@@ -568,6 +568,8 @@ NON_BUILDING_ACTIONS = {
     "docker/setup-buildx-action",
     "docker/setup-qemu-action",
     "dorny/paths-filter",
+    "github/codeql-action/analyze",
+    "github/codeql-action/init",
     "oven-sh/setup-bun",
 }
 # `docker/build-push-action` inputs this check has read and found to add no build input, so a

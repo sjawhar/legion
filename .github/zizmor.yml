@@ -1,0 +1,7 @@
+# zizmor's policy for this repository (.github/workflows/security.yaml runs it with --config; the
+# security plan's day-14 decision on AGENTC-1305 disposes of every finding still listed here).
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin

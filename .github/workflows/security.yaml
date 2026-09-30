@@ -1,0 +1,370 @@
+name: Security
+
+# Report-only security checks (AGENTC-1305). zizmor audits the workflows and composite actions; on
+# a pull request or a merge group only the findings new against the base are judged
+# (.github/scripts/zizmor-findings.sh). osv-scanner and govulncheck audit the dependencies. Each
+# scanner job ends in one Gate step, the only step that can fail on findings or tool errors, and
+# while .github/security-window.json says report_only: true that step runs under
+# continue-on-error, so every job concludes success and nothing here blocks a merge. Installs and
+# tool runs record a tool error instead of failing. The daily scheduled run also runs
+# scripts/security-report.sh, whose exit is that run's conclusion: it fails once the report-only
+# window has closed while report_only is still true, and the window watcher reads that off this
+# workflow's status badge.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      decision:
+        description: force prints the day-14 decision before the window closes, and fails the run while report_only is true
+        type: choice
+        options: [none, force]
+        default: none
+
+permissions:
+  contents: read
+
+# GitHub runs `bash --noprofile --norc -eo pipefail {0}` for a shell: bash step, so a failing
+# command anywhere in a pipe fails the step; a bare run: without it gets `bash -e`, no pipefail.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  window:
+    runs-on: ubuntu-24.04
+    outputs:
+      report_only: ${{ steps.flag.outputs.report_only }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Read the report-only flag
+        id: flag
+        run: |
+          report_only=$(jq -r 'if (.report_only | type) == "boolean" then .report_only
+            else error("report_only must be true or false") end' .github/security-window.json)
+          printf 'report_only=%s\n' "$report_only" >> "$GITHUB_OUTPUT"
+
+  workflows:
+    needs: window
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        id: uv
+        continue-on-error: true
+        # check-image-trigger-paths.sh reads a local action only in its ./ form (its $/ form is refused there).
+        uses: ./.github/actions/install-uv # zizmor: ignore[self-repository]
+
+      # The input is `.` from the head's root, so every path reads ./.github/…, as the base's do.
+      # The token turns on zizmor's online audits (impostor-commit, known-vulnerable-actions,
+      # ref-confusion); the base audit gets the same token so both sides run the same audits.
+      - name: Audit workflows (head)
+        id: head
+        if: steps.uv.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          "$LEGION_TEST_UV" tool run "zizmor@1.30.1" --config .github/zizmor.yml --format=json-v1 . > zizmor-head.json
+          rc=$?
+          set -e
+          echo "zizmor exited $rc"
+          case $rc in
+            0 | 11 | 12 | 13 | 14) echo tool_error=false >> "$GITHUB_OUTPUT" ;;
+            *) echo tool_error=true >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # The base is audited from its own root with the same input `.`, so its paths match the
+      # head's; the head's configuration applies to both through an absolute --config. A public
+      # repository fetches without a credential, which persist-credentials: false relies on.
+      - name: Audit workflows (base)
+        id: base
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.head.outputs.tool_error == 'false'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CONFIG: ${{ github.workspace }}/.github/zizmor.yml
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" &&
+            git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA" &&
+            (cd "$RUNNER_TEMP/base" && "$LEGION_TEST_UV" tool run "zizmor@1.30.1" --config "$CONFIG" --format=json-v1 . > "$GITHUB_WORKSPACE/zizmor-base.json")
+          rc=$?
+          set -e
+          echo "base audit exited $rc"
+          case $rc in
+            0 | 11 | 12 | 13 | 14) echo tool_error=false >> "$GITHUB_OUTPUT" ;;
+            *) echo tool_error=true >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Fingerprint
+        id: fingerprint
+        if: steps.head.outputs.tool_error == 'false' && (steps.base.outcome == 'skipped' || steps.base.outputs.tool_error == 'false')
+        continue-on-error: true
+        env:
+          WITH_BASE: ${{ steps.base.outcome == 'success' }}
+        run: |
+          args=(--head zizmor-head.json --out zizmor-findings.json --annotate)
+          if [ "$WITH_BASE" = true ]; then
+            args+=(--base zizmor-base.json)
+          fi
+          .github/scripts/zizmor-findings.sh "${args[@]}"
+
+      - name: Record tool errors
+        if: always()
+        env:
+          UV: ${{ steps.uv.outcome }}
+          HEAD_ERROR: ${{ steps.head.outputs.tool_error }}
+          BASE_ERROR: ${{ steps.base.outputs.tool_error }}
+          FINGERPRINT: ${{ steps.fingerprint.outcome }}
+        run: |
+          if [ "$UV" != success ] || [ "$HEAD_ERROR" != false ] || [ "$BASE_ERROR" = true ] || [ "$FINGERPRINT" != success ]; then
+            echo '{"tool_error": true, "head_count": null, "new_count": null}' > zizmor-findings.json
+            echo "::warning::zizmor did not run to completion (install-uv: $UV; head audit tool error: ${HEAD_ERROR:-not run}; base audit tool error: ${BASE_ERROR:-not run}; fingerprint: $FINGERPRINT)"
+          fi
+
+      - name: Upload the findings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zizmor-findings
+          path: zizmor-findings.json
+
+      - name: Gate
+        if: always()
+        continue-on-error: ${{ needs.window.outputs.report_only == 'true' }}
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$(jq -r '.tool_error // false' zizmor-findings.json)" = true ]; then
+            echo "::error::zizmor recorded a tool error; see the steps above"
+            exit 1
+          fi
+          case $EVENT in
+            pull_request | merge_group) count=$(jq -r .new_count zizmor-findings.json) what="new against the base" ;;
+            *) count=$(jq -r .head_count zizmor-findings.json) what="on this tree" ;;
+          esac
+          echo "zizmor: $count findings $what"
+          if [ "$count" -ne 0 ]; then
+            echo "::error::zizmor: $count findings $what"
+            exit 1
+          fi
+
+  dependencies:
+    needs: window
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        id: go
+        continue-on-error: true
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+
+      - name: Install scanners
+        id: tools
+        if: steps.go.outcome == 'success'
+        continue-on-error: true
+        run: |
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.6.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+
+      # Reads bun.lock and both go.mod files; exit 1 means vulnerabilities were found.
+      - name: osv-scanner
+        id: osv
+        if: steps.tools.outcome == 'success'
+        run: |
+          set +e
+          osv-scanner scan source --recursive --format json --output-file osv.json .
+          rc=$?
+          set -e
+          echo "osv-scanner exited $rc"
+          case $rc in
+            0 | 1) echo tool_error=false >> "$GITHUB_OUTPUT" ;;
+            *) echo tool_error=true >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # -format json exits 0 whatever it finds; a finding whose trace[0] names a function is a
+      # symbol-level (reachable) one, and module- and package-level findings are informational.
+      - name: govulncheck
+        id: govulncheck
+        if: steps.tools.outcome == 'success'
+        run: |
+          tool_error=false
+          for module in envoy daemon-go; do
+            if ! govulncheck -C "packages/$module" -format json ./... > "govulncheck-$module.json"; then
+              echo "::warning::govulncheck failed in packages/$module"
+              tool_error=true
+            fi
+          done
+          echo "tool_error=$tool_error" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        if: always()
+        env:
+          OSV_ERROR: ${{ steps.osv.outputs.tool_error }}
+          GOVULNCHECK_ERROR: ${{ steps.govulncheck.outputs.tool_error }}
+        run: |
+          osv='{"total": null, "with_fix": null, "tool_error": true}'
+          if [ "$OSV_ERROR" = false ]; then
+            osv=$(jq -c '[.results[]?.packages[]?.vulnerabilities[]?]
+              | {total: length, with_fix: (map(select(any(.affected[]?.ranges[]?.events[]?; has("fixed")))) | length),
+                 tool_error: false}' osv.json) || osv='{"total": null, "with_fix": null, "tool_error": true}'
+          fi
+          # One entry per (module, OSV id): reachable when any of its findings is symbol-level.
+          govulncheck='{"reachable": null, "informational": null, "tool_error": true}'
+          if [ "$GOVULNCHECK_ERROR" = false ]; then
+            govulncheck=$(jq -n -c '[inputs | select(.finding) | {module: input_filename, osv: .finding.osv,
+                symbol: (.finding.trace[0].function != null)}]
+              | group_by([.module, .osv]) | map(any(.[]; .symbol))
+              | {reachable: (map(select(.)) | length), informational: (map(select(. | not)) | length), tool_error: false}' \
+              govulncheck-envoy.json govulncheck-daemon-go.json) ||
+              govulncheck='{"reachable": null, "informational": null, "tool_error": true}'
+          fi
+          jq -n --argjson osv "$osv" --argjson govulncheck "$govulncheck" \
+            '{osv: $osv, govulncheck: $govulncheck}' > deps-summary.json
+          cat deps-summary.json
+
+      - name: Upload the summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deps-summary
+          path: deps-summary.json
+
+      - name: Gate
+        if: always()
+        continue-on-error: ${{ needs.window.outputs.report_only == 'true' }}
+        run: |
+          if ! jq -e '(.osv.tool_error or .govulncheck.tool_error) | not' deps-summary.json > /dev/null; then
+            echo "::error::a dependency scanner recorded a tool error; see the steps above"
+            exit 1
+          fi
+          with_fix=$(jq -r .osv.with_fix deps-summary.json)
+          reachable=$(jq -r .govulncheck.reachable deps-summary.json)
+          echo "osv-scanner: $with_fix vulnerabilities with a fixed version; govulncheck: $reachable reachable"
+          if [ "$with_fix" -ne 0 ] || [ "$reachable" -ne 0 ]; then
+            echo "::error::$with_fix osv-scanner vulnerabilities with a fixed version, $reachable reachable govulncheck findings"
+            exit 1
+          fi
+
+  security:
+    needs: [window, workflows, dependencies]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      security-events: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Download the zizmor findings
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: zizmor-findings
+          path: artifacts
+
+      - name: Download the dependency summary
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: deps-summary
+          path: artifacts
+
+      # A missing artifact records a tool error for that half, never a clean run.
+      - name: Build the report
+        id: report
+        env:
+          RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          REPORT_ONLY: ${{ needs.window.outputs.report_only }}
+          WORKFLOWS_RESULT: ${{ needs.workflows.result }}
+          DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
+        run: |
+          zizmor=$(jq -c '{head_count, new_count, tool_error: (.tool_error // false),
+            by_audit: (if .head then .head | group_by(.ident) | map({key: .[0].ident, value: length}) | from_entries
+                       else null end)}' artifacts/zizmor-findings.json) ||
+            zizmor='{"head_count": null, "new_count": null, "by_audit": null, "tool_error": true}'
+          deps=$(jq -c '{osv, govulncheck}' artifacts/deps-summary.json) ||
+            deps='{"osv": {"total": null, "with_fix": null, "tool_error": true}, "govulncheck": {"reachable": null, "informational": null, "tool_error": true}}'
+          jq -n --argjson run "$RUN_ID" --arg event "$EVENT" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+            --arg report_only "$REPORT_ONLY" --argjson zizmor "$zizmor" --argjson deps "$deps" \
+            --arg workflows "$WORKFLOWS_RESULT" --arg dependencies "$DEPENDENCIES_RESULT" '{
+              run_id: $run, event: $event, head_sha: $head, base_sha: (if $base == "" then null else $base end),
+              report_only: (if $report_only == "true" then true elif $report_only == "false" then false else null end),
+              zizmor: $zizmor, osv: $deps.osv, govulncheck: $deps.govulncheck,
+              tool_error: ($zizmor.tool_error or $deps.osv.tool_error or $deps.govulncheck.tool_error),
+              gate: {workflows: $workflows, dependencies: $dependencies}}' > security-report.json
+          cat security-report.json
+          {
+            echo "## Security (report_only: ${REPORT_ONLY:-unknown})"
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+            jq -r '"| zizmor | " + (if .zizmor.tool_error then "tool error" else
+                "\(.zizmor.head_count) findings on this tree, " + (if .zizmor.new_count == null then "no base to compare"
+                  else "\(.zizmor.new_count) new against the base" end) end) + " |",
+              "| zizmor by audit | " + ((.zizmor.by_audit // {}) | to_entries | map("\(.key) \(.value)") | join(", ")) + " |",
+              "| osv-scanner | " + (if .osv.tool_error then "tool error" else
+                "\(.osv.total) vulnerabilities, \(.osv.with_fix) with a fixed version" end) + " |",
+              "| govulncheck | " + (if .govulncheck.tool_error then "tool error" else
+                "\(.govulncheck.reachable) reachable, \(.govulncheck.informational) informational" end) + " |"' \
+              security-report.json
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "tool_error=$(jq -r .tool_error security-report.json)" >> "$GITHUB_OUTPUT"
+          echo "zizmor_new=$(jq -r '.zizmor.new_count // 0' security-report.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-report
+          path: security-report.json
+
+      # Two markers scripts/security-report.sh lists by name, so the window's report reads a
+      # handful of artifacts rather than one per run.
+      - name: Mark a tool error
+        if: steps.report.outputs.tool_error == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-tool-error
+          path: security-report.json
+
+      - name: Mark new zizmor findings
+        if: github.event_name == 'pull_request' && steps.report.outputs.zizmor_new != '0'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zizmor-new
+          path: artifacts/zizmor-findings.json
+
+      - name: Report and decide
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          DECISION: ${{ inputs.decision || 'none' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/security-report.sh --repo "$GITHUB_REPOSITORY" --decision "$DECISION" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

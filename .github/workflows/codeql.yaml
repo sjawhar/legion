@@ -1,0 +1,61 @@
+name: CodeQL
+
+# CodeQL as advanced setup on main only (AGENTC-1305): no check run on any pull request, nothing
+# required. Its results land in the repository's code scanning alerts, and the Security workflow's
+# scheduled job reads them as counts by rule, severity and state (scripts/security-report.sh). This
+# workflow publishes no SARIF artifact and no result listing. Default setup must stay off, or GitHub
+# refuses these uploads (scripts/security-settings.sh warns when it is on).
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      # The two go.work members.
+      - name: Build the Go modules
+        if: matrix.language == 'go'
+        shell: bash
+        run: |
+          (cd packages/envoy && go build ./...)
+          (cd packages/daemon-go && go build ./...)
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}

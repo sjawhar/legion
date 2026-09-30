@@ -111,6 +111,15 @@ jobs:
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
 
+      - name: Test the zizmor fingerprint script
+        run: .github/scripts/zizmor-findings.test.sh
+
+      - name: Test the security settings script
+        run: scripts/security-settings.test.sh
+
+      - name: Test the security report script
+        run: scripts/security-report.test.sh
+
       - name: Test the live proofs' GitHub ingress bridge
         run: bun test scripts/e2e/lib
 

@@ -11,7 +11,7 @@ runs:
       shell: bash
       env:
         MISE_GITHUB_TOKEN: ${{ github.token }}
-      run: |
+      run: | # zizmor: ignore[github-env] writes the path of the omp packages/daemon/src/daemon/omp-pin.ts pins, never event data; no workflow here uses pull_request_target or workflow_run
         set -euo pipefail
         pin=$(sed -n 's/^export const OMP_FORK_PIN = "\(.*\)";$/\1/p' packages/daemon/src/daemon/omp-pin.ts)
         test -n "$pin"

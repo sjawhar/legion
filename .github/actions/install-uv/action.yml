@@ -10,7 +10,7 @@ runs:
   steps:
     - name: Install the worker image's uv
       shell: bash
-      run: |
+      run: | # zizmor: ignore[github-env] writes the path of the uv packages/daemon/docker/worker.Dockerfile pins, never event data; no workflow here uses pull_request_target or workflow_run
         set -euo pipefail
         dockerfile=packages/daemon/docker/worker.Dockerfile
         version=$(sed -n 's/^ARG UV_VERSION=//p' "$dockerfile")
