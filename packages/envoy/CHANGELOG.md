@@ -21,10 +21,12 @@
   that asked for a page cannot tell from one (LEGION-406). A repeated, blank, non-integer or
   out-of-range `limit` or `offset` is `400 INVALID_QUERY` naming the parameter, and so is `cursor`,
   which the listing does not page with. The page is cut after every filter, `route_status`
-  included. The listing's order now ends on the issue key: status, rank and creation time can tie
-  (every project's first issue has rank `U`, and nothing makes a rank unique), and the key order
-  those ties used to come back in was a side effect of the query's grouping that nothing
-  guaranteed. The Stage 4b live proof no longer sends `limit=200`, which would now answer a page.
+  included. The listing's order now ends on the issue key. Status, rank and creation time can tie
+  (every project's first issue has rank `U`, and nothing makes a rank unique), and Postgres
+  returned such ties in an order of its own: in a project whose issues alternate between two
+  ranks, the old order listed one rank as `S8-2 S8-6 S8-4 S8-8`. A walk of the pages is exact
+  only while the listing does not change. The Stage 4b live proof no longer sends `limit=200`,
+  which would now answer a page.
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it

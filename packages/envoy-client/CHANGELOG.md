@@ -28,8 +28,9 @@
   schedule, so the client negotiates the answer's version rather than falling back: a Dispatch that
   pages answers `{issues, total, limit, offset}`, which is used as served; one that predates paging
   ignores both parameters and answers every matching issue as an array, which the client pages as
-  it always has; any other answer is refused. The tool's answer is the same either way, down to
-  its `showing A-B of N`.
+  it always has; any other answer, a page missing one of its four fields included, is refused. The
+  tool's answer is the same either way, down to its `showing A-B of N`. The array arm goes once
+  every Dispatch the hosts reach, the production deploy included, runs this change.
 - The `envoy_subscribe` description says a `pr.<n>.checks` settlement is published for every
   commit of the pull request whose checks settle, the head or not, and names its `sha`
   (LEGION-208).

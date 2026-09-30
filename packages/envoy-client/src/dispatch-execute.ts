@@ -41,7 +41,6 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
-  MAX_ISSUE_PAGE_LIMIT,
   overCapMessage,
   serviceSubjectLabel,
   snippetText,
@@ -1981,7 +1980,6 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const requestedLimit = optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT;
       const page = await client.listIssuePage(
         {
           project,
@@ -1992,9 +1990,11 @@ export async function executeDispatchTool(
           ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
           ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
         },
+        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
+        // negative or fractional offset.
         {
-          limit: Math.min(Math.max(requestedLimit, 1), MAX_ISSUE_PAGE_LIMIT),
-          offset: Math.max(optionalNumber(args, "offset") ?? 0, 0),
+          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+          offset: optionalNumber(args, "offset") ?? 0,
         }
       );
       const { total, limit, offset } = page;

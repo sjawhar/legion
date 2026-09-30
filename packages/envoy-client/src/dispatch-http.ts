@@ -136,10 +136,10 @@ export class DispatchClient {
   /**
    * One page of `GET /api/v1/issues?limit=&offset=`. This negotiates the answer's version rather
    * than falling back: the hosts release this client when it merges while Dispatch deploys on its
-   * own schedule, so a client can always meet a server older than itself. A Dispatch that pages
-   * answers `IssueSummaryPage`; one that predates paging ignores both parameters and answers every
-   * matching issue as an array, which is paged here as the server would have. Any other answer is
-   * refused.
+   * own schedule, so a client can meet a server older than itself. A Dispatch that pages answers
+   * `IssueSummaryPage`; one that predates paging ignores both parameters and answers every
+   * matching issue as an array, which is paged here as the server would have. Any other answer,
+   * a page missing one of its four fields included, is refused.
    */
   async listIssuePage(
     options: ListIssuesOptions,
@@ -150,6 +150,9 @@ export class DispatchClient {
       limit: page.limit,
       offset: page.offset,
     });
+    // The array arm serves Dispatch deploys that predate #1612 (LEGION-406). Remove it once every
+    // Dispatch the hosts reach runs that change, the production deploy included: from then on an
+    // array answer to a paged request is a rollback or this bug returning, and is refused below.
     if (Array.isArray(answer)) {
       const issues = answer as IssueSummary[];
       return {
@@ -164,7 +167,9 @@ export class DispatchClient {
       typeof served !== "object" ||
       served === null ||
       !Array.isArray(served.issues) ||
-      typeof served.total !== "number"
+      typeof served.total !== "number" ||
+      typeof served.limit !== "number" ||
+      typeof served.offset !== "number"
     ) {
       throw new Error(
         "GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues"

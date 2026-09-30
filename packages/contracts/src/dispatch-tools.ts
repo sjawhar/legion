@@ -934,7 +934,9 @@ export const dispatchToolSpecs = [
       "Dispatch pages the list: limit sets the page size (default " +
       `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` +
       "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
-      "enumerate every matching issue.",
+      "walk every matching issue. A walk is exact only while the list does not change: an issue " +
+      "created, or whose status or route reach changes, between two pages moves across a page " +
+      "boundary, so one issue can come back twice and another never.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),

@@ -91,6 +91,26 @@ describe("DispatchClient", () => {
     );
   });
 
+  // The executor prints `showing A-B of N` from the served limit and offset, so a page missing
+  // either must be refused rather than read as `showing NaN-NaN of N`.
+  test("refuses a page that does not name its limit and offset", async () => {
+    const issue = { key: "DSP-2", title: "DSP-2", status: "todo" } as unknown as IssueSummary;
+    const { fetchImpl } = fakeFetch([
+      jsonResponse({ issues: [issue], total: 5 }),
+      jsonResponse({ issues: [issue], total: 5, limit: 1 }),
+      jsonResponse({ issues: [issue], total: 5, limit: "1", offset: 1 }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    for (let answer = 0; answer < 3; answer++) {
+      await expect(
+        client.listIssuePage({ project: "DSP" }, { limit: 1, offset: 1 })
+      ).rejects.toThrow(
+        "GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues"
+      );
+    }
+  });
+
   test("search encodes q, project, and limit and returns the response body", async () => {
     const body = {
       results: [

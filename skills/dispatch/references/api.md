@@ -28,8 +28,11 @@ route"}`; when you see that, you typed the path wrong — read the index rather 
 
 `GET /api/v1/issues` answers every matching issue as an array, or one page when you name `limit`
 (1–250) or `offset` (alone it pages 50): `{issues, total, limit, offset}`, where `total` counts
-every issue your filters match, so repeat with the next `offset` until you have `total` rows;
-`cursor` is `400 INVALID_QUERY`. `dispatch_issues` does that paging for you. The event logs page
-with `after` or `before` and `limit`, and `GET /api/v1/search` takes a `limit` of at most 50 and has
-no next page. Every other route answers without paging and ignores a paging parameter.
+every issue your filters match. Walking the pages with the next `offset` is exact only while the
+listing does not change. The order starts with status, so an issue created, or one whose status or
+route reach changes, between two reads moves across a page boundary: one issue comes back twice
+and another never, even when you stop at `total`. The unpaged array is the only exact set one read
+gives. `cursor` is `400 INVALID_QUERY`. `dispatch_issues` pages for you. The event logs page with
+`after` or `before` and `limit`, and `GET /api/v1/search` takes a `limit` of at most 50 and has no
+next page. Every other route answers without paging and ignores a paging parameter.
 

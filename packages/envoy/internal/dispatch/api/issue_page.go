@@ -48,7 +48,10 @@ func parseIssuePage(query url.Values) (*issuePage, error) {
 }
 
 // of cuts the page out of the whole filtered listing, which is in the listing's total order, so
-// consecutive offsets cover every matching issue once.
+// consecutive offsets cover every matching issue once while the listing does not change between
+// reads. The order starts with status, so an issue created, or one whose status or route reach
+// changes, between two reads moves across a page boundary, and one issue is served twice and
+// another never. Only the unpaged listing is an exact set in one read.
 func (p issuePage) of(issues []model.IssueSummary) model.IssueSummaryPage {
 	start := min(p.offset, len(issues))
 	end := min(start+p.limit, len(issues))

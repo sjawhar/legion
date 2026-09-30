@@ -33,10 +33,12 @@ var issueStatusCase = issueStatusOrderSQL()
 // The components lateral yields one row per issue, so grouping by its columns
 // with the key adds no rows. listPinnedIssuesQuery is the same query joined
 // to the caller's pinned rows ($9 is the login). The order ends on the key, the
-// one column no two issues share, so it is total and a page cut at an offset
-// (parseIssuePage) cannot show a row twice or never: ranks repeat across
-// projects (every project's first issue is "U") and nothing makes one unique
-// within a project, and created_at is the creating transaction's start.
+// one column no two issues share, so it is total, and pages cut at consecutive
+// offsets (parseIssuePage) cannot show a row twice or never while the listing
+// does not change between the reads (issuePage.of says what a change does).
+// Without the key they could: ranks repeat across projects (every project's
+// first issue is "U"), nothing makes one unique within a project, and
+// created_at is the creating transaction's start.
 var listIssuesQuery = issueSummaryHead + issueSummaryTail
 
 var listPinnedIssuesQuery = issueSummaryHead + `

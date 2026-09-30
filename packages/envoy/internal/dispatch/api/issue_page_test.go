@@ -14,14 +14,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// issuePageBody is a paged GET /api/v1/issues answer.
-type issuePageBody struct {
-	Issues []model.IssueSummary `json:"issues"`
-	Total  int                  `json:"total"`
-	Limit  int                  `json:"limit"`
-	Offset int                  `json:"offset"`
-}
-
 func createListedIssues(t *testing.T, handler http.Handler, project string, count int) []string {
 	t.Helper()
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -62,14 +54,14 @@ func listedKeys(t *testing.T, handler http.Handler, query string) []string {
 
 // readPage reads one page, reporting (not stopping on) an answer that is not one: a route that
 // ignored the paging parameters answers the whole listing as a bare array.
-func readPage(t *testing.T, handler http.Handler, query string) (issuePageBody, bool) {
+func readPage(t *testing.T, handler http.Handler, query string) (model.IssueSummaryPage, bool) {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?"+query, nil, "alice")
 	if response.Code != http.StatusOK {
 		t.Errorf("?%s: status=%d body=%s, want 200 with a page", query, response.Code, response.Body.String())
-		return issuePageBody{}, false
+		return model.IssueSummaryPage{}, false
 	}
-	var page issuePageBody
+	var page model.IssueSummaryPage
 	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
 		var every []model.IssueSummary
 		if json.Unmarshal(response.Body.Bytes(), &every) == nil {
@@ -77,7 +69,7 @@ func readPage(t *testing.T, handler http.Handler, query string) (issuePageBody, 
 		} else {
 			t.Errorf("?%s: decode page: %v; body=%s", query, err, response.Body.String())
 		}
-		return issuePageBody{}, false
+		return model.IssueSummaryPage{}, false
 	}
 	return page, true
 }
@@ -179,22 +171,29 @@ func TestListIssuePagesCoverAFilteredListingOnce(t *testing.T) {
 	}
 }
 
-// Issues the order cannot otherwise tell apart - the same status, rank and creation time, which
-// two projects' first issues share - come in key order, so every read of the listing agrees.
-func TestListIssuesOrdersTiedIssuesByKey(t *testing.T) {
+// Tied issues come in key order when the listing also holds issues that do not tie with them.
+// Postgres's sort does not keep the order its input arrives in, so without the key it hands back
+// a tie among other rows in an order of its own making, and a write anywhere in the listing can
+// reshuffle it between two pages of one walk.
+func TestListIssuesOrdersTiesByKeyAmongOtherIssues(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
-	keys := append(createListedIssues(t, handler, "BETA", 3), createListedIssues(t, handler, "ALPHA", 3)...)
-	// Rewrite the rows in reverse key order, so the table holds them that way round.
-	for index := len(keys) - 1; index >= 0; index-- {
+	tied := []string{}
+	for _, project := range []string{"ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GOLF", "HOTEL", "INDIA", "JULIET", "KILO", "LIMA"} {
+		// A project's first issue is rank U, the rest rank after it.
+		tied = append(tied, createListedIssues(t, handler, project, 4)[0])
+	}
+	for index := len(tied) - 1; index >= 0; index-- {
 		if _, err := database.Pool.Exec(context.Background(),
-			"update issues set rank = 'U', created_at = '2026-09-30T12:00:00Z' where key = $1", keys[index]); err != nil {
-			t.Fatalf("tie %s: %v", keys[index], err)
+			"update issues set created_at = '2026-09-30T12:00:00Z' where key = $1", tied[index]); err != nil {
+			t.Fatalf("tie %s: %v", tied[index], err)
 		}
 	}
-	want := slices.Clone(keys)
+	listed := listedKeys(t, handler, "")
+	got := slices.DeleteFunc(slices.Clone(listed), func(key string) bool { return !slices.Contains(tied, key) })
+	want := slices.Clone(tied)
 	slices.Sort(want)
-	if got := listedKeys(t, handler, ""); !slices.Equal(got, want) {
-		t.Fatalf("tied issues list as %v, want key order %v", got, want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("the tied first issues list as %v among %d issues, want key order %v", got, len(listed), want)
 	}
 }
 
