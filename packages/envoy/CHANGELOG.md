@@ -13,6 +13,14 @@
 
 ### Changed
 
+- `GET /api/v1/issues` refuses `limit`, `offset` and `cursor` with `400 INVALID_QUERY`, naming the
+  parameter, saying the listing is unpaginated, and naming the `dispatch_issues` tool's `limit` and
+  `offset` as what pages it. It used to ignore them and answer 200 with the whole list (on
+  production, `?project=LEGSMOKE` with `limit=5`, `offset=5`, `cursor=abc` or `limit=999` all
+  answered the same 341 rows), which a caller that asked for a page cannot tell from one
+  (LEGION-406). Every other `GET` route refuses them the same way, except what it reads: the two
+  event logs and `/api/v1/search` keep `limit`. The Stage 4b live proof no longer sends the
+  `limit=200` the listing always ignored.
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it
