@@ -67,8 +67,9 @@ on:
   merge_group:
     types: [checks_requested]
 
-# The token's only uses are release downloads (install-jj, install-omp) and dorny/paths-filter
-# reading the changed files; nothing writes.
+# The token clones the repository (actions/checkout), downloads tools and releases (the setup
+# actions' default `token` inputs, install-jj, install-omp) and lets dorny/paths-filter read the
+# changed files; nothing writes.
 permissions:
   contents: read
 

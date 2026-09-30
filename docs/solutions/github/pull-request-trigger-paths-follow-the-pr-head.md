@@ -46,8 +46,8 @@ Two consequences for the built artifact under `pull_request`:
 - Concurrency should key on the PR, not the ref: `group: ${{ github.event.pull_request.number ||
   github.ref }}` serialises two pushes to one PR and leaves other events on the ref key.
 
-Same-repo `pull_request` runs receive the workflow's declared `permissions` (here `contents`,
-`packages`, `id-token: write`); a fork PR would get a read-only token. Say which you rely on.
+Same-repo `pull_request` runs receive the workflow's declared `permissions` (here `contents: read`
+and `packages: write`); a fork PR would get a read-only token. Say which you rely on.
 
 ## Fix
 
