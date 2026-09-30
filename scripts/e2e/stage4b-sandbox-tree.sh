@@ -1296,12 +1296,12 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
 # LEGSMOKE's stale todo roots would be admitted at boot ahead of the run's own.
-stale=$(dispatch_get "issues?project=$project&status=todo&limit=200" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
+stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
 for key in $stale; do
   set_status "$key" backlog
   note "moved stale todo root $key to backlog"
 done
-[ -z "$(dispatch_get "issues?project=$project&status=todo&limit=200" | jq -r '.[].key')" ] || fail "LEGSMOKE still holds todo issues"
+[ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "LEGSMOKE still holds todo issues"
 # The configured stream carries both halves of the workflow's intake. Dispatch publishes every
 # project's issue events under subjects that name the issue, so any project's shows the Dispatch
 # half (LEGSMOKE's own age out between runs; admission is where the run's are seen); the GitHub
