@@ -337,14 +337,14 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 			return fmt.Errorf("re-read %s after its engine transition: %w", summary.Key, err)
 		}
 		// The engine consumed the snapshot when it recorded the snapshot's sequence: it kept its own
-		// status over a status Dispatch already showed (keepStatus), or re-entered a child. The record's
-		// status is then the engine's; recording the snapshot's instead would put a set-back's backlog
+		// status over a status Dispatch already showed (keepStatus), or re-entered a child, and wrote
+		// the observation itself. Recording the snapshot's status now would put a set-back's backlog
 		// on a running tree, whose slot releaseInactiveSlots would then free. Otherwise the snapshot's
 		// move is recorded, as the live event's would be.
-		stored, status = refreshed, summary.Status
 		if refreshed.LastDispatchSeq >= summary.LastSeq {
-			status = refreshed.Status
+			return nil
 		}
+		stored, status = refreshed, summary.Status
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
 		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq)
@@ -412,7 +412,7 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
 // the boot read: Shown is the status Dispatch showed, and Status the one the record takes, which is
-// Shown unless the engine kept its own over it.
+// Shown except from a boot listing no newer than the record, which keeps the record's own.
 type observed struct {
 	Title, Parent, Rank, Status, Shown string
 	HandedOver                         bool

@@ -128,7 +128,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	// An event carries the whole issue, so it writes a status only when its status differs from the
 	// one Dispatch showed at the event before it. One that does not is an edit — a rank, title or
 	// label change — made while a status the daemon queued has not reached Dispatch, whoever made it.
-	if fact.Status == issue.Shown() {
+	if fact.Status == issue.DispatchStatus {
 		return intake.Result{}, e.keepStatus(ctx, tx, *issue, fact)
 	}
 	if reasserted, err := e.sessionStatusWrite(ctx, tx, *issue, fact); err != nil || reasserted {

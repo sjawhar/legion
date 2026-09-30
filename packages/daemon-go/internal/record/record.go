@@ -42,7 +42,9 @@ func (p ClassifiedPush) MayChangeCode() bool {
 }
 
 // Issue is one durable workflow record. Status is the issue's lifecycle status as the daemon holds
-// it: the last one Dispatch showed, or the one the daemon has queued its write of since.
+// it: set when the daemon queues a status write, and set again from each Dispatch event or boot
+// listing that changes the status Dispatch shows, the daemon's own echoes included. While a chain of
+// writes is queued, it can briefly hold an earlier write's echo.
 type Issue struct {
 	Key                 string
 	Tree                string
@@ -62,17 +64,8 @@ type Issue struct {
 	HandedOver bool
 	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole
-	// issue, so only an event whose status differs from it writes a status. Read it through Shown.
+	// issue, so only an event whose status differs from it writes a status.
 	DispatchStatus string
-}
-
-// Shown is the status Dispatch showed the issue at LastDispatchSeq. A record written without one, as
-// a test writes it, shows its own Status.
-func (i Issue) Shown() string {
-	if i.DispatchStatus == "" {
-		return i.Status
-	}
-	return i.DispatchStatus
 }
 
 // Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.
