@@ -215,17 +215,13 @@ type queryer interface {
 // Every route is marked so the shared pool can refuse a second connection to a handler that
 // already holds one of its transactions (store.ErrNestedAcquire): one caller, one connection is
 // what keeps the pool from deadlocking, and a handler that breaks it fails here instead of in
-// production. Every GET route refuses a paging parameter it does not read (refuseUnservedPaging).
+// production.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		handler := route.Handler
-		if route.Method == http.MethodGet {
-			handler = refuseUnservedPaging(route.Pattern, handler)
-		}
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(handler))
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)

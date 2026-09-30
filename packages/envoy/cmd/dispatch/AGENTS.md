@@ -142,13 +142,6 @@ under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`) is answered by
 /api/v1 lists every route"}` before any dashboard lookup; only paths outside those roots fall back
 to the SPA shell.
 
-`Register` puts every `GET` row behind `refuseUnservedPaging` (`api/paging.go`): a paging parameter
-the route does not read (`limit`, `offset`, `cursor`) is `400 INVALID_QUERY` naming the parameter
-and the route, before the handler runs, because a route that ignored it would answer 200 with rows
-the caller cannot tell from the page it asked for (LEGION-406). `routePaging` names the routes that
-read one — the two event logs and `/api/v1/search` read `limit` — and what the refusal says pages a
-route; a new `GET` row pages nothing until it is named there.
-
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.
 
@@ -174,7 +167,7 @@ the table says human only.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase: the assignee picker's options (pure config, no DB). |
 | `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
-| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. The listing is unpaginated: it answers every matching issue, and `limit`, `offset` or `cursor` is `400 INVALID_QUERY` naming the parameter; the `dispatch_issues` tool pages it with its own `limit` and `offset`. Creation without a `spec`, or with a blank one, gives an empty primary document at version 1. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
+| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. The listing is every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match; a repeated, blank, non-integer or out-of-range value, or `cursor`, is `400 INVALID_QUERY` naming the parameter. Creation without a `spec`, or with a blank one, gives an empty primary document at version 1. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
 | `/api/v1/search?q=&project=&limit=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results contain `<mark>` snippets and SPA `href`s. `limit` is 1–50 (default 20); an under-two-character or stop-word-only query returns `400 INVALID_QUERY`, and an invalid limit returns `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. `assignee` (an allowlisted login, lowercased; `null` clears; absent leaves it) may be set by any caller; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. `components` is the issue's own architecture attachment: `null` or `{mode: "inherit"}` deletes it (the issue takes its nearest ancestor's again), `{mode: "explicit", ids}` names bare component ids of the issue's project (`400 COMPONENTS_INPUT` for an unknown, retired, external, or other-project id), `{mode: "none", reason}` declares the issue not architectural; it is the one field besides `rank` a closed issue accepts without reopening. Every issue read carries the effective `components` (`mode`, `ids`, `unknown` for retired ids, `reason`, `inherited_from`), resolved up the parent chain in the same query. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |

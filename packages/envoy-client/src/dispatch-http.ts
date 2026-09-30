@@ -34,6 +34,7 @@ import type {
   IssueReferences,
   IssueRouteStatus,
   IssueSummary,
+  IssueSummaryPage,
   Message,
   MessageRead,
   MessageReplyInput,
@@ -83,6 +84,12 @@ export interface ListIssuesOptions {
   readonly route_status?: IssueRouteStatus;
 }
 
+/** The page `listIssuePage` asks for: `limit` issues from position `offset` of the listing. */
+export interface IssuePageRequest {
+  readonly limit: number;
+  readonly offset: number;
+}
+
 export interface SearchOptions {
   readonly project?: string;
   readonly limit?: number;
@@ -126,8 +133,44 @@ export class DispatchClient {
     return this.#resolveIssue(issueReference);
   }
 
-  async listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
-    return this.#json("GET", ["api", "v1", "issues"], undefined, options);
+  /**
+   * One page of `GET /api/v1/issues?limit=&offset=`. This negotiates the answer's version rather
+   * than falling back: the hosts release this client when it merges while Dispatch deploys on its
+   * own schedule, so a client can always meet a server older than itself. A Dispatch that pages
+   * answers `IssueSummaryPage`; one that predates paging ignores both parameters and answers every
+   * matching issue as an array, which is paged here as the server would have. Any other answer is
+   * refused.
+   */
+  async listIssuePage(
+    options: ListIssuesOptions,
+    page: IssuePageRequest
+  ): Promise<IssueSummaryPage> {
+    const answer: unknown = await this.#json("GET", ["api", "v1", "issues"], undefined, {
+      ...options,
+      limit: page.limit,
+      offset: page.offset,
+    });
+    if (Array.isArray(answer)) {
+      const issues = answer as IssueSummary[];
+      return {
+        issues: issues.slice(page.offset, page.offset + page.limit),
+        total: issues.length,
+        limit: page.limit,
+        offset: page.offset,
+      };
+    }
+    const served = answer as Partial<IssueSummaryPage> | null;
+    if (
+      typeof served !== "object" ||
+      served === null ||
+      !Array.isArray(served.issues) ||
+      typeof served.total !== "number"
+    ) {
+      throw new Error(
+        "GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues"
+      );
+    }
+    return served as IssueSummaryPage;
   }
 
   async listProjectArtifacts(project: string, unlinked = false): Promise<Artifact[]> {

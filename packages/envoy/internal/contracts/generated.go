@@ -147,6 +147,13 @@ const ReceiptTimeoutCause = "The listener didn't answer within the send window; 
 // cannot drift apart.
 const MaxBroadcastRecipients = 100
 
+// MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
+// DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
+// MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
+// and the dispatch_issues tool's cannot drift apart.
+const MaxIssuePageLimit = 250
+const DefaultIssuePageLimit = 50
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

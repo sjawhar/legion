@@ -1,3 +1,4 @@
+import { DEFAULT_ISSUE_PAGE_LIMIT, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -930,8 +931,9 @@ export const dispatchToolSpecs = [
       "session that is not running at the moment of the read, whatever its priority. A restarting " +
       "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
       "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
-      "Rows are paged after the server returns the full response: limit sets the page size (default 50, " +
-      "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " +
+      "Dispatch pages the list: limit sets the page size (default " +
+      `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` +
+      "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
       "enumerate every matching issue.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
@@ -958,8 +960,8 @@ export const dispatchToolSpecs = [
         )
         .optional(),
       limit: z
-        .number({ int: true, min: 1, max: 250 })
-        .describe("Maximum rows, 1-250; default 50.")
+        .number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT })
+        .describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`)
         .optional(),
       offset: z
         .number({ int: true, min: 0 })

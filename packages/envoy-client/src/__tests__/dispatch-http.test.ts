@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { IssueSummary } from "@legion/contracts";
 import { DispatchClient } from "../dispatch-http";
 
 interface RecordedRequest {
@@ -35,15 +36,58 @@ const actor = {
 };
 
 describe("DispatchClient", () => {
-  test("serializes the updated_since boundary when listing issues", async () => {
-    const { fetchImpl, requests } = fakeFetch([jsonResponse([])]);
+  test("asks for a page of the issue listing with the filters and the updated_since boundary", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ issues: [], total: 0, limit: 5, offset: 10 }),
+    ]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
 
-    await client.listIssues({ project: "DSP", updated_since: "2026-09-10T12:00:00Z" });
+    await client.listIssuePage(
+      { project: "DSP", updated_since: "2026-09-10T12:00:00Z" },
+      { limit: 5, offset: 10 }
+    );
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toContain(
-      "/api/v1/issues?project=DSP&updated_since=2026-09-10T12%3A00%3A00Z"
+      "/api/v1/issues?project=DSP&updated_since=2026-09-10T12%3A00%3A00Z&limit=5&offset=10"
+    );
+  });
+
+  // Dispatch deploys apart from the hosts that release this client, so a client meets servers
+  // from before and after the listing paged; each answer shape is read for what it is.
+  test("reads a paging Dispatch's page as served and pages an older Dispatch's whole array itself", async () => {
+    // Only the key matters to paging, so the rest of each summary is left out.
+    const issue = (key: string) => ({ key, title: key, status: "todo" }) as unknown as IssueSummary;
+    const served = { issues: [issue("DSP-4")], total: 4, limit: 3, offset: 3 };
+    const { fetchImpl } = fakeFetch([
+      jsonResponse(served),
+      jsonResponse(["DSP-1", "DSP-2", "DSP-3", "DSP-4"].map(issue)),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    // The page a paging Dispatch cut is the page: nothing is sliced out of it again.
+    await expect(
+      client.listIssuePage({ project: "DSP" }, { limit: 3, offset: 3 })
+    ).resolves.toEqual(served);
+    // A Dispatch that predates paging ignored limit and offset and answered every issue.
+    await expect(
+      client.listIssuePage({ project: "DSP" }, { limit: 2, offset: 1 })
+    ).resolves.toEqual({
+      issues: [issue("DSP-2"), issue("DSP-3")],
+      total: 4,
+      limit: 2,
+      offset: 1,
+    });
+  });
+
+  test("refuses an issue listing answer that is neither a page nor an array", async () => {
+    const { fetchImpl } = fakeFetch([jsonResponse({ issues: "DSP-1", total: 1 })]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(
+      client.listIssuePage({ project: "DSP" }, { limit: 50, offset: 0 })
+    ).rejects.toThrow(
+      "GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues"
     );
   });
 

@@ -3,8 +3,10 @@ import { dirname, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
+  DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
   MAX_BROADCAST_RECIPIENTS,
+  MAX_ISSUE_PAGE_LIMIT,
   RECEIPT_TIMEOUT_CAUSE,
 } from "../src/dispatch-api";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
@@ -89,6 +91,13 @@ const ReceiptTimeoutCause = ${JSON.stringify(RECEIPT_TIMEOUT_CAUSE)}
 // MAX_BROADCAST_RECIPIENTS in packages/contracts so the server's limit and the dashboard's
 // cannot drift apart.
 const MaxBroadcastRecipients = ${MAX_BROADCAST_RECIPIENTS}
+
+// MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
+// DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
+// MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
+// and the dispatch_issues tool's cannot drift apart.
+const MaxIssuePageLimit = ${MAX_ISSUE_PAGE_LIMIT}
+const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

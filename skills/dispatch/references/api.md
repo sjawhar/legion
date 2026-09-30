@@ -26,8 +26,10 @@ A path Dispatch does not serve under `/api` or `/v1` answers
 route"}`; when you see that, you typed the path wrong — read the index rather than guessing. Every
 `/api/v1` error body carries a `code`; branch on the code, never on the text.
 
-A `GET` route that does not page refuses `limit`, `offset` and `cursor` with `400 INVALID_QUERY`
-rather than ignoring them. `GET /api/v1/issues` is unpaginated and answers every matching issue;
-to page it, call `dispatch_issues` with its `limit` and `offset`. The event logs page with `after`
-or `before` and `limit`, and `GET /api/v1/search` takes a `limit` of at most 50 and has no next page.
+`GET /api/v1/issues` answers every matching issue as an array, or one page when you name `limit`
+(1–250) or `offset` (alone it pages 50): `{issues, total, limit, offset}`, where `total` counts
+every issue your filters match, so repeat with the next `offset` until you have `total` rows;
+`cursor` is `400 INVALID_QUERY`. `dispatch_issues` does that paging for you. The event logs page
+with `after` or `before` and `limit`, and `GET /api/v1/search` takes a `limit` of at most 50 and has
+no next page. Every other route answers without paging and ignores a paging parameter.
 

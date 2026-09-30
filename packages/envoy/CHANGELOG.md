@@ -13,14 +13,18 @@
 
 ### Changed
 
-- `GET /api/v1/issues` refuses `limit`, `offset` and `cursor` with `400 INVALID_QUERY`, naming the
-  parameter, saying the listing is unpaginated, and naming the `dispatch_issues` tool's `limit` and
-  `offset` as what pages it. It used to ignore them and answer 200 with the whole list (on
-  production, `?project=LEGSMOKE` with `limit=5`, `offset=5`, `cursor=abc` or `limit=999` all
-  answered the same 341 rows), which a caller that asked for a page cannot tell from one
-  (LEGION-406). Every other `GET` route refuses them the same way, except what it reads: the two
-  event logs and `/api/v1/search` keep `limit`. The Stage 4b live proof no longer sends the
-  `limit=200` the listing always ignored.
+- `GET /api/v1/issues` pages with `limit` (1–250) and `offset` (0 or more; `offset` alone pages
+  50), answering `{issues, total, limit, offset}` with `total` counting every issue the filters
+  match; without either parameter it answers the whole listing as an array, as before. It used to
+  ignore both, and `cursor`, answering 200 with every row (on production, `?project=LEGSMOKE` with
+  `limit=5`, `offset=5`, `cursor=abc` or `limit=999` each answered the whole project), which a caller
+  that asked for a page cannot tell from one (LEGION-406). A repeated, blank, non-integer or
+  out-of-range `limit` or `offset` is `400 INVALID_QUERY` naming the parameter, and so is `cursor`,
+  which the listing does not page with. The page is cut after every filter, `route_status`
+  included. The listing's order now ends on the issue key: status, rank and creation time can tie
+  (every project's first issue has rank `U`, and nothing makes a rank unique), and the key order
+  those ties used to come back in was a side effect of the query's grouping that nothing
+  guaranteed. The Stage 4b live proof no longer sends `limit=200`, which would now answer a page.
 - The CI summary loop publishes a `pr.<n>.checks` settlement for every commit of a pull request
   whose checks settle, not only its current head, carrying the commit's `sha` as before. A head
   pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it
