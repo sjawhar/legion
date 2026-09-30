@@ -16,6 +16,7 @@ applies_when:
   - A Go (or any) test runs a Bun script and parses what it prints, and fails now and then on invalid JSON or a bad encoding while the script exited 0
   - The failing case changes between runs and is always one of the larger outputs
   - A Bun script's output is cut at a round size (4096, 8192, 65536 bytes) only on a loaded machine
+  - A Bun script whose output something parses reads process.stdout, or depends on anything that might (a colour library checking isTTY is enough)
   - You are about to reach for Bun.write(Bun.stdout, ...) to "flush" a script's output
 ---
 
@@ -29,17 +30,30 @@ run and `empty-items-holding-the-next-line` on the next: lost output, not bad da
 
 ## Mechanism
 
-1. **fd 1 is non-blocking.** `@legion/proof-editor/headless` imports `unified`, which imports
-   `vfile`, whose `#minproc` is `export {default as minproc} from 'node:process'`. At Bun 1.3.14,
-   loading `node:process` as an ES module switches the script's stdout to `O_NONBLOCK`:
-   `/proc/self/fdinfo/1` reads `flags: 01` before and `04001` after. A bare `import process from
-   "node:process"` does the same, and so does the first `process.stdout.write`; using the global
-   `process` does not.
+1. **The first read of `process.stdout` makes fd 1 non-blocking.** At Bun 1.3.14 the first read
+   of the `process.stdout` getter switches fd 1 to `O_NONBLOCK` (`/proc/self/fdinfo/1` reads
+   `flags: 01` before and `04001` after), and the first read of `process.stderr` does the same to
+   fd 2, whether the read goes through the `process` global or an import. Importing `node:process`
+   as an ES module reads both getters. Measured in script files with both fds on pipes: a bare
+   default import, a namespace import and vfile's `export {default as minproc} from
+   'node:process'` flip both; `process.stdout.isTTY` or a first `process.stdout.write` through the
+   global flips fd 1, and `process.stderr` flips fd 2; `console.log`, `console.error`,
+   `process.argv` and `require("node:process")` flip neither. So a script that only reads
+   `process.argv` is safe until someone adds `process.stdout.isTTY` for a progress line. The
+   hazard is not one import: any dependency can read `process.stdout` without saying so, and
+   whether it does can depend on the environment.
+   picocolors 1.1.1 reads `process.stdout.isTTY` unless `NO_COLOR` or `FORCE_COLOR` is set, and
+   flipped fd 1 with `CI=true` alone but not with either of those. Here the import comes from
+   `@legion/proof-editor/headless`, which imports `unified`, which imports `vfile` and its
+   `node:process` re-export.
 2. **console.log on a full non-blocking pipe loses the rest.** It writes what the pipe has room
    for, gets `EAGAIN` for the remainder, drops it, and the script exits 0. strace of a 20,000-byte
    `console.log` into a one-page pipe: `write(1, …, 20000) = 4096`, `write(1, …, 15904) = -1
    EAGAIN`, `write(1, "\n", 1) = -1 EAGAIN`, `exit_group(0)`. On a blocking stdout the same
    `console.log` waits for the reader, which is why a plain scratch script never reproduces it.
+   `console.error` loses output on fd 2 the same way: after a read of `process.stderr`, a slow
+   reader got 65,536 of 200,001 bytes and the exit status was 0. The gen scripts' stderr is read
+   only to show a failure, so there it can shorten a failure message but not change a verdict.
 3. **Pipes on a busy box are small.** A pipe holds 64 KiB, but once a user's pipes pass
    `/proc/sys/fs/pipe-user-pages-soft` (16384 pages) Linux gives new ones two pages. On the
    devbox `F_GETPIPE_SZ` on a fresh pipe read 8192 at some moments and 65536 at others. Every
@@ -60,9 +74,11 @@ received the first 4096 bytes twice.
 
 ## Fix: hand the result back in a file
 
-`decode.ts` and `edit-blocks.ts` take an output path as their last argument and `writeFileSync`
-their result there, as `differential.ts` and `gen.ts` already did, so no gen script a test reads
-returns anything over a pipe. A regular file takes the whole write, and a write that fails throws
+Any dependency can make stdout non-blocking, and whether it does can depend on the environment,
+so a Bun script's stdout is not a safe place for a result a program parses. `decode.ts` and
+`edit-blocks.ts` take an output path as their last argument and `writeFileSync` their result
+there, as `differential.ts` and `gen.ts` already did, so no gen script a test reads returns
+anything over a pipe. A regular file takes the whole write, and a write that fails throws
 and exits non-zero. The Go runner (`genResult`, `update_test.go`) reads the file after exit 0 and
 fails the test when the script printed anything to stdout or exited 0 without writing the file,
 so a script moved back to `console.log` fails every test that runs it.

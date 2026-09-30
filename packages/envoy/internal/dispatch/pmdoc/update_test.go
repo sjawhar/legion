@@ -203,7 +203,8 @@ func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 // stdout, which a Bun script can cut short while exiting 0
 // (docs/solutions/testing/bun-console-log-drops-what-a-full-non-blocking-pipe-cannot-take-and-exits-0.md),
 // so anything it prints to stdout fails the test rather than going unread, as does exiting 0
-// without writing the file.
+// without creating the file. A file the script created and left empty passes that check; the
+// test's own check of the result is what fails on it.
 func genResult(t *testing.T, script string, update []byte) []byte {
 	t.Helper()
 	if _, err := exec.LookPath("bun"); err != nil {
@@ -221,11 +222,11 @@ func genResult(t *testing.T, script string, update []byte) []byte {
 		t.Fatalf("%s: %v\nstderr:\n%s", script, err, stderr.Bytes())
 	}
 	if len(stdout) > 0 {
-		t.Fatalf("%s printed %d bytes to stdout, which nothing reads: a gen script writes its result to the file it is given", script, len(stdout))
+		t.Fatalf("%s printed %d bytes to stdout, which nothing reads: a gen script writes its result to the file it is given\nstderr:\n%s", script, len(stdout), stderr.Bytes())
 	}
 	result, err := os.ReadFile(out)
 	if err != nil {
-		t.Fatalf("%s exited 0 without writing its result to the file it is given: %v", script, err)
+		t.Fatalf("%s exited 0 without writing its result to the file it is given: %v\nstderr:\n%s", script, err, stderr.Bytes())
 	}
 	return result
 }
