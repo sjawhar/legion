@@ -443,7 +443,8 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 
 // Oh My Pi runs through the launch prefix, interactive (no --mode rpc, no --resume), with one
 // --append-system-prompt holding the controller prompt, the daemon's design gate policy, and the
-// deployment instructions, under the operator's own environment plus exactly the shared
+// deployment instructions, and the start message as its first prompt, so the controller's first
+// turn runs with nothing typed; under the operator's own environment plus exactly the shared
 // controller environment — the secrets as file pointers, never values.
 func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *testing.T) {
 	d := newControllerDaemon(t)
@@ -469,7 +470,8 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	// `$(cat …)` drops each file's trailing newlines, as a shell does.
 	wantArgv := []string{"--append-system-prompt",
 		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`.\n\n" +
-			strings.TrimRight(string(instructions), "\n")}
+			strings.TrimRight(string(instructions), "\n"),
+		controllerStartMessage}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("Oh My Pi's argv = %q\nwant %q", got, wantArgv)
 	}
@@ -557,7 +559,7 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	argv := c.argv()
-	if len(argv) != 2 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
+	if len(argv) != 3 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
 		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry the off policy line", argv)
 	}
 }

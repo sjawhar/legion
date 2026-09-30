@@ -35,6 +35,12 @@ const controllerUsage = "usage: legion controller start --config <controller.yam
 // a secret file.
 const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
 
+// controllerStartMessage is the controller's first prompt, which `legion controller start` passes
+// Oh My Pi at launch: Oh My Pi's interactive mode sends its first message as the session's first
+// turn, so every start and restart runs the skill's start procedure with nothing typed, where the
+// plugin alone would leave the session idle until a wake.
+const controllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
+
 func runController(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "start" {
 		fmt.Fprintln(stderr, controllerUsage)
@@ -75,9 +81,10 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 // bearer (the daemon mints a fresh capability and revokes the previous controller's); write it
 // 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
 // deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
-// `--append-system-prompt`, no `--resume`, no `--mode rpc` — in the foreground with the same
-// environment, and answer its exit code. A refusal before the secret is written removes the
-// directories made for the probe, so the state directory is as it was.
+// `--append-system-prompt`, and controllerStartMessage as its one message, no `--resume`, no
+// `--mode rpc` — in the foreground with the same environment, and answer its exit code. A refusal
+// before the secret is written removes the directories made for the probe, so the state directory
+// is as it was.
 func controllerStart(ctx context.Context, configPath, daemonURL string, stderr io.Writer) (int, error) {
 	absolute, err := filepath.EvalSymlinks(configPath)
 	if err == nil {
@@ -186,12 +193,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		}
 	}
 	// The daemon's design gate policy is the controller's addressing, the line its take comment
-	// reads before it promises anyone a design approval (skill://legion-controller).
+	// reads before it promises anyone a design approval (skill://legion-controller). The start
+	// message is Oh My Pi's first prompt, so a started or restarted controller runs its start
+	// procedure at once rather than waiting for a wake that, with every slot full, may not come.
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            []string{controllerPrompt},
 		Addressing:                 daemon.DesignGateFragment(designGate),
 		DeploymentInstructionsPath: instructionsFile,
-	})
+	}) + " " + shellprefix.Word(controllerStartMessage)
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
 	// Interactive and in the foreground: the operator's terminal is Oh My Pi's. The child is not
 	// bound to ctx — a Ctrl-C reaches Oh My Pi through the terminal's process group and is its to

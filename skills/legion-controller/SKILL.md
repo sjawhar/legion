@@ -89,7 +89,9 @@ mints a new secret, so your grants stop working and the role moves to the new se
 The Go daemon's controller topic is a wake for a session that is running when it is published.
 Envoy hands an Oh My Pi session no retained copy of a notice published before it subscribed, so a
 hold, a tree architect's failed claim, a new triage root, or a freed slot from while no controller
-ran never arrives as a wake. At every start, before anything else:
+ran never arrives as a wake. `legion controller start` opens your first turn with a start message
+(`Legion controller start: …`), so every start and restart runs this procedure with nothing typed.
+At every start, before anything else:
 
 1. Read `legion state --json` and handle each issue whose `issues.<KEY>.phase` is `held` (its
    `issues.<KEY>.holdReason` is `escalated` when its architect sent it to you, and absent while the

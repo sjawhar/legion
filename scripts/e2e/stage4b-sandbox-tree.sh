@@ -1768,6 +1768,20 @@ tmux -L "legion-e2e4b-$$" new-session -d -s controller -x 200 -y 50 \
 until_true 300 "controllerLocator in the state" sh -c "'$work/legion' state --json --config '$work/legion.yaml' | jq -e '.controllerLocator.sessionId != null' >/dev/null"
 controller_session=$(daemon_state | jq -r .controllerLocator.sessionId)
 note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
+# The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
+# its session's first user message is the start message `legion controller start` launches Oh My
+# Pi with (controllerStartMessage, cmd/legion/controller.go), and the model answers it.
+controller_started_itself() {
+  local file
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
+    [ -f "$file" ] || continue
+    grep -m1 '"role":"user"' "$file" | grep -qF 'Legion controller start: follow skill://legion-controller' &&
+      grep -q '"role":"assistant"' "$file" && return 0
+  done
+  return 1
+}
+until_true 300 "the controller's first turn to start itself, with nothing typed" controller_started_itself
+note "the controller's first turn began from its start message, with nothing typed into its pane"
 wait_for_worker "$tree3" architect
 drive_spec "$tree3"
 wait_for_worker "$tree3" planner
