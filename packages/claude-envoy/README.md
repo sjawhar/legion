@@ -107,8 +107,9 @@ human approval surface.
 The plugin ships three skills, `claude-envoy:envoy`, `claude-envoy:dispatch` and
 `claude-envoy:dispatch-first`, which teach the tools above. `skills/` holds one relative symlink per
 skill into the repository-root `skills/`, which stays their only source; Claude Code copies each
-target into the plugin cache at install. With Dispatch configured, the `dispatch-first` SessionStart
-hook also puts `dispatch-first` into the model's context on startup, `/clear` and `/compact`.
+target into the plugin cache at install. With Dispatch configured, the `dispatch-first` hook also
+puts `dispatch-first` into the model's context on every `SessionStart` (startup, resume, clear,
+compact, fork) and `SubagentStart`, as the `hooks/hooks.json` bullet above describes.
 
 `envoy`, `dispatch` and `dispatch-first` are the three a standalone Claude Code session uses. The other root skills
 stay out: they belong to Legion's roles (the architect, controller, oracle and retro skills, and the
