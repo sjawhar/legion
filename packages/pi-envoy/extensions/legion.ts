@@ -503,8 +503,8 @@ export default function legionExtension(pi: PiApi): void {
   // once per tool call.
   const checkSubagentSession = subagentSessionCheck();
   // The pane rules this pane is held to (PANE_RULES), judged from the environment on the first
-  // tool_call. A subagent's own instance inherits the pane's environment, so they bind it exactly
-  // as they bind the worker that spawned it.
+  // tool_call. A subagent's own instance inherits the pane's environment, so the rules bind it
+  // exactly as they bind the worker that spawned it.
   let paneRules: readonly PaneRule[] | undefined;
 
   // The phase-stall check (src/legion/phase-stall.ts). It runs only in a session holding a
@@ -946,7 +946,8 @@ export default function legionExtension(pi: PiApi): void {
     // `legion` tool, so a handoff from its bash is one the phase stall cannot see. The pane rules
     // are therefore judged from the pane's environment ahead of the subagent exemption below --
     // the one gate that reaches a subagent -- and before any grant is minted. Classified once per
-    // instance, on the first call.
+    // instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the handler,
+    // never at load.
     paneRules ??= PANE_RULES[classifySession(process.env).kind] ?? [];
     const refusal = paneRuleRefusal(toolCall, paneRules);
     if (refusal !== undefined) return { block: true, reason: refusal };

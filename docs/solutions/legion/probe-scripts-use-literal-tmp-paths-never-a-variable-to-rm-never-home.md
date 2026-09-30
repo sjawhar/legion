@@ -33,8 +33,9 @@ it. The script ran without the edited tail being re-read.
 ## Why the probe was a file at all
 
 The pi-envoy extension's jj operation-log rule refuses any `bash`/`eval` command whose text
-mentions `jj` together with `abandon`, `undo`, `restore`, or `revert` — including inside a quoted
-string, a heredoc, a commit message, or a `--data` argument. The LEGION-84 setting is named
+mentions `jj` together with `abandon` or `undo`, or with `restore` or `revert` under `op` or
+`operation` (`jj op restore`; a file-level `jj restore <paths>` stays allowed). It reads a quoted
+string, a heredoc, a commit message, and a `--data` argument too. The LEGION-84 setting is named
 `git.abandon-unreachable-commits`, so every probe of it, every handoff JSON naming it, and every
 commit subject about it had to go through a file written with the `write` tool. That is the rule
 working as designed: it protects the shared jj operation log
