@@ -475,8 +475,9 @@ namespace list. Every evidence line names which one observed it (`[runtime]`, `[
 `[harness]` for the listener and its resolver).
 
 The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata) and port 13371 — the port the devbox's security group admits from Legion nodes, never
-`0.0.0.0` — and refuses to start while anything holds it, naming the holder. Its resolver accepts
+metadata, never `0.0.0.0`) and port 13373 — the rigs' worker-stream port, which the devbox's
+security group admits from Legion nodes beside the production daemon's 13370/13371 — and refuses
+to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
 pod's uid to a marker file in the tree volume's sessions directory, the file a resume names, and
@@ -598,8 +599,9 @@ Three roots are set todo under `admission_cap: 2`:
 - Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
   is outstanding, and is taken out the same way.
 
-**One run at a time.** The project, the durable consumer names, ports 13370 and 13371 and the
-namespace label `legion.dev/project=legsmoke` are shared.
+**One run at a time.** The project, the durable consumer names, ports 13372 and 13373 (the rigs'
+pair; the production daemon keeps 13370 and 13371) and the namespace label
+`legion.dev/project=legsmoke` are shared.
 - The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
 - It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
   `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.

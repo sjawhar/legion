@@ -46,7 +46,7 @@
 # The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
 # into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
 # reads them from header files), and never in the evidence. One run at a time: the project, the NATS
-# durable consumer names, ports 13370/13371 and the namespace label are shared, so the run takes a
+# durable consumer names, ports 13372/13373 and the namespace label are shared, so the run takes a
 # lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
 # it did not create.
 set -Eeuo pipefail
@@ -97,8 +97,10 @@ providers_secret=legion-$run_label-providers
 # daemon's spawn requires; the trailing digit keeps the child apart from the root.
 optree="S4BOP-$$"
 opchild="S4BOP-${$}1"
-port_daemon=13370
-port_worker_stream=13371
+# The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
+# the Legion nodes, so a run never waits for the production daemon to stop.
+port_daemon=13372
+port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
 # One path for every run on the devbox, whatever its environment names as its state directory.
 lock=$HOME/.local/state/legion/e2e/stage4b.lock
