@@ -84,14 +84,26 @@ func TestRegisterExecRunsTheCommandAsTheRegisteredPid(t *testing.T) {
 
 // realHelper serves a real helper.Server — the daemon's own registry, pidfd pinning and sign op —
 // on a socket, with a broker that can never enroll anyone (no launcher credential, nothing
-// listening), so every session it registers stays enrolling. It waits for every session to be
-// retired, and the server to stop, before the test's temporary directories go.
+// listening), so every session it registers stays unenrolled.
 func realHelper(t *testing.T) string {
 	t.Helper()
+	_, sock := serveRealHelper(t, "http://127.0.0.1:1")
+	return sock
+}
+
+// serveRealHelper serves a real helper.Server against the broker at brokerURL, with an operator
+// file so a test can log it in (Broker.Login). It waits for every session to be retired, and the
+// server to stop, before the test's temporary directories go.
+func serveRealHelper(t *testing.T, brokerURL string) (*helper.Server, string) {
+	t.Helper()
 	dir := t.TempDir()
+	operator := filepath.Join(dir, "operator")
+	if err := os.WriteFile(operator, []byte("sjawhar\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(filepath.Join(dir, "sessions.json")),
-		Broker:   &helper.Broker{URL: "http://127.0.0.1:1", OperatorFile: filepath.Join(dir, "operator"), HTTP: http.DefaultClient},
+		Broker:   &helper.Broker{URL: brokerURL, OperatorFile: operator, HTTP: http.DefaultClient},
 		Hostname: "testhost",
 		PeerOf:   helper.PeerOf,
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -113,7 +125,7 @@ func realHelper(t *testing.T) string {
 		cancel()
 		<-served
 	})
-	return sock
+	return srv, sock
 }
 
 func helperSessions(t *testing.T, sock string) []helper.SessionInfo {
@@ -125,11 +137,11 @@ func helperSessions(t *testing.T, sock string) []helper.SessionInfo {
 	return resp.Sessions
 }
 
-// TestIdentityAsksARealHelperWithoutRegistering runs identity against the real helper: from a
-// process no session registered it answers 1 (NOT_A_SESSION) and leaves the helper's sessions
+// TestIdentityAsksARealHelperWithoutRegistering runs identity against the real helper from a
+// process no session registered: it answers 1 (NOT_A_SESSION) and leaves the helper's sessions
 // exactly as they were — identity must never become a registration, which is what `register`
-// from an unregistered process is — and from inside a session the helper registered but has not
-// enrolled yet it answers 0 (NOT_ENROLLED), since that process is an agent session.
+// from an unregistered process is. nocredential_linux_test.go covers identity inside a
+// registered session.
 func TestIdentityAsksARealHelperWithoutRegistering(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := realHelper(t)
@@ -144,13 +156,6 @@ func TestIdentityAsksARealHelperWithoutRegistering(t *testing.T) {
 	}
 	if after := helperSessions(t, sock); len(after) != len(before) {
 		t.Fatalf("identity changed the helper's sessions: before %+v, after %+v", before, after)
-	}
-
-	cmd = exec.Command(binary, "register", "--exec", "--", binary, "identity")
-	cmd.Env = env
-	out, err = cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("identity inside a registered, enrolling session: %v, output %q; want exit 0", err, out)
 	}
 }
 

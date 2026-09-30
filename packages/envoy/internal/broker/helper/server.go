@@ -173,7 +173,9 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 // registerReply answers a register, first waiting up to wait for the session to enroll. Without a
 // launcher credential the enroll loop cannot succeed until a human logs the helper in, so it does
 // not wait at all, and the reply names that as the reason: a launcher's `register --wait N`
-// then costs nothing on a helper that was never logged in, or whose credential expired.
+// then costs nothing on a helper that was never logged in, or whose credential the broker has
+// refused once. An expired credential stays held until a call is refused, so the first register
+// after it expires still waits the full N.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	if wait > 0 && credential {
@@ -184,11 +186,22 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		}
 	}
 	lastErr := sess.LastError()
-	if !credential && sess.EnrollmentID() == "" && lastErr == "" {
+	if !credential && sess.EnrollmentID() == "" {
 		lastErr = noCredentialMsg
 	}
 	operator := s.Broker.Operator()
 	return Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: operator, State: sess.State(), Error: lastErr}
+}
+
+// notEnrolled answers sign or sign-request for a registered session with no enrollment yet: it is
+// enrolling (NOT_ENROLLED) while the helper holds a launcher credential, and without one the
+// helper enrolls no one until a human logs it in, so the session has no broker identity
+// (NO_CREDENTIAL).
+func (s *Server) notEnrolled(sess *Session) Response {
+	if !s.Broker.HasCredential() {
+		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
+	}
+	return Response{Code: CodeNotEnrolled, Error: "this session is not enrolled with the broker yet; last attempt: " + sess.LastError()}
 }
 
 // resolveDescendant keeps peer's pidfd open through Registry.Root's ancestry walk, exactly like
@@ -225,7 +238,7 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 	}
 	id := sess.EnrollmentID()
 	if id == "" {
-		return Response{Code: CodeNotEnrolled, Error: "this session is not enrolled with the broker yet; last attempt: " + sess.LastError()}
+		return s.notEnrolled(sess)
 	}
 	compact, err := proof.Sign(sess.Key, id, method, url, time.Now())
 	if err != nil {
@@ -251,7 +264,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 		return resp
 	}
 	if sess.EnrollmentID() == "" {
-		return Response{Code: CodeNotEnrolled, Error: "this session is not enrolled with the broker yet; last attempt: " + sess.LastError()}
+		return s.notEnrolled(sess)
 	}
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {

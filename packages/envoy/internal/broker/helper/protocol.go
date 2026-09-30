@@ -28,7 +28,7 @@ type Request struct {
 	URL          string   `json:"url,omitempty"`           // sign: its absolute URL
 	Secrets      []string `json:"secrets,omitempty"`       // sign-request: the requested agent_secret names
 	Reason       string   `json:"reason,omitempty"`        // sign-request: why they're needed
-	WaitSeconds  int      `json:"wait_seconds,omitempty"`  // register: block this long for the enrollment
+	WaitSeconds  int      `json:"wait_seconds,omitempty"`  // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
 	RuntimeID    string   `json:"runtime_id,omitempty"`    // enroll-box: the box's runtime id
 	Thumbprint   string   `json:"thumbprint,omitempty"`    // enroll-box: the box key's thumbprint
 	Kind         string   `json:"kind,omitempty"`          // enroll-box: always "box"
@@ -64,8 +64,14 @@ type SessionInfo struct {
 }
 
 const (
-	CodeNotASession    = "NOT_A_SESSION"
-	CodeNotEnrolled    = "NOT_ENROLLED"
+	CodeNotASession = "NOT_A_SESSION"
+	// CodeNotEnrolled answers sign or sign-request for a registered session that is still
+	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
+	CodeNotEnrolled = "NOT_ENROLLED"
+	// CodeNoCredential answers them instead while the helper holds no launcher credential, from
+	// every restart until the operator logs the machine in: it enrolls no one, so the session has
+	// no broker identity.
+	CodeNoCredential   = "NO_CREDENTIAL"
 	CodeBadRequest     = "BAD_REQUEST"
 	CodeUnidentified   = "PEER_UNIDENTIFIED"
 	CodeLoginFailed    = "LOGIN_FAILED"

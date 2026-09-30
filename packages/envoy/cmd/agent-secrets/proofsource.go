@@ -13,6 +13,7 @@ package main
 
 import (
 	"crypto/ecdsa"
+	"errors"
 	"fmt"
 	"time"
 
@@ -58,13 +59,27 @@ type helperSigner struct {
 	sock string
 }
 
+// errNoCredential is what a host session gets from a helper that holds no launcher credential
+// (NO_CREDENTIAL): after every reboot or helper restart, until the operator logs the machine in,
+// the helper enrolls no one, so the session has no broker identity. identity and every command
+// that meets it print the same line for it (reportError).
+var errNoCredential = errors.New("this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets-login <login>)")
+
+// helperRefusal is the error for a helper answer that is not OK.
+func helperRefusal(resp helper.Response) error {
+	if resp.Code == helper.CodeNoCredential {
+		return errNoCredential
+	}
+	return fmt.Errorf("%s: %s", resp.Code, resp.Error)
+}
+
 func (h *helperSigner) Sign(method, url string) (string, error) {
 	resp, err := helper.Call(h.sock, helper.Request{Op: "sign", Method: method, URL: url}, 5*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets-helper at %s: %w", h.sock, err)
 	}
 	if !resp.OK {
-		return "", fmt.Errorf("%s: %s", resp.Code, resp.Error)
+		return "", helperRefusal(resp)
 	}
 	return resp.Proof, nil
 }
@@ -75,7 +90,7 @@ func (h *helperSigner) SignRequestObject(audience string, names []string, reason
 		return "", fmt.Errorf("agent-secrets-helper at %s: %w", h.sock, err)
 	}
 	if !resp.OK {
-		return "", fmt.Errorf("%s: %s", resp.Code, resp.Error)
+		return "", helperRefusal(resp)
 	}
 	return resp.RequestObject, nil
 }

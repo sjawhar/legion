@@ -28,7 +28,7 @@ const helperConnectPatience = 10 * time.Second
 func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("agent-secrets register", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	wait := flags.Int("wait", 0, "block until the helper has enrolled the session (seconds; 0 returns at once)")
+	wait := flags.Int("wait", 0, "wait up to this many seconds for the helper to enroll the session (0 returns at once, as does a helper holding no launcher credential)")
 	doExec := flags.Bool("exec", false, "after registering, exec the command that follows as this same process")
 	if err := flags.Parse(args); err != nil {
 		return exitUsage(err)
@@ -64,7 +64,8 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	}
 	// --exec never blocks a launch on the broker, but never launches silently either: the agent
 	// starts with no secrets access (helper unreachable), or with broker calls that fail
-	// NOT_ENROLLED until the helper's enroll loop succeeds.
+	// NOT_ENROLLED, or NO_CREDENTIAL while the helper holds no launcher credential, until the
+	// helper's enroll loop succeeds.
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)

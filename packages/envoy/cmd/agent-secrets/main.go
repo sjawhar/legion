@@ -146,6 +146,16 @@ func exitUsage(err error) int {
 	return exitUsageError
 }
 
+// reportError prints a command's failure as "<prefix>: <err>", except that a helper holding no
+// launcher credential is reported with the one line identity prints for it, whatever the command.
+func reportError(stderr io.Writer, prefix string, err error) {
+	if errors.Is(err, errNoCredential) {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", errNoCredential)
+		return
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", prefix, err)
+}
+
 // splitArgs partitions args into recognized "--flag"/"--flag value" tokens (as declared by
 // takesValue, keyed by flag name without its leading dashes) and every other bare token, so a
 // subcommand can accept secret names or ids before, after, or between its optional flags — the
@@ -677,7 +687,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 	}
 	result, raw, err := newClient(base).CreateRequest(context.Background(), signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
+		reportError(stderr, "agent-secrets request", err)
 		return 1
 	}
 	if *asJSON {
@@ -718,7 +728,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	}
 	result, raw, err := newClient(base).GetRequest(context.Background(), signer, positional[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets status: %v\n", err)
+		reportError(stderr, "agent-secrets status", err)
 		return 1
 	}
 	if *asJSON {
@@ -751,7 +761,7 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if err := newClient(base).CancelRequest(context.Background(), signer, positional[0]); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets cancel: %v\n", err)
+		reportError(stderr, "agent-secrets cancel", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "cancelled")
@@ -774,7 +784,7 @@ func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if err := newClient(base).RevokeGrant(context.Background(), signer, positional[0]); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets revoke: %v\n", err)
+		reportError(stderr, "agent-secrets revoke", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, "revoked")
@@ -804,7 +814,7 @@ func cmdSelf(args []string, stdout, stderr io.Writer) int {
 	}
 	result, raw, err := newClient(base).Self(context.Background(), signer)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets self: %v\n", err)
+		reportError(stderr, "agent-secrets self", err)
 		return 1
 	}
 	if *asJSON {
@@ -873,7 +883,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	result, _, err := c.CreateRequest(ctx, signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		reportError(stderr, "agent-secrets", err)
 		return 1
 	}
 
@@ -889,7 +899,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 			time.Sleep(minDuration(backoff, remaining))
 			status, _, err := c.GetRequest(ctx, signer, requestID)
 			if err != nil {
-				fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+				reportError(stderr, "agent-secrets", err)
 				return 1
 			}
 			state, grantID = status.State, status.GrantID
@@ -918,7 +928,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 
 	values, err := c.GrantValues(ctx, signer, *grantID)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		reportError(stderr, "agent-secrets", err)
 		return 1
 	}
 	var missing []string
