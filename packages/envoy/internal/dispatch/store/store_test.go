@@ -794,6 +794,14 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// Version 0 decodes, but no version has that number and the approval-request route never
 		// writes it.
 		{"an approval ask at version 0", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":0}`), true},
+		// encoding/json matches an object's keys to model.AskApproval's fields without regard to
+		// case, Unicode folding included, so a key the check does not name can still land on a
+		// field and fail its decode; and it scans every value, so one nested past its depth limit
+		// fails the decode whatever its key. Either fails every read of the ask as the rows above do.
+		{"an approval ask repeating version under another case as a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"Version":1.5}`), true},
+		{"an approval ask repeating name under another case as a number", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","Name":5,"version":1}`), true},
+		{"an approval ask repeating version with a long s as a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"verſion":1.5}`), true},
+		{"an approval ask carrying a value nested past the decoder's depth limit", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"x":` + strings.Repeat("[", 10001) + strings.Repeat("]", 10001) + `}`), true},
 		{"a question naming a document", "question", new(approval), true},
 		// A check keyed on the approval being an object, (kind = 'approval') = (jsonb_typeof(approval)
 		// = 'object'), would store this, and ScanAsk would then put an approval on the question.
