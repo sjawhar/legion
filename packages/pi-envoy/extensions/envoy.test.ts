@@ -90,6 +90,7 @@ type TestPi = {
     message: { readonly content: string; readonly customType?: string; readonly display?: boolean },
     options: unknown
   ) => void;
+  readonly sendUserMessage: (content: string, options?: unknown) => void;
   readonly askEphemeral?: (input: {
     readonly prompt: string;
     readonly signal?: AbortSignal;
@@ -227,7 +228,10 @@ mock.module("nats", () => ({
       },
     };
   },
-  StringCodec: () => ({ decode: (data: Uint8Array) => new TextDecoder().decode(data) }),
+  StringCodec: () => ({
+    decode: (data: Uint8Array) => new TextDecoder().decode(data),
+    encode: (text: string) => new TextEncoder().encode(text),
+  }),
 }));
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
@@ -325,6 +329,8 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
     readonly display?: boolean;
     readonly options: unknown;
   }[] = [];
+  // User turns the extension started, in the order it sent them.
+  const userMessages: { readonly content: string; readonly options: unknown }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` returns them.
   const entries: {
     readonly type: "custom";
@@ -347,6 +353,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
         options,
       });
     },
+    sendUserMessage: (content, options) => {
+      userMessages.push({ content, options });
+    },
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
     },
@@ -361,6 +370,7 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
     pi,
     renderers,
     tools,
+    userMessages,
   };
 }
 
@@ -484,6 +494,158 @@ function targetedCommentEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: str
     topic: "notifications.agent.ses_delivery",
     trace_id: dedupeKey,
   });
+}
+
+const DIRECT_MESSAGE_ID = "44444444-4444-4444-8444-444444444444";
+const DIRECT_MESSAGE_BODY = "Where is the dashboard?";
+
+/**
+ * A person's direct message to ses_delivery from Dispatch's Agents page, as the listener hands the
+ * session its delivery frame: no issue, the person as the event's actor, attempt 1 in `mode`.
+ * `actor` is who the frame claims sent it, which any publisher on the subject can write.
+ */
+function directDispatchEnvelope(
+  mode: "aside" | "btw" | "steer",
+  dedupeKey: string,
+  actor: { readonly kind: string; readonly id: string } = { id: "alice", kind: "user" }
+): string {
+  return JSON.stringify({
+    dedupe_key: dedupeKey,
+    event_id: `dispatch-${dedupeKey}`,
+    issued_at: 1,
+    payload: JSON.stringify({
+      event: {
+        actor,
+        issue_key: null,
+        payload: {
+          author: actor,
+          body: DIRECT_MESSAGE_BODY,
+          created_at: "2026-09-30T00:00:00Z",
+          deliveries: [],
+          id: DIRECT_MESSAGE_ID,
+          in_reply_to: null,
+          issue_key: null,
+          target: "session:ses_delivery",
+        },
+        type: "message.created",
+      },
+      delivery: { attempt: 1, mode },
+    }),
+    payload_summary: DIRECT_MESSAGE_BODY,
+    source: "dispatch",
+    source_event_id: "1",
+    topic: "notifications.agent.ses_delivery",
+    trace_id: dedupeKey,
+  });
+}
+
+/** Dispatch's own record of that message, as `GET /api/v1/messages/{id}?session=` reads it back:
+ *  what a person stored and the attempt Dispatch recorded delivering it to ses_delivery. */
+function storedDirectMessage(
+  mode: "aside" | "btw" | "steer",
+  overrides: Readonly<Record<string, unknown>> = {}
+) {
+  return {
+    message: {
+      author: { id: "alice", kind: "user" },
+      body: DIRECT_MESSAGE_BODY,
+      broadcast_id: null,
+      created_at: "2026-09-30T00:00:00Z",
+      deliveries: [
+        {
+          attempt: 1,
+          created_at: "2026-09-30T00:00:00Z",
+          delivery: mode,
+          duplicate: false,
+          envelope_id: null,
+          error: null,
+          message_id: DIRECT_MESSAGE_ID,
+          reply_id: null,
+          session_id: "ses_delivery",
+          state: "pending",
+        },
+      ],
+      id: DIRECT_MESSAGE_ID,
+      in_reply_to: null,
+      issue_key: null,
+      target: "session:ses_delivery",
+      ...overrides,
+    },
+    replies: [],
+  };
+}
+
+/**
+ * Boots ses_delivery against a Dispatch whose message read answers `stored` (or `status` with no
+ * body), recording every read of a message and every reply posted. `delivered(n)` resolves once
+ * the session has taken `n` deliveries, cards and user turns together; `branch` is the transcript
+ * a restarted session resumes with.
+ */
+async function bootDirectSession(
+  query: string,
+  stored: unknown,
+  options: { readonly status?: number; readonly branch?: readonly unknown[] } = {}
+) {
+  process.env.DISPATCH_URL = "http://dispatch.test";
+  process.env.DISPATCH_TOKEN = "dispatch-token";
+  const reads: { readonly path: string; readonly authorization: string | null }[] = [];
+  const posts: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(input.toString());
+    if (url.pathname.startsWith("/api/v1/messages/")) {
+      if ((init?.method ?? "GET") !== "GET") {
+        posts.push(url.pathname);
+        return response({});
+      }
+      reads.push({
+        authorization: new Headers(init?.headers).get("Authorization"),
+        path: `${url.pathname}${url.search}`,
+      });
+      return new Response(
+        JSON.stringify(options.status === undefined ? stored : { code: "REFUSED" }),
+        { headers: { "content-type": "application/json" }, status: options.status ?? 200 }
+      );
+    }
+    return responseWithRegistration(input, init, {});
+  };
+  // Query-string isolation gives each caller its own instance of this stateful extension, and a
+  // restart its second one; the specifier is the caller's, so it cannot be a static import.
+  const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+  const fixture = createPi();
+  const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
+  const taken = () => {
+    const count = fixture.deliveries.length + fixture.userMessages.length;
+    for (const waiter of waiters.splice(0)) {
+      if (count >= waiter.count) waiter.resolve();
+      else waiters.push(waiter);
+    }
+  };
+  envoyExtension({
+    ...fixture.pi,
+    sendMessage: (message: never, sendOptions: unknown) => {
+      fixture.pi.sendMessage(message, sendOptions);
+      taken();
+    },
+    sendUserMessage: (content: string, sendOptions?: unknown) => {
+      fixture.pi.sendUserMessage(content, sendOptions);
+      taken();
+    },
+  });
+  const base = sessionContext("ses_delivery");
+  const context = {
+    ...base,
+    sessionManager: { ...base.sessionManager, getBranch: () => options.branch ?? [] },
+  };
+  await fixture.handlers.get("session_start")?.({}, context);
+  const agent = natsState.controls.get("notifications.agent.ses_delivery");
+  if (agent === undefined) throw new Error("agent subject was not subscribed");
+  const delivered = (count: number): Promise<void> => {
+    const waiter = Promise.withResolvers<void>();
+    waiters.push({ count, resolve: waiter.resolve });
+    taken();
+    return waiter.promise;
+  };
+  return { agent, context, delivered, fixture, posts, reads };
 }
 
 function response(body: unknown): Response {
@@ -4433,6 +4595,214 @@ describe("envoy OMP extension", () => {
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "steer", triggerTurn: true },
     ]);
+  });
+
+  // A person's Send or Aside from the Agents page is the user's own turn, as if typed at the
+  // terminal. The frame saying "a person wrote this" is not the proof - the listener takes its
+  // source from the caller - so the session reads the message back from Dispatch first.
+  describe("a person's direct message", () => {
+    test("is read back from Dispatch and arrives as the user's own turn, with nothing posted", async () => {
+      const { agent, delivered, fixture, posts, reads } = await bootDirectSession(
+        "direct-send",
+        storedDirectMessage("steer")
+      );
+
+      agent.push(directDispatchEnvelope("steer", "direct-send"));
+      await delivered(1);
+
+      expect(reads).toEqual([
+        {
+          authorization: "Bearer dispatch-token",
+          path: `/api/v1/messages/${DIRECT_MESSAGE_ID}?session=ses_delivery`,
+        },
+      ]);
+      expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options: undefined }]);
+      expect(fixture.deliveries).toEqual([]);
+      expect(posts).toEqual([]);
+      expect(fixture.entries).toContainEqual({
+        customType: "envoy-dispatch-user-turn",
+        data: { message_id: DIRECT_MESSAGE_ID },
+        type: "custom",
+      });
+    });
+
+    // Send is Enter at the terminal (no deliverAs); Aside lands at the next step. The frame's
+    // mode is what any publisher wrote, so the attempt Dispatch stored decides.
+    for (const [index, [frameMode, storedMode, options]] of (
+      [
+        ["steer", "steer", undefined],
+        ["aside", "aside", { deliverAs: "aside" }],
+        ["steer", "aside", { deliverAs: "aside" }],
+        ["aside", "steer", undefined],
+      ] as const
+    ).entries()) {
+      test(`a frame saying ${frameMode} whose stored attempt is ${storedMode} is delivered as ${storedMode}`, async () => {
+        const { agent, delivered, fixture } = await bootDirectSession(
+          `direct-mode-${index}`,
+          storedDirectMessage(storedMode)
+        );
+
+        agent.push(directDispatchEnvelope(frameMode, `direct-mode-${index}`));
+        await delivered(1);
+
+        expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options }]);
+      });
+    }
+
+    const other = storedDirectMessage("steer").message;
+    for (const [name, stored] of [
+      [
+        "a session's own message claiming a person wrote it",
+        storedDirectMessage("steer", { author: { id: "ses_forger", kind: "session" } }),
+      ],
+      [
+        "a message whose conversation is another session's",
+        storedDirectMessage("steer", { target: "session:ses_other" }),
+      ],
+      [
+        "one recipient's copy of a broadcast",
+        storedDirectMessage("steer", { broadcast_id: "55555555-5555-4555-8555-555555555555" }),
+      ],
+      [
+        "a message from a Dispatch that does not say whether a broadcast sent it",
+        (() => {
+          const { broadcast_id: _unsaid, ...message } = storedDirectMessage("steer").message;
+          return { message, replies: [] };
+        })(),
+      ],
+      [
+        "a message no attempt delivered to this session",
+        storedDirectMessage("steer", {
+          deliveries: [{ ...other.deliveries[0], session_id: "ses_other" }],
+        }),
+      ],
+      ["a message whose stored attempt is a BTW", storedDirectMessage("btw")],
+      [
+        "a thread that does not hold the message the frame names",
+        storedDirectMessage("steer", { id: "66666666-6666-4666-8666-666666666666" }),
+      ],
+    ] as const) {
+      test(`${name} stays a card and posts nothing`, async () => {
+        const { agent, delivered, fixture, posts, reads } = await bootDirectSession(
+          `direct-refused-${name}`,
+          stored
+        );
+
+        agent.push(directDispatchEnvelope("steer", `direct-refused-${name}`));
+        await delivered(1);
+
+        expect(reads).toHaveLength(1);
+        expect(fixture.userMessages).toEqual([]);
+        expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
+          "envoy-message",
+        ]);
+        expect(posts).toEqual([]);
+      });
+    }
+
+    test("stays a card when Dispatch refuses the read", async () => {
+      const { agent, delivered, fixture, posts } = await bootDirectSession(
+        "direct-read-refused",
+        undefined,
+        { status: 403 }
+      );
+
+      agent.push(directDispatchEnvelope("steer", "direct-read-refused"));
+      await delivered(1);
+
+      expect(fixture.userMessages).toEqual([]);
+      expect(fixture.deliveries).toHaveLength(1);
+      expect(posts).toEqual([]);
+    });
+
+    // Only a person's issue-less message is ever read back; everything else keeps its envelope
+    // without costing a Dispatch read.
+    for (const [name, envelope] of [
+      ["an issue message", targetedDispatchEnvelope("steer", "scope-issue")],
+      ["a comment mention", targetedCommentEnvelope("aside", "scope-comment")],
+      [
+        "a direct message a session sent",
+        directDispatchEnvelope("steer", "scope-session", { id: "ses_peer", kind: "session" }),
+      ],
+    ] as const) {
+      test(`${name} keeps its card and is never read back`, async () => {
+        const { agent, delivered, fixture, reads } = await bootDirectSession(
+          `direct-scope-${name}`,
+          storedDirectMessage("steer")
+        );
+
+        agent.push(envelope);
+        await delivered(1);
+
+        expect(reads).toEqual([]);
+        expect(fixture.userMessages).toEqual([]);
+        expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
+          "envoy-message",
+        ]);
+      });
+    }
+
+    test("is one user turn however often it is delivered, across a restart of the plugin", async () => {
+      const first = await bootDirectSession("direct-replay-first", storedDirectMessage("steer"));
+      first.agent.push(directDispatchEnvelope("steer", "direct-replay"));
+      await first.delivered(1);
+      // The same message again under another envelope: the dedupe key does not catch it.
+      first.agent.push(directDispatchEnvelope("steer", "direct-replay-again"));
+      await first.delivered(2);
+      expect(first.fixture.userMessages).toHaveLength(1);
+      expect(first.fixture.deliveries).toHaveLength(1);
+
+      // A restarted plugin remembers nothing but the transcript it resumes.
+      const restarted = await bootDirectSession(
+        "direct-replay-restarted",
+        storedDirectMessage("steer"),
+        { branch: first.fixture.entries }
+      );
+      restarted.agent.push(directDispatchEnvelope("steer", "direct-replay"));
+      await restarted.delivered(1);
+
+      expect(restarted.fixture.userMessages).toEqual([]);
+      expect(restarted.fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
+        "envoy-message",
+      ]);
+    });
+
+    // The viewer shows Dispatch's stored copy until the turn's own frame names it.
+    for (const [name, runEndsFirst, tag] of [
+      ["tags the user turn it became on the live stream", false, DIRECT_MESSAGE_ID],
+      ["tags nothing once the run it was sent into has ended", true, undefined],
+    ] as const) {
+      test(name, async () => {
+        const { agent, context, delivered, fixture } = await bootDirectSession(
+          `direct-stream-${runEndsFirst}`,
+          storedDirectMessage("steer")
+        );
+        natsState.controls
+          .get("agentstream.ses_delivery.control")
+          ?.push(JSON.stringify({ type: "watch", v: 1 }));
+
+        agent.push(directDispatchEnvelope("steer", `direct-stream-${runEndsFirst}`));
+        await delivered(1);
+        if (runEndsFirst) await fixture.handlers.get("agent_end")?.({ messages: [] }, context);
+        await fixture.handlers.get("message_start")?.(
+          {
+            message: {
+              content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }],
+              role: "user",
+              timestamp: 10,
+            },
+          },
+          context
+        );
+
+        const frames = natsState.published
+          .filter((published) => published.subject === "agentstream.ses_delivery.frames")
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)));
+        expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
+          ["u10", tag],
+        ]);
+      });
+    }
   });
 
   test("deduplicates targeted Dispatch frames by dedupe key", async () => {

@@ -846,6 +846,12 @@ export interface Message {
   readonly body: string;
   readonly target: string | null;
   readonly in_reply_to: string | null;
+  /**
+   * The broadcast this message is one recipient's copy of; null for every other message. Absent
+   * from a Dispatch older than the field, which a reader that must rule a broadcast out treats as
+   * unknown rather than as null.
+   */
+  readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
 }

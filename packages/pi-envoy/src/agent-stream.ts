@@ -128,6 +128,19 @@ function contentText(content: unknown): string {
   return pieces.join("\n");
 }
 
+/** A user message's own text: its text parts alone, which is what a prompt's text became. */
+function userText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const pieces: string[] = [];
+  for (const raw of content) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const part = raw as HostPart;
+    if (part.type === "text" && typeof part.text === "string") pieces.push(part.text);
+  }
+  return pieces.join("\n");
+}
+
 /** Caps every string a tool call's arguments carry as they are serialised, so the cost of
  *  rendering a call that streams a large file in is bounded by the cap rather than by the file. */
 function boundedStrings(_key: string, value: unknown): unknown {
@@ -177,8 +190,9 @@ function conversationParts(content: unknown): AgentStreamPart[] {
   return parts;
 }
 
-/** The frame a ring entry becomes. This is the only place a message's content is read. */
-function frameFor(entry: RingEntry): AgentStreamFrame {
+/** The frame a ring entry becomes. This is the only place a message's content is read, apart
+ *  from a user message's text while a Dispatch turn is awaited (`expectDispatchTurn`). */
+function frameFor(entry: RingEntry, dispatchMessageId: string | undefined): AgentStreamFrame {
   const { message } = entry;
   if (message.role === "toolResult" && message.toolCallId !== undefined) {
     return {
@@ -205,6 +219,7 @@ function frameFor(entry: RingEntry): AgentStreamFrame {
       parts: conversationParts(message.host.content),
       role: message.role === "assistant" ? "assistant" : "user",
       streaming: entry.streaming,
+      ...(dispatchMessageId === undefined ? {} : { dispatchMessageId }),
     },
     seq: entry.seq,
     v: AGENT_STREAM_PROTOCOL,
@@ -220,6 +235,10 @@ export class AgentStreamPublisher {
   /** When each message was last put on the wire, so a token storm costs one frame per
    *  `snapshotIntervalMs` rather than one per delta. */
   readonly #publishedAt = new Map<string, number>();
+  /** The Dispatch message each user message delivered, by ring key (`expectDispatchTurn`). */
+  readonly #dispatchIds = new Map<string, string>();
+  /** Dispatch messages sent into the session whose user message has not been seen yet. */
+  #expectedTurns: { readonly body: string; readonly messageId: string }[] = [];
   #seq = 0;
   #watchedUntil = 0;
 
@@ -245,7 +264,25 @@ export class AgentStreamPublisher {
     this.#history.clear();
     this.#settled.clear();
     this.#publishedAt.clear();
+    this.#dispatchIds.clear();
+    this.#expectedTurns = [];
     this.#watchedUntil = 0;
+  }
+
+  /**
+   * A person's Dispatch message `messageId` was just sent into the session as its own user turn:
+   * the next user message whose text is `body` is that turn, and its frames carry the id. The host
+   * links the message it records to nothing the caller sent, so the text is the only match, and
+   * it is looked for until the run ends (`endRun`): a message sent while a tool runs is taken
+   * only between tool steps, so no fixed window would do.
+   */
+  expectDispatchTurn(body: string, messageId: string): void {
+    this.#expectedTurns.push({ body, messageId });
+  }
+
+  /** The session's run ended: a Dispatch message whose turn has not been seen is not looked for. */
+  endRun(): void {
+    this.#expectedTurns = [];
   }
 
   /**
@@ -272,6 +309,7 @@ export class AgentStreamPublisher {
       streaming: stillStreaming,
     };
     this.#history.set(key, entry);
+    if (message.role === "user") this.#tagDispatchTurn(key, message);
     if (!stillStreaming) this.#settled.add(key);
     while (this.#history.size > AGENT_STREAM_LIMITS.historyMessages) {
       const oldest = this.#history.keys().next();
@@ -279,6 +317,7 @@ export class AgentStreamPublisher {
       this.#history.delete(oldest.value);
       this.#settled.delete(oldest.value);
       this.#publishedAt.delete(oldest.value);
+      this.#dispatchIds.delete(oldest.value);
     }
     if (!this.watched) return true;
     const now = this.#deps.now();
@@ -287,7 +326,7 @@ export class AgentStreamPublisher {
       published !== undefined && now - published < AGENT_STREAM_LIMITS.snapshotIntervalMs;
     if (stillStreaming && tooSoon) return true;
     this.#publishedAt.set(key, now);
-    this.#deps.publish(subject, JSON.stringify(frameFor(entry)));
+    this.#deps.publish(subject, JSON.stringify(frameFor(entry, this.#dispatchIds.get(key))));
     return true;
   }
 
@@ -315,11 +354,21 @@ export class AgentStreamPublisher {
     for (let index = ordered.length - 1; index >= 0; index -= 1) {
       const entry = ordered[index];
       if (entry === undefined) continue;
-      const frame = frameFor(entry);
+      const frame = frameFor(entry, this.#dispatchIds.get(entry.key));
       budget -= encoder.encode(JSON.stringify(frame)).length;
       if (budget < 0) break;
       kept.unshift(frame);
     }
     return { frames: kept, session_id: sessionID, v: AGENT_STREAM_PROTOCOL };
+  }
+
+  #tagDispatchTurn(key: string, message: ReadableMessage): void {
+    if (this.#expectedTurns.length === 0 || this.#dispatchIds.has(key)) return;
+    const text = userText(message.host.content);
+    const index = this.#expectedTurns.findIndex((expected) => expected.body === text);
+    const expected = this.#expectedTurns[index];
+    if (expected === undefined) return;
+    this.#expectedTurns.splice(index, 1);
+    this.#dispatchIds.set(key, expected.messageId);
   }
 }

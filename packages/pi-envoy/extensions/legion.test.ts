@@ -148,6 +148,7 @@ type TestPi = {
     readonly discriminatedUnion: (key: string, options: readonly unknown[]) => unknown;
   };
   readonly sendMessage: PiApi["sendMessage"];
+  readonly sendUserMessage: PiApi["sendUserMessage"];
   readonly appendEntry: PiApi["appendEntry"];
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
@@ -300,6 +301,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       discriminatedUnion: () => ({}),
     },
     sendMessage: (message) => sentMessages.push(message),
+    sendUserMessage: () => undefined,
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
     },

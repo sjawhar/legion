@@ -81,6 +81,11 @@ export interface AgentStreamMessage {
   readonly parts: readonly AgentStreamPart[];
   /** True while the message is still being produced. */
   readonly streaming: boolean;
+  /**
+   * The Dispatch message this user message delivered: set on the turn a person's direct message
+   * from Dispatch became, so a viewer that also shows Dispatch's stored copy shows it once.
+   */
+  readonly dispatchMessageId?: string;
 }
 
 export interface AgentStreamToolResult {

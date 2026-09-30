@@ -311,6 +311,12 @@ export interface PiApi {
     options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
   ) => void;
   /**
+   * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
+   * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
+   * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
+   */
+  readonly sendUserMessage: (content: string, options?: { readonly deliverAs: "aside" }) => void;
+  /**
    * The fork's side turn before Oh My Pi 18.3: the same call as `SessionContext.runEphemeralTurn`,
    * with the question wrapped in the /btw prompt by the host.
    */
