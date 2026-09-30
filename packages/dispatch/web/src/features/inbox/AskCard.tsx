@@ -150,6 +150,7 @@ export function AskCard({
   onAnswered,
 }: AskCardProps): ReactNode {
   const {
+    answerFailure,
     answerFieldId,
     answerPlaceholder,
     answerText,
@@ -562,13 +563,13 @@ export function AskCard({
             {answerActions}
           </>
         )}
-        {mutation.isError ? (
+        {answerFailure === null ? null : (
           <QueryError
-            message="Could not save your answer."
-            onRetry={() => submitGuard.retryLast(mutation)}
+            message={answerFailure.message}
+            onRetry={answerFailure.retryable ? () => submitGuard.retryLast(mutation) : undefined}
             retrying={mutation.isPending}
           />
-        ) : null}
+        )}
         {clarification.isError ? (
           <QueryError
             message="Could not send your clarification."

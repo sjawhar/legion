@@ -15,39 +15,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-const defaultIssueSpecMarkdown = `## Summary
-
-_Three sentences at most, in plain words: the problem, what changes for whom, and how we will know it worked._
-
-## New since we talked
-
-_One plain sentence per design point the human did not settle in conversation, marked inferred with the reasoning._
-
-## Acceptance
-
-_List numbered outcomes that name what a user will observe and the check that proves each one._
-
-## Requirements
-
-_What must hold, and where each came from: a quoted human sentence, or inferred plus the reasoning._
-
-## Design
-
-_The files, components, routes, and data flow that change._
-
-## Errors
-
-_Use a condition | behaviour table; do not specify silent fallbacks._
-
-## Testing
-
-_Map every acceptance line to the proof that exercises it._
-
-## Rejected
-
-_List each considered alternative and the reason it was rejected._
-`
-
 // parseIssuePriority decodes the tri-state `priority` field of an issue write. Absent →
 // (nil, false): leave it alone. JSON null → (nil, true): clear it. An integer 0..3 → its
 // value. Anything else → 400 INVALID_PRIORITY.
@@ -313,7 +280,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	markdown := defaultIssueSpecMarkdown
+	// An issue created without a spec gets an empty primary document.
+	var markdown string
 	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		markdown = *input.Spec
 	}
