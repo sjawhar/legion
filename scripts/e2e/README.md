@@ -365,11 +365,11 @@ check, which needs the first issue's whole history, ends
 never cited as the proof; only a full run is.
 
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
-`/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): every agent transcript, the daemon,
-Dispatch, listener, and bridge logs, the model key command and its log of every mint
-(`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks, and the
-production audit. A passing run's last three checks stop every process, kill the private tmux
-server and remove both containers (`services-stopped`), check the model route
+`/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): `transcript.log` (the whole run), every agent
+transcript, the daemon, Dispatch, listener, and bridge logs, the model key command and its log of
+every mint (`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks,
+and the production audit. A passing run's last three checks stop every process, kill the private
+tmux server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-gateway`), and close every pull request the run still has open on the
 smoke repository — its own, by branch: the daemon's `legion/<project>-*` and the proof human's
 `proof/clean-main-<project, lowercased>` — before removing the isolated OMP profile and the scratch
@@ -383,7 +383,14 @@ directory and prints its path. For a run that did not pass, the trap also closes
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
 pull request open and prints gh's reason, with a line saying some may still be open. A failed run
 also [notes](#libmodel-gateway-unservedsh) each agent that could have failed the check for want of
-a model key, and still exits 1.
+a model key, and still exits 1. The trap still closes the run's pull requests in two further cases
+([`lib/transcript.sh`](#libtranscriptsh)):
+- whoever reads the run's output goes first, for example a supervised launcher's own `tee` stopped
+  with the run. The run keeps going, and the transcript still gets every line;
+- the transcript's disk fills. The run keeps going, and its output still reaches anyone reading.
+  GNU `tee`, the devbox's, keeps the transcript only up to the point its disk filled and never
+  reopens it, even once space returns; busybox `tee` picks the transcript up again once there is
+  room.
 
 ## stage3-4b13b-acceptance.sh
 
@@ -409,8 +416,14 @@ phase-finished notice's summary and verdict, the daemon posting and publishing t
 proof pull request is retargeted to a scratch base before any merge (the one merged at
 `awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
 merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
-(default the kept scratch work directory's `evidence/`). A run that ends on its soft failures gets
-[notes](#libmodel-gateway-unservedsh) for its first soft-failing check, from that check's own start.
+(default the kept scratch work directory's `evidence/`), `transcript.log` (the whole run) among it.
+A run that ends on its soft failures gets [notes](#libmodel-gateway-unservedsh) for its first
+soft-failing check, from that check's own start. The `EXIT` trap closes every proof pull request
+still open and deletes the proof branches and both bases, also when whoever reads the run's output
+goes first or the transcript's disk fills, as in [stage 3](#stage3-devbox-workflowsh). The default
+evidence directory is under the scratch work directory, whose processes the teardown kills by path,
+so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
+([`lib/transcript.sh`](#libtranscriptsh)).
 
 ## stage4a-sandbox-runtime.sh
 
@@ -635,7 +648,15 @@ pair; the production daemon keeps 13370 and 13371) and the namespace label
 **What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
 the run that owns it. A signal to the whole process group does not stop the removal:
 - a closed pane, a Ctrl-C, or `timeout`'s TERM;
-- the transcript's `tee` ignores those signals;
+- the transcript's `tee` ignores those signals and SIGPIPE;
+- whoever reads the run's output can go first, for example a supervised launcher's own `tee` stopped
+  with the run. A run whose reader goes and no signal follows runs to its own end, and holds the
+  lock until then;
+- the transcript's disk can fill. With or without its reader, the run keeps going and its teardown
+  still runs in full, and its output reaches anyone still reading. GNU `tee`, the devbox's, keeps
+  the transcript only up to the point its disk filled and never reopens it, even once space
+  returns; busybox `tee` picks the transcript up again once there is room
+  ([`lib/transcript.sh`](#libtranscriptsh));
 - the teardown ignores a second signal and SIGPIPE;
 - the teardown writes to the transcript even when the signal interrupted a command whose output
   went to `/dev/null`;
@@ -1242,6 +1263,32 @@ Every run also carries its own negative control: the first session holding a tur
 `--control` with that one turn rewritten as `amazon-bedrock/us.anthropic.claude-opus-4-8`, and the
 same check must refuse the copy, or the run exits 1 (`the negative control passed`). An argument
 refusal exits 2.
+
+## lib/transcript.sh
+
+The stage proof's transcript. Stage 3, Stage 4a, Stage 4b and `stage3-4b13b-acceptance.sh` source
+it before their first output.
+
+```sh
+. "$root/scripts/e2e/lib/transcript.sh"     # sourced, never run
+transcript_to "$evidence/transcript.log"
+```
+
+`transcript_to FILE` sends the calling shell's stdout and stderr to `FILE` as well as to whatever
+read stdout before. It does this through a `tee` that ignores the signals a driver traps and
+SIGPIPE.
+
+- A signal to the process group, a reader that goes first (a supervised launcher's own `tee`,
+  stopped with the run), or a full disk under `FILE` each cost `tee` at most the outputs they break.
+  The driver and its cleanup never fail on a write.
+- GNU `tee` stops once every output has failed and never reopens one. `/dev/null`, an output that
+  never fails, is what keeps it draining once both the reader and `FILE` have failed.
+- busybox `tee` keeps writing every output and reports errors at EOF, so it picks `FILE` up again
+  once its disk has room. It rejects `-p`, which is why the trap, not `-p`, carries SIGPIPE.
+- The `tee` is one of the run's processes: its argv names `FILE`, and its working directory is the
+  caller's at the call. [`lib/rig.sh`](#librigsh)'s `run_processes` matches `$work` in either, so a
+  caller keeps both outside `$work`, or opens `FILE` on a descriptor and passes `/dev/fd/N`, as
+  `stage3-4b13b-acceptance.sh` does with its evidence under `$work`.
 
 ## lib/rig.sh
 
