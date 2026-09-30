@@ -49,6 +49,22 @@ async function holdPosts(
   return { posts: () => posts, release };
 }
 
+/** Holds every `POST` to `pattern` until the returned call, then refuses it, as a server that is
+ *  down: 503 with a reason the composer shows. */
+async function refusePosts(page: Page, pattern: string): Promise<() => void> {
+  const { promise: held, resolve: refuse } = Promise.withResolvers<void>();
+  await page.route(pattern, async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    await held;
+    return route.fulfill({
+      body: JSON.stringify({ code: "UNAVAILABLE", error: "the server is down" }),
+      contentType: "application/json",
+      status: 503,
+    });
+  });
+  return refuse;
+}
+
 test.describe("agents page", () => {
   // The arrows choose and Enter commits, so a reader can pass the first option to reach the
   // second - and the Enter that picks is the picker's, not a newline at the top of the message.
@@ -368,6 +384,93 @@ test.describe("agents page", () => {
       await expect(field).toBeEnabled();
       await expect(field).toHaveValue("");
       expect(send.posts()).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A send the server refuses after the reader cancelled their reply mid-flight has outlived the
+  // composer that sent it: the channel change remounts the composer once the answer is in. The
+  // refusal stays with the row, so the remounted composer says so, as the one that sent would
+  // have, with the unsent draft where the reader left it.
+  test("a send refused after its reply is cancelled mid-flight still says so, beside its draft", async ({
+    browser,
+  }) => {
+    const issueKey = await seedAgents();
+    await createMessage(issueKey, {
+      body: "Can this ship?",
+      delivery: "btw",
+      target: `session:${plannerSession.session_id}`,
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const refuse = await refusePosts(page, "**/api/v1/issues/*/messages");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await row.getByRole("button", { name: "Reply" }).first().click();
+      await field.fill("Once the build is green");
+      await field.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await row.getByRole("button", { name: "Cancel reply" }).click();
+      refuse();
+
+      const refusal = row.getByText("Couldn't send — the server is down");
+      await expect(refusal).toBeVisible();
+      await expect(field).toBeEnabled();
+      await expect(field).toHaveValue("Once the build is green");
+      await expect(row.getByRole("button", { name: "Choose issue" })).toContainText("No issue");
+
+      // The notice lasts until the composer sends again: now a direct message, which goes.
+      const resent = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname ===
+            `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
+      await field.press("Control+Enter");
+      expect((await resent).ok()).toBe(true);
+      await expect(refusal).toHaveCount(0);
+      await expect(field).toHaveValue("");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The same refusal after a reply was started mid-flight: the composer the reply remounts says
+  // the message did not go.
+  test("a send refused after a reply is started mid-flight still says so", async ({ browser }) => {
+    const issueKey = await seedAgents();
+    await createMessage(issueKey, {
+      body: "Can this ship?",
+      delivery: "btw",
+      target: `session:${plannerSession.session_id}`,
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = page.locator("[data-agent-row]").nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await row.getByRole("button", { name: "Reply" }).first().click();
+      refuse();
+
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByRole("button", { name: "Cancel reply" })).toBeVisible();
+      await expect(field).toBeEnabled();
     } finally {
       await context.close();
     }

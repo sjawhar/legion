@@ -129,6 +129,10 @@ export interface CarriedDraft {
   /** The reply the draft was written under, so a mount under that same reply keeps the draft
    *  rather than seeding the reply over it. */
   readonly replyId?: string;
+  /** The refusal of this draft's last send, as the composer showed it. A send can end after the
+   *  composer that made it has unmounted - the host remounted it once the answer was in - so the
+   *  one mounted with the draft shows it instead, until it sends again. */
+  readonly failure?: string;
 }
 
 interface MentionOption {
@@ -468,6 +472,15 @@ export function canSubmitComposer(
   return hasDraft(kind, body, replacement) && !isSaving && pendingUploads === 0;
 }
 
+/** What the composer says when the server refuses a send: a vanished anchor in the server's own
+ *  words, anything else as the reason the send did not go. One wording, whether the composer
+ *  showing it made the send or was handed the refusal with the draft (`CarriedDraft.failure`). */
+function sendFailure(error: unknown): string {
+  return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING"
+    ? error.message
+    : `Couldn't send — ${apiErrorMessage(error, "network error")}`;
+}
+
 interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
@@ -488,11 +501,12 @@ interface MentionComposerProps {
   /** Every change to the draft, for a caller that will hand it back after a remount of its own. */
   readonly onCarry?: (draft: CarriedDraft) => void;
   readonly onClose: () => void;
-  /** Whether a send is in flight, from the send itself: its start, and its end once any success
-   *  has reset the draft and reported that reset (`onCarry`). The mutation's own callbacks report
-   *  it, so the end arrives even after this composer has unmounted - a caller that mounts a new
-   *  composer only once it reads `false` hands on the draft the send left behind, never one the
-   *  server is still taking. */
+  /** Whether a send is in flight, from the send itself: its start, and its end once its outcome
+   *  is in the carry - a success's reset, or a refusal (`CarriedDraft.failure`) - both reported
+   *  through `onCarry` first. The mutation's own callbacks report it, so the end arrives even after
+   *  this composer has unmounted: a caller that mounts a new composer only once it reads `false`
+   *  hands on the draft the send left behind, and its refusal, never text the server is still
+   *  taking. */
   readonly onSending?: (sending: boolean) => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
@@ -591,10 +605,9 @@ export function MentionComposer({
   const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 
-  const replyId = replyTo?.id;
-  useEffect(() => {
-    onCarry?.({ body, mentions, replyId });
-  }, [body, mentions, onCarry, replyId]);
+  /** A refusal handed over with the carried draft (`CarriedDraft.failure`), shown as this
+   *  composer's own until it sends. */
+  const [carriedFailure, setCarriedFailure] = useState(carried?.failure);
   useEffect(() => {
     if (editBody === undefined) return;
     setBody(editBody);
@@ -767,7 +780,15 @@ export function MentionComposer({
         ? api.createComment(owner.issueKey, input)
         : api.createArtifactComment(owner.artifactId, input);
     },
-    onMutate: () => onSending?.(true),
+    onError: (error) => {
+      // Reported at once, not from the render that shows it: the composer that sent may be gone,
+      // and the send's end (`onSending`) is reported after this.
+      onCarry?.({ body, mentions, replyId: replyTo?.id, failure: sendFailure(error) });
+    },
+    onMutate: () => {
+      setCarriedFailure(undefined);
+      onSending?.(true);
+    },
     onSettled: () => {
       submitGuard.release();
       onSending?.(false);
@@ -797,6 +818,11 @@ export function MentionComposer({
       if (!inline && edit === undefined) onClose();
     },
   });
+  const failure = save.isError ? sendFailure(save.error) : carriedFailure;
+  const replyId = replyTo?.id;
+  useEffect(() => {
+    onCarry?.({ body, failure, mentions, replyId });
+  }, [body, failure, mentions, onCarry, replyId]);
   const upload = useMutation({
     mutationFn: (file: File) => {
       if (owner.kind === "session")
@@ -1301,19 +1327,13 @@ export function MentionComposer({
           ) : null}
         </>
       )}
-      {save.isError ? (
+      {failure === undefined ? null : (
         <QueryError
-          message={
-            save.error instanceof ApiError &&
-            save.error.status === 409 &&
-            save.error.code === "ANCHOR_MISSING"
-              ? save.error.message
-              : `Couldn't send — ${apiErrorMessage(save.error, "network error")}`
-          }
+          message={failure}
           onRetry={() => submitGuard.guard(() => save.mutate(currentDraft()))}
           retrying={save.isPending}
         />
-      ) : null}
+      )}
       <button
         className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
         disabled={!canSubmit}

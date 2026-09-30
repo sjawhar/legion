@@ -21,7 +21,10 @@ production build from `web/dist`.
   mounts while its row's send is still out shows `Sending…` until the answer is in, since the
   draft that send leaves behind is not known before then - a success resets it, a refusal keeps
   it - and the send reports its end (`onSending`) from its own callbacks, which run even after
-  the composer that made it has gone.
+  the composer that made it has gone. A refusal travels with the draft too
+  (`CarriedDraft.failure`), so whichever composer is on screen once the answer is in - one a
+  pin, or a reply started or cancelled mid-flight, remounted - says `Couldn't send — <reason>`
+  beside the unsent draft, with Retry, as the composer that sent would have.
 - The Agents broadcast page renders recipients in the order the server returns them: the send's
   tick order after exclusions.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
@@ -514,8 +517,9 @@ its arrows and type-ahead rows, each committed by Enter and driven through `page
 step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
 Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a click run in the same engines,
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
-send still name one issue. So do its rows on a message in flight (the picker held, and no sent text carried into
-the composer a channel change remounts) and on an issue closed after its pick (still named, marked closed). The
+send still name one issue. So do its rows on a message in flight (the picker held, no sent text carried into the
+composer a channel change remounts, and a refusal still shown there) and on an issue closed after its pick (still
+named, marked closed). The
 project selects both specs by file name, not title, so renaming a row cannot drop it. CI installs
 WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 

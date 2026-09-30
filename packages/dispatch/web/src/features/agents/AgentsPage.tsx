@@ -217,7 +217,8 @@ type RowView = Pick<KeptRow, "expanded" | "replyTo" | "sending">;
 const CLOSED_ROW: RowView = { expanded: false, replyTo: null, sending: false };
 
 /** A kept row's mount-only part: the issue its composer is addressed to, and the draft in it -
- *  the composer's own carry (`CarriedDraft`), the one its channel remount hands on. */
+ *  the composer's own carry (`CarriedDraft`), the one its channel remount hands on, which also
+ *  carries a refused send's notice to the composer mounted after the refusal. */
 interface RowMemory {
   draft: CarriedDraft | undefined;
   issueKey: string;
@@ -614,8 +615,8 @@ function AgentMessageComposer({
   );
   /** Whether this composer mounted while another one's send for this row was still out - the row
    *  remounted under it, by a pin, say. The draft that send left behind is not known until it
-   *  lands (a success resets it, a refusal keeps it), so until then this composer offers no field
-   *  rather than one holding text the server may be taking. */
+   *  lands (a success resets it, a refusal keeps it with its notice), so until then this composer
+   *  offers no field rather than one holding text the server may be taking. */
   const [waitingForSend, setWaitingForSend] = useState(sending);
   if (waitingForSend && !sending) setWaitingForSend(false);
   /** What the picker's selection reads while it is open, which is the reader's until they commit
