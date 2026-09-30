@@ -456,8 +456,8 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	}
 	var events []model.Event
 	if open != nil {
-		// The open request names a version the document has moved past, and an answer to it
-		// would pin a review to the latest version, which its question never named.
+		// The open request names a version the document has moved past, which no answer can
+		// approve any more (APPROVAL_ASK_STALE), so this request replaces it.
 		reason := fmt.Sprintf("%s moved on to version %d; approval is requested for that version instead", artifact.Name, version)
 		if _, events, err = s.closeAskTx(r.Context(), tx, open.ID, actor, s.resolveTransition(actor, "retracted", reason)); err != nil {
 			s.writeHandlerError(w, err)

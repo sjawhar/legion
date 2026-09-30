@@ -170,7 +170,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 
 // An approval request's question carries the requester's summary of what the version proposes,
 // within the ask cap. A request after the document has moved on retracts the ask naming the older
-// version and opens one at the latest, so no human approves a version the question never named.
+// version and opens one at the latest.
 func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -316,6 +316,70 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 	}
 	if satisfied := request(issue.PrimaryArtifactID, &revised); satisfied.Code != http.StatusOK || !strings.Contains(satisfied.Body.String(), `"ask":null`) || !strings.Contains(satisfied.Body.String(), `"state":"approved"`) {
 		t.Fatalf("request on an approved document: status=%d body=%s", satisfied.Code, satisfied.Body.String())
+	}
+}
+
+// An answer to an approval ask pins its review to the document's latest settled version, so an ask
+// naming an older version is not answered: its question never named what the review would
+// approve. The human approves from the document header, or waits for a new request.
+func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Stale approval", "A spec")
+	requested := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests", map[string]any{
+		"actor":   sessionActor(),
+		"summary": "Caps retries at three attempts.",
+	})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+
+	// The document moves on to version 2, and nobody asks again.
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("revise document: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("settle revised version: status=%d body=%s", named.Code, named.Body.String())
+	}
+	for _, answer := range []map[string]any{
+		{"selected": []string{"Approve"}},
+		{"selected": []string{"Request changes"}, "text": "Keep the old budget."},
+	} {
+		refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", answer, "alice")
+		body := refused.Body.String()
+		if refused.Code != http.StatusConflict || !strings.Contains(body, `"code":"APPROVAL_ASK_STALE"`) || !strings.Contains(body, "version 1") || !strings.Contains(body, "version 2") || !strings.Contains(body, "document header") {
+			t.Fatalf("answer %v to the ask naming version 1: status=%d body=%s", answer["selected"], refused.Code, body)
+		}
+	}
+	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State == "approved" || got.Approval.Version != nil {
+		t.Fatalf("approval after the refused answers = %#v, want no review", got.Approval)
+	}
+	stillOpen := decodeBody[struct {
+		Ask struct {
+			State string `json:"state"`
+		} `json:"ask"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")).Ask
+	if stillOpen.State != "open" {
+		t.Fatalf("ask after the refused answers = %#v, want open", stillOpen)
+	}
+
+	// Approving from the document header reviews the version it shows, and closes the old ask.
+	if header := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]any{"state": "approved"}, "alice"); header.Code != http.StatusCreated {
+		t.Fatalf("header approve: status=%d body=%s", header.Code, header.Body.String())
+	}
+	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "approved" || got.Approval.Version == nil || *got.Approval.Version != 2 || got.Approval.AskID == nil || *got.Approval.AskID != askID {
+		t.Fatalf("approval after the header approve = %#v, want approved at version 2 through ask %s", got.Approval, askID)
 	}
 }
 

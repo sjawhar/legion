@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
@@ -559,11 +559,17 @@ export function AskCard({
           </>
         )}
         {mutation.isError ? (
-          <QueryError
-            message="Could not save your answer."
-            onRetry={() => submitGuard.retryLast(mutation)}
-            retrying={mutation.isPending}
-          />
+          // An approval ask naming an older version is refused however often it is sent, and
+          // the refusal says where the human can approve instead.
+          mutation.error instanceof ApiError && mutation.error.code === "APPROVAL_ASK_STALE" ? (
+            <QueryError message={mutation.error.message} />
+          ) : (
+            <QueryError
+              message="Could not save your answer."
+              onRetry={() => submitGuard.retryLast(mutation)}
+              retrying={mutation.isPending}
+            />
+          )
         ) : null}
         {clarification.isError ? (
           <QueryError
