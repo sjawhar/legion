@@ -43,7 +43,8 @@ func (p ClassifiedPush) MayChangeCode() bool {
 
 // Issue is one durable workflow record. Status is the issue's lifecycle status as the daemon holds
 // it: set when the daemon queues a status write, and set again from each Dispatch event or boot
-// listing that changes the status Dispatch shows, the daemon's own echoes included. While a chain of
+// listing that changes the status Dispatch shows, the daemon's own echoes included, except a
+// session's write the daemon sets back (sessionStatusWrite), which leaves it. While a chain of
 // writes is queued, it can briefly hold an earlier write's echo.
 type Issue struct {
 	Key                 string
