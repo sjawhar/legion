@@ -144,8 +144,11 @@ when it last changed — a roadmap or backlog pass without opening every issue. 
 (a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
 `null` for an issue with no priority: `[0, 1]` is every P0 and P1), `route_status` (below), or
 `updated_since` (an RFC3339 timestamp, for "what moved this week"). `limit` is the page size, 50 by
-default and 250 at most, and `offset` is where the page starts: repeat with the next offset until a
-page comes back short to list every matching issue.
+default and 250 at most, and `offset` is where the page starts; the answer says how many issues
+match. Repeating with the next offset walks every matching issue only while the list does not
+change: an issue that enters or leaves what your filters match, or whose status or rank changes,
+between two pages shifts rows across a page boundary, and the walk then shows one issue twice and
+misses another.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.
