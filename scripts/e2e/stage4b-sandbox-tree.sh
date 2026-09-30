@@ -1422,7 +1422,8 @@ cat >>"$work/instructions.md" <<EOF
 
 The controller's daily report is the one controller action that waits for no targeted message.
 Post it as \`skill://legion-controller\`'s "Daily report" says, on the first turn a \`tick on $project\`
-wake starts: never on your start turn, and once in this run. Its issue is titled
+wake starts after your start turn has ended: never in your start turn, where a tick that arrives
+while that turn still runs does not count, and once in this run. Its issue is titled
 \`$report_title\`: find it with \`dispatch_search\`, and when there is none, create it once with
 that title and park it in icebox, as the skill says for the default report issue.
 EOF
@@ -1965,23 +1966,29 @@ dispatch_get "issues/$report" | jq -e '(.labels | map(ascii_downcase) | index("l
 # fits the skill's 2,000 characters.
 report_posted() {
   dispatch_events "$report" | jq -e --arg s "$controller_session" --arg tree "$tree1" \
-    'any(.[]; .type == "message.created" and .actor.id == $s and (.payload.body | contains($tree)) and (.payload.body | test("slot"; "i")) and (.payload.body | length) <= 2000)' >/dev/null
+    'any(.[]; .type == "message.created" and .actor.id == $s and (.payload.body | test("(^|[^0-9A-Za-z-])" + $tree + "($|[^0-9])")) and (.payload.body | test("slot"; "i")) and (.payload.body | length) <= 2000)' >/dev/null
 }
 until_true 300 "the controller's report message on $report" report_posted
-# It was posted on a turn a tick started: in the controller's session, the first report message
-# comes after the first `tick on LEGSMOKE` delivery, never in its start turn.
+# It was posted on a turn a tick started after the start turn ended, the quiet day's wake of an
+# idle controller. A tick delivered while the start turn still runs is steered into that turn
+# (pi-envoy delivers every Envoy message as a steer), so the anchor is the start turn's end: the
+# first assistant message with a terminal stopReason. Both a tick delivery and the first report
+# call come after it, the tick first, and no report call comes before it.
 report_after_tick() {
-  local file tick call
+  local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    call=$(grep -n -m1 'xd://dispatch_message' "$file" | cut -d: -f1)
-    [ -n "$call" ] || continue
-    tick=$(grep -n -m1 "summary: tick on $project" "$file" | cut -d: -f1)
-    [ -n "$tick" ] && [ "$tick" -lt "$call" ] && return 0
+    jq -R -s -e --arg tick "summary: tick on $project" '
+      [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
+      | ([$lines[] | select(.m.type? == "message" and .m.message.role? == "assistant" and (.m.message.stopReason? as $r | $r == "stop" or $r == "error" or $r == "aborted")) | .i] | first) as $end
+      | ([$lines[] | select(.raw | test("xd://dispatch_message|\"name\":\"dispatch_message\"")) | .i]) as $calls
+      | ([$lines[] | select($end != null and .i > $end and (.raw | contains($tick))) | .i] | first) as $after
+      | $end != null and ($calls | length) > 0 and ($calls | all(. > $end)) and $after != null and $after < ($calls | first)
+    ' "$file" >/dev/null && return 0
   done
   return 1
 }
-report_after_tick || fail "the controller's first report message was not posted on a turn a tick started"
+report_after_tick || fail "the controller's first report message was not posted on a turn a tick started after its start turn ended"
 note "the controller parked $report ('$report_title') in icebox and posted its daily report there on a tick's turn"
 pass
 fi # the daily report
