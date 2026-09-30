@@ -198,9 +198,9 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
-`FAIL <check>: <why>` and exits 1, unless the model key command served an agent no key
-([its verdict](#libmodel-gateway-unservedsh) decides), and any other failing command names the
-check it ended. The
+`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. A failed
+run also [notes](#libmodel-gateway-unservedsh) each agent whose last call since that check began got
+no model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
@@ -382,8 +382,8 @@ On any exit the `EXIT` trap does the same teardown, except that a failure keeps 
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
 pull request open and prints gh's reason, with a line saying some may still be open. A failed run
-in which the model key command served an agent no key ends with
-[its verdict](#libmodel-gateway-unservedsh).
+also [notes](#libmodel-gateway-unservedsh) each agent whose last call since the failing check began
+got no model key, and still exits 1.
 
 ## stage3-4b13b-acceptance.sh
 
@@ -600,9 +600,11 @@ keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the 
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
 every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
 controller's), the interest samples, the audit files and the negative controls. What the
-run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). A failed run in which the model key
-command served the controller no key ends with [its verdict](#libmodel-gateway-unservedsh), unless
-the teardown fails as well.
+run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
+`stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
+on whether the controller, the key command's one caller, got no model key since that check began;
+or `stage 4b e2e: BLOCKED (check <check>)` when a prerequisite stopped the run, which then proved
+nothing and gets no notes. Every one but the pass exits 1.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -1144,40 +1146,37 @@ caller does, with its work directory and `<cache-dir>`.
 ## lib/model-gateway-unserved.sh
 
 Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) wrote
-left an agent without a key, and why, so a run in which an agent never got a model turn is scored
-neither as a pass nor as a failure of what it tests. Oh My Pi answers every call that gets no key
-the same way (`No API key found for anthropic.`, exit 1, and no session transcript at all or one
-holding no assistant message), whatever the cause.
+left an agent without a key, and why. Oh My Pi answers every call that gets no key the same way
+(`No API key found for anthropic.`, exit 1, and for `omp -p` on 18.2.9 no session file at all),
+whatever the cause, so a run cannot say for itself that it never got a model turn.
 
 ```sh
-bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-calls"                        # a scorer, one agent
-bash scripts/e2e/lib/model-gateway-unserved.sh --run-exit "$status" "$gateway_dest" "$check_started"     # a stage proof's EXIT trap
+bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-calls"                                # a scorer: one agent run
+bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$status" "$gateway_dest" "$check_started" "$check"         # a stage proof's EXIT trap
 ```
 
-An agent is the calls made from one working directory, and it is left without a key when its last
-call was not served: Oh My Pi retries a failed key command 30 s later and after a 401, and a pane
-relaunched after a starve calls again, so an agent served since then has recovered. The verdict,
-printed with each such agent's last call, is `STARVED, not scored` (75) when each of them ran out of
-time or had its mint killed, so the run is to be rerun, and `KEY FAILED, not scored` (77) when one's
-last mint failed otherwise: a rerun does not fix that, so it outranks a starve.
+An agent's last call decides whether it went without a key: Oh My Pi retries a failed key command
+30 s later and after a 401, and a relaunched pane calls again.
 
-`--record` reads one agent's `MODEL_GATEWAY_CALLS_FILE` and exits 0 when its last call was served
-or it holds none (no file included), else with the verdict's status. A harness that scores each
-agent's run from its own directory, such as the skill-scenario rig's scorer, names a file in each
-agent's environment and reads it this way. A run from a checkout whose key command predates the
-record carries the same signal without the reason: no session transcript, or one holding no
-assistant message (a starved `omp -p` on Oh My Pi 18.2.9 wrote no session file at all).
+`--record` scores one agent run from the `MODEL_GATEWAY_CALLS_FILE` a harness named in that
+agent's environment: a file of the run's own, which does not exist before the run, so every line
+in it is that agent's. The skill-scenario rig runs one `omp -p` per run, which keeps its key for
+the life of the process, so a starved run has no model turn and the record agrees with the
+outcome. It exits 0 when the last call was served or the file holds none (no file included), `75`
+(`STARVED, not scored`: rerun it) when that call ran out of time or had its mint killed, and `77`
+(`KEY FAILED, not scored`) when the mint failed otherwise, which a rerun does not fix. A run from a
+checkout whose key command predates the record carries the same signal without the reason: no
+session file at all.
 
-`--run-exit` exits with the status a stage proof's run ends with: `<status>` itself, unless it is 1
-and an agent left without a key made its last call at or after `<since>`, the time the failing check
-began, when it prints the verdict and exits with its status instead. A check that fails for its own
-reason once every agent is served ends 1, as does one that fails after an agent's last starve in an
-earlier check. `<dest>` is the key command's directory this run created, empty until it did: each
-stage proof sets it just before installing the key command, and refuses, before it installs its
-`EXIT` trap, an evidence directory that already holds one, whose calls would be an earlier run's.
-The tmux stage proofs (Stage 2, Stage 3, the 4b.13b acceptance) end their `EXIT` trap with it, and
-Stage 4b runs it for its controller before the teardown, whose own failure sets the status back to
-1.
+`--notes` is a stage proof's diagnostic, and never changes its exit status. A failed run prints,
+after the check's own failure, each agent (the calls from one working directory) whose last call got
+no key and came at or after `<since>`, the time the failing check began: when, from which directory,
+and why. A person then sees whether starvation could explain the failure. A run-wide "not scored"
+would not be honest: in Stage 4b the key command's one caller is the operator's controller, while
+every pod uses its projected token, so a worker's failure cannot come from a starved controller.
+`<dest>` is the key command's directory this run created, and empty until it did: each stage proof
+sets it just before installing the key command, and refuses, before it installs its `EXIT` trap,
+an evidence directory that already holds one, whose calls would be an earlier run's.
 
 Either form exits 2 on an argument refusal (a `--record` in a directory that does not exist
 included), and 1 on a record line whose outcome it does not know.

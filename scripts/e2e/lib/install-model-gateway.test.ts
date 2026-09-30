@@ -167,45 +167,52 @@ describe("the model gateway key command", () => {
     expect(unserved("--record", calls("never"))).toMatchObject({ code: 0, stdout: "" });
   });
 
-  test("counts an agent that starved and was then served as served", async () => {
-    const { run, dest, mints, keyCommand } = install();
-    const since = now();
+  test("judges a run by its agent's last call, so a starve Oh My Pi retried past counts as served", async () => {
+    const { run, mints, keyCommand } = install();
     const file = join(run, "pane", "model-gateway-calls");
     const pane = join(run, "pane", "cwd");
     await call(keyCommand, pane, mints, { mode: "budget", callsFile: file });
     expect(unserved("--record", file).code).toBe(75);
-    expect(unserved("--run-exit", "1", dest, since).code).toBe(75);
 
     // Oh My Pi retries the key command, and this time it mints.
     expect((await call(keyCommand, pane, mints, { callsFile: file })).code).toBe(0);
     expect(unserved("--record", file)).toMatchObject({ code: 0, stdout: "" });
-    expect(unserved("--run-exit", "1", dest, since)).toMatchObject({ code: 1, stdout: "" });
   });
 
-  test("ends a failed run with the verdict only for a starve since its failing check began", async () => {
+  test("tells a failed stage proof which agents' last calls since its failing check got no key, and never changes its status", async () => {
     const { run, dest, mints, keyCommand } = install();
-    await call(keyCommand, join(run, "pane-refused"), mints, { mode: "refused" });
-    // The failing check began after that call, so its record is no verdict on this failure. The
-    // record's times are whole seconds, so the check begins a second later: real time, since no fake
-    // timer reaches another process's clock.
+    await call(keyCommand, join(run, "pane-earlier"), mints, { mode: "budget" });
+    // The failing check begins after that call. The record's times are whole seconds, so it begins
+    // a second later: real time, since no fake timer reaches another process's clock.
     await Bun.sleep(1100);
-    const later = now();
-    expect(unserved("--run-exit", "1", dest, later)).toMatchObject({ code: 1, stdout: "" });
+    const since = now();
     await call(keyCommand, join(run, "pane-starved"), mints, { mode: "budget" });
-    const starved = unserved("--run-exit", "1", dest, later);
-    expect(starved.code).toBe(75);
-    expect(starved.stdout).not.toContain("pane-refused");
-
-    // A key failure since the check began outranks a starve: it is the one a rerun does not fix.
     await call(keyCommand, join(run, "pane-refused"), mints, { mode: "refused" });
-    const failed = unserved("--run-exit", "1", dest, later);
-    expect(failed.code).toBe(77);
-    expect(failed.stdout).toMatch(/^model-gateway-unserved: KEY FAILED, not scored/);
-    // Every other status is the run's own, and a run that installed no key command passes none.
-    expect(unserved("--run-exit", "0", dest, later)).toMatchObject({ code: 0, stdout: "" });
-    expect(unserved("--run-exit", "130", dest, later)).toMatchObject({ code: 130, stdout: "" });
-    expect(unserved("--run-exit", "1", "", later)).toMatchObject({ code: 1, stdout: "" });
-    expect(unserved("--run-exit", "1", dest, "yesterday").code).toBe(2);
+    await call(keyCommand, join(run, "pane-recovered"), mints, { mode: "budget" });
+    await call(keyCommand, join(run, "pane-recovered"), mints);
+
+    const notes = unserved("--notes", "1", dest, since, "held-worker");
+    expect(notes.code).toBe(0);
+    expect(notes.stdout).toStartWith(
+      `model-gateway-unserved: since check held-worker began (${since})`
+    );
+    const listed = notes.stdout.split("\n").filter((line) => line.startsWith("  "));
+    expect(listed).toHaveLength(2);
+    const of = (pane: string) =>
+      listed.find((line) => line.includes(`in ${join(run, pane)} `)) ?? "";
+    expect(of("pane-refused")).toContain(
+      ": failed: hawk-token exited 1 without a key: error: no usable hawk login"
+    );
+    expect(of("pane-starved")).toContain(": timeout: hawk-token: mint produced no token");
+    // A pass says nothing, nor does a run that failed before it installed the key command (an
+    // empty directory), since a directory an earlier run left holds that run's calls.
+    expect(unserved("--notes", "0", dest, since, "held-worker")).toMatchObject({
+      code: 0,
+      stdout: "",
+    });
+    expect(unserved("--notes", "1", "", since, "setup")).toMatchObject({ code: 0, stdout: "" });
+    expect(unserved("--notes", "x", dest, since, "setup").code).toBe(2);
+    expect(unserved("--notes", "1", dest, "yesterday", "setup").code).toBe(2);
   }, 30_000);
 
   test("gives up on a mint that outlasts the caller, and on the wait behind it, before Oh My Pi's ten seconds", async () => {
@@ -225,10 +232,9 @@ describe("the model gateway key command", () => {
       expect([c.code, c.stdout]).toEqual([1, ""]);
       expect(c.ms).toBeLessThan(10_000);
     }
-    const u = unserved("--run-exit", "1", dest, since);
-    expect(u.code).toBe(75);
-    expect(u.stdout.match(/: timeout: /g)).toHaveLength(2);
-    expect(u.stdout).toContain("for another call's mint");
+    const notes = unserved("--notes", "1", dest, since, "outlast").stdout;
+    expect(notes).toContain(": timeout: the mint ran past the call's 9500 ms");
+    expect(notes).toContain("for another call's mint");
   }, 30_000);
 
   test("exempts the installer's preflight mint from the deadline, for hawk-token's first-run build", () => {

@@ -82,11 +82,7 @@ audited=
 soft_failures="$evidence/soft-failures.txt"
 : >"$soft_failures"
 
-begin() {
-  check=$1
-  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
-  printf '== %s  (%s)\n' "$check" "$(date -u +%T)"
-}
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
@@ -143,7 +139,7 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
-  bash "$unserved_reader" --run-exit "$status" "$gateway_dest" "$check_started" >&2 || exit "$?"
+  bash "$unserved_reader" --notes "$status" "$gateway_dest" "$check_started" "$check" >&2
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the

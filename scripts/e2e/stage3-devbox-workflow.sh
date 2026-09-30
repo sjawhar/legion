@@ -80,11 +80,7 @@ prod_dispatch_url=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
 
-begin() {
-  check=$1
-  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
-  printf '== %s\n' "$check"
-}
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s\n' "$check"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
@@ -136,7 +132,7 @@ cleanup() {
     printf "the run's scratch workspace is %s\n" "$work" >&2
   fi
   printf "the run's evidence is %s\n" "$evidence" >&2
-  bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --run-exit "$status" "$gateway_dest" "$check_started" >&2 || exit "$?"
+  bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$status" "$gateway_dest" "$check_started" "$check" >&2
   return 0
 }
 trap cleanup EXIT

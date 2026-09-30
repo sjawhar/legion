@@ -123,7 +123,7 @@ cleanup() {
     rm -rf "$work" || true
   else
     echo "the run's workspace is $work (daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
-    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --run-exit "$status" "$gateway_dest" "$check_started" >&2 || exit "$?"
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$status" "$gateway_dest" "$check_started" "$check" >&2
   fi
   return 0
 }

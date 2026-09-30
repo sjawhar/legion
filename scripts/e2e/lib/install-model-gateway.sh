@@ -170,8 +170,9 @@ done
 # directory, outcome and detail. The outcome is served, timeout (the call ran out of time: its own
 # deadline, its wait behind another call's mint, or hawk-token's budget), killed (a signal ended the
 # mint while it had time left) or failed (the mint ended without a key for any other reason). A
-# caller whose environment names MODEL_GATEWAY_CALLS_FILE gets its line there too, so a harness
-# that gives each agent its own file can judge one run from that run's own directory.
+# caller whose environment names MODEL_GATEWAY_CALLS_FILE gets its line there too: that is for a
+# harness that runs one agent per run and names a file of that run's own, which does not exist
+# before the run (lib/model-gateway-unserved.sh --record).
 EOF
   printf 'log=%q\n' "$log"
   printf 'cache=%q\n' "$cache_dir/hawk-token.key"
@@ -199,11 +200,10 @@ esac
 set -o pipefail
 umask 077
 # The call's clock starts with its own process: the profile names it `!exec <path>`, so the /bin/sh
-# Oh My Pi starts execs this file, and its process start is that of Oh My Pi's call. Its PPID is
-# the Oh My Pi process that ran the call (measured on 18.2.9: a child of the agent's own omp, not
-# the agent's pid), so the record tells agents apart by working directory. Under load bash can take
-# half a second to reach this line. The clock is read without a fork, since each fork there costs
-# tens of milliseconds more.
+# Oh My Pi starts execs this file, and its process start is that of Oh My Pi's call. Its PPID, the
+# pid the log names, is the Oh My Pi process that ran the call (measured on 18.2.9: a child of the
+# agent's own omp, not the agent's pid). Under load bash can take half a second to reach this line.
+# The clock is read without a fork, since each fork there costs tens of milliseconds more.
 read -r stat </proc/self/stat
 read -r -a fields <<<"${stat##*) }"
 read -r uptime _ </proc/uptime

@@ -126,6 +126,7 @@ daemon_log=$evidence/logs/daemon.log
 check=setup
 TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 ok=
+was_blocked= # set by blocked: the run stopped on a prerequisite, so it did not run, and did not fail
 gateway_dest= # the controller's key command directory once this run installs it (lib/model-gateway-unserved.sh)
 torn_down=
 snapshotted=
@@ -186,6 +187,7 @@ fail() {
 }
 blocked() {
   echo "CHECK $check: BLOCKED: $*"
+  was_blocked=1
   exit 1
 }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
@@ -1013,8 +1015,6 @@ cleanup() {
   # one the checks set. Inside this EXIT trap BASH_COMMAND is still the command the trap interrupted,
   # so the warning names the line alone.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
-  # Before the teardown, whose own failure below sets the status back to 1.
-  bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --run-exit "$status" "$gateway_dest" "$check_started" || status=$?
   stop_tree "$shape_pid"
   [ -z "$tree1" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
@@ -1040,7 +1040,12 @@ cleanup() {
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
-  [ -n "$ok" ] || echo "stage 4b e2e: FAIL (check $check)"
+  if [ -n "$was_blocked" ]; then
+    echo "stage 4b e2e: BLOCKED (check $check): the run stopped on a prerequisite and proved nothing"
+  elif [ -z "$ok" ]; then
+    bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$status" "$gateway_dest" "$check_started" "$check"
+    echo "stage 4b e2e: FAIL (check $check)"
+  fi
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
   exit "$status"
 }
