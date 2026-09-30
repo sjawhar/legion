@@ -9,7 +9,9 @@
 #                            production -> a copy of the real `legion` profile's plugin tree
 #                                          (secretsd included) with only the Legion plugin swapped
 #        RIG_LEGION_BUILD    branch (default) | a released version such as 1.17.1 — which Legion
-#                            plugin build production mode installs
+#                            plugin build production mode installs: branch packs the checkout
+#                            (scripts/e2e/lib/pack-plugin.sh), a version is `npm pack`ed from the
+#                            registry; either tarball is extracted in the installed plugin's place
 #        RIG_REFRESH_PLUGINS 1 -> re-copy the plugin tree even if the rig profile already has one
 #        RIG_PROFILE         rig profile name (l12rig); RIG_SOURCE_PROFILE the copied one (legion)
 # prints: RIG=<rig dir> RIG_PLUGINS=<mode> RIG_LEGION_BUILD=<build> on success
@@ -66,21 +68,29 @@ if [ "$PLUGINS_MODE" = production ]; then
     echo "the copied plugin tree has no @sjawhar/pi-legion-envoy: $PKG" >&2
     exit 2
   }
-  # Swap only the Legion plugin.
+  # Swap only the Legion plugin, for a tarball extracted in its place: what `npm pack` ships
+  # (dist/ with the bundles and dist/skills, agents/, package.json), nothing kept from the
+  # installed release. The rest of the copied tree stays, secretsd and the other plugins included;
+  # the Legion package needs none of it, since its bundles inline every dependency except the
+  # @oh-my-pi/* packages Oh My Pi itself provides.
+  rm -rf "$RIG/pkgs"
+  mkdir -p "$RIG/pkgs"
   if [ "$LEGION_BUILD" = branch ]; then
-    # The checkout's build over the installed dist/. The installed package.json stays: its
-    # omp.extensions already names dist/envoy.js and dist/legion.js.
-    (cd "$SRC/packages/pi-envoy" && bun run build >/dev/null)
-    cp "$SRC/packages/pi-envoy/dist/envoy.js" "$SRC/packages/pi-envoy/dist/legion.js" "$PKG/dist/"
+    # The checkout's own plugin, packed by the one pack step the live proofs use, as the release
+    # packs it.
+    test -f "$SRC/scripts/e2e/lib/pack-plugin.sh" || {
+      echo "the checkout has no scripts/e2e/lib/pack-plugin.sh to pack its plugin with: $SRC" >&2
+      exit 2
+    }
+    TARBALL=$(bash "$SRC/scripts/e2e/lib/pack-plugin.sh" "$RIG/pkgs")
     BUILD_COMMIT=$(jj -R "$SRC" log -r @ --no-graph -T commit_id 2>/dev/null || echo unknown)
   else
     # A released build, exactly as `bun add @sjawhar/pi-legion-envoy@<version>` would install it.
-    mkdir -p "$RIG/pkgs"
-    TARBALL=$(cd "$RIG/pkgs" && npm pack "@sjawhar/pi-legion-envoy@$LEGION_BUILD" --silent)
-    rm -rf "$PKG"
-    mkdir -p "$PKG"
-    tar -xzf "$RIG/pkgs/$TARBALL" --strip-components=1 -C "$PKG"
+    TARBALL="$RIG/pkgs/$(cd "$RIG/pkgs" && npm pack "@sjawhar/pi-legion-envoy@$LEGION_BUILD" --silent)"
   fi
+  rm -rf "$PKG"
+  mkdir -p "$PKG"
+  tar -xzf "$TARBALL" --strip-components=1 -C "$PKG"
 else
   # No plugins directory, so exactly one copy of each extension loads: the checkout's, symlinked.
   rm -rf "$PROFILE_DIR/plugins"

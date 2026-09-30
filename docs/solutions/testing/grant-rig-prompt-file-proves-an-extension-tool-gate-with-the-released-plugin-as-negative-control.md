@@ -38,7 +38,8 @@ delivery; its prompt was hard-coded, so it could only prove grants.
 `bun scripts/grant-rig/run.ts drive|tui … --prompt-file <path>` replaces the built-in A–G
 grant steps with the file's text. Everything else stays real: `RIG_PLUGINS=production` copies
 the live profile's whole plugin tree with only the Legion plugin swapped
-(`RIG_LEGION_BUILD=branch` for the checkout's `bun run build`, or a published version), the
+(`RIG_LEGION_BUILD=branch` for the checkout packed as the release packs it, through
+`scripts/e2e/lib/pack-plugin.sh`, or a published version), the
 daemon's launch prefix (`secrets … -- omp --mode rpc`), the OMP pin read from
 `~/.config/legion/sjawhar-legion/legion.yaml`, a stand-in daemon, and a real jj workspace at
 `$RIG/ws` whose operation log is the evidence. The A–G verdicts the analyzer prints then
@@ -65,9 +66,8 @@ describe whatever bash calls the prompt happened to cause and are not that run's
    after a corrective round whose `packages/pi-envoy` source is unchanged, the bare gates are
    enough, otherwise run it again.
 
-Round 3's E2E line also recorded that the branch's `bun run build` output was byte-identical to
-the checkout's `dist/legion.js` — the rig runs the built plugin, so a stale `dist/` would test
-the wrong code.
+Branch mode installs the checkout's packed plugin: `pack-plugin.sh` runs `bun pm pack`, whose
+`prepack.sh` builds `dist/` from the checkout's source, so the rig never runs a stale `dist/`.
 
 ## The deployment gap this surface makes visible
 

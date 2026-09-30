@@ -17,11 +17,16 @@ events and sends them to the current Claude Code session as supported
   merging with it; Claude Code reads only `.claude-plugin/plugin.json`, so it still launches the
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
   unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
-- `hooks/hooks.json` runs `dist/open-asks-hook.js` on every `SessionStart` (startup, resume, clear,
-  compact, fork). It records the current session id for the channel server and puts the session's
-  open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
+- `hooks/hooks.json` runs `dist/session-hook.js open-asks` on every `SessionStart` (startup,
+  resume, clear, compact, fork). It records the current session id for the channel server and puts
+  the session's open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
   `unavailable: <reason>` when Dispatch cannot be reached; nothing when Dispatch is not
-  configured).
+  configured). With Dispatch configured, `dist/session-hook.js dispatch-first` puts the
+  `dispatch-first` skill into the context of every session on the same `SessionStart` events and of
+  each subagent (`SubagentStart`), as a hook of its own so neither output crowds the other past
+  Claude Code's 10,000-character hook limit. On a resume or fork Claude Code adds it only when the
+  transcript does not already hold the same text, so a session keeps one copy, and one opened
+  before the skill shipped gets it.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe` or a successful Dispatch mutation. It renders every envelope with
   the shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
@@ -99,11 +104,14 @@ human approval surface.
 
 ## Skills
 
-The plugin ships two skills, `claude-envoy:envoy` and `claude-envoy:dispatch`, which teach the
-tools above. `skills/` holds one relative symlink per skill into the repository-root `skills/`,
-which stays their only source; Claude Code copies each target into the plugin cache at install.
+The plugin ships three skills, `claude-envoy:envoy`, `claude-envoy:dispatch` and
+`claude-envoy:dispatch-first`, which teach the tools above. `skills/` holds one relative symlink per
+skill into the repository-root `skills/`, which stays their only source; Claude Code copies each
+target into the plugin cache at install. With Dispatch configured, the `dispatch-first` hook also
+puts `dispatch-first` into the model's context on every `SessionStart` (startup, resume, clear,
+compact, fork) and `SubagentStart`, as the `hooks/hooks.json` bullet above describes.
 
-`envoy` and `dispatch` are the two a standalone Claude Code session uses. The other root skills
+`envoy`, `dispatch` and `dispatch-first` are the three a standalone Claude Code session uses. The other root skills
 stay out: they belong to Legion's roles (the architect, controller, oracle and retro skills, and the
 phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's `thermonuclear-*`
 pair, and those run on Oh My Pi (`skills/AGENTS.md`). The `thermonuclear-*` rubrics also ship in
@@ -116,7 +124,7 @@ The marketplace installs this package's git tree into Claude Code's plugin cache
 `node_modules`: `workspace:*` dependencies cannot resolve there, and Claude Code skips its automatic
 dependency install because the package has no lockfile of its own (the monorepo's lives at the
 root). So the two executables ship as committed single-file Bun bundles, `dist/envoy-channel.js`
-and `dist/open-asks-hook.js`, with every dependency inlined (`@legion/contracts`,
+and `dist/session-hook.js`, with every dependency inlined (`@legion/contracts`,
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod`, `ky`; the package version is
 inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one version).
 
