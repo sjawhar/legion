@@ -394,7 +394,7 @@ func TestATriageRootIsWokenEvenWhileItsKeyIsHeld(t *testing.T) {
 
 	apply(t, pool, admission, "triage-created", intake.DispatchIssue{Key: "LEGION-TRIAGE", Seq: 1, Type: "issue.created", Status: "triage", Title: "triage root", Rank: "A", HandedOver: true}, engineStub{})
 	assertEffects(t, pool, []effect{
-		{kind: record.OutboxKindControllerNotice, issue: "LEGION-TRIAGE", payload: record.ControllerNotice{Kind: "triage"}},
+		{kind: record.OutboxKindControllerNotice, issue: "LEGION-TRIAGE", payload: record.ControllerNotice{Kind: record.TriageNotice}},
 	})
 	if got := maybeIssue(t, pool, "LEGION-TRIAGE"); got != nil {
 		t.Fatalf("triage root recorded while held = %#v, want none: a triage root is never a todo candidate", got)

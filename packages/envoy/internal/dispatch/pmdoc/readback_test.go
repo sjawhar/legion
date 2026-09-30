@@ -136,3 +136,50 @@ func assertRenders(t *testing.T, cases []struct{ markdown, want string }) {
 		}
 	}
 }
+
+// A write into a document reads it back before and after with the tables' spans unwritten
+// (RefuseMisreadWrite), so a stored row whose cell spans columns is written short and padded on
+// each read-back. Those cells are the stored document's, not the write's, so each read-back has a
+// budget of its own: beside a stored table whose spans cover 5,940 cells a paragraph is stored and
+// a table whose body row is shorter than its header is still refused as reading back otherwise,
+// and beside one whose read-back would pad more than a read-back's budget the write is refused,
+// naming the limit, rather than stored without the check.
+func TestRefuseMisreadWriteReadsStoredSpansBackOnABudgetOfTheirOwn(t *testing.T) {
+	paragraph := &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: "New."}}}
+	shortRow := spanTable([][2]int{{1, 1}, {1, 1}}, [][2]int{{1, 1}})
+	spanned := documentBesideSpannedTable(100, 60)
+	if err := RefuseMisreadWrite(spanned, documentAdding(spanned, paragraph)); err != nil {
+		t.Errorf("a paragraph beside a table spanning 5,940 cells: %v, want it stored", err)
+	}
+	if err := RefuseMisreadWrite(spanned, documentAdding(spanned, shortRow)); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "reads back otherwise") {
+		t.Errorf("a short-rowed table beside a table spanning 5,940 cells: %v, want it refused as reading back otherwise", err)
+	}
+	past := documentBesideSpannedTable(1000, 101)
+	if err := RefuseMisreadWrite(past, documentAdding(past, paragraph)); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "limit 100000") {
+		t.Errorf("a paragraph beside a table spanning 100,899 cells: %v, want it refused naming the read-back limit", err)
+	}
+}
+
+// documentBesideSpannedTable is a paragraph and a table under a header of width cells, each of
+// its rows one cell spanning the header.
+func documentBesideSpannedTable(width, rows int) *Node {
+	header := make([][2]int, width)
+	for index := range header {
+		header[index] = [2]int{1, 1}
+	}
+	spans := [][][2]int{header}
+	for range rows {
+		spans = append(spans, [][2]int{{width, 1}})
+	}
+	doc := &Node{Type: "doc", Children: []*Node{
+		{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Before."}}},
+		spanTable(spans...),
+	}}
+	EnsureBlockIDs(doc)
+	return doc
+}
+
+// documentAdding is doc with block written after its last.
+func documentAdding(doc, block *Node) *Node {
+	return &Node{Type: "doc", Children: append(slices.Clone(doc.Children), block)}
+}

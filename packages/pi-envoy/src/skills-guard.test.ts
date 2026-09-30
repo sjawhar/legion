@@ -11,34 +11,93 @@ import {
 // 50 KiB) spills to an artifact that keeps only 20 KB at each end, so a longer skill arrives with
 // its middle cut out. A `skill://` read is otherwise whole (no line limit, no line-length cap), so
 // the file's own byte count is the measure. Reads by filesystem path stop at 300 lines, which is
-// why every reference is linked as `skill://<name>/<path>`, and why each such link must resolve:
-// the Go daemon's boot gate checks only the name before the first `/`.
+// why every reference is linked as `skill://<name>/<path>`, why each such link must resolve (the Go
+// daemon's boot gate checks only the name before the first `/`), and why each legion-worker
+// reference must be linked from somewhere a worker reads.
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const skillsRoot = path.join(repoRoot, "skills");
-const rolesRoot = path.join(repoRoot, "packages/pi-envoy/roles");
+const workerRoot = path.join(skillsRoot, "legion-worker");
+// Everything an agent reads that can link into a skill: the skills themselves, the TypeScript
+// daemon's role prompts, and the Go daemon's prompt overlays.
+const linkingRoots = [
+  skillsRoot,
+  path.join(repoRoot, "packages/pi-envoy/roles"),
+  path.join(repoRoot, "packages/daemon-go/internal/prompts"),
+];
 const SPILL_THRESHOLD_BYTES = 50 * 1024;
+// A link's path stops at whitespace, a closing bracket or quote, a code span, or Markdown emphasis
+// (`**skill://…/pr-body.md**`); `#anchor` is kept so it can be checked against the target's headings.
+const LINK = /skill:\/\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)\/([^\s)`'"\]>*]+)/g;
 
-function markdownFiles(directory: string): string[] {
+function files(directory: string): string[] {
   return readdirSync(directory, { recursive: true, encoding: "utf8" })
     .map((entry) => path.join(directory, entry))
     .filter((file) => statSync(file).isFile());
 }
 
+/** Every `skills/<name>/SKILL.md`. */
+function skillFiles(): string[] {
+  return readdirSync(skillsRoot)
+    .map((name) => path.join(skillsRoot, name, "SKILL.md"))
+    .filter((file) => existsSync(file));
+}
+
+/** GitHub's heading anchor: lower-cased, punctuation dropped, each space a hyphen. */
+function anchors(markdown: string): Set<string> {
+  return new Set(
+    [...markdown.matchAll(/^#{1,6}\s+(.+?)\s*#*$/gm)].map(([, heading]) =>
+      (heading ?? "")
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+        .replace(/\s/g, "-")
+    )
+  );
+}
+
+/** Every `skill://<name>/<path>[#anchor]` link, as `{source, name, target, anchor}`. */
+function links(): { source: string; name: string; target: string; anchor: string | undefined }[] {
+  return linkingRoots
+    .flatMap(files)
+    .filter((file) => file.endsWith(".md"))
+    .flatMap((file) =>
+      [...readFileSync(file, "utf8").matchAll(LINK)].map(([, name = "", raw]) => {
+        // A link that ends a sentence carries its full stop.
+        const [target = "", anchor] = (raw ?? "").replace(/[.,;:]+$/, "").split("#");
+        return { source: path.relative(repoRoot, file), name, target, anchor };
+      })
+    );
+}
+
 test("every skill file is under Oh My Pi's spill threshold, so a skill:// read arrives whole", () => {
-  const oversized = markdownFiles(skillsRoot)
+  const oversized = files(skillsRoot)
     .map((file) => ({ file: path.relative(repoRoot, file), bytes: statSync(file).size }))
     .filter(({ bytes }) => bytes >= SPILL_THRESHOLD_BYTES);
   expect(oversized).toEqual([]);
 });
 
-test("the dispatch and legion-worker bodies stay under 500 lines, their detail in references", () => {
-  const long = ["dispatch", "legion-worker"]
-    .map((skill) => ({
-      skill,
-      lines: readFileSync(path.join(skillsRoot, skill, "SKILL.md"), "utf8").split("\n").length,
+test("every skill body stays under 500 lines, its detail in references", () => {
+  const long = skillFiles()
+    .map((file) => ({
+      file: path.relative(repoRoot, file),
+      lines: readFileSync(file, "utf8").split("\n").length,
     }))
     .filter(({ lines }) => lines >= 500);
   expect(long).toEqual([]);
+});
+
+// Oh My Pi resolves `skill://<name>` by the frontmatter name, and the link check below resolves it
+// by the directory, so the two must agree.
+test("every skill's frontmatter name is its directory's name", () => {
+  const misnamed = skillFiles()
+    .map((file) => {
+      const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(file, "utf8"))?.[1] ?? "";
+      return {
+        directory: path.basename(path.dirname(file)),
+        name: /^name:\s*(.*?)\s*$/m.exec(frontmatter)?.[1],
+      };
+    })
+    .filter(({ directory, name }) => name !== directory);
+  expect(misnamed).toEqual([]);
 });
 
 test("the injected dispatch-first skill fits its budget on every host", () => {
@@ -52,19 +111,27 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
   expect(`Instructions from: ${file}\n${skill}`.length).toBeLessThan(6_000);
 });
 
-test("every skill://<name>/<path> link in a skill or a role prompt names a file that exists", () => {
-  const link = /skill:\/\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)\/([^\s)`'"\]>]+)/g;
-  const missing: string[] = [];
-  for (const file of [...markdownFiles(skillsRoot), ...markdownFiles(rolesRoot)]) {
-    if (!file.endsWith(".md")) continue;
-    for (const match of readFileSync(file, "utf8").matchAll(link)) {
-      const [whole, name, target] = match;
-      // A link that ends a sentence carries its full stop; an anchor names a heading, not a file.
-      const relative = (target ?? "").replace(/[.,;:]+$/, "").split("#")[0] ?? "";
-      if (!existsSync(path.join(skillsRoot, name ?? "", relative))) {
-        missing.push(`${path.relative(repoRoot, file)}: ${whole}`);
-      }
+test("every skill://<name>/<path> link names a file that exists, and its #anchor a heading in it", () => {
+  const broken = links().flatMap(({ source, name, target, anchor }) => {
+    const link = `skill://${name}/${target}`;
+    const file = path.join(skillsRoot, name, target);
+    if (!existsSync(file)) return [`${source}: ${link} names no file`];
+    if (anchor !== undefined && !anchors(readFileSync(file, "utf8")).has(anchor)) {
+      return [`${source}: ${link}#${anchor} names no heading`];
     }
-  }
-  expect(missing).toEqual([]);
+    return [];
+  });
+  expect(broken).toEqual([]);
+});
+
+test("every legion-worker reference is linked from a skill or a prompt", () => {
+  const linked = new Set(
+    links()
+      .filter(({ name }) => name === "legion-worker")
+      .map(({ target }) => target)
+  );
+  const unlinked = files(path.join(workerRoot, "references"))
+    .map((file) => path.relative(workerRoot, file))
+    .filter((reference) => !linked.has(reference));
+  expect(unlinked).toEqual([]);
 });

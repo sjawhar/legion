@@ -159,22 +159,6 @@ Anything else, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE"
 evidence; the architect decides, and an operator performs any operation-log restore with every
 other tree paused.
 
-**Filesystem and process safety:** Your pane runs as the operator's own user, so one mistaken
-path can destroy the machine every agent shares (on 2026-09-13 a probe script's leftover
-`rm -rf "$work" "$HOME"` deleted the operator's SSH and signing keys and stopped every worker).
-The extension refuses, before it runs, a `bash` command, `eval` code, or `hub` process start
-(yours or a `task` subagent's) that would delete, move, truncate, overwrite an existing file by
-redirection or `tee`, or `chmod -R`/`chown -R` anything outside `$LEGION_WORKSPACE` and any
-directory below `/tmp` except `/tmp` itself, a glob over it, and its tmux and ssh socket
-directories. It cannot tell which allowed `/tmp` directory belongs to your pane. It follows
-`$HOME`, `~`, variables, `cd`, and the scripts a command runs. A target with no proven path prefix
-is refused; an unknown trailing component under a prefix already proven inside your workspace or
-permitted `/tmp` remains allowed. `pkill` and `killall` are refused, and `kill` only reaches a
-process you started (a descendant of your Oh My Pi process): stop your own long-running processes
-through the hub tool. The refusal names the target and the rule; do not rewrite a script just to
-silence it. This is a mistake-guard rather than a sandbox. What it cannot read, a compiled program
-or code whose paths are only known at run time, is still yours to keep inside the workspace.
-
 ## Phase work
 
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
@@ -310,8 +294,11 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
   runs `legion threads resolve` before every push that answers a review, and the merger before
   READY: `skill://legion-worker/references/review-threads.md`.
-- **No deferrals.** A finding that changes behaviour, hides an error, or breaks a gate is fixed in
-  this pull request; naming, duplication, or wording cleanup is the one `Fast-follow:` line.
+- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." A finding that changes
+  behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
+  or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
+- **A red CI job** that failed on its own is re-run with
+  `legion gh -- run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.

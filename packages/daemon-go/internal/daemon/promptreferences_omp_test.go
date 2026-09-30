@@ -5,7 +5,7 @@ import (
 	"context"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
-	"github.com/sjawhar/legion/daemon/internal/testomp"
+	"github.com/sjawhar/legion/daemon/internal/testbin"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,7 +22,7 @@ import (
 // is an operator's provider nothing listens on, so no credential the machine carries decides the
 // run (no probe here makes a model call).
 func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
-	omp := testomp.Binary(t)
+	omp := testbin.OMP(t)
 	noAgent := "finds no task agent thermonuclear-deep-review (dispatched by dist/skills/legion-worker/SKILL.md)"
 	noRubric := "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"
 	for _, testCase := range []struct {

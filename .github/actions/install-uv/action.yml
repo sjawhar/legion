@@ -1,0 +1,31 @@
+name: Install uv
+description: >-
+  Installs the uv the worker image ships: the release `ARG UV_VERSION` in
+  packages/daemon/docker/worker.Dockerfile names, checked against that file's `ARG UV_SHA256`, as
+  the image's toolchain stage checks it. It lands off PATH, and its path is exported as
+  LEGION_TEST_UV for the tests that run it; they refuse on GitHub Actions without one. Needs the
+  repository checked out.
+runs:
+  using: composite
+  steps:
+    - name: Install the worker image's uv
+      shell: bash
+      run: |
+        set -euo pipefail
+        dockerfile=packages/daemon/docker/worker.Dockerfile
+        version=$(sed -n 's/^ARG UV_VERSION=//p' "$dockerfile")
+        sha256=$(sed -n 's/^ARG UV_SHA256=//p' "$dockerfile")
+        if [ -z "$version" ] || [ -z "$sha256" ]; then
+          echo "$dockerfile names no ARG UV_VERSION or ARG UV_SHA256" >&2
+          exit 1
+        fi
+        dir="$RUNNER_TEMP/uv"
+        mkdir -p "$dir"
+        curl -fsSLo "$dir/uv.tar.gz" \
+          "https://github.com/astral-sh/uv/releases/download/${version}/uv-x86_64-unknown-linux-gnu.tar.gz"
+        printf '%s  %s\n' "$sha256" "$dir/uv.tar.gz" > "$dir/SHA256SUMS"
+        sha256sum --check --strict "$dir/SHA256SUMS"
+        tar -xzf "$dir/uv.tar.gz" -C "$dir" --strip-components=1 uv-x86_64-unknown-linux-gnu/uv
+        rm "$dir/uv.tar.gz" "$dir/SHA256SUMS"
+        "$dir/uv" --version
+        echo "LEGION_TEST_UV=$dir/uv" >> "$GITHUB_ENV"

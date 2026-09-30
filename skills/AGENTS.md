@@ -11,7 +11,7 @@ event intake, process lifecycle, credentials, and role delivery.
 | `dispatch-first/` | every session with Dispatch configured, injected by each host plugin on every request (Oh My Pi), at session start, `/clear` and `/compact` (Claude Code), or as an instruction file (OpenCode) | searching Dispatch before acting, extending the existing issue, citing decisions, closing duplicates; kept under 60 lines and 6,000 characters |
 | `envoy/` | every role | subscriptions, agent-to-agent messages, and topic formats |
 | `legion-architect/` | root and sub-architects | tree ownership, decomposition, waves, gates, integration, sign-off |
-| `legion-controller/` | the controller root process | wake routing, backlog admission, escalation |
+| `legion-controller/` | the controller root process | wake routing, keeping the admission slots full from `todo`, the daily report, escalation |
 | `legion-oracle/` | any role doing research | repository-grounded research |
 | `legion-retro/` | the implementer, at retro | the pre-merge retrospective and its Dispatch message |
 | `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |
