@@ -4,6 +4,13 @@
 
 ### Added
 
+- Added the plan handoff's two plan checks (LEGION-421): `gapAnalysis` (`findings`, each a
+  `finding` with the plan's `answer`, or the failed call's `error`) and `planReview` (`verdict`
+  `approved`, `rejected` or `failed`, `rounds`, `remainingIssues` of `{issue, evidence}`, `error`),
+  with `PLAN_REVIEW_MAX_ROUNDS` (3) and `PLAN_REVIEW_VERDICTS`. `describePhaseHandoffWriteProblems`
+  refuses a plan written without either, a rejection recorded before the last round or without
+  the issues it named, an approval with issues standing, and a failure without its error; reading
+  stays tolerant, so a plan committed before the checks still loads.
 - `LegionGoControllerSecretResponse` carries `designGate` (`root-issues` or `off`): the Go daemon
   tells `legion controller start` its design gate policy, which the controller's take comment
   reads before it promises a design approval.

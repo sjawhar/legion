@@ -6,6 +6,7 @@ import {
   type HandoffPhase,
   LEGION_DIR_NAME,
   PHASE_FILE_NAMES,
+  PLAN_REVIEW_MAX_ROUNDS,
   validatePhaseHandoff,
 } from "./handoff-schema";
 
@@ -168,17 +169,25 @@ test("an undeclared field survives validation at every phase", () => {
   }
 });
 
+// Both plan checks recorded, so a test of another write rule sees only its own problems.
+const planChecks = {
+  gapAnalysis: { findings: [] },
+  planReview: { verdict: "approved", rounds: 1 },
+};
+const skills = { implement: ["using-jj"], test: ["testing"], review: ["testing"] };
+
 test("a plan is written only with a non-empty skill list per downstream role; an explicit none counts; reading stays tolerant", () => {
   const base = { schemaVersion: 1, phase: "plan", completed: "2026-09-18T00:00:00.000Z" };
   const legacy = { ...base, taskCount: 4 };
   expect(validatePhaseHandoff(legacy)?.phase).toBe("plan");
   expect(describePhaseHandoffProblems(legacy)).toEqual([]);
-  expect(describePhaseHandoffWriteProblems(legacy)).toEqual([
+  expect(describePhaseHandoffWriteProblems({ ...legacy, ...planChecks })).toEqual([
     "requiredSkills: missing or empty — name the skills this role must load, or state `none: <what you looked through and why nothing fits>`",
   ]);
   expect(
     describePhaseHandoffWriteProblems({
       ...base,
+      ...planChecks,
       requiredSkills: { implement: ["using-jj"], test: [], review: [" "] },
     })
   ).toEqual([
@@ -188,6 +197,7 @@ test("a plan is written only with a non-empty skill list per downstream role; an
   expect(
     describePhaseHandoffWriteProblems({
       ...base,
+      ...planChecks,
       requiredSkills: {
         implement: ["none: no agent skills exist here yet"],
         test: ["none: same"],
@@ -197,4 +207,71 @@ test("a plan is written only with a non-empty skill list per downstream role; an
   ).toEqual([]);
   // Other phases are untouched by the write-only rule.
   expect(describePhaseHandoffWriteProblems({ ...base, phase: "architect" })).toEqual([]);
+});
+
+test("a plan is written only with its gap analysis and its plan review recorded; a failed check is recorded, never blocking; reading stays tolerant", () => {
+  const base = {
+    schemaVersion: 1,
+    phase: "plan",
+    completed: "2026-09-30T00:00:00.000Z",
+    requiredSkills: skills,
+  };
+  const write = (checks: object) => describePhaseHandoffWriteProblems({ ...base, ...checks });
+  const gapAnalysis = {
+    findings: [{ finding: "no criterion checks the refusal", answer: "task 3's check" }],
+  };
+  const issue = { issue: "task 2 edits a missing file", evidence: "src/gone.ts does not exist" };
+  const rejected = {
+    verdict: "rejected",
+    rounds: PLAN_REVIEW_MAX_ROUNDS,
+    remainingIssues: [issue],
+  };
+
+  // A plan committed before the checks existed still reads; it is only refused a new write.
+  expect(validatePhaseHandoff(base)?.phase).toBe("plan");
+  expect(write({})).toEqual([
+    "gapAnalysis: missing — record the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`",
+    "planReview: missing — record the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed",
+  ]);
+
+  expect(write({ gapAnalysis, planReview: { verdict: "approved", rounds: 2 } })).toEqual([]);
+  // The reviewer still rejecting after the last round: the plan proceeds with what it named.
+  expect(write({ gapAnalysis, planReview: rejected })).toEqual([]);
+  // Both calls failed: each is recorded as its error, and the plan still goes ahead.
+  expect(
+    write({
+      gapAnalysis: { error: "model call failed: 503" },
+      planReview: { verdict: "failed", rounds: 1, error: "model call failed: 503" },
+    })
+  ).toEqual([]);
+
+  expect(write({ gapAnalysis: { ...gapAnalysis, error: "x" }, planReview: rejected })).toEqual([
+    "gapAnalysis: record either `findings` or the failed call's `error`, not both",
+  ]);
+  expect(
+    write({ gapAnalysis: { findings: [{ finding: "a gap", answer: " " }] }, planReview: rejected })
+  ).toEqual([expect.stringMatching(/^gapAnalysis\.findings\.0\.answer: /)]);
+  expect(write({ gapAnalysis, planReview: { ...rejected, rounds: 1 } })).toEqual([
+    "planReview.rounds: a review still rejecting after 1 of 3 rounds is revised and reviewed again, not recorded",
+  ]);
+  expect(write({ gapAnalysis, planReview: { ...rejected, remainingIssues: [] } })).toEqual([
+    "planReview.remainingIssues: a rejected review records the blocking issues its last round named",
+  ]);
+  expect(
+    write({ gapAnalysis, planReview: { ...rejected, remainingIssues: [{ issue: "x" }] } })
+  ).toEqual([expect.stringMatching(/^planReview\.remainingIssues\.0\.evidence: /)]);
+  expect(
+    write({ gapAnalysis, planReview: { verdict: "approved", rounds: 1, remainingIssues: [issue] } })
+  ).toEqual(["planReview.remainingIssues: an approved review leaves no blocking issue standing"]);
+  expect(write({ gapAnalysis, planReview: { verdict: "failed", rounds: 2 } })).toEqual([
+    "planReview.error: a failed review records its call's error, and only a failed review does",
+  ]);
+  expect(
+    write({ gapAnalysis, planReview: { verdict: "approved", rounds: 1, error: "x" } })
+  ).toEqual([
+    "planReview.error: a failed review records its call's error, and only a failed review does",
+  ]);
+  expect(
+    write({ gapAnalysis, planReview: { ...rejected, rounds: PLAN_REVIEW_MAX_ROUNDS + 1 } })
+  ).toEqual([expect.stringMatching(/^planReview\.rounds: /)]);
 });
