@@ -2,32 +2,26 @@
 //
 // This test mounts the real broker handlers (api.Register) on a real Postgres test store — no
 // fakes — and drives the devkey binary's own run() function directly (in-process, exactly the
-// argv a subprocess would receive) for both halves of its job: "register --seed" to bootstrap an
-// approver identity the same way scripts/dev-broker.sh does, and "approve" to decide a real
-// pending credential-request record with a real WebAuthn assertion. The requester side (a signed
-// request object over a live session enrollment) is built directly with record.Sign and
-// proof.Sign — the same two calls a fixed agent-secrets client sends (AGENTC-393 Task 10, a
-// sibling lane not yet landed in this workspace) — since devkey only ever plays the approver.
+// argv a subprocess would receive) for both decisions the dev stack needs a human for: the typed-
+// code machine login that enrolls a box, and the approval of that box's secret request. The
+// machine and requester sides (signed request objects, launcher and session proofs) are built
+// directly with record.Sign, proof.SignLauncher and proof.Sign — the calls agent-secrets and its
+// helper make — since devkey only ever plays the approving human's relay.
 package main
 
 import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/sjawhar/envoy/internal/broker/api"
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -35,62 +29,21 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
-	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 const (
-	testOrigin  = "https://devkey.test"
-	testUIToken = "test-ui-token-0123456789abcdef"
-	testSource  = "example/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL"
-	testValue   = "dev-secret-value"
+	testUIToken  = "test-ui-token-0123456789abcdef"
+	testApprover = "sjawhar"
+	testSource   = "example/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL"
+	testValue    = "dev-secret-value"
 )
 
-// devkeyTestServer is a live broker HTTP server (real handlers, real Postgres) seeded with
-// devkey's own "register --seed" output for login "sjawhar" — the same break-glass path
-// scripts/dev-broker.sh drives — so this test exercises the CLI's seed logic itself, not a
-// shortcut that bypasses it.
-type devkeyTestServer struct {
-	URL      string
-	Store    *store.Store
-	StateDir string
-}
-
-func newDevkeyTestServer(t *testing.T) *devkeyTestServer {
+// newDevkeyTestServer is a live broker HTTP server (real handlers, real Postgres) on the rules
+// scripts/dev-broker.sh writes: one approval-required secret, approved by the box's operator.
+func newDevkeyTestServer(t *testing.T) string {
 	t.Helper()
 	st := storetest.Open(t)
-
-	stateDir := t.TempDir() + "/devkey-state"
-	var seedOut, seedErr bytes.Buffer
-	if code := run([]string{"register", "--seed", "--login", "sjawhar", "--origin", testOrigin, "--state", stateDir}, &seedOut, &seedErr); code != 0 {
-		t.Fatalf("devkey register --seed: exit %d\nstderr: %s", code, seedErr.String())
-	}
-	var seed seedOutput
-	if err := json.Unmarshal(seedOut.Bytes(), &seed); err != nil {
-		t.Fatalf("decode seed output: %v\n%s", err, seedOut.String())
-	}
-
-	if _, err := st.Pool.Exec(context.Background(),
-		`insert into approver_key_seeds (login, credential_id) values ($1,$2)`, seed.Login, seed.CredentialID); err != nil {
-		t.Fatalf("insert approver_key_seeds: %v", err)
-	}
-
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM([]byte(seed.CAPEM)) {
-		t.Fatalf("seed output ca_pem did not parse as PEM: %s", seed.CAPEM)
-	}
-	approversSvc := &approvers.Service{Store: st, Verifier: &approvers.Verifier{
-		Roots: pool, Origin: testOrigin, AAGUIDs: map[uuid.UUID]bool{uuid.MustParse(seed.AAGUID): true},
-	}}
-	entry := approvers.KeyEntry{
-		CredentialID:   seed.CredentialID,
-		ChallengeNonce: seed.ChallengeNonce,
-		Registration:   seed.Registration,
-		Seed:           true,
-	}
-	if err := approversSvc.Reconcile(context.Background(), map[string][]approvers.KeyEntry{seed.Login: {entry}}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
 
 	rulesYAML := `version: 1
 secrets:
@@ -101,17 +54,6 @@ secrets:
     max_lifetime_seconds: 3600
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
-approvers:
-  origin: ` + testOrigin + `
-  aaguids: ["` + seed.AAGUID + `"]
-  logins:
-    sjawhar:
-      keys:
-        - credential_id: "` + seed.CredentialID + `"
-          registration:
-            challenge_nonce: "` + seed.ChallengeNonce + `"
-            response: ` + string(seed.Registration) + `
-          seed: true
 `
 	rulesPath := t.TempDir() + "/rules.yaml"
 	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
@@ -127,64 +69,39 @@ approvers:
 	t.Cleanup(srv.Close)
 
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
-	enr.Chain = enroll.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
+	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 	reqMachine := &requests.Machine{
 		Store: st, Rules: cur, Secrets: secrets.Fake{testSource: testValue},
-		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
+		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
-	reqMachine.Chain = requests.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
+	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
-		Store: st, Enroll: enr, Approvers: approversSvc, Rules: cur,
+		Store: st, Enroll: enr, Rules: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}
 	api.Register(mux, api.Deps{
-		PublicURL: srv.URL, UIOrigin: testOrigin, UIToken: testUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach, Approvers: approversSvc,
+		PublicURL: srv.URL, UIToken: testUIToken,
+		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 	})
-
-	return &devkeyTestServer{URL: srv.URL, Store: st, StateDir: stateDir}
+	return srv.URL
 }
 
-// newSessionEnrollment inserts a live box enrollment (and its backing launcher_credentials row)
-// directly, mirroring internal/broker/api's own test helper: enroll.Service.Create is exercised
-// end to end by the launcher-proof enrollment routes themselves, elsewhere, so this test needs
-// only a live row to sign a request object and a session proof against.
-func (ts *devkeyTestServer) newSessionEnrollment(t *testing.T) (enrollmentID string, key *ecdsa.PrivateKey) {
-	t.Helper()
-	ctx := context.Background()
-	k, err := proof.NewKey()
-	if err != nil {
-		t.Fatalf("proof.NewKey: %v", err)
-	}
-	thumbprint, err := proof.Thumbprint(&k.PublicKey)
-	if err != nil {
-		t.Fatalf("proof.Thumbprint: %v", err)
-	}
-	credentialUUID := uuid.New()
-	if _, err := ts.Store.Pool.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
-		values ($1,$2,'test-host',$3,'{}'::jsonb, now() + interval '30 days')`, credentialUUID, "sjawhar", thumbprint); err != nil {
-		t.Fatalf("insert launcher_credentials: %v", err)
-	}
-	enrollmentID = uuid.NewString()
-	if _, err := ts.Store.Pool.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
-		values ($1,'box','box-devkey-test','sjawhar',$2,$3, now() + interval '1 hour')`, enrollmentID, thumbprint, credentialUUID); err != nil {
-		t.Fatalf("insert enrollments: %v", err)
-	}
-	return enrollmentID, k
-}
-
-// req issues method against ts.URL+path with an optional JSON body and headers, returning the
-// decoded status and raw body bytes.
-func (ts *devkeyTestServer) req(t *testing.T, method, path string, headers map[string]string, body []byte) (int, []byte) {
+// req issues method against base+path with an optional JSON body and headers, returning the
+// status and raw body bytes.
+func req(t *testing.T, method, url string, headers map[string]string, body any) (int, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != nil {
-		reader = bytes.NewReader(body)
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = bytes.NewReader(b)
 	}
-	request, err := http.NewRequest(method, ts.URL+path, reader)
+	request, err := http.NewRequest(method, url, reader)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -196,7 +113,7 @@ func (ts *devkeyTestServer) req(t *testing.T, method, path string, headers map[s
 	}
 	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
+		t.Fatalf("%s %s: %v", method, url, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
@@ -206,31 +123,99 @@ func (ts *devkeyTestServer) req(t *testing.T, method, path string, headers map[s
 	return resp.StatusCode, raw
 }
 
-// TestRegisterAndApproveIssueAGrant is Step 1's failing (now passing) test: devkey's own
-// "register --seed" bootstraps the approver identity a rules reload accepts, a signed request
-// object opens a real pending credential-request record needing that approver, and devkey's own
-// "approve" subcommand — built entirely on the restored identity, a live HTTP round trip, and a
-// real WebAuthn assertion — decides it into a grant whose released value matches the fake secrets
-// store.
-func TestRegisterAndApproveIssueAGrant(t *testing.T) {
-	ts := newDevkeyTestServer(t)
-	enrollmentID, key := ts.newSessionEnrollment(t)
-
-	compact, err := record.Sign(key, ts.URL, []record.AuthorizationDetail{
-		{Type: "agent_secret", Identifier: "AGENT_SECRETS_PROOF_APPROVAL", Actions: []string{"inject"}},
-	}, "devkey main_test smoke", "", time.Now())
-	if err != nil {
-		t.Fatalf("record.Sign: %v", err)
+// devkey runs the command in-process with args and the broker connection flags, failing t on a
+// nonzero exit, and decodes its stdout into T.
+func devkey[T any](t *testing.T, brokerURL string, args ...string) T {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	args = append(args, "--broker", brokerURL, "--ui-token", testUIToken, "--login", testApprover)
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("agent-secrets-devkey %v: exit %d\nstdout: %s\nstderr: %s", args, code, stdout.String(), stderr.String())
 	}
-	createBody, err := json.Marshal(map[string]any{"request": compact, "session_id": nil})
+	var out T
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("decode devkey output: %v\n%s", err, stdout.String())
+	}
+	return out
+}
+
+func newKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatalf("proof.NewKey: %v", err)
+	}
+	return key
+}
+
+// TestDevStackEnrollsRequestsApprovesAndReleases runs the dev stack's whole story end to end: a
+// machine logs in and devkey approves its typed code by the operator's login, the resulting
+// launcher credential enrolls a box, the box asks for an approval-required secret, devkey approves
+// that record by the same login through the broker's UI route Dispatch relays to, and the grant
+// releases the fake secrets store's value.
+func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
+	brokerURL := newDevkeyTestServer(t)
+
+	// --- enroll: a machine login approved by devkey, then a box enrollment on its credential ---
+	machineKey := newKey(t)
+	loginRequest, err := record.Sign(machineKey, brokerURL, []record.AuthorizationDetail{
+		{Type: "launcher_credential", Identifier: "devkey-test-host"},
+	}, "", testApprover, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign(machine login): %v", err)
+	}
+	status, body := req(t, http.MethodPost, brokerURL+"/v1/launcher-credentials", nil, map[string]any{"request": loginRequest})
+	if status != http.StatusAccepted {
+		t.Fatalf("POST /v1/launcher-credentials = %d: %s", status, body)
+	}
+	var login struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &login); err != nil || login.Code == "" {
+		t.Fatalf("decode machine login: %v (body: %s)", err, body)
+	}
+	issued := devkey[struct {
+		State        string  `json:"state"`
+		CredentialID *string `json:"credential_id"`
+	}](t, brokerURL, "machine-approve", "--code", login.Code)
+	if issued.State != "approved" || issued.CredentialID == nil {
+		t.Fatalf("machine-approve output = %+v, want state=approved with a credential_id", issued)
+	}
+
+	sessionKey := newKey(t)
+	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := proof.Sign(key, enrollmentID, http.MethodPost, ts.URL+"/v1/requests", time.Now())
+	launcherProof, err := proof.SignLauncher(machineKey, *issued.CredentialID, http.MethodPost, brokerURL+"/v1/enrollments", time.Now())
 	if err != nil {
-		t.Fatalf("proof.Sign: %v", err)
+		t.Fatal(err)
 	}
-	status, body := ts.req(t, http.MethodPost, "/v1/requests", map[string]string{"Proof": p}, createBody)
+	status, body = req(t, http.MethodPost, brokerURL+"/v1/enrollments", map[string]string{"Proof": launcherProof},
+		map[string]any{"kind": "box", "runtime_id": "box-devkey-test", "operator": testApprover, "thumbprint": thumbprint})
+	if status != http.StatusCreated {
+		t.Fatalf("POST /v1/enrollments = %d: %s", status, body)
+	}
+	var enrolled struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}
+	if err := json.Unmarshal(body, &enrolled); err != nil || enrolled.EnrollmentID == "" {
+		t.Fatalf("decode enrollment: %v (body: %s)", err, body)
+	}
+
+	// --- request: the box asks for the approval-required secret ---
+	compact, err := record.Sign(sessionKey, brokerURL, []record.AuthorizationDetail{
+		{Type: "agent_secret", Identifier: "AGENT_SECRETS_PROOF_APPROVAL", Actions: []string{"inject"}},
+	}, "devkey main_test", "", time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	p, err := proof.Sign(sessionKey, enrolled.EnrollmentID, http.MethodPost, brokerURL+"/v1/requests", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body = req(t, http.MethodPost, brokerURL+"/v1/requests", map[string]string{"Proof": p},
+		map[string]any{"request": compact, "session_id": nil})
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/requests = %d: %s", status, body)
 	}
@@ -238,37 +223,25 @@ func TestRegisterAndApproveIssueAGrant(t *testing.T) {
 		State    string  `json:"state"`
 		RecordID *string `json:"record_id"`
 	}
-	if err := json.Unmarshal(body, &created); err != nil {
-		t.Fatalf("decode create response: %v", err)
-	}
-	if created.State != "pending" || created.RecordID == nil {
-		t.Fatalf("create response = %+v, want a pending request with a record_id", created)
+	if err := json.Unmarshal(body, &created); err != nil || created.State != "pending" || created.RecordID == nil {
+		t.Fatalf("create response = %s (%v), want a pending request with a record_id", body, err)
 	}
 
-	var approveOut, approveErr bytes.Buffer
-	code := run([]string{
-		"approve", "--record", *created.RecordID,
-		"--broker", ts.URL, "--ui-token", testUIToken, "--origin", testOrigin, "--state", ts.StateDir,
-	}, &approveOut, &approveErr)
-	if code != 0 {
-		t.Fatalf("devkey approve: exit %d\nstdout: %s\nstderr: %s", code, approveOut.String(), approveErr.String())
-	}
-	var approved struct {
+	// --- approve: devkey decides the record by the operator's login ---
+	approved := devkey[struct {
 		State   string  `json:"state"`
 		GrantID *string `json:"grant_id"`
-	}
-	if err := json.Unmarshal(approveOut.Bytes(), &approved); err != nil {
-		t.Fatalf("decode approve output: %v\n%s", err, approveOut.String())
-	}
+	}](t, brokerURL, "approve", "--record", *created.RecordID)
 	if approved.State != "approved" || approved.GrantID == nil {
-		t.Fatalf("approve output = %s, want state=approved with a grant_id", approveOut.String())
+		t.Fatalf("approve output = %+v, want state=approved with a grant_id", approved)
 	}
 
-	valuesProof, err := proof.Sign(key, enrollmentID, http.MethodPost, ts.URL+"/v1/grants/"+*approved.GrantID+"/values", time.Now())
+	// --- release: the grant's value is the fake secrets store's ---
+	valuesProof, err := proof.Sign(sessionKey, enrolled.EnrollmentID, http.MethodPost, brokerURL+"/v1/grants/"+*approved.GrantID+"/values", time.Now())
 	if err != nil {
-		t.Fatalf("proof.Sign: %v", err)
+		t.Fatal(err)
 	}
-	status, body = ts.req(t, http.MethodPost, "/v1/grants/"+*approved.GrantID+"/values", map[string]string{"Proof": valuesProof}, nil)
+	status, body = req(t, http.MethodPost, brokerURL+"/v1/grants/"+*approved.GrantID+"/values", map[string]string{"Proof": valuesProof}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/grants/{id}/values = %d: %s", status, body)
 	}
@@ -280,25 +253,5 @@ func TestRegisterAndApproveIssueAGrant(t *testing.T) {
 	}
 	if got := values.Values["AGENT_SECRETS_PROOF_APPROVAL"]; got != testValue {
 		t.Fatalf("granted value = %q, want %q", got, testValue)
-	}
-}
-
-// TestRegisterSeedRefusesToOverwriteAnExistingIdentity pins that a second "--seed" run against
-// the same --state directory refuses rather than silently generating a new, unrelated identity
-// under an approver key the rules file (and any already-inserted approver_key_seeds row) still
-// names by its old credential id.
-func TestRegisterSeedRefusesToOverwriteAnExistingIdentity(t *testing.T) {
-	stateDir := t.TempDir() + "/devkey-state"
-	var out1, err1 bytes.Buffer
-	if code := run([]string{"register", "--seed", "--login", "sjawhar", "--state", stateDir}, &out1, &err1); code != 0 {
-		t.Fatalf("first seed: exit %d\n%s", code, err1.String())
-	}
-	var out2, err2 bytes.Buffer
-	code := run([]string{"register", "--seed", "--login", "sjawhar", "--state", stateDir}, &out2, &err2)
-	if code == 0 {
-		t.Fatalf("second seed at the same --state: want a non-zero exit, got 0: %s", out2.String())
-	}
-	if !strings.Contains(err2.String(), "already exists") {
-		t.Fatalf("second seed error = %q, want it to mention an existing identity", err2.String())
 	}
 }

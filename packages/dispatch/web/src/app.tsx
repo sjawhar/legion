@@ -108,9 +108,6 @@ const MachineLoginPage = lazy(() =>
     default: module.MachineLoginPage,
   }))
 );
-const KeysPage = lazy(() =>
-  import("./features/credentials/KeysPage").then((module) => ({ default: module.KeysPage }))
-);
 
 function IssuePageFallback(): ReactNode {
   return (
@@ -591,7 +588,6 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
                 <Route element={<CredentialRecordPage />} path="/credentials/:recordId" />
                 <Route element={<MachineLoginPage />} path="/credentials/machine" />
-                <Route element={<KeysPage />} path="/credentials/keys" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<NotFoundPage />} path="*" />
               </Routes>

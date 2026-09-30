@@ -1,6 +1,6 @@
 // Package record implements the credential-request record: its canonical body and content-addressed
-// id, the domain-separated challenges the broker asks approvers to sign, and verification of the
-// requester's signed request object (AGENTC-393 design v4, contract v9).
+// id, who may decide it, and verification of the requester's signed request object (AGENTC-393
+// design v4, contract v9).
 package record
 
 import (
@@ -336,29 +336,11 @@ func ParseBody(canonical string) (Body, error) {
 	return b, nil
 }
 
-// ApproveChallenge is the domain-separated challenge an approver signs to approve a record.
-func ApproveChallenge(recordID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/approve/v1\n" + recordID))
-}
-
-// DenyChallenge is the domain-separated challenge an approver signs to deny a record.
-func DenyChallenge(recordID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/deny/v1\n" + recordID))
-}
-
-// RevokeChallenge is the domain-separated challenge an approver or operator signs to revoke a
-// grant.
-func RevokeChallenge(grantID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/revoke/v1\n" + grantID))
-}
-
-// EndorseChallenge is the domain-separated challenge an already-persisted key signs to endorse a
-// new key for the same login.
-func EndorseChallenge(login, keyHashHex string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/endorse/v1\n" + login + "\n" + keyHashHex))
-}
-
-// RegisterChallenge is the domain-separated challenge a new key signs during registration.
-func RegisterChallenge(login, nonceHex string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/register/v1\n" + login + "\n" + nonceHex))
+// IsApprover reports whether login, canonicalized, is the approver this record names. A record's
+// approver is resolved when it is created — an approval rule's login:<name>, the requesting
+// enrollment's operator for approver: operator, or a machine login's login_hint — so this one
+// comparison is every decision's and every chain re-check's approver rule.
+func (b Body) IsApprover(login string) bool {
+	login = CanonicalLogin(login)
+	return login != "" && login == CanonicalLogin(b.Approver)
 }

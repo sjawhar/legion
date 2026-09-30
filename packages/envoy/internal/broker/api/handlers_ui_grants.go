@@ -4,13 +4,13 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -52,13 +52,15 @@ func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"grants": out})
 }
 
+// revokeByApproverBody is {"approver"}: the revoking human's Dispatch login, which Dispatch's
+// server sets from its own session.
 type revokeByApproverBody struct {
-	Assertion json.RawMessage `json:"assertion"`
+	Approver string `json:"approver"`
 }
 
-// revokeByApprover ends a grant on a human's WebAuthn assertion over its revoke challenge: the
-// key must belong to the grant's approver or its enrollment's operator (requests.Machine.
-// RevokeByApprover's own mayRevoke check).
+// revokeByApprover ends a grant on a human's Dispatch login: the login must be the grant's
+// approver or its enrollment's operator (requests.Machine.RevokeByApprover's own mayRevoke
+// check).
 func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {
@@ -68,16 +70,17 @@ func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body, "INVALID_REVOKE") {
 		return
 	}
-	err := s.deps.Machine.RevokeByApprover(r.Context(), id, body.Assertion)
+	if record.CanonicalLogin(body.Approver) == "" {
+		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+		return
+	}
+	err := s.deps.Machine.RevokeByApprover(r.Context(), id, body.Approver)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such grant")
 		return
 	case errors.Is(err, requests.ErrNotApprover):
 		writeError(w, http.StatusForbidden, "NOT_APPROVER", err.Error())
-		return
-	case isAssertionError(err):
-		writeError(w, http.StatusForbidden, "ASSERTION_INVALID", err.Error())
 		return
 	case err != nil:
 		writeInternal(w, "revoke grant", err)

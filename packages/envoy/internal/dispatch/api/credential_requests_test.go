@@ -1,11 +1,10 @@
 // credential_requests_test.go is the unit layer: a fake broker (httptest.Server) proves the
-// proxy's own logic — FEATURE_OFF, approver=me resolution and its refusal, ceremony path
-// validation, and status/body forwarding both ways — without a real broker. contract_test.go is
-// what proves a real broker's handlers round-trip through these same routes.
+// proxy's own logic — FEATURE_OFF, approver=me resolution and its refusal, the approver Dispatch
+// names on every decision, and status/body forwarding both ways — without a real broker.
+// contract_test.go is what proves a real broker's handlers round-trip through these same routes.
 package api
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -62,8 +61,6 @@ var credentialRoutes = []struct {
 	{http.MethodPost, "/api/v1/credential-requests/rec1/approve"},
 	{http.MethodPost, "/api/v1/credential-requests/rec1/deny"},
 	{http.MethodPost, "/api/v1/credential-requests/machine-lookup"},
-	{http.MethodGet, "/api/v1/credential-keys/alice"},
-	{http.MethodPost, "/api/v1/credential-keys/alice/register/begin"},
 	{http.MethodGet, "/api/v1/credential-grants"},
 	{http.MethodPost, "/api/v1/credential-grants/grant1/revoke"},
 }
@@ -148,7 +145,7 @@ func TestCredentialRouteForwardsBrokerErrorStatusAndBodyVerbatim(t *testing.T) {
 	handler := newCredentialTestHandler(t, rig.server.URL)
 
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/rec1/approve",
-		map[string]any{"assertion": json.RawMessage(`{"id":"a"}`)}, "alice")
+		map[string]any{}, "alice")
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", response.Code, response.Body.String())
 	}
@@ -161,13 +158,43 @@ func TestCredentialRouteRelaysRequestBodyVerbatim(t *testing.T) {
 	rig := newFakeBrokerRig(t)
 	handler := newCredentialTestHandler(t, rig.server.URL)
 
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/rec1/deny",
-		map[string]any{"assertion": map[string]string{"id": "abc"}}, "alice")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-requests/machine-lookup",
+		map[string]any{"code": "ABCD-1234"}, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
 	}
-	if rig.lastBody != `{"assertion":{"id":"abc"}}` {
+	if rig.lastBody != `{"code":"ABCD-1234"}` {
 		t.Fatalf("broker saw body %q, want the request body byte-identical", rig.lastBody)
+	}
+}
+
+// TestDecisionsNameTheCallerNeverTheBrowsersApprover pins the one thing Dispatch adds to a
+// decision: the broker trusts the approver field on the UI bearer's word, so approve, deny and
+// revoke must send the login Dispatch's own session resolved, canonical lowercase, and forward a
+// machine login's typed code — never an approver, or anything else, the browser put in its body.
+func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {
+	browserBody := map[string]any{"approver": "bob", "code": "ABCD-1234", "assertion": map[string]string{"id": "x"}}
+	for _, tc := range []struct {
+		path     string
+		body     any
+		wantBody string
+	}{
+		{"/api/v1/credential-requests/rec1/approve", browserBody, `{"approver":"alice","code":"ABCD-1234"}`},
+		{"/api/v1/credential-requests/rec1/deny", browserBody, `{"approver":"alice","code":"ABCD-1234"}`},
+		{"/api/v1/credential-requests/rec1/approve", nil, `{"approver":"alice"}`},
+		{"/api/v1/credential-grants/grant1/revoke", browserBody, `{"approver":"alice"}`},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			rig := newFakeBrokerRig(t)
+			handler := newCredentialTestHandler(t, rig.server.URL)
+			response := dispatchRequest(t, handler, http.MethodPost, tc.path, tc.body, "Alice")
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			if rig.lastBody != tc.wantBody {
+				t.Fatalf("broker saw body %s, want %s", rig.lastBody, tc.wantBody)
+			}
+		})
 	}
 }
 
@@ -231,45 +258,5 @@ func TestApproverLiteralOtherValueIsRejectedBeforeReachingTheBroker(t *testing.T
 	}
 	if rig.calls != 0 {
 		t.Fatalf("broker was called %d times, want 0: a literal approver must never reach it", rig.calls)
-	}
-}
-
-func TestCredentialKeyCeremonyRejectsAnyCombinationOutsideRegisterEndorseBeginFinish(t *testing.T) {
-	rig := newFakeBrokerRig(t)
-	handler := newCredentialTestHandler(t, rig.server.URL)
-
-	for _, path := range []string{
-		"/api/v1/credential-keys/alice/rotate/begin",
-		"/api/v1/credential-keys/alice/register/middle",
-	} {
-		t.Run(path, func(t *testing.T) {
-			response := dispatchRequest(t, handler, http.MethodPost, path, map[string]any{}, "alice")
-			if response.Code != http.StatusNotFound {
-				t.Fatalf("status = %d, want 404: %s", response.Code, response.Body.String())
-			}
-			body := decodeBody[struct {
-				Code string `json:"code"`
-			}](t, response)
-			if body.Code != "NOT_FOUND" {
-				t.Fatalf("code = %q, want NOT_FOUND", body.Code)
-			}
-		})
-	}
-	if rig.calls != 0 {
-		t.Fatalf("broker was called %d times, want 0: an invalid kind/step must never reach it", rig.calls)
-	}
-}
-
-func TestCredentialKeyCeremonyAcceptsEveryValidCombination(t *testing.T) {
-	rig := newFakeBrokerRig(t)
-	handler := newCredentialTestHandler(t, rig.server.URL)
-
-	for _, combo := range []string{"register/begin", "register/finish", "endorse/begin", "endorse/finish"} {
-		t.Run(combo, func(t *testing.T) {
-			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/credential-keys/alice/"+combo, map[string]any{}, "alice")
-			if response.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
-			}
-		})
 	}
 }

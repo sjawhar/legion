@@ -156,10 +156,6 @@ export interface CredentialDecisionEvent {
   at: string;
   credential_id: string | null;
 }
-export interface CredentialChallenges {
-  approve: string; // base64url
-  deny: string; // base64url
-}
 export interface CredentialRecord {
   record_id: string;
   kind: CredentialRequestKind;
@@ -174,26 +170,12 @@ export interface CredentialRecord {
   expires_at: string;
   requested_at: string;
   decided: CredentialDecisionEvent | null;
-  challenges: CredentialChallenges | null; // present only while pending, never for a machine record
 }
 
 export interface CredentialDecisionResponse {
   state: "approved" | "denied";
   grant_id: string | null;
   credential_id: string | null;
-}
-
-export interface CredentialKey {
-  credential_id: string;
-  aaguid: string;
-  registered_at: string;
-  last_used_at: string | null;
-  state: "active" | "tombstoned" | "revoked";
-  endorsed_by: string | null;
-  seeded: boolean;
-}
-export interface CredentialKeysResponse {
-  keys: CredentialKey[];
 }
 
 export interface CredentialGrant {
@@ -206,53 +188,4 @@ export interface CredentialGrant {
 }
 export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
-}
-
-// Raw WebAuthn JSON shapes as go-webauthn's `protocol` package emits/consumes them (field names
-// are load-bearing - they must match exactly what the broker parses). Kept permissive (the
-// fields navigator.credentials actually needs) rather than modeling every optional extension.
-export interface PublicKeyCredentialCreationOptionsJSON {
-  rp: { id?: string; name: string };
-  user: { id: string; name: string; displayName: string }; // id is base64url
-  challenge: string; // base64url
-  pubKeyCredParams: { type: "public-key"; alg: number }[];
-  authenticatorSelection?: { userVerification?: string; residentKey?: string };
-  attestation?: string;
-  timeout?: number;
-  excludeCredentials?: { id: string; type: "public-key" }[];
-}
-export interface PublicKeyCredentialRequestOptionsJSON {
-  challenge: string; // base64url
-  rpId?: string;
-  allowCredentials?: { id: string; type: "public-key" }[];
-  userVerification?: string;
-  timeout?: number;
-}
-export interface AuthenticationResponseJSON {
-  id: string;
-  rawId: string;
-  type: "public-key";
-  response: {
-    clientDataJSON: string;
-    authenticatorData: string;
-    signature: string;
-    userHandle?: string;
-  };
-}
-export interface RegistrationResponseJSON {
-  id: string;
-  rawId: string;
-  type: "public-key";
-  response: {
-    clientDataJSON: string;
-    attestationObject: string;
-  };
-}
-
-export interface CredentialCeremonyBeginResponse {
-  ceremony_id: string;
-  publicKey: PublicKeyCredentialCreationOptionsJSON | PublicKeyCredentialRequestOptionsJSON;
-}
-export interface CredentialCeremonyFinishResponse {
-  yaml: string;
 }

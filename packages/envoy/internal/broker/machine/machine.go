@@ -3,9 +3,9 @@
 // automated service like the Legion daemon) signs a credential-request object naming the
 // operator it logs in as (login_hint) and a single launcher_credential authorization detail, and
 // polls Login's pendingID for a human to approve the confirmation code Login also mints.
-// Machine-login records are decided here, not in requests.Machine: ApplyDecision verifies the
-// human's WebAuthn assertion itself and, on approval, mints the credential directly — there is
-// no Dispatch ask anywhere in this flow, and no bearer token in any response.
+// Machine-login records are decided here, not in requests.Machine: ApplyDecision takes the
+// deciding human's Dispatch login and the typed code and, on approval, mints the credential
+// directly — there is no Dispatch ask anywhere in this flow, and no bearer token in any response.
 package machine
 
 import (
@@ -22,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/rules"
@@ -35,7 +34,7 @@ var (
 	ErrNotFound = errors.New("machine login not found")
 	// ErrCodeMismatch is ApplyDecision's refusal when the caller's code does not match the
 	// record's own: the human is deciding a different login than the one their terminal or
-	// dashboard actually shows, refused before the assertion is even checked.
+	// dashboard actually shows, refused before the approver is even checked.
 	ErrCodeMismatch = errors.New("confirmation code does not match")
 	// ErrAlreadyDecided is ApplyDecision's refusal when a concurrent decision already recorded
 	// the record's one terminal event first.
@@ -43,10 +42,9 @@ var (
 )
 
 type Service struct {
-	Store     *store.Store
-	Enroll    *enroll.Service
-	Approvers *approvers.Service
-	Rules     *rules.Current
+	Store  *store.Store
+	Enroll *enroll.Service
+	Rules  *rules.Current
 
 	Audience           string
 	Skew               time.Duration
@@ -122,8 +120,8 @@ func deref(s *string) string {
 }
 
 // Login verifies a signed machine credential-request object and opens a pending record for a
-// human to approve or deny: login_hint is required (it names the operator whose approver key
-// must decide it) and authorization_details must carry exactly one launcher_credential entry.
+// human to approve or deny: login_hint is required (it names the operator who must decide it)
+// and authorization_details must carry exactly one launcher_credential entry.
 // Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
 // limiting this unauthenticated route is the api layer's job, not this one's.
 func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
@@ -186,23 +184,22 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 
 // ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
 // means the human is looking at a different login than the one they're deciding, refused before
-// the assertion is even checked (CODE_MISMATCH). assertion must verify against
-// ApproveChallenge(recordID) to approve or DenyChallenge(recordID) to deny, signed by the
-// record's own approver. Approval mints the credential — bound to the request object's own key
-// (thumbprint and embedded JWK), with lifetime CredentialLifetime counted from the decision — in
-// the same transaction that records the decision, so a crash between the two never orphans a
-// credential no decision names.
-func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bool, assertion json.RawMessage, code string) (state, credentialID string, err error) {
+// anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be
+// the record's own approver (record.ErrNotApprover). Approval mints the credential — bound to the
+// request object's own key (thumbprint and embedded JWK), with lifetime CredentialLifetime counted
+// from the decision — in the same transaction that records the decision, so a crash between the
+// two never orphans a credential no decision names.
+func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bool, login, code string) (state, credentialID string, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return "", "", err
 	}
 	defer tx.Rollback(ctx)
 
-	var canonical, approver, storedCode string
+	var canonical, storedCode string
 	var createdAt time.Time
-	err = tx.QueryRow(ctx, `select body, approver, code, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).
-		Scan(&canonical, &approver, &storedCode, &createdAt)
+	err = tx.QueryRow(ctx, `select body, code, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).
+		Scan(&canonical, &storedCode, &createdAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
@@ -221,12 +218,13 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", err
 	}
 
-	event, challenge := "denied", record.DenyChallenge(recordID)
-	if approve {
-		event, challenge = "approved", record.ApproveChallenge(recordID)
+	if !body.IsApprover(login) {
+		return "", "", record.ErrNotApprover
 	}
-	if _, err := s.Approvers.VerifyAssertion(ctx, tx, approver, challenge, assertion); err != nil {
-		return "", "", err
+	login = record.CanonicalLogin(login)
+	event := "denied"
+	if approve {
+		event = "approved"
 	}
 
 	var credID *string
@@ -244,7 +242,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		if detail.Service != "" {
 			service = &detail.Service
 		} else {
-			op := approver
+			op := login
 			operator = &op
 		}
 		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
@@ -256,8 +254,8 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		credID = &idStr
 	}
 
-	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, assertion, credential_id, actor) values ($1,$2,$3,$4,$5)`,
-		recordID, event, []byte(assertion), credID, approver); err != nil {
+	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, credential_id, actor) values ($1,$2,$3,$4,$5)`,
+		recordID, event, login, credID, "human:"+login); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return "", "", ErrAlreadyDecided
@@ -307,19 +305,16 @@ func (s *Service) recordState(ctx context.Context, recordID string) (state, cred
 }
 
 // RecordView is a machine login record as the operator's UI sees it, resolved by its
-// human-readable confirmation code: enough to show what is being decided and to build the
-// WebAuthn assertion request an Approve or Deny button signs.
+// human-readable confirmation code: enough to show what is being decided.
 type RecordView struct {
-	RecordID         string
-	Host             string
-	Service          string // "" for a personal (non-service) login
-	Approver         string
-	State            string
-	CredentialID     string
-	CreatedAt        time.Time
-	ExpiresAt        time.Time
-	ApproveChallenge []byte
-	DenyChallenge    []byte
+	RecordID     string
+	Host         string
+	Service      string // "" for a personal (non-service) login
+	Approver     string
+	State        string
+	CredentialID string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 }
 
 // LookupByCode resolves a pending machine login by its confirmation code, for the operator's own
@@ -350,12 +345,9 @@ func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, er
 	if err != nil {
 		return RecordView{}, err
 	}
-	approveCh := record.ApproveChallenge(id)
-	denyCh := record.DenyChallenge(id)
 	return RecordView{
 		RecordID: id, Host: detail.Identifier, Service: detail.Service, Approver: approver,
 		State: state, CredentialID: credentialID, CreatedAt: createdAt, ExpiresAt: expiresAt,
-		ApproveChallenge: approveCh[:], DenyChallenge: denyCh[:],
 	}, nil
 }
 

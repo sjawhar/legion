@@ -3,7 +3,6 @@ import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { getAssertion } from "../../lib/webauthn";
 import {
   dangerText,
   inputClasses,
@@ -19,9 +18,9 @@ import { CredentialRecordFacts } from "./CredentialRecordFacts";
 
 /**
  * The machine-login code-entry page: `agent-secrets launcher login` prints an 8-character code
- * on the machine, and the operator types it here. Contract v9 ruling 13 - a `launcher_credential`
- * record's WebAuthn challenges only ever come from this code-lookup route, never from
- * `getCredentialRecord`, so this is the one place a machine record gets Approve/Deny buttons.
+ * on the machine, and the operator types it here. Contract v9 ruling 13 - only this code-lookup
+ * route selects a `launcher_credential` record, and deciding it sends the same code again, so
+ * this is the one place a machine record gets Approve/Deny buttons.
  */
 export function MachineLoginPage(): ReactNode {
   const [code, setCode] = useState("");
@@ -33,26 +32,16 @@ export function MachineLoginPage(): ReactNode {
     onSettled: () => submitGuard.release(),
   });
   const record = lookup.data;
+  // The code the shown record was looked up by, not whatever the field holds now.
+  const lookedUpCode = lookup.variables ?? "";
 
   const approve = useMutation({
-    mutationFn: async () => {
-      if (record === undefined || record.challenges === null) {
-        throw new Error("No approve challenge available for this record");
-      }
-      const assertion = await getAssertion(record.challenges.approve, window.location.hostname);
-      return api.approveCredentialRecord(record.record_id, { assertion, code });
-    },
+    mutationFn: () => api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
     onSettled: () => submitGuard.release(),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["credential-pending"] }),
   });
   const deny = useMutation({
-    mutationFn: async () => {
-      if (record === undefined || record.challenges === null) {
-        throw new Error("No deny challenge available for this record");
-      }
-      const assertion = await getAssertion(record.challenges.deny, window.location.hostname);
-      return api.denyCredentialRecord(record.record_id, { assertion });
-    },
+    mutationFn: () => api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
     onSettled: () => submitGuard.release(),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["credential-pending"] }),
   });
@@ -102,7 +91,7 @@ export function MachineLoginPage(): ReactNode {
       {record === undefined ? null : (
         <div className="space-y-4">
           <CredentialRecordFacts record={record} />
-          {record.state === "pending" && record.challenges !== null ? (
+          {record.state === "pending" ? (
             <CredentialDecisionButtons approve={approve} deny={deny} submitGuard={submitGuard} />
           ) : null}
         </div>

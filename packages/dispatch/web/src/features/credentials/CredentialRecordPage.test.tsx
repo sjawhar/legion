@@ -5,24 +5,11 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { CredentialRecord } from "../../api/types";
-import { bufToB64url } from "../../lib/webauthn";
 import { CredentialRecordPage } from "./CredentialRecordPage";
-
-function bufFrom(text: string): ArrayBuffer {
-  return new TextEncoder().encode(text).buffer as ArrayBuffer;
-}
-
-function stubCredentials(fake: { get?: (options: unknown) => Promise<unknown> }): void {
-  Object.defineProperty(navigator, "credentials", { configurable: true, value: fake });
-}
 
 function secretRecord(overrides: Partial<CredentialRecord> = {}): CredentialRecord {
   return {
     approver: "sami",
-    challenges: {
-      approve: bufToB64url(bufFrom("approve-challenge")),
-      deny: bufToB64url(bufFrom("deny-challenge")),
-    },
     decided: null,
     enrollment: { kind: "devbox", operator: "sami", runtime_id: "runtime-1" },
     expires_at: "2026-09-27T01:00:00Z",
@@ -73,30 +60,13 @@ test("renders the broker's facts before the agent's reason, rendered as plain te
   }
 });
 
-test("Approve runs the WebAuthn ceremony against the record's own challenge and posts the assertion", async () => {
+test("Approve is one plain POST for the record, with no key ceremony", async () => {
   const record = secretRecord();
   const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(record);
   const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
     credential_id: null,
     grant_id: "grant-1",
     state: "approved",
-  });
-  let capturedChallenge: ArrayBuffer | undefined;
-  stubCredentials({
-    get: async (options) => {
-      const requestOptions = options as { publicKey: { challenge: ArrayBuffer } };
-      capturedChallenge = requestOptions.publicKey.challenge;
-      return {
-        id: "credential-id",
-        rawId: bufFrom("raw-id-bytes"),
-        response: {
-          authenticatorData: bufFrom("authenticator-data"),
-          clientDataJSON: bufFrom("client-data-json"),
-          signature: bufFrom("signature-bytes"),
-        },
-        type: "public-key",
-      };
-    },
   });
 
   try {
@@ -105,22 +75,7 @@ test("Approve runs the WebAuthn ceremony against the record's own challenge and 
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
-    if (record.challenges === null) {
-      throw new Error("expected the fixture to carry challenges");
-    }
-    expect(bufToB64url(capturedChallenge as ArrayBuffer)).toBe(record.challenges.approve);
-    expect(approveCredentialRecord).toHaveBeenCalledWith("req-1", {
-      assertion: {
-        id: "credential-id",
-        rawId: bufToB64url(bufFrom("raw-id-bytes")),
-        response: {
-          authenticatorData: bufToB64url(bufFrom("authenticator-data")),
-          clientDataJSON: bufToB64url(bufFrom("client-data-json")),
-          signature: bufToB64url(bufFrom("signature-bytes")),
-        },
-        type: "public-key",
-      },
-    });
+    expect(approveCredentialRecord).toHaveBeenCalledWith("req-1");
   } finally {
     cleanup();
     getCredentialRecord.mockRestore();
@@ -130,7 +85,6 @@ test("Approve runs the WebAuthn ceremony against the record's own challenge and 
 
 test("a machine-kind record renders the machine sentence, links to the machine page, and shows no Approve button", async () => {
   const record = secretRecord({
-    challenges: null,
     identifiers: ["worker-7.example.com"],
     kind: "launcher_credential",
     reason: "",
@@ -156,7 +110,6 @@ test("a machine-kind record renders the machine sentence, links to the machine p
 
 test("a decided record renders the decision and no buttons", async () => {
   const record = secretRecord({
-    challenges: null,
     decided: { at: "2026-09-27T00:30:00Z", credential_id: "cred-123", event: "approved" },
     state: "approved",
   });

@@ -6,10 +6,10 @@
 // inside one transaction that also writes the audit row, so a duplicate or late decision changes
 // nothing. A request that needs approval also freezes an append-only credential-request record
 // (internal/broker/record): the requester's signed request object plus the broker's decision
-// fields. The record is decided on a WebAuthn assertion (internal/broker/approvers) over its
-// domain-separated challenge, never a Dispatch ask, and every release of a grant it produced
-// re-verifies the whole chain — record hash, requester signature, approver assertion against the
-// pinned keys — so a row written by anyone but the broker releases nothing (AGENTC-393 v9).
+// fields. The record is decided by its approver's Dispatch login, which Dispatch's server sends on
+// the UI routes and the UI bearer vouches for, and every release of a grant it produced
+// re-verifies the whole chain — record hash, requester signature, one approval by the record's
+// approver — so a row written by anyone but the broker releases nothing (AGENTC-393).
 package requests
 
 import (
@@ -24,7 +24,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -37,8 +36,8 @@ var (
 	ErrTerminal     = errors.New("request is already decided")
 	ErrGrantNotLive = errors.New("grant is expired, revoked, or its session ended")
 	// ErrGrantChainInvalid: re-verifying a grant's whole approval chain (record hash, requester
-	// signature, approver assertion against the pinned keys) failed — a row written by anyone but
-	// the broker, or an approver key revoked since, releases nothing.
+	// signature, one approval by the record's approver) failed — a row written by anyone but the
+	// broker releases nothing.
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
 	// ErrSecretNotInStore: the rules name a secret whose source the secrets store does not hold.
 	ErrSecretNotInStore = errors.New("secret is not in the secrets store")
@@ -80,7 +79,6 @@ type Machine struct {
 	Store      *store.Store
 	Rules      *rules.Current
 	Secrets    secrets.Reader
-	Approvers  *approvers.Service
 	MaxGrant   time.Duration
 	PendingTTL time.Duration
 	// Audience is BROKER_PUBLIC_URL: the aud every request object's signature is checked against.
@@ -97,11 +95,8 @@ type Machine struct {
 
 // NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
 // records, mirroring enroll.NewChainVerifier's own construction against launcher_credential
-// records: FetchRecord and FetchApproval read straight from Postgres, and VerifyAssertion
-// re-runs the approver's real WebAuthn signature check inside a transaction it always rolls
-// back, treating only approvers.ErrCounterReplay as success (the original decision already
-// advanced that same authenticator's counter for real; see record.ChainVerifier's own doc).
-func NewChainVerifier(st *store.Store, approversSvc *approvers.Service, audience string, skew time.Duration) *record.ChainVerifier {
+// records: FetchRecord and FetchDecisions read straight from Postgres.
+func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
 	return &record.ChainVerifier{
 		Audience: audience,
 		Skew:     skew,
@@ -117,27 +112,13 @@ func NewChainVerifier(st *store.Store, approversSvc *approvers.Service, audience
 			}
 			return body, createdAt, true, nil
 		},
-		FetchApproval: func(ctx context.Context, recordID string) (json.RawMessage, bool, error) {
-			var assertion json.RawMessage
-			err := st.Pool.QueryRow(ctx, `select assertion from credential_request_events where record_id=$1 and event='approved'`, recordID).Scan(&assertion)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, false, nil
-			}
+		FetchDecisions: func(ctx context.Context, recordID string) ([]record.TerminalEvent, error) {
+			rows, err := st.Pool.Query(ctx, `select event, coalesce(login, '') from credential_request_events
+				where record_id=$1 and event in ('approved','denied','expired','cancelled') order by id`, recordID)
 			if err != nil {
-				return nil, false, err
+				return nil, err
 			}
-			return assertion, true, nil
-		},
-		VerifyAssertion: func(ctx context.Context, login string, challenge [32]byte, assertion json.RawMessage) error {
-			tx, err := st.Pool.Begin(ctx)
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback(ctx)
-			if _, err := approversSvc.VerifyAssertion(ctx, tx, login, challenge, assertion); err != nil && !errors.Is(err, approvers.ErrCounterReplay) {
-				return err
-			}
-			return nil
+			return pgx.CollectRows(rows, pgx.RowToStructByPos[record.TerminalEvent])
 		},
 	}
 }
@@ -458,25 +439,26 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]expiredRe
 	return expired, nil
 }
 
-// ApplyDecision decides a pending agent_secret record on a verified assertion. approve=true mints
-// the grant while the requesting enrollment is still live; otherwise (or on a deny) the request is
-// denied. It re-reads the record body, recomputes its id, re-verifies the embedded request object,
-// then verifies the assertion inside the same transaction (approvers.Service.VerifyAssertion bumps
-// the sign_count counter), and writes the event, the request transition and the audit row in that
-// same transaction. A non-pending record is ErrTerminal: a duplicate or late decision changes
-// nothing. The enrollment row is locked before the request row — the same order every other
-// enrollment-then-request writer in this package takes them in, so none of them deadlock.
-func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, assertion json.RawMessage) (Decision, error) {
+// ApplyDecision decides a pending agent_secret record by login, the Dispatch login of the human
+// deciding it. approve=true mints the grant while the requesting enrollment is still live;
+// otherwise the request is denied. It re-reads the record body, recomputes its id, re-verifies
+// the embedded request object, refuses any login but the record's own approver
+// (record.ErrNotApprover), and writes the event (naming that login), the request transition and
+// the audit row in one transaction. A non-pending record is ErrTerminal: a duplicate or late
+// decision changes nothing. The enrollment row is locked before the request row — the same order
+// every other enrollment-then-request writer in this package takes them in, so none of them
+// deadlock.
+func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Decision{}, err
 	}
 	defer tx.Rollback(ctx)
 
-	var enrollmentID, approver, body string
+	var enrollmentID, body string
 	var createdAt time.Time
-	if err := tx.QueryRow(ctx, `select enrollment_id, approver, body, created_at from credential_requests where id=$1`, recordID).
-		Scan(&enrollmentID, &approver, &body, &createdAt); err != nil {
+	if err := tx.QueryRow(ctx, `select enrollment_id, body, created_at from credential_requests where id=$1`, recordID).
+		Scan(&enrollmentID, &body, &createdAt); err != nil {
 		return Decision{}, err
 	}
 	var live bool
@@ -505,15 +487,11 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
 	}
 
-	challenge := record.ApproveChallenge(recordID)
-	if !approve {
-		challenge = record.DenyChallenge(recordID)
+	if !parsed.IsApprover(login) {
+		return Decision{}, record.ErrNotApprover
 	}
-	asserted, err := m.Approvers.VerifyAssertion(ctx, tx, approver, challenge, assertion)
-	if err != nil {
-		return Decision{}, err
-	}
-	event, by := "denied", "human:"+asserted.Login
+	login = record.CanonicalLogin(login)
+	event, by := "denied", "human:"+login
 	next, detail := "denied", ""
 	if approve {
 		event = "approved"
@@ -524,16 +502,16 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		}
 	}
 	if _, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4 where id=$1 and state='pending'`,
-		requestID, next, asserted.Login, nullable(detail)); err != nil {
+		requestID, next, login, nullable(detail)); err != nil {
 		return Decision{}, err
 	}
-	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, assertion, credential_id, actor, detail) values ($1,$2,$3,$4,$5,$6)`,
-		recordID, event, assertion, asserted.CredentialID, by, nullable(detail)); err != nil {
+	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor, detail) values ($1,$2,$3,$4,$5)`,
+		recordID, event, login, by, nullable(detail)); err != nil {
 		return Decision{}, err
 	}
 	var grantID string
 	if next == "granted" {
-		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, asserted.Login, time.Duration(lifetime)*time.Second); err != nil {
+		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, time.Duration(lifetime)*time.Second); err != nil {
 			return Decision{}, err
 		}
 	}
@@ -559,12 +537,12 @@ func verifyRecordBody(recordID, body string) (record.Body, error) {
 // VerifyChain re-verifies a grant's whole approval chain against whatever is true right now, not
 // just what was true when the grant was minted, through the shared record.ChainVerifier
 // machinery (m.Chain, built by NewChainVerifier): the record's stored body still hashes to its
-// own id, its embedded request object still verifies, and its single approval event's stored
-// assertion still verifies against the pinned key material for its approver — a tampered row, a
-// forged grant with no approval event, or a since-revoked approving key all fail here. An
-// automatic grant (no record_id) needs none of this and always passes. Called by Values and
-// reuseLiveGrant. A genuine dependency failure inside m.Chain.Verify (a Postgres error from
-// FetchRecord or FetchApproval) is returned as-is rather than folded into ErrGrantChainInvalid;
+// own id, its embedded request object still verifies, and it carries exactly one terminal
+// decision, an approval by the login the record names as its approver — a tampered row, a forged
+// grant with no approval event, an approval naming another login, or a second decision all fail
+// here. An automatic grant (no record_id) needs none of this and always passes. Called by Values
+// and reuseLiveGrant. A genuine dependency failure inside m.Chain.Verify (a Postgres error from
+// FetchRecord or FetchDecisions) is returned as-is rather than folded into ErrGrantChainInvalid;
 // only record.ErrChainBroken — every reason the chain itself does not verify — is wrapped.
 func (m *Machine) VerifyChain(ctx context.Context, grantID string) error {
 	var recordID *string
@@ -613,12 +591,10 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 	return tx.Commit(ctx)
 }
 
-// RevokeByApprover ends a grant on a human's WebAuthn assertion over its revoke challenge. The
-// asserting key must belong to the grant's approver or its enrollment's operator (mayRevoke),
-// matching the same trust boundary the pre-record human revocation path enforced, now
-// authenticated by an assertion instead of a Dispatch login. Revoking an already-revoked grant
-// succeeds and changes nothing.
-func (m *Machine) RevokeByApprover(ctx context.Context, grantID string, assertion json.RawMessage) error {
+// RevokeByApprover ends a grant on a human's Dispatch login. The login must be the grant's
+// approver or its enrollment's operator (mayRevoke). Revoking an already-revoked grant succeeds
+// and changes nothing.
+func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -630,14 +606,10 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID string, assertio
 		from grants g join enrollments e on e.id=g.enrollment_id where g.id=$1 for update of g`, grantID).Scan(&owner, &requestID, &approver, &operator); err != nil {
 		return err
 	}
-	asserted, err := m.Approvers.VerifyAssertion(ctx, tx, "", record.RevokeChallenge(grantID), assertion)
-	if err != nil {
-		return err
-	}
-	if !mayRevoke(asserted.Login, approver, operator) {
+	if !mayRevoke(login, approver, operator) {
 		return ErrNotApprover
 	}
-	actor := "human:" + asserted.Login
+	actor := "human:" + record.CanonicalLogin(login)
 	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null`, grantID, actor)
 	if err != nil {
 		return err

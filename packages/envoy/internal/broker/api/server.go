@@ -15,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -24,16 +23,12 @@ import (
 
 type Deps struct {
 	PublicURL string
-	// UIOrigin is BROKER_UI_ORIGIN — Dispatch's origin, the WebAuthn rpId's host, embedded in
-	// every ceremony's PublicKeyCredential*Options this package builds.
-	UIOrigin string
 	// UIToken is BROKER_UI_TOKEN: the shared bearer uiAuth compares against (constant-time),
-	// authenticating Dispatch's server, never a human.
+	// authenticating Dispatch's server, which vouches for the approver login it sends.
 	UIToken      string
 	Enroll       *enroll.Service
 	Machine      *requests.Machine
 	MachineLogin *machine.Service
-	Approvers    *approvers.Service
 	Proof        *proof.Verifier
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
@@ -216,19 +211,6 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// isAssertionError reports whether err is a WebAuthn assertion failure the caller should see as
-// 403 ASSERTION_INVALID: a bad signature, wrong challenge, revoked or tombstoned key, wrong login,
-// replayed counter, or (finishEndorse only) an invalid endorsement assertion. The reason string is
-// safe to echo — approvers never puts key material in these errors.
-func isAssertionError(err error) bool {
-	return errors.Is(err, approvers.ErrAssertionInvalid) ||
-		errors.Is(err, approvers.ErrKeyNotFound) ||
-		errors.Is(err, approvers.ErrKeyNotLive) ||
-		errors.Is(err, approvers.ErrWrongLogin) ||
-		errors.Is(err, approvers.ErrCounterReplay) ||
-		errors.Is(err, approvers.ErrEndorsementInvalid)
 }
 
 // strPtr is nil for "" and &s otherwise, for an optional wire field that is null rather than "".

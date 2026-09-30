@@ -24,7 +24,6 @@ package agentsecrets
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -33,24 +32,17 @@ import (
 	"github.com/sjawhar/envoy/brokertest"
 )
 
-// wireChallenges and wireMachineLoginRecord are the small slice of
-// POST /v1/machine-logins/lookup's response this test actually reads — a minimal echo of
-// packages/envoy/internal/broker/api/api_test.go's own wireChallenges/wireRecord, scoped to what
-// approveMachineLogin needs rather than the record's full shape.
-type wireChallenges struct {
-	Approve string `json:"approve"`
-}
-
+// wireMachineLoginRecord is the small slice of POST /v1/machine-logins/lookup's response this
+// test actually reads.
 type wireMachineLoginRecord struct {
-	RecordID   string          `json:"record_id"`
-	Challenges *wireChallenges `json:"challenges"`
+	RecordID string `json:"record_id"`
 }
 
 // approveMachineLogin drives the human-approval half of a machine login through the real UI
 // routes exactly as packages/envoy/internal/broker/api/api_test.go's own
 // TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment does: look up the pending
-// record by its confirmation code, sign a real WebAuthn assertion over its approve challenge with
-// the rig's seeded authenticator, and approve.
+// record by its confirmation code, then approve it with the same code and the operator's login,
+// the body Dispatch's server sends.
 func approveMachineLogin(t *testing.T, rig *brokertest.Rig, code string) {
 	t.Helper()
 	status, body := rig.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
@@ -58,19 +50,11 @@ func approveMachineLogin(t *testing.T, rig *brokertest.Rig, code string) {
 		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
 	}
 	var looked wireMachineLoginRecord
-	if err := json.Unmarshal(body, &looked); err != nil {
-		t.Fatalf("decode machine-login lookup: %v", err)
+	if err := json.Unmarshal(body, &looked); err != nil || looked.RecordID == "" {
+		t.Fatalf("decode machine-login lookup: %v (body: %s)", err, body)
 	}
-	if looked.Challenges == nil {
-		t.Fatalf("machine-login lookup = %+v, want challenges", looked)
-	}
-	challenge, err := base64.RawURLEncoding.DecodeString(looked.Challenges.Approve)
-	if err != nil {
-		t.Fatalf("decode approve challenge: %v", err)
-	}
-	assertion := rig.Approver.Assert(t, brokertest.RPID, brokertest.Origin, challenge)
 	status, body = rig.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"assertion": json.RawMessage(assertion), "code": code})
+		map[string]any{"approver": rig.Operator, "code": code})
 	if status != http.StatusOK {
 		t.Fatalf("approve machine login = %d: %s", status, body)
 	}
