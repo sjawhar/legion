@@ -137,6 +137,12 @@ filled with the highest-priority root issue Legion can take.
 released `<KEY>`'s slot, because its tree finished or left the workflow, and no waiting root took
 it.
 
+**Scope first.** The scope the deployment instructions state decides which issues are candidates
+at all, before anything below. When they say you hand Legion no issue yourself, or that Legion
+runs only issues someone else sets to `todo`, the walk takes nothing: stop here, whatever slots
+are free. When they narrow the scope (a repository, a kind of change, paths never to touch), a
+candidate outside it is skipped (the last row of the table below).
+
 **How many.** Read `legion state --json`. The free slots are `admission.cap` minus the roots in
 `admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything
 you add). With none free, stop.
