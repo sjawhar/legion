@@ -43,8 +43,7 @@ separate coordinator to finish necessary work.
 
 Deployment instructions, when present, are the operator's standing rules for this repository —
 required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
-the merge credential. They override this skill's defaults where they conflict; they never
-override a Sami ruling quoted here.
+the merge credential. They override this skill's defaults where they conflict.
 
 ## 1. Decompose or adopt
 

@@ -24,6 +24,12 @@ const (
 	DesignGateOff        DesignGate = "off"
 )
 
+// Valid says whether gate is one of the two policies a daemon runs, which `legion.yaml`'s
+// `gates.design` accepts and `legion controller start` requires the daemon to answer.
+func (gate DesignGate) Valid() bool {
+	return gate == DesignGateRootIssues || gate == DesignGateOff
+}
+
 // Gates contains the workflow gates the daemon enforces.
 type Gates struct {
 	Design DesignGate
@@ -149,7 +155,7 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 	if design != "" {
 		gates.Design = DesignGate(design)
 	}
-	if gates.Design != DesignGateRootIssues && gates.Design != DesignGateOff {
+	if !gates.Design.Valid() {
 		return nil, fmt.Errorf("%s.design must be 'root-issues' or 'off'", key)
 	}
 	return &gates, nil
