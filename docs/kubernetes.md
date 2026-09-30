@@ -503,15 +503,15 @@ projected twice: its boot half into the worker, read-only, and its provisioning 
 Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon has a
 NATS nkey seed. State, `/tmp` and the XDG config home are in-memory.
 
-The worker is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python` and `UV_CACHE_DIR=/legion/uv/cache`, so
-uv keeps the Pythons it installs and its cache on the tree volume beside the workspaces. A project's
-`.venv`, in its workspace on that volume, links to its interpreter there, so it runs as it is in every
-later pod of the tree, which also reuses the packages an earlier pod downloaded. With the cache and the
-`.venv` on one filesystem, uv hardlinks a package's files from the cache into each `.venv` that installs
-it (falling back to a copy, with a warning, on a filesystem that refuses the link). A file edited in
-place inside a `.venv` therefore also changes the cached copy and that file in every other `.venv` of
-the tree; `uv cache clean <package>`, then `uv sync --reinstall-package <package>` in each affected
-workspace, repairs it.
+The worker is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python`, `UV_CACHE_DIR=/legion/uv/cache` and
+`UV_LINK_MODE=copy`. uv keeps the Pythons it installs and its cache on the tree volume beside the
+workspaces, so a project's `.venv`, which links to its interpreter there, runs as it is in every later
+pod of the tree, and those pods reuse the packages an earlier pod downloaded. uv copies each package
+from that cache into a `.venv`. With the cache and the `.venv` on one filesystem it would otherwise
+hardlink them, and an edit made in place inside one workspace's `.venv` would change the cache and
+every other `.venv` of the tree that installed the package, including ones installed later. So each
+`.venv` is a full copy of its packages on the tree volume, beside the cache, and a deployment sizes
+`tree_volume` for one copy per workspace of a tree.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;

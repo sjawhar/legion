@@ -61,9 +61,14 @@ const (
 	// cache, on the tree volume beside the workspaces. A project's .venv, in a workspace on that
 	// volume, links to an interpreter under uvPythonDir, so every later pod of the tree finds the
 	// interpreter and the environment works there as it is; uvCacheDir on the same volume lets
-	// those pods reuse what an earlier one downloaded, and lets uv link from it into a .venv.
+	// those pods reuse what an earlier one downloaded.
 	uvPythonDir = TreeRoot + "/uv/python"
 	uvCacheDir  = TreeRoot + "/uv/cache"
+	// uvLinkMode is how uv puts a package from uvCacheDir into a .venv: a copy. With the cache and
+	// the .venv on one filesystem uv would otherwise hardlink them, and an edit made in place in one
+	// workspace's .venv would change the cache and every other .venv of the tree that installed the
+	// package, the shared-inode failure LEGION-198 hit with bun's cache.
+	uvLinkMode = "copy"
 	// initTempDir is the workspace-fetch container's TMPDIR, an in-memory volume of its own:
 	// `workspace-init fetch` keeps its one-shot credential there, off every volume another
 	// container mounts.

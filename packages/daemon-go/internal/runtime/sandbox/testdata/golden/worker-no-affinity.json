@@ -173,6 +173,10 @@
                 "value": "/legion/uv/cache"
               },
               {
+                "name": "UV_LINK_MODE",
+                "value": "copy"
+              },
+              {
                 "name": "POD_UID",
                 "valueFrom": {
                   "fieldRef": {

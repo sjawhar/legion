@@ -19,6 +19,7 @@ on:
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
+      - ".github/actions/install-uv/**"
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
@@ -49,6 +50,7 @@ on:
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
+      - ".github/actions/install-uv/**"
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
@@ -190,9 +192,10 @@ jobs:
               - 'scripts/e2e/**'
               # The operator route's pod.yml, which two daemon-go tests load (config, sandbox).
               - 'deploy/kubernetes/operator-route/**'
-              # The jj its tests drive is the worker image's.
+              # The jj and uv its tests drive are the worker image's.
               - 'packages/daemon/docker/worker.Dockerfile'
               - '.github/actions/install-jj/**'
+              - '.github/actions/install-uv/**'
               # Stage 3's live proof consumes the Go wire fixtures and the native Dispatch
               # server through the Go client. Any change on either side must run the Go lanes.
               - 'packages/contracts/fixtures/**'
@@ -655,6 +658,10 @@ jobs:
       # omp-pin.ts, the repository's one copy of it, installed through the mise above
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
+      # internal/runtime/sandbox's uv link-mode test installs a wheel with the uv the worker image
+      # ships (ARG UV_VERSION, checked against ARG UV_SHA256), and refuses on GitHub Actions
+      # without one (.github/actions/install-uv).
+      - uses: ./.github/actions/install-uv
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon-go
