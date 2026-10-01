@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 )
 
 // ErrQuiesceHeld answers a start that takes over the issue's phase while the claim whose phase it
@@ -13,11 +12,10 @@ import (
 var ErrQuiesceHeld = errors.New("the start waits for the outgoing worker's interrupted turn to end")
 
 // interrupt is the turn Quiesce interrupts: the newest start that asked, the launch generation it
-// asked of, when it first asked, and whether the agent has taken the abort.
+// asked of, and whether the agent has taken the abort.
 type interrupt struct {
 	row        int64
 	generation uint64
-	since      time.Time
 	sent       bool
 }
 
@@ -35,11 +33,9 @@ type interrupt struct {
 //
 //   - A turn running is interrupted: the agent is asked to abort it (runtime.Conn.Abort), which
 //     cancels its tool calls and keeps the process. The abort's answer is not the turn's end; the
-//     agent_end that follows it is (turnEnded). An abort that fails is sent again at the next ask.
+//     agent_end that follows it is (turnEnded). An abort that fails is sent again at the next ask;
+//     one the agent took is not, and the start waits for that turn's end however long it takes.
 //   - A prompt on its way is left to become a turn, interrupted at the next ask, or to fail.
-//   - A claim still in a turn, or on its way to one, once the stop timeout has passed since the first
-//     ask is suspended as any suspension of it is (holdSuspension): its process is stopped at its
-//     turn's end or the stop timeout, and its session is resumed at its next start.
 //   - Once a start has found the claim out of a turn, it is answered nil from then on, so a later
 //     turn — a question another role asks through Envoy, which the finished role answers read-only —
 //     is never interrupted for it. The process ending (letGo) is the interrupted turn over too.
@@ -60,17 +56,10 @@ func (m *Machine) Quiesce(ctx context.Context, row int64) error {
 	}
 	i := m.interrupt
 	if i == nil {
-		i = &interrupt{generation: m.claim.Generation, since: m.deps.Clock.Now()}
+		i = &interrupt{generation: m.claim.Generation}
 		m.interrupt = i
 	}
 	i.row = max(i.row, row)
-	if m.deps.Clock.Now().Sub(i.since) >= m.deps.Timeouts.Stop {
-		err := m.handle(ctx, RequestSuspend{Claim: m.claim.Token, Reason: "its turn, interrupted for a start that takes over its issue's phase, did not end within the stop timeout"})
-		if err != nil && !errors.Is(err, ErrSuspendHeld) {
-			return err
-		}
-		return ErrQuiesceHeld
-	}
 	if !working || i.sent {
 		return ErrQuiesceHeld
 	}
