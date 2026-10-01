@@ -559,6 +559,32 @@ async function removeRepoScopedIdentity(
   }
 }
 
+/** Appends ".codegraph/" to repoCloneDir's ".git/info/exclude" unless a line already matches it
+ * exactly, so repeated provisioning of the same clone writes it once. Keeps every future
+ * `codegraph init`/`index` in a workspace of this clone — the host warm-up's own, and a worker's
+ * `codegraph` tool call — from ever getting its `.codegraph/` tracked: CodeGraph's own generated
+ * `.codegraph/.gitignore` is `*` then `!.gitignore`, so that one file stays visible to git, and
+ * without this, jj's default auto-track would snapshot it into the workspace's own change
+ * (confirmed empirically: `jj status` under an empty HOME showed `.codegraph/.gitignore` newly
+ * added after a bare `codegraph init`). `.git/info/exclude` is local to this shared clone, read
+ * by every workspace of it — git worktrees share one `info/exclude` through their common git
+ * directory — and by jj (confirmed the same way: with the line added first, the same `codegraph
+ * init` left `jj status` clean), so this needs no global git configuration anywhere a workspace
+ * of this clone is used. */
+async function excludeCodegraphDirectory(repoCloneDir: string): Promise<void> {
+  const excludePath = path.join(repoCloneDir, ".git", "info", "exclude");
+  let existing = "";
+  try {
+    existing = await readFile(excludePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (existing.split("\n").includes(".codegraph/")) return;
+  await mkdir(path.dirname(excludePath), { recursive: true });
+  const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+  await writeFile(excludePath, `${existing}${separator}.codegraph/\n`, { mode: 0o600 });
+}
+
 /** Where `issue`'s jj workspace lives under `stateDir` — the one path `provisionIssueWorkspace`
  * creates and every later daemon command against that working copy must target. */
 export function issueWorkspaceDir(
@@ -743,6 +769,7 @@ export async function provisionIssueWorkspace(
     "false",
   ]);
   await removeRepoScopedIdentity(deps, repoCloneDir);
+  await excludeCodegraphDirectory(repoCloneDir);
 
   return { repoCloneDir, workspaceDir, bookmark };
 }
