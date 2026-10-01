@@ -825,6 +825,25 @@ func TestResolveBootConfigDevSignInRefusesARemoteAgentSecretsBroker(t *testing.T
 	}
 }
 
+// With the flag a loopback client acts as any allowlisted human, so the process may not deliver
+// that human's mentions through another machine's Envoy listener.
+func TestResolveBootConfigDevSignInRefusesARemoteEnvoyListener(t *testing.T) {
+	for _, listenerURL := range []string{"https://listener.example.com", "http://10.0.0.5:9020"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": listenerURL})); err == nil || !strings.Contains(err.Error(), "ENVOY_URL") {
+			t.Errorf("ENVOY_URL=%s: err = %v, want a refusal naming ENVOY_URL", listenerURL, err)
+		}
+	}
+	// Unset, ENVOY_URL defaults to this machine's listener.
+	for _, listenerURL := range []string{"", "http://127.0.0.1:9020", "http://localhost:9020", "http://[::1]:9020"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": listenerURL})); err != nil {
+			t.Errorf("ENVOY_URL=%q: %v, want a loopback listener accepted", listenerURL, err)
+		}
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": "https://listener.example.com", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
+		t.Errorf("a remote listener without the flag: %v, want accepted", err)
+	}
+}
+
 func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 	for _, tc := range []struct{ host, port, want string }{
 		{host: "::1", port: "", want: "[::1]:8766"},

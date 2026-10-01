@@ -42,6 +42,13 @@ func LoopbackIP(host string) bool {
 	return err == nil && addr.Zone() == "" && !addr.Is4In6() && addr.IsLoopback()
 }
 
+// LoopbackHostPort reports whether address, a host:port such as a listen address or a request's
+// RemoteAddr, names a loopback IP literal as LoopbackIP judges it.
+func LoopbackHostPort(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	return err == nil && LoopbackIP(host)
+}
+
 // forwardingHeaders are the headers a proxy adds to a request it relays. The dev sign-in route
 // refuses a request carrying any of them, whatever its value: the peer it sees is then the proxy,
 // not the browser.
@@ -52,8 +59,7 @@ var forwardingHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Ho
 // spelling requested is minted, so a test can sign in as GitHub spells a login. Only a loopback
 // peer that no proxy forwarded is served, and every mint is logged at WARN.
 func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err != nil || !LoopbackIP(host) {
+	if !LoopbackHostPort(req.RemoteAddr) {
 		writeCodeError(w, http.StatusForbidden, fmt.Sprintf("dev sign-in serves loopback peers only, not %s", req.RemoteAddr), "DEV_SIGNIN_FORBIDDEN")
 		return
 	}

@@ -113,11 +113,14 @@ users through `Identity.Login` and write identity errors with
   exchange. `devSignInFence` (`cmd/dispatch/main.go`, run by
   `resolveBootConfig`) refuses it unless identity is cookie, the host of
   `boot.ListenAddr` (the one address `main` binds) is a loopback IP literal
-  (`routes.LoopbackIP`), every `DATABASE_URL` host `pgx.ParseConfig` finds is
-  loopback or a unix socket (`routes.LoopbackName`), `DISPATCH_SIGNING_KEY` is
-  unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, and a set
-  `DISPATCH_AGENT_SECRETS_URL` names a loopback host. `routes.BuildAppContext`
-  (and `main`, before any connection) refuses a dashboard origin that is not
+  (`routes.LoopbackHostPort`, which the route's peer check also uses), every
+  `DATABASE_URL` host `pgx.ParseConfig` finds is loopback or a unix socket
+  (`routes.LoopbackName`), `DISPATCH_SIGNING_KEY` is unset,
+  `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set
+  `DISPATCH_AGENT_SECRETS_URL` names a loopback host, and `ENVOY_URL` (the
+  listener mentions and messages are delivered through) names a loopback host.
+  `routes.BuildAppContext` (and `main`, before any connection) refuses a
+  dashboard origin that is not
   `127.0.0.1`, `[::1]` or `localhost` (`routes.DevSignInOrigin`) and stores the
   origin's host in the unexported `devSignInHost`, the only switch `New` reads,
   so no caller can mount the route without that check. The signing key is then

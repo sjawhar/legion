@@ -502,13 +502,14 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 
 // devSignInFence is DISPATCH_DEV_SIGNIN=1's boot half. With the flag any loopback client signs in
 // as any allowlisted login, so the process must listen, keep its data and reach the services that
-// act on a human's word on this machine alone, and sign its cookies with a key no other process
-// holds. routes.BuildAppContext checks the dashboard origin.
+// act on a human's word (NATS, the secrets broker, the Envoy listener that delivers mentions and
+// messages) on this machine alone, and sign its cookies with a key no other process holds.
+// routes.BuildAppContext checks the dashboard origin.
 func devSignInFence(boot bootConfig, getenv func(string) string) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
 	}
-	if host, _, err := net.SplitHostPort(boot.ListenAddr); err != nil || !routes.LoopbackIP(host) {
+	if !routes.LoopbackHostPort(boot.ListenAddr) {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", getenv("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
 	}
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
@@ -524,6 +525,9 @@ func devSignInFence(boot bootConfig, getenv func(string) string) error {
 		if parsed, err := url.Parse(boot.AgentSecretsURL); err != nil || !routes.LoopbackName(parsed.Hostname()) {
 			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
 		}
+	}
+	if parsed, err := url.Parse(boot.EnvoyURL); err != nil || !routes.LoopbackName(parsed.Hostname()) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 delivers through this machine's Envoy listener only: ENVOY_URL=%q must name 127.0.0.1, [::1] or localhost", boot.EnvoyURL)
 	}
 	return nil
 }
