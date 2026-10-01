@@ -229,6 +229,22 @@ claim_moved_or_held() {
     .phase == "held" or (((if $role == "architect" then .architect else .workers[$role].claim end).locator.incarnation // "") as $n | $n != "" and $n != $uid)' >/dev/null
 }
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.incarnation'; }
+# A phase worker stays live from its role's first assignment until its issue closes. record_resident
+# ISSUE ROLE keeps the session and pod uid ROLE's claim registered with, once; resident_kept ISSUE
+# ROLE is that claim still live (ready, working or idle) on the same session in the same pod.
+record_resident() {
+  local kept="$work/resident-$1-$2.json"
+  [ -s "$kept" ] && return 0
+  claim_view "$1" "$2" | jq -ce '{session, incarnation: .locator.incarnation} | select((.session // "") != "" and (.incarnation // "") != "")' >"$kept"
+}
+resident_kept() {
+  claim_view "$1" "$2" | jq -e --slurpfile first "$work/resident-$1-$2.json" \
+    '(.state | IN("ready", "working", "idle")) and .session == $first[0].session and .locator.incarnation == $first[0].incarnation' >/dev/null
+}
+# resident_lost ISSUE ROLE says how ROLE's claim differs from the session and pod it first had.
+resident_lost() {
+  printf 'now %s, first %s' "$(claim_view "$1" "$2" | jq -c '{state, session, incarnation: .locator.incarnation}')" "$(cat "$work/resident-$1-$2.json")"
+}
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
 # take_out ISSUE moves the tree ISSUE roots to backlog from the operator shell, over the operator
@@ -1010,8 +1026,8 @@ fixture_markers() {
 # stall recorded `closed` after the call that succeeded (the extension records it inside the call,
 # before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
 # last successful completion. It is the 4b.13b acceptance's stall check
-# (stage3-4b13b-acceptance.sh, pane-rule-phase-worker-and-stall) for a pod's saved session: a worker
-# suspended while its handoff_complete call runs leaves that call with no result and no `closed`
+# (stage3-4b13b-acceptance.sh, pane-rule-phase-worker-and-stall) for a pod's session: a worker
+# stopped while its handoff_complete call runs leaves that call with no result and no `closed`
 # (LEGION-283), and a worker resumed from such a session may report the phase again.
 completion_verdict() {
   jq -R -s -c --arg followup "Your turn ended with your Legion phase still open" '
@@ -1690,9 +1706,11 @@ pass
 
 begin tree-separation
 wait_for_worker "$tree1" planner
+record_resident "$tree1" planner || fail "tree 1's planner has no session and pod to keep: $(claim_view "$tree1" planner)"
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 wait_for_phase "$tree1" implementing 900
 wait_for_worker "$tree1" implementer
+record_resident "$tree1" implementer || fail "tree 1's implementer has no session and pod to keep: $(claim_view "$tree1" implementer)"
 wait_for_worker "$tree2" planner
 node_of_tree() { op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u; }
 at=$(date -u +%FT%TZ)
@@ -1710,8 +1728,8 @@ pass
 begin repository-configuration
 # Tree 2's pods carry the repository's own configuration (push_fixture). Each marker names a loading
 # path the pod's agent loaded, as an agent in any checkout does. The markers live in the
-# pod's own /tmp, which goes with the pod once the planner's phase ends and its Sandbox suspends, so
-# they are read while the planner waits after its first turn; then it plans. The argv the pod ran
+# pod's own /tmp, which goes with the pod when its tree closes, and are read while the planner waits
+# after its first turn, before it plans. The argv the pod ran
 # its agent with is recorded beside them.
 nonce="fixture-read-$RANDOM$RANDOM"
 send_agent "$tree2" planner "Stage 4b proof repository-configuration operation: read this repository's README and AGENTS.md, then answer this message with the single word $nonce and wait for the next instruction. Do not write a handoff yet."
@@ -1770,6 +1788,7 @@ wait_for_phase "$tree1" testing 1200
 assert_handoff_committer "$tree1" implementer implementing 0
 smoke_file=$(pull_request_product_files)
 wait_for_worker "$tree1" tester
+record_resident "$tree1" tester || fail "tree 1's tester has no session and pod to keep: $(claim_view "$tree1" tester)"
 # The adoption on top of a described commit: the tester's @ is a new empty change authored by the
 # reviewer App, and the implementer's handoff commit keeps its author.
 adoption=$(workspace_jj "$tree1" log -r '@|@-' --no-graph -T 'if(empty, "empty", "change") ++ "|" ++ author.name() ++ "\n"')
@@ -1780,6 +1799,7 @@ send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implement
 wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
+record_resident "$tree1" reviewer || fail "tree 1's reviewer has no session and pod to keep: $(claim_view "$tree1" reviewer)"
 # A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
 # The daemon leaves the issue in reviewing and tells the architect, naming the head. The proof's
 # instructions hold every agent until a targeted message gives its next operation, so the driver
@@ -1838,27 +1858,43 @@ note "$tree1 moved planner → implementer → tester → reviewer → retro →
 pass
 
 begin completion-closed
-# Each phase worker of tree 1 is suspended as its phase ends — the planner, the implementer
-# (implementing, and retro when it ran), the tester and the reviewer — and the workflow suspends a
-# worker as it records the completion the worker reports from inside its turn. The suspension is
-# held until that turn ends (LEGION-283), so each saved session answers every handoff_complete call,
-# reports each assignment once, and records the phase stall `closed` after the call that
-# succeeded: the 4b.13b acceptance's stall check (completion_verdict), which a suspension inside the
-# call fails. The planner, never resumed, is the case the 4b.13b acceptance saw; the implementer is
-# resumed for retro, where a session holding an unanswered report is the one that reports again.
+# Each phase worker of tree 1 stays live as its phase ends — the planner, the implementer
+# (implementing, and retro when it ran), the tester and the reviewer. The completion a worker reports
+# from inside its turn ends its assignment, not its process: the turn runs to its end and the worker
+# goes idle in the pod and on the session it first registered with, where it stays until tree 1
+# closes. Its live session answers every handoff_complete call, reports each assignment once, and
+# records the phase stall `closed` after the call that succeeded: the 4b.13b acceptance's stall
+# check (completion_verdict), which a stop inside the call fails. The implementer, handed retro in
+# that same session, is where a session holding an unanswered report would report again.
+resident_idle() { resident_kept "$1" "$2" && issue_worker_state "$1" "$2" idle; }
 for role in planner implementer tester reviewer; do
-  until_true 300 "$role on $tree1 to be suspended after its phase" issue_worker_state "$tree1" "$role" suspended
+  resident_kept "$tree1" "$role" || fail "$role on $tree1 did not stay live in the pod and session it first registered with after its phase: $(resident_lost "$tree1" "$role")"
+  until_true 300 "$role on $tree1 to go idle in the pod and session it first registered with" resident_idle "$tree1" "$role"
   session_copy="$evidence/completion-$role.jsonl"
   claim_session_text "$tree1" "$role" >"$session_copy" || fail "$role on $tree1 has no readable session"
   completion_verdict <"$session_copy" >"$evidence/completion-$role-verdict.json"
   completions_answered "$session_copy" ||
     fail "$role on $tree1 left a phase completion unanswered, unclosed or repeated: $(cat "$evidence/completion-$role-verdict.json")"
-  note "$role on $tree1, suspended: $(jq -c '[.segments[] | {calls, succeeded, closed}]' "$evidence/completion-$role-verdict.json")"
+  note "$role on $tree1, idle in its first pod $(cat "$work/resident-$tree1-$role.json"): $(jq -c '[.segments[] | {calls, succeeded, closed}]' "$evidence/completion-$role-verdict.json")"
 done
-# The control: the planner's session cut at its handoff_complete call, the transcript a suspension
-# inside the call leaves, is refused.
+# The control: the planner's session cut at its handoff_complete call, the transcript a stop inside
+# the call leaves, is refused.
 cut_at_completion_call "$evidence/completion-planner.jsonl" >"$evidence/completion-planner-cut-at-the-call.jsonl"
 expect_failure completion-cut-at-the-call completions_answered "$evidence/completion-planner-cut-at-the-call.jsonl"
+pass
+
+begin resident-answer
+# A role that finished its phase answers while another role's phase is the issue's: tree 1's planner,
+# asked a question while tree 1 is in merging, replies in the session and pod it first registered
+# with, and tree 1 stays in merging. Nothing relaunched the planner, and its answer moved no phase.
+issue_phase "$tree1" merging >/dev/null || fail "$tree1 left merging before the planner was asked: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
+nonce="resident-answer-$RANDOM$RANDOM"
+send_agent "$tree1" planner "Stage 4b proof resident-role question: your phase is finished and another role's phase is active, so change no file and call no legion operation. Reply to this message with the single word $nonce, then wait."
+until_true 900 "tree 1's finished planner to answer $nonce" assistant_said "$tree1" planner "$nonce"
+until_true 300 "tree 1's planner to go idle again after its answer" resident_idle "$tree1" planner
+resident_kept "$tree1" planner || fail "answering relaunched or replaced tree 1's planner: $(resident_lost "$tree1" planner)"
+issue_phase "$tree1" merging >/dev/null || fail "the planner's answer moved $tree1 out of merging: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
+note "tree 1's finished planner answered $nonce in its first pod and session $(cat "$work/resident-$tree1-planner.json"); $tree1 stayed in merging"
 pass
 
 begin review-pair
@@ -1960,16 +1996,21 @@ note "turns after the rotation were answered by $after"
 jq -e 'all(.[]; test("^anthropic/claude-[a-z0-9.-]+-legion$"))' <<<"$after" >/dev/null || fail "a turn after the rotation left the gateway's aliases: $after"
 pass
 
-begin idle-suspend
-# A finished worker's Sandbox is Suspended, its pod gone, the tree volume bound.
-for role in planner tester reviewer; do
-  if [ "$(claim_view "$tree1" "$role" | jq -r .state)" = suspended ]; then note "$role on $tree1 is suspended"; fi
+begin idle-resident
+# A finished worker's Sandbox stays running while its issue is open: each role of tree 1 that
+# finished its phase is still live in the pod it first registered with, that pod Running, and no
+# Sandbox of tree 1 is Suspended. The tree volume is Bound.
+for role in planner implementer tester reviewer; do
+  resident_kept "$tree1" "$role" || fail "$role on $tree1 left the pod or session it first registered with while tree 1 is open: $(resident_lost "$tree1" "$role")"
+  pod=$(claim_sandbox "$tree1" "$role") || fail "$role on $tree1 has no Sandbox"
+  running=$(op get pod "$pod" -o jsonpath='{.metadata.uid} {.status.phase}') || fail "the operator could not read $role's pod $pod"
+  [ "$running" = "$(jq -r .incarnation "$work/resident-$tree1-$role.json") Running" ] || fail "$role on $tree1 runs in pod $pod as '$running', want its first pod Running"
 done
 suspended=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o json | jq -c '[.items[] | select(.spec.operatingMode == "Suspended") | .metadata.name]')
-[ "$suspended" != "[]" ] || fail "no Sandbox of $tree1 is Suspended after its phases finished"
+[ "$suspended" = "[]" ] || fail "Sandboxes of $tree1 are Suspended while its issue is open: $suspended"
 bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
 [ "$bound" = Bound ] || fail "the tree volume of $tree1 is '$bound', want Bound"
-note "Suspended Sandboxes of $tree1: $suspended; its tree volume Bound"
+note "planner, implementer, tester and reviewer of $tree1 each run in the pod they first registered with; no Sandbox of $tree1 is Suspended; its tree volume Bound"
 pass
 
 begin kill-pod-resume
@@ -2377,6 +2418,14 @@ until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_
 clean_smoke_main
 release_smoke_main
 note "$repo#$pr_number merged by the proof human; the production check and the sign-off closed $tree1"
+# The close is what stops the roles the tree kept live: each claim of tree 1 is suspended, its
+# session kept for a re-admission to resume.
+tree1_roles_suspended() {
+  local role
+  for role in architect planner implementer tester reviewer merger; do issue_worker_state "$tree1" "$role" suspended || return 1; done
+}
+until_true 300 "the close to suspend every role of $tree1" tree1_roles_suspended
+note "the close suspended the architect, planner, implementer, tester, reviewer and merger of $tree1"
 # The daemon's done released the claim tree 1's architect took on its root issue (LEGION-392).
 dispatch_events "$tree1" | jq -e 'any(.[]; .type == "issue.claimed" and .actor.kind == "session")' >/dev/null ||
   fail "$tree1's events hold no issue.claimed by its architect's session"

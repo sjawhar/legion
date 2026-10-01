@@ -190,7 +190,7 @@ var knownLaterKeys = map[string]int{
 // place would misstate what the daemon does.
 var tossedKeys = map[string]string{
 	"worker_cap":                 "the running-worker cap no longer exists (LEGION-208 Requirement 8)",
-	"worker_idle_retire_seconds": `a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, "Process supervision")`,
+	"worker_idle_retire_seconds": `a worker stays live from its role's first assignment until its issue closes, and nothing retires it after an idle window (LEGION-462)`,
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 }
 

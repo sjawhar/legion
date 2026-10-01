@@ -541,12 +541,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			// The claim runs nothing, so there is nothing to suspend.
 			return nil
 		}
-		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too. The
-		// phase is read before the suspend acts, not in one transaction with it: a transition
-		// committing in between costs one suspend, which that transition's own start then resumes.
-		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last, nil) {
-			r.log.Info("outbox suspend no longer acts: its role's phase is back, or a newer start superseded it; finished without acting",
-				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
+		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too.
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, last, nil) {
+			r.log.Info("outbox suspend superseded by a newer start; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
@@ -565,7 +563,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if err != nil {
 			return err
 		}
-		if !workflow.StopActs(row.ID, payload, issue.Phase, machine.Claim().LastStartRow, root) {
+		if !workflow.StopActs(row.ID, payload, machine.Claim().LastStartRow, root) {
 			r.log.Info("outbox tree close of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
 				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
