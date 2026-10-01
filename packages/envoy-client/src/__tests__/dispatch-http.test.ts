@@ -88,20 +88,37 @@ describe("DispatchClient", () => {
     );
   });
 
-  test("refuses an issue listing answer that is not a page, naming what arrived", async () => {
+  // A JSON answer that is not a page is Dispatch's own and comes back the same on a retry; text in
+  // its place is most likely a proxy or gateway page, which a retry can get past. The agent acts on
+  // the advice, so each kind gets its own.
+  test("refuses an issue listing answer that is not a page, naming what arrived and whether a retry can help", async () => {
     const { fetchImpl } = fakeFetch([
       jsonResponse({ issues: "DSP-1", total: 1 }),
       jsonResponse(null),
       new Response("<html>bad gateway</html>", { status: 200 }),
+      new Response("{truncat", { status: 200, headers: { "Content-Type": "application/json" } }),
     ]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
-    const list = () => client.listIssuePage({ project: "DSP" }, { limit: 50, offset: 0 });
+    const refusal = () =>
+      client.listIssuePage({ project: "DSP" }, { limit: 50, offset: 0 }).then(
+        () => "",
+        (error: Error) => error.message
+      );
+    const sameAgain =
+      ". Retrying will not help: the same request gets the same answer until that Dispatch is " +
+      "upgraded or fixed.";
+    const maySucceed =
+      "and got text that is not a JSON page, which looks like a proxy or gateway page rather than " +
+      "Dispatch's own answer, so a retry may succeed.";
 
-    await expect(list()).rejects.toThrow(
-      "and got an object without an issues array or a numeric limit or a numeric offset. Retrying"
+    expect(await refusal()).toEndWith(
+      `and got an object without an issues array or a numeric limit or a numeric offset${sameAgain}`
     );
-    await expect(list()).rejects.toThrow("and got null. Retrying");
-    await expect(list()).rejects.toThrow("and got a string. Retrying");
+    expect(await refusal()).toEndWith(`and got null${sameAgain}`);
+    for (const text of [await refusal(), await refusal()]) {
+      expect(text).toEndWith(maySucceed);
+      expect(text).not.toContain("Retrying will not help");
+    }
   });
 
   // The executor prints `showing A-B of N` from the served limit and offset, so a page missing

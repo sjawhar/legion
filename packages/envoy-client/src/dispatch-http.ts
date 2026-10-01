@@ -109,24 +109,41 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 }
 
-/** Why `answer` is not the page `listIssuePage` asked for, or undefined when it is one. */
+/**
+ * Why `answer` is not the page `listIssuePage` asked for, and whether asking again can change
+ * that; undefined when it is one. A JSON answer that is not a page is Dispatch's own and comes back
+ * the same; text (`#response` returns a body it could not read as JSON as its text) looks like a
+ * proxy or gateway in the way, which a retry can get past.
+ */
 function whyNotAPage(answer: unknown): string | undefined {
-  if (Array.isArray(answer)) {
+  if (typeof answer === "string") {
     return (
-      `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` +
-      "is older than sjawhar/legion#1612 or that change has regressed"
+      "text that is not a JSON page, which looks like a proxy or gateway page rather than " +
+      "Dispatch's own answer, so a retry may succeed."
     );
   }
-  if (answer === null) return "null";
-  if (typeof answer !== "object") return `a ${typeof answer}`;
-  const fields = answer as Partial<Record<keyof IssueSummaryPage, unknown>>;
-  const lacking = [
-    ...(Array.isArray(fields.issues) ? [] : ["an issues array"]),
-    ...(["total", "limit", "offset"] as const)
-      .filter((name) => typeof fields[name] !== "number")
-      .map((name) => `a numeric ${name}`),
-  ];
-  return lacking.length === 0 ? undefined : `an object without ${lacking.join(" or ")}`;
+  let what: string;
+  if (Array.isArray(answer)) {
+    what =
+      `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` +
+      "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer as Partial<Record<keyof IssueSummaryPage, unknown>>;
+    const lacking = [
+      ...(Array.isArray(fields.issues) ? [] : ["an issues array"]),
+      ...(["total", "limit", "offset"] as const)
+        .filter((name) => typeof fields[name] !== "number")
+        .map((name) => `a numeric ${name}`),
+    ];
+    if (lacking.length === 0) return undefined;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return (
+    `${what}. Retrying will not help: the same request gets the same answer until that ` +
+    "Dispatch is upgraded or fixed."
+  );
 }
 
 /** JSON HTTP client for Dispatch's native-tool API. */
@@ -156,9 +173,9 @@ export class DispatchClient {
 
   /**
    * One page of `GET /api/v1/issues?limit=&offset=`, used as Dispatch served it: `IssueSummaryPage`
-   * (sjawhar/legion#1612). Any other answer is refused, naming the request sent and what arrived; a
-   * bare array answered to this paged request means a Dispatch older than that change or a
-   * regression of it.
+   * (sjawhar/legion#1612). Any other answer is refused, naming the request sent, what arrived and
+   * whether a retry can help; a bare array answered to this paged request means a Dispatch older
+   * than that change or a regression of it.
    */
   async listIssuePage(
     options: ListIssuesOptions,
@@ -171,8 +188,7 @@ export class DispatchClient {
     if (refusal === undefined) return answer as IssueSummaryPage;
     throw new Error(
       `GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` +
-        `${refusal}. Retrying will not help: the same request gets the same answer until that ` +
-        "Dispatch is upgraded or fixed."
+        refusal
     );
   }
 
