@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { notifyManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -1097,10 +1097,10 @@ test("a send takes the Discard prompt with it and Escape raises none until the s
   }
 });
 
-// Nor does a reference join a message on its way, for its refusal to drop. In a browser TanStack
-// tells the composer its send has started a task after Send (its scheduler is a zero timeout), so
-// a Ctrl+K landing in that gap still reaches the field: the picker it opens waits for the
-// server's answer, and then adds to the draft the refusal handed back.
+// Nor does a reference join a message on its way, for its refusal to drop. The field disables
+// itself on the render after Send, and a Ctrl+K handled before that render still reaches it - in a
+// browser TanStack tells the composer its send has started a zero-timeout later - so the picker
+// that key opens waits for the server's answer, and then adds to the draft the refusal handed back.
 test("a reference picker opened as a send goes out waits for the server's answer", async () => {
   const refused = Promise.withResolvers<Comment>();
   const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
@@ -1113,15 +1113,11 @@ test("a reference picker opened as a send goes out waits for the server's answer
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
     fireEvent.change(field, { target: { value: "@Planner see" } });
-    // The browser's gap, held open by hand: this suite's setup notifies at once.
-    const notifications: (() => void)[] = [];
-    notifyManager.setScheduler((callback) => notifications.push(callback));
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    expect(field.disabled).toBe(false);
-    fireEvent.keyDown(field, { ctrlKey: true, key: "k" });
-    notifyManager.setScheduler((callback) => callback());
+    // One act, so React renders nothing between Send and the key.
     act(() => {
-      for (const notify of notifications.splice(0)) notify();
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      expect(field.disabled).toBe(false);
+      fireEvent.keyDown(field, { ctrlKey: true, key: "k" });
     });
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     expect(field.disabled).toBe(true);
@@ -1133,7 +1129,6 @@ test("a reference picker opened as a send goes out waits for the server's answer
     fireEvent.click(await screen.findByRole("button", { name: "CORE-1: Core issue" }));
     await waitFor(() => expect(field.value).toBe("@Planner see dispatch://CORE-1"));
   } finally {
-    notifyManager.setScheduler((callback) => callback());
     view.unmount();
     createComment.mockRestore();
     getIssue.mockRestore();
