@@ -1,7 +1,8 @@
 /**
  * Two readers' asks may cover the same text: the `dispatchAsk` schema declares `excludes: ''`, so
  * a second ask over part of the first adds its own mark instead of cutting the first out of the
- * overlap, and removing one ask removes that mark's instance, never every ask on its text.
+ * overlap, removing one ask removes that mark's instance, never every ask on its text, and an ask
+ * span nested in another reads back from markdown as both.
  */
 
 import { expect, test } from "bun:test";
@@ -86,4 +87,21 @@ test("removing an ask that is not in the document reports false and dispatches n
   const { view, transactions } = await twoAsks();
   expect(removeAskMark(view, "never")).toBe(false);
   expect(transactions).toHaveLength(2);
+});
+
+test("an ask span nested inside another reads back from markdown as both asks", async () => {
+  const { parseMarkdown, serializeMarkdown } = await createHeadlessProof();
+  const ask = (id: string, by: string, text: string) =>
+    `<span data-dispatch="ask" data-id="${id}" data-by="${by}">${text}</span>`;
+  const markdown = `The ${ask("a1", "user:bob", `quick ${ask("a2", "user:alice", "brown")} fox`)} jumps.\n`;
+  const doc = parseMarkdown(markdown);
+  expect({ a1: askText(doc, "a1"), a2: askText(doc, "a2") }).toEqual({
+    a1: "quick brown fox",
+    a2: "brown",
+  });
+  const again = parseMarkdown(serializeMarkdown(doc));
+  expect({ a1: askText(again, "a1"), a2: askText(again, "a2") }).toEqual({
+    a1: "quick brown fox",
+    a2: "brown",
+  });
 });

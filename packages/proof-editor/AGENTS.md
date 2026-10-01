@@ -58,8 +58,9 @@ wrapper on `toDOM`, and the suite's cases for all of it; `src/lib.ts` installing
 cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of calling
 `yCursorPlugin` itself; `src/lib.ts` installing `trailingNewlineInputPlugin` from
 `./trailing-newline-input`; `src/dispatch-marks.ts`'s `dispatchAsk` schema declaring
-`excludes: ''`, so two readers' asks may cover the same text, and `removeAskMark` removing that
-mark's instance by id rather than every `dispatchAsk` over its range (LEGION-458); and
+`excludes: ''`, so two readers' asks may cover the same text, with `removeAskMark` removing that
+mark's instance by id rather than every `dispatchAsk` over its range and the parse runner closing
+its own span of nested asks rather than every open ask (LEGION-458); and
 annotations, casts and assertions that make a file type-check, each of which erases before
 runtime (below).
 

@@ -58,6 +58,9 @@ type DispatchMarkNode = {
 
 export const dispatchAskAttr = $markAttr('dispatchAsk', () => ({}));
 
+/** The asks the markdown parser has open, outermost first, per parser state. */
+const openAskSpans = new WeakMap<object, Attrs[]>();
+
 export const dispatchAskSchema = $markSchema('dispatchAsk', (ctx) => ({
   attrs: {
     id: { default: null },
@@ -87,12 +90,20 @@ export const dispatchAskSchema = $markSchema('dispatchAsk', (ctx) => ({
     runner: (state, node, markType) => {
       const n = node as DispatchMarkNode;
       const attrs = n.attrs || {};
-      state.openMark(markType, {
-        id: attrs.id ?? null,
-        by: attrs.by ?? 'unknown',
-      });
-      state.next((n.children as never[]) || []);
-      state.closeMark(markType);
+      const askAttrs = { id: attrs.id ?? null, by: attrs.by ?? 'unknown' };
+      // Two readers' asks may cover the same text, so their spans nest, but closeMark drops every
+      // open mark of the type: close this span, then re-open the asks around it.
+      const outer = openAskSpans.get(state) ?? [];
+      openAskSpans.set(state, outer);
+      state.openMark(markType, askAttrs);
+      outer.push(askAttrs);
+      try {
+        state.next((n.children as never[]) || []);
+      } finally {
+        outer.pop();
+        state.closeMark(markType);
+        for (const outerAttrs of outer) state.openMark(markType, outerAttrs);
+      }
     },
   },
   toMarkdown: {
