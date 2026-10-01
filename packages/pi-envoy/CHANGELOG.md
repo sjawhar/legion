@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
+  the eight required headings: a spec starts as the problem and its evidence, puts each open
+  question in a decision block at the end of the section that discusses it, records a settled
+  point in the human's words with the date, and is rewritten in place as it changes. "Approval of
+  a spec" says to request approval only once no decision block is open and the spec proposes
+  something the human hasn't settled. The `dispatch_issue` and `dispatch_doc_edit` descriptions
+  point at that section instead of listing headings.
+- `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
+  the human hasn't already agreed to, in one to three sentences. The Inbox shows it after "Approve
+  spec.md (version N)?", and the result text quotes the question the human sees. It needs a
+  Dispatch server that accepts `summary`; an older one refuses the call.
+- `dispatch_request_approval` is refused while the document holds an open decision block, even
+  when a human asked for approval, and the refusal names each block. "Approval of a spec" says
+  what to do instead: name the open block and ask the human to answer or waive it; a waived block
+  is closed with `dispatch_resolve_ask`. It also says to request approval in the pass that
+  finishes a spec whose remaining choices are the agent's own, rather than making each of them a
+  decision block.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open, even in a batch that inserts it
+  again; the refusal names `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. A whole-document
+  replace through `dispatch_artifact` is not refused, so it can still remove an open block.
+- The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
+  decision blocks first, as "Approval of a spec" defines settled, then request approval with a
+  summary of what the tree will do. `legion-architect` states that condition once.
+- The run-end nudge that tells an agent to open an ask no longer offers
+  `dispatch_request_approval` as a way to wait on a human.
+
 ### Added
 
 - The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
