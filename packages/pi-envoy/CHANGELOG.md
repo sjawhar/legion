@@ -44,10 +44,12 @@
   with read-only file tools: the gap analyst runs on the operator's `@oracle` role and the reviewer
   on `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the
   reviewer's pair. Oh My Pi also gives each the Dispatch and Envoy tools; their prompts forbid
-  writing through them, and nothing enforces it (LEGION-428). Install the worker image built from
-  this release before the Go daemon build: that build's role prompts dispatch `plan-gap-analyst`
-  and `plan-reviewer`, so it refuses an older image, whose plugin ships neither, and an old daemon
-  build on the new image boots.
+  writing through them, and nothing enforces it (LEGION-428). The Go daemon build's role prompts
+  dispatch `plan-gap-analyst` and `plan-reviewer`, and its boot gate refuses a plugin that ships
+  neither, so install the plugin first on either runtime: on the Sandbox runtime, the worker image
+  built from this release before the Go daemon build; on the tmux runtime, this
+  `@sjawhar/pi-legion-envoy` release before restarting the Go daemon. An old daemon build boots on
+  the new plugin.
 - Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
   `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
   ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`
