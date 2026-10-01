@@ -42,10 +42,10 @@ export interface RetypedMark {
   readonly quote: string;
 }
 
-/** Why a retype changed nothing: the document no longer holds the mark; the new kind cannot be
- *  written over its text (a suggestion across table cells); or part of that text already carries
- *  another record's mark of the new kind, which writing over it would cut out of that record
- *  (LEGION-458). */
+/** Why a retype changed nothing: the document no longer holds the mark on any text; the new kind
+ *  cannot be written over its text (a suggestion across table cells); or part of that text already
+ *  carries another record's mark of the new kind, which writing over it would cut out of that
+ *  record (LEGION-458). */
 export interface RetypeRefusal {
   readonly refused: "missing" | "unmarkable" | "overlaps";
 }
@@ -53,8 +53,10 @@ export interface RetypeRefusal {
 export type RetypeOutcome = RetypedMark | RetypeRefusal;
 
 /** The record mark `markId` as the document holds it: its type, and the range from the start of
- *  its first inline run to the end of its last. Inline atoms such as an image count: the bar's
- *  `addMark` marks them with the text. Null when the document does not hold it. */
+ *  its first inline run to the end of its last. Inline atoms such as an image count toward the
+ *  range: the bar's `addMark` marks them with the text. Null when no text node holds it: the
+ *  server anchors a record to text alone (`pmdoc.MarkSpans`), so a mark left only on an atom is
+ *  gone as far as a send can tell. */
 export function findRecordMark(
   doc: ProseMirrorNode,
   markId: string
@@ -62,6 +64,7 @@ export function findRecordMark(
   let from = -1;
   let to = -1;
   let type = "";
+  let text = false;
   doc.descendants((node, pos) => {
     if (!node.isInline) return true;
     const held = node.marks.find(
@@ -73,9 +76,10 @@ export function findRecordMark(
       type = held.type.name;
     }
     to = pos + node.nodeSize;
+    if (node.isText) text = true;
     return true;
   });
-  return from === -1 ? null : { range: { from, to }, type };
+  return from === -1 || !text ? null : { range: { from, to }, type };
 }
 
 /** The meta key `removeRecordMark` sets on its transaction, and the value it sets there. Both are

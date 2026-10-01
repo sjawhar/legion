@@ -170,25 +170,33 @@ function recordMarksOnInline(view: EditorView): string[] {
   return marks;
 }
 
-/** Where the first inline image and the first occurrence of `word` sit in `view`'s document. */
-function positions(view: EditorView, word: string): { image: number; wordEnd: number } {
+/** Where the first inline image sits in `view`'s document. */
+function imagePosition(view: EditorView): number {
   let image = -1;
-  let wordEnd = -1;
   view.state.doc.descendants((node, pos) => {
     if (node.type.name === "image" && image === -1) image = pos;
-    const at = node.isText ? (node.text ?? "").indexOf(word) : -1;
-    if (at !== -1 && wordEnd === -1) wordEnd = pos + at + word.length;
     return true;
   });
-  if (image === -1 || wordEnd === -1) throw new Error("the document has no image or no word");
-  return { image, wordEnd };
+  if (image === -1) throw new Error("the document has no image");
+  return image;
+}
+
+/** Where the first occurrence of `word` in `view`'s document ends. */
+function wordEnd(view: EditorView, word: string): number {
+  let end = -1;
+  view.state.doc.descendants((node, pos) => {
+    const at = node.isText ? (node.text ?? "").indexOf(word) : -1;
+    if (at !== -1 && end === -1) end = pos + at + word.length;
+    return true;
+  });
+  if (end === -1) throw new Error(`the document has no "${word}"`);
+  return end;
 }
 
 test("a retype and a removal over a selection with an inline image leave no record mark on the image", async () => {
   // The bar's `addMark` marks an inline image inside the selection as well as the text.
   await withMarksEditor("The quick ![pic](/p.png) brown fox", ({ view }) => {
-    const { wordEnd } = positions(view, "brown");
-    const start = comment(view, "quick \n brown", BY, "", { from: 5, to: wordEnd });
+    const start = comment(view, "quick \n brown", BY, "", { from: 5, to: wordEnd(view, "brown") });
     expect(recordMarksOnInline(view)).toContain(`image:proofComment#${start.id}`);
     const ask = retypeMark(view, start.id, "ask", BY);
     if ("refused" in ask) throw new Error(`the ask retype was refused: ${ask.refused}`);
@@ -201,10 +209,11 @@ test("a retype and a removal over a selection with an inline image leave no reco
 
 test("a retype keeps a mark that starts on an inline image whole", async () => {
   await withMarksEditor("The ![pic](/p.png) brown fox", ({ view }) => {
-    const { image, wordEnd } = positions(view, "brown");
-    const start = comment(view, "\n brown", BY, "", { from: image, to: wordEnd });
+    const image = imagePosition(view);
+    const brownEnd = wordEnd(view, "brown");
+    const start = comment(view, "\n brown", BY, "", { from: image, to: brownEnd });
     expect(findRecordMark(view.state.doc, start.id)).toEqual({
-      range: { from: image, to: wordEnd },
+      range: { from: image, to: brownEnd },
       type: "proofComment",
     });
     const ask = retypeMark(view, start.id, "ask", BY);
@@ -220,11 +229,31 @@ test("retypeMark refuses a kind whose mark another record holds on an inline ima
   await withMarksEditor("The quick ![pic](/p.png) brown fox", ({ view }) => {
     // Bob's recorded comment covers only the image; a comment of Alice's over "quick [image]
     // brown" would cut it off the image.
-    const { image, wordEnd } = positions(view, "brown");
+    const image = imagePosition(view);
     const bob = comment(view, "\n", "bob", "", { from: image, to: image + 1 });
-    const alice = createAskMark(view, { from: 5, to: wordEnd }, BY);
+    const alice = createAskMark(view, { from: 5, to: wordEnd(view, "brown") }, BY);
     if (alice === null) throw new Error("the ask mark was not written");
     expect(retypeMark(view, alice.id, "comment", BY)).toEqual({ refused: "overlaps" });
     expect(recordMarksOnInline(view)).toContain(`image:proofComment#${bob.id}`);
+  });
+});
+
+test("retypeMark refuses a mark the document holds only on an inline image", async () => {
+  // The server anchors a record to text alone (`pmdoc.MarkSpans` skips every node that is not
+  // text), so a mark left only on an image is gone: a retype there would write a mark on the
+  // image that no send can verify.
+  await withMarksEditor("The quick ![pic](/p.png) brown fox", ({ view }) => {
+    const image = imagePosition(view);
+    const start = comment(view, "quick \n brown", BY, "", { from: 5, to: wordEnd(view, "brown") });
+    // Another reader deletes the marked text on both sides of the image: " brown", then "quick ".
+    view.dispatch(view.state.tr.delete(image + 1, wordEnd(view, "brown")));
+    view.dispatch(view.state.tr.delete(5, image));
+    expect(recordMarksOnInline(view)).toEqual([`image:proofComment#${start.id}`]);
+    expect(findRecordMark(view.state.doc, start.id)).toBeNull();
+    expect(retypeMark(view, start.id, "ask", BY)).toEqual({ refused: "missing" });
+    expect(recordMarksOnInline(view)).toEqual([`image:proofComment#${start.id}`]);
+    // The composer's cancel still takes the mark off the image.
+    expect(removeRecordMark(view, start.id)).toBe(true);
+    expect(recordMarksOnInline(view)).toEqual([]);
   });
 });
