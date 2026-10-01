@@ -34,9 +34,10 @@ const unsubscribeCalls: unknown[] = [];
  *  omits it means "live now", so it is stamped on every read rather than once at seeding: a
  *  session seeded into a long-lived harness (one started by hand and reused with
  *  `DISPATCH_E2E_REUSE_SERVERS=1`) would otherwise fold under Inactive ten minutes later. Only a
- *  seed that sets `last_seen` can be stale. */
-function asSeen(session: FakeSession): FakeSession {
-  return { last_seen: Date.now(), ...session };
+ *  seed that sets `last_seen` can be stale. One read stamps every row with the same `now`, so
+ *  sessions seeded together tie, as the server's sorts by `last_seen` expect of one read. */
+function asSeen(session: FakeSession, now: number): FakeSession {
+  return { last_seen: now, ...session };
 }
 
 Bun.serve({
@@ -45,8 +46,11 @@ Bun.serve({
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/sessions") {
+      const now = Date.now();
       return Response.json(
-        sessions.filter((session) => liveSessions.has(session.session_id)).map(asSeen)
+        sessions
+          .filter((session) => liveSessions.has(session.session_id))
+          .map((session) => asSeen(session, now))
       );
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/roles/")) {
@@ -57,7 +61,7 @@ Bun.serve({
       if (holder === undefined)
         return Response.json({ error: `no holder for role ${role}` }, { status: 404 });
       return Response.json({
-        ...asSeen(holder),
+        ...asSeen(holder, Date.now()),
         capabilities: holder.capabilities ?? [],
         holder: holder.session_id,
         role,

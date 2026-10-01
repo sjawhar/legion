@@ -1,4 +1,4 @@
-import type { Actor } from "../web/src/api/types";
+import type { Actor, ActorOrigin } from "../web/src/api/types";
 import { type FakeSession, setLiveSessions } from "./agents";
 import {
   answerAsk,
@@ -117,10 +117,10 @@ async function waitForSpecAsk(issueKey: string): Promise<void> {
  *  `packages/envoy-client/src/dispatch-execute.ts`), so the surfaces that read the stamped title
  *  rather than the live registry (the Inbox's author chip) name it too. */
 export async function seedWorkspace(): Promise<SeededWorkspace> {
-  const actor = (id: string): Actor => {
+  const actor = (id: string, origin: Omit<ActorOrigin, "session_title"> = {}): Actor => {
     const session = workspaceSessions.find((candidate) => candidate.session_id === id);
     if (session === undefined) throw new Error(`seedWorkspace: no workspace session ${id}`);
-    return { id, kind: "session", origin: { session_title: session.title } };
+    return { id, kind: "session", origin: { ...origin, session_title: session.title } };
   };
   const as = (id: string) => ({ actor: actor(id), as: "agent" as const });
   const alice = { login: "alice" };
@@ -164,14 +164,7 @@ export async function seedWorkspace(): Promise<SeededWorkspace> {
   const blocking = await createAsk(
     folds.key,
     { question: "Fold a session unseen for ten minutes under Inactive?", urgency: "blocking" },
-    {
-      actor: {
-        id: "planner-session",
-        kind: "session",
-        origin: { session_title: "Planner", tmux: "legion:1.2" },
-      },
-      as: "agent",
-    }
+    { actor: actor("planner-session", { tmux: "legion:1.2" }), as: "agent" }
   );
   const snoozed = await createAsk(
     snooze.key,
