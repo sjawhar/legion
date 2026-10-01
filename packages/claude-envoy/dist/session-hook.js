@@ -16537,8 +16537,8 @@ async function openArtifactMarks(client, resolved) {
     ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
   ];
 }
-async function blockAsks(client, resolved) {
-  const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id) : client.listIssueAsks(resolved.issue.key));
+async function blockAsks(client, resolved, state) {
+  const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
   return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
@@ -16603,7 +16603,7 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   }
   if (removed.size === 0)
     return;
-  const asks = await blockAsks(client, resolved);
+  const asks = await blockAsks(client, resolved, "open");
   const open = asks.filter((ask) => ask.state === "open" && removed.has(ask.block_id));
   if (open.length === 0)
     return;

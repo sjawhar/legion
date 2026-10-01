@@ -1599,11 +1599,12 @@ async function openArtifactMarks(
  * route refuses an issue document; an unlinked document lists its own. */
 async function blockAsks(
   client: DispatchClient,
-  resolved: ResolvedArtifact
+  resolved: ResolvedArtifact,
+  state?: "all" | "open" | "answered"
 ): Promise<Array<Ask & { readonly block_id: string }>> {
   const asks = await (resolved.issue === undefined
-    ? client.getArtifactAsks(resolved.artifact.id)
-    : client.listIssueAsks(resolved.issue.key));
+    ? client.getArtifactAsks(resolved.artifact.id, state)
+    : client.listIssueAsks(resolved.issue.key, state));
   return asks.filter(
     (ask): ask is Ask & { readonly block_id: string } =>
       typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id
@@ -1684,9 +1685,10 @@ async function refuseOpenDecisionBlocks(
  * `refuseOpenDecisionBlocks` to find. An `insert` in the same batch that carries the block's id
  * does not exempt it: telling a block written back from an opener quoted in code needs the
  * server's parser, so the executor fails closed, as `refuseOpenDecisionBlocks` does for a quoted
- * opener. An open block is reworded with `replace` and moved with `move`, which keep it. Costs
- * nothing for an edit with no such operation, then one `GET /artifacts/{id}/blocks`, and the
- * owner's asks only when an operation reaches an `ask` block.
+ * opener. An open block is reworded with `replace`, moved with `move`, or, when this session asked
+ * it, has its question, options, urgency or multiple changed with `dispatch_edit_ask`; each keeps
+ * it. Costs nothing for an edit with no such operation, then one
+ * `GET /artifacts/{id}/blocks`, and the owner's asks only when an operation reaches an `ask` block.
  */
 async function refuseRemovingOpenDecisionBlocks(
   client: DispatchClient,
@@ -1718,7 +1720,7 @@ async function refuseRemovingOpenDecisionBlocks(
     }
   }
   if (removed.size === 0) return;
-  const asks = await blockAsks(client, resolved);
+  const asks = await blockAsks(client, resolved, "open");
   const open = asks.filter((ask) => ask.state === "open" && removed.has(ask.block_id));
   if (open.length === 0) return;
   const [what, question] =

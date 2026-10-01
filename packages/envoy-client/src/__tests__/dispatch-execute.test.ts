@@ -3580,8 +3580,12 @@ describe("executeDispatchTool", () => {
           return response(blocks);
         }
         if (target.pathname === "/api/v1/issues/DSP-42/asks") {
-          reads.push(target.pathname);
-          return response(asks);
+          reads.push(`${target.pathname}${target.search}`);
+          return response(
+            target.searchParams.get("state") === "open"
+              ? asks.filter((ask) => ask.state === "open")
+              : asks
+          );
         }
         if (target.pathname === "/api/v1/artifacts/artifact-42/edits") {
           edits.push(JSON.parse(init?.body as string).ops);
@@ -3627,20 +3631,22 @@ describe("executeDispatchTool", () => {
           { op: "insert", after: "block:p-1", markdown: "```\n:::ask{#b-1 }\n```" },
         ],
       ]) {
-        const { outcome, edits } = edit(ops);
+        const { outcome, reads, edits } = edit(ops);
         expect((await outcome).split("\n")).toEqual([
           "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
           "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+        ]);
+        expect(reads).toEqual([
+          "/api/v1/artifacts/artifact-42/blocks",
+          "/api/v1/issues/DSP-42/asks?state=open",
         ]);
         expect(edits).toEqual([]);
       }
     });
 
     test("an opener that the inserted markdown holds only as code does not write the block back", async () => {
-      // Dispatch parses these as a code block, so the block leaves the document and settlement
-      // retracts its open ask, exactly as a bare delete would (acceptance at de9909aa: each one
-      // was applied, the ask retracted by document-settlement, and the next request sent).
+      // Code-only opener text does not restore a block or its ask.
       for (const markdown of [
         "```text\n:::ask{#b-1}\n```",
         '~~~\n:::ask{#b-1 urgency="med"}\n~~~',
@@ -3660,9 +3666,7 @@ describe("executeDispatchTool", () => {
     });
 
     test("names dispatch_edit_ask for the urgency, multiple and options replace and move cannot change", async () => {
-      // Rewriting an open block to raise its urgency is the delete-then-insert this refuses. replace
-      // and move keep the block but change only its text and place; dispatch_edit_ask changes its
-      // urgency, multiple and options and keeps the ask open (acceptance at 656e50a5 and 92f1c112).
+      // Changing those attributes requires editing the ask; replace and move cannot change them.
       const { outcome, edits } = edit([
         { op: "delete", block: "b-1" },
         {

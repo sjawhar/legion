@@ -62,8 +62,8 @@ dispatch_resolve_ask({
 Use `retracted` when the question is obsolete and `resolved` when you found the answer. Include the reason because the question remains
 in its Conversation card and reply thread; a reason beginning `removed from the document in version` is refused, because that is how a
 retraction the document's own settlement wrote is recognised. Resolving a block ask records it in the block too, so it stays resolved
-however the document moves afterwards. The tools refuse deleting the block of an open ask; a block deleted another way, as a person can in
-the browser, closes its ask, and putting the block back reopens it. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
+however the document moves afterwards. `dispatch_doc_edit` refuses deleting the block of an open ask; a block removed another way, by a
+whole-document `dispatch_artifact` replace or by a person in the browser, closes its ask, and putting the block back reopens it. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
 resolved. A human may reply to an open or answered ask; so may you, e.g. after finding the answer — use `reply_to_ask` on
 `dispatch_comment` (mutually exclusive with `reply_to`).
 A review comment you opened has its own closer, `dispatch_resolve_comment` — see

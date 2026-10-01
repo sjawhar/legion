@@ -136,8 +136,7 @@ describe("design-gate-verdict.jq", () => {
     ).toEqual(["version 5: Where does the smoke file go?"]);
   });
 
-  // LEGION-386's own incident: approval requested while the open choice was still prose, before
-  // any block asked it; the architect added the block later, the human answered, and it asked again.
+  // A request made before a choice became an ask block is early once a human answers that choice.
   test("a request made before the choice was asked as a block is early", () => {
     const asks = [
       block,
