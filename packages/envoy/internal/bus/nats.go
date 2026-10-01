@@ -60,6 +60,10 @@ type recoverableSubscription struct {
 	handler   nats.MsgHandler
 	opts      []nats.SubOpt
 	active    *nats.Subscription
+	// binding is set while a bind of this registration is in flight, and closed when it ends. A
+	// registration has one bind at a time: a restore leaves one that has a bind in flight, and a
+	// registration that replaces it waits for that bind first.
+	binding chan struct{}
 }
 
 type Client struct {
@@ -70,6 +74,9 @@ type Client struct {
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
+	// subscriptionsMu guards subscriptions. It is held to read and write them, never across a
+	// bind's request to the server, so a reconnect's restore and the health reads never wait out a
+	// request the reconnect lost.
 	subscriptionsMu sync.Mutex
 	subscriptions   [subscriptionCount]recoverableSubscription
 
@@ -359,44 +366,67 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues .
 	}, conn, js)
 }
 
+// registerSubscription makes next the transport's subscription and binds it. The registration
+// stays when the bind fails, so a later restore binds it. A bind of the transport's subscription
+// already in flight, a restore's or another registration's, is waited for first.
 func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
 	c.subscriptionsMu.Lock()
-	defer c.subscriptionsMu.Unlock()
 	subscription := &c.subscriptions[next.transport]
+	for subscription.binding != nil {
+		inFlight := subscription.binding
+		c.subscriptionsMu.Unlock()
+		<-inFlight
+		c.subscriptionsMu.Lock()
+	}
 	// Registering replaces the transport's subscription, so the one it replaces stops delivering:
 	// the listener's self-health rebuild re-registers after its durable consumer was lost, and the
 	// old handle, bound to that consumer's deliver inbox, would otherwise stay subscribed for good.
-	// For a consumer the library created, Unsubscribe also deletes it, as it always does.
-	if subscription.active != nil {
-		_ = subscription.active.Unsubscribe()
-	}
+	// For a consumer the library created, Unsubscribe also deletes it, as it always does. It runs
+	// before the bind, which a durable still bound to the old handle would refuse.
+	replaced := subscription.active
 	*subscription = next
-	if err := restoreSubscription(subscription, conn, js); err != nil {
+	subscription.binding = make(chan struct{})
+	c.subscriptionsMu.Unlock()
+	if replaced != nil {
+		_ = replaced.Unsubscribe()
+	}
+	sub, err := bind(next, conn, js)
+	if err := c.endBind(subscription, sub, err); err != nil {
 		return nil, err
 	}
-	return subscription.active, nil
+	return sub, nil
 }
 
-func restoreSubscription(subscription *recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) error {
-	var (
-		sub *nats.Subscription
-		err error
-	)
-	switch subscription.transport {
-	case jetStreamSubscription:
-		sub, err = js.Subscribe(subscription.subject, subscription.handler, subscription.opts...)
-	case coreSubscription:
-		if subscription.queue == "" {
-			sub, err = conn.Subscribe(subscription.subject, subscription.handler)
-		} else {
-			sub, err = conn.QueueSubscribe(subscription.subject, subscription.queue, subscription.handler)
-		}
+// bind subscribes registration's handler, through js for a JetStream subscription and on conn for
+// a core one. It is the request to the server, so no lock of the client's is held across it.
+func bind(registration recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
+	if registration.transport == jetStreamSubscription {
+		return js.Subscribe(registration.subject, registration.handler, registration.opts...)
 	}
-	if err != nil {
-		return err
+	if registration.queue == "" {
+		return conn.Subscribe(registration.subject, registration.handler)
 	}
-	subscription.active = sub
-	return nil
+	return conn.QueueSubscribe(registration.subject, registration.queue, registration.handler)
+}
+
+// endBind ends the bind in flight of the registration subscription holds, installing sub unless
+// the bind failed or the client stopped meanwhile. Drain collects the subscriptions to drain under
+// subscriptionsMu once it has stopped the client, so a bind that ends after the stop installs
+// nothing and closes what it bound, as a restore that starts after the stop binds nothing.
+func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscription, err error) error {
+	c.subscriptionsMu.Lock()
+	close(subscription.binding)
+	subscription.binding = nil
+	stopped := err == nil && c.stopped()
+	if err == nil && !stopped {
+		subscription.active = sub
+	}
+	c.subscriptionsMu.Unlock()
+	if stopped {
+		_ = sub.Unsubscribe()
+		return errStopped
+	}
+	return err
 }
 
 // SubOK reports whether the durable listener subscription is active on a live connection.

@@ -52,26 +52,31 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	// The hooks run whatever the restore returned: the state they move holds no subscription, and
 	// while a listener waits out the task that holds its durable, the durable's restore is refused
 	// by design while /v1 and the role lane already read that state.
-	if err := c.rewatch(); err != nil {
+	hookErr := c.rewatch()
+	if hookErr != nil {
 		// A failure after the stop is the stop: a shutdown that began while a hook ran closed what
 		// the hook was reading through. recover reports that case the same way, with the error kept
 		// on the line in case a real failure coincided with the stop.
 		if c.stopped() {
-			slog.Info("envoy nats reconnect hooks cancelled", slog.String("error", err.Error()))
+			slog.Info("envoy nats reconnect hooks cancelled", slog.String("error", hookErr.Error()))
 			return
 		}
-		slog.Error("envoy nats reconnect hook failed", slog.String("error", err.Error()))
+		slog.Error("envoy nats reconnect hook failed", slog.String("error", hookErr.Error()))
 	}
-	if restoreErr != nil {
+	// The recovery binds what the restore left unbound and runs the hooks again after a failed run;
+	// until the next connection event nothing else does either.
+	if restoreErr != nil || hookErr != nil {
 		go c.recover()
 	}
 }
 
 // AddReconnectHook registers recovery for state that is attached to NATS but not represented by
-// Client subscriptions, such as KV watchers. The hooks run on the client's connection once for each
-// connection event, a reconnect in place or a connection the client dials to replace a closed one,
-// whatever restoring the subscriptions returned. Runs take turns, never two at once, and a recovery
-// runs the hooks again only after a run failed.
+// Client subscriptions, such as KV watchers. After each connection event, a reconnect in place or a
+// connection the client dials to replace a closed one, a run of the hooks on the client's connection
+// begins that covers it, whatever restoring the subscriptions returned. A run covers every event
+// counted before it began, so an event that lands between runs gets a run of its own and a burst of
+// events that land before one begins gets one. Runs take turns, never two at once, and a run that
+// fails is run again by a recovery, the only way an event gets a second run.
 func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	if hook == nil {
 		return
@@ -125,14 +130,23 @@ func (c *Client) runReconnectHooks(conn *nats.Conn) error {
 	return nil
 }
 
-// recover attempts to restore the NATS connection and every recoverable
-// subscription after a CLOSED state or failed re-subscribe.
+// recover attempts to restore the NATS connection and every recoverable subscription after a
+// CLOSED state, a failed re-subscribe or a failed run of the reconnect hooks. One runs at a time: a
+// caller that finds one running starts none, so the running one looks again once it has cleared its
+// flag, and a failure that lands as it ends is not left to the next connection event.
 func (c *Client) recover() {
-	if !atomic.CompareAndSwapInt32(&c.recovering, 0, 1) {
-		return
+	for atomic.CompareAndSwapInt32(&c.recovering, 0, 1) {
+		c.recoverUntilHealthy()
+		atomic.StoreInt32(&c.recovering, 0)
+		if c.stopped() || (c.subscriptionsHealthy() && !c.hooksDue()) {
+			return
+		}
 	}
-	defer atomic.StoreInt32(&c.recovering, 0)
+}
 
+// recoverUntilHealthy retries, with backoff, until the connection, every subscription and the
+// reconnect hooks are current, or the client stops.
+func (c *Client) recoverUntilHealthy() {
 	// The dial retries a lost server for up to ten attempts; the stop cancels it, so a recovery
 	// ends at Close or Drain instead of outliving the client.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -210,21 +224,25 @@ func (c *Client) subscriptionsHealthy() bool {
 	return connOK
 }
 
+// errBindInFlight is a restore's report of a registration it left to the bind in flight for it.
+var errBindInFlight = errors.New("bus: the subscription's bind is still in flight")
+
 func (c *Client) restoreSubscriptions() error {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
 	c.mu.Unlock()
 	c.subscriptionsMu.Lock()
-	defer c.subscriptionsMu.Unlock()
 	// Drain collects the subscriptions to drain under subscriptionsMu after stopping the client, so
 	// a recovery that reaches here after it re-subscribes nothing.
 	if c.stopped() {
+		c.subscriptionsMu.Unlock()
 		return errStopped
 	}
 	// Every subscription is attempted, so one that cannot be restored leaves the others delivering: a
 	// listener waiting out the task that holds its durable has an unbound JetStream subscription
 	// beside a core role lane that is already a member of its machine's queue group.
 	var errs []error
+	var restoring []*recoverableSubscription
 	for index := range c.subscriptions {
 		subscription := &c.subscriptions[index]
 		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
@@ -234,8 +252,26 @@ func (c *Client) restoreSubscriptions() error {
 		if subscription.handler == nil || subscription.active.IsValid() {
 			continue
 		}
-		slog.Info("envoy nats resubscribing", slog.String("subject", subscription.subject))
-		if err := restoreSubscription(subscription, conn, js); err != nil {
+		// A registration whose bind is in flight (the listener's bind attempt, whose lookup a
+		// reconnect can lose, to be waited out for JetStream's 10 s) is that bind's: a second bind
+		// beside it could leave the registration bound twice. It reads as not restored, so the
+		// caller's recovery binds it should that bind fail.
+		if subscription.binding != nil {
+			errs = append(errs, errBindInFlight)
+			continue
+		}
+		subscription.binding = make(chan struct{})
+		restoring = append(restoring, subscription)
+	}
+	registrations := make([]recoverableSubscription, len(restoring))
+	for index, subscription := range restoring {
+		registrations[index] = *subscription
+	}
+	c.subscriptionsMu.Unlock()
+	for index, subscription := range restoring {
+		slog.Info("envoy nats resubscribing", slog.String("subject", registrations[index].subject))
+		sub, err := bind(registrations[index], conn, js)
+		if err := c.endBind(subscription, sub, err); err != nil {
 			errs = append(errs, err)
 		}
 	}
