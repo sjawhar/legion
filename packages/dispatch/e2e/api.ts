@@ -340,6 +340,14 @@ export function listComments(
   );
 }
 
+/** One comment and its reply chain, as the server holds them now: its anchor's quote included. */
+export function getComment(
+  id: string,
+  options: ApiOptions = {}
+): Promise<{ comment: Comment; replies: Comment[] }> {
+  return request(`/api/v1/comments/${encodeURIComponent(id)}`, "GET", undefined, options);
+}
+
 export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
   return request<AskRead>(`/api/v1/asks/${encodeURIComponent(id)}`, "GET", undefined, options);
 }

@@ -9,6 +9,7 @@ import {
   getArtifact,
   getArtifactText,
   getAsk,
+  getComment,
   listComments,
 } from "./api";
 import {
@@ -21,6 +22,7 @@ import {
   marginCard,
   markSpan,
   selectEditorText,
+  typeAtEnd,
 } from "./editor";
 import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
@@ -915,5 +917,121 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
     await expect(documentEditor(page)).toHaveText("The quick red fox");
   } finally {
     await bob.close();
+  }
+});
+
+/** The text of every span of a mark, joined: a mark nested in another may render as more than one
+ *  span. */
+async function markText(page: Page, markId: string): Promise<string> {
+  const spans = await markSpan(page, markId).allTextContents();
+  return spans.join("");
+}
+
+// Bob comments on "quick brown", then Alice on "brown". Each record mark keeps its own text in
+// both browsers and in the server's reading of the document, so the anchor refresh a document
+// version runs leaves Bob's quote "quick brown" rather than cutting it to "quick ".
+test("two readers' comments can cover the same text, and neither cuts the other's anchor", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: initialMarkdown, title: "Overlap" });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
+    for (const page of [alicePage, bobPage]) {
+      await expect(documentEditor(page)).toContainText(initialMarkdown);
+      await expect(connectedDot(page)).toHaveText("connected");
+    }
+
+    await selectEditorText(bobPage, "quick brown");
+    await barAction(bobPage, "Comment");
+    const bobComposer = bobPage.getByRole("form", { name: "Comment composer" });
+    await bobComposer.getByLabel("Comment").fill("Bob's comment");
+    await bobComposer.getByRole("button", { exact: true, name: "Send" }).click();
+    const bobComment = await commentWithBody(issue.key, artifactId, "Bob's comment");
+    if (bobComment.anchor === null) {
+      throw new Error("Bob's comment has no anchor.");
+    }
+    expect(bobComment.anchor.quote).toBe("quick brown");
+    const bobMark = bobComment.anchor.mark_id;
+    await expect.poll(() => markText(alicePage, bobMark)).toBe("quick brown");
+
+    await setSheet(alicePage, testInfo.project.name, false);
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Comment");
+    const aliceComposer = alicePage.getByRole("form", { name: "Comment composer" });
+    await aliceComposer.getByLabel("Comment").fill("Alice's comment");
+    await aliceComposer.getByRole("button", { exact: true, name: "Send" }).click();
+    const aliceComment = await commentWithBody(issue.key, artifactId, "Alice's comment");
+    if (aliceComment.anchor === null) {
+      throw new Error("Alice's comment has no anchor.");
+    }
+    expect(aliceComment.anchor.quote).toBe("brown");
+    const aliceMark = aliceComment.anchor.mark_id;
+
+    // A mark alone writes no document version. A typed paragraph does, and the transaction that
+    // writes the version also refreshes every open anchor from the document (writeVersionTx), so
+    // once the version is there each anchor's quote is what the server reads in the document now.
+    const before = (await getArtifact(artifactId)).versions.length;
+    await setSheet(alicePage, testInfo.project.name, false);
+    await typeAtEnd(alicePage, "jumps");
+    await expect
+      .poll(() => getArtifact(artifactId).then(({ versions }) => versions.length))
+      .toBeGreaterThan(before);
+    const bobAnchor = (await getComment(bobComment.id)).comment.anchor;
+    expect({ quote: bobAnchor?.quote, orphaned: bobAnchor?.orphaned }).toEqual({
+      quote: "quick brown",
+      orphaned: false,
+    });
+    const aliceAnchor = (await getComment(aliceComment.id)).comment.anchor;
+    expect({ quote: aliceAnchor?.quote, orphaned: aliceAnchor?.orphaned }).toEqual({
+      quote: "brown",
+      orphaned: false,
+    });
+
+    for (const page of [alicePage, bobPage]) {
+      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
+      await expect.poll(() => markText(page, aliceMark)).toBe("brown");
+      await expect(markSpan(page, bobMark).locator(`[data-id="${aliceMark}"]`)).toHaveCount(1);
+      await expect(marginCard(page, bobComment.id)).toBeAttached();
+      await expect(marginCard(page, aliceComment.id)).toBeAttached();
+    }
+
+    await bobPage.reload();
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+    await expect.poll(() => markText(bobPage, bobMark)).toBe("quick brown");
+    await expect.poll(() => markText(bobPage, aliceMark)).toBe("brown");
+    await expect(marginCard(bobPage, bobComment.id)).toBeAttached();
+    await expect(marginCard(bobPage, aliceComment.id)).toBeAttached();
+
+    // A comment Alice starts on "brown" and cancels takes its provisional mark away, and only it.
+    await setSheet(alicePage, testInfo.project.name, false);
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Comment");
+    await expect(alicePage.getByRole("form", { name: "Comment composer" })).toContainText("brown");
+    await alicePage.keyboard.press("Escape");
+    for (const page of [alicePage, bobPage]) {
+      await expect
+        .poll(() =>
+          documentEditor(page)
+            .locator("span[data-proof][data-id]")
+            .evaluateAll((spans) =>
+              [...new Set(spans.map((span) => span.getAttribute("data-id")))].sort()
+            )
+        )
+        .toEqual([bobMark, aliceMark].sort());
+      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
+    }
+  } finally {
+    await bob.close();
+    await alice.close();
   }
 });
