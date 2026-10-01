@@ -274,12 +274,13 @@ the migration's own census answers. Those tables are:
   function it defines, and in a `DO` block's body, which it runs;
 - the table behind each index it drops or alters;
 - every table a foreign key reaches from a table whose rows it writes, read from `pg_constraint`
-  when the census is taken: a row inserted or updated is checked against the table its key
-  references, and a row deleted is checked against every table that references it or cascades into
-  it, and on from there. The report prints such a table as `touches <table> through a foreign key
-  with <table>`, and checks its holders and that it can be read, but neither counts its rows nor
-  holds it to the size limit: the migration locks it only to check or act on the rows that key
-  connects.
+  when the census is taken, and from the `references` an earlier pending migration adds, which
+  applies first at boot: a row inserted or updated (an upsert's `do update` included) is checked
+  against the table its key references, and a row deleted, or one whose key an update changes, is
+  checked against every table that references it or cascades into it, and on from there. The
+  report prints such a table as `touches <table> through a foreign key with <table>`, and checks
+  its holders and that it can be read, but neither counts its rows nor holds it to the size limit:
+  the migration locks it only to check or act on the rows that key connects.
 
 A table a statement only reads (`insert … select from`, `create view … as`) is not listed: its
 ACCESS SHARE waits only behind an ACCESS EXCLUSIVE holder. Each store's tests apply every one of

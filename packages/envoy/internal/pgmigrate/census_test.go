@@ -53,6 +53,22 @@ func TestTouchedIndexesFindsDropAndAlterIndex(t *testing.T) {
 	}
 }
 
+// The foreign keys a pending migration adds are read from its create table and alter table
+// statements, from the statement's table, cascading when the statement says on delete cascade; a
+// references inside a literal or another statement adds none.
+func TestAddedForeignKeysReadsTheKeysAMigrationAdds(t *testing.T) {
+	for sql, want := range map[string][]foreignKey{
+		"create table keys (id uuid not null references broadcasts(id) on delete cascade, login text);":                          {{from: "keys", to: "broadcasts", onDelete: "c"}},
+		"ALTER TABLE public.comments ADD CONSTRAINT c FOREIGN KEY (ask_id) REFERENCES public.asks (id);":                         {{from: "comments", to: "asks", onDelete: "a"}},
+		"alter table things add column note text; create table notes (body text default 'references things');":                   nil,
+		"create table a (id int primary key);\ncreate table b (a_id int references a, c_id int references c on delete cascade);": {{from: "b", to: "a", onDelete: "c"}, {from: "b", to: "c", onDelete: "c"}},
+	} {
+		if got := addedForeignKeys(migrationCode(sql)); !slices.Equal(got, want) {
+			t.Errorf("addedForeignKeys(%q) = %v, want %v", sql, got, want)
+		}
+	}
+}
+
 // The report is one census: line per fact, each refusal under its migration, ending with the
 // verdict; a lock holder is named by its session metadata and never its query. A table a foreign
 // key reaches says from where, and a size above the limit never prints as the limit itself.

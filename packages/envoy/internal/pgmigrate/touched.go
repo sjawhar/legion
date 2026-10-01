@@ -45,8 +45,10 @@ var touchedTablePatterns = []struct {
 	{regexp.MustCompile(`(?is)\block\s+(?:table\s+)?(?:only\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), 0},
 	// A foreign key takes SHARE ROW EXCLUSIVE on the table it references, which holds that
 	// table's writes for as long as the migration runs.
-	{regexp.MustCompile(`(?is)\breferences\s+(?:only\s+)?([\w."]+)`), 0},
+	{referencesPattern, 0},
 }
+
+var referencesPattern = regexp.MustCompile(`(?is)\breferences\s+(?:only\s+)?([\w."]+)`)
 
 var touchedIndexPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)\bdrop\s+index\s+(?:concurrently\s+)?(?:if\s+exists\s+)?([\w."]+)`),
@@ -144,10 +146,16 @@ type CensusTable struct {
 //     cascade goes on from every table it reaches, while a set null or a cascaded update stops at
 //     the table it writes. An insert's on conflict do update is read as an update too.
 //
-// The foreign keys followed are the ones the catalog holds when the census is taken, so one a
-// pending migration adds is not.
+// The foreign keys followed are the ones the catalog holds, read when the census is taken; Census
+// adds the ones earlier pending migrations add (addedForeignKeys), which the lock audit, applying
+// each migration before it reads the next, finds in the catalog.
 func CensusTables(ctx context.Context, q Querier, sql string) ([]CensusTable, error) {
-	code := migrationCode(sql)
+	return censusTables(ctx, q, migrationCode(sql), nil)
+}
+
+// censusTables is CensusTables over a migration's code, following the foreign keys pending
+// earlier migrations add as well as the catalog's.
+func censusTables(ctx context.Context, q Querier, code string, pending []foreignKey) ([]CensusTable, error) {
 	writes := map[string]rowWrite{}
 	for _, touch := range touches(code) {
 		writes[touch.name] |= touch.writes
@@ -177,6 +185,7 @@ func CensusTables(ctx context.Context, q Querier, sql string) ([]CensusTable, er
 		if err != nil {
 			return nil, err
 		}
+		keys = append(keys, pending...)
 		for name, through := range reachedByForeignKeys(writes, keys) {
 			if _, named := writes[name]; !named {
 				tables = append(tables, CensusTable{Name: name, Through: through})
@@ -211,6 +220,33 @@ func foreignKeys(ctx context.Context, q Querier) ([]foreignKey, error) {
 		return nil, fmt.Errorf("read foreign keys: %w", err)
 	}
 	return keys, nil
+}
+
+// statementTable is the table a create table or alter table statement is about.
+var statementTable = regexp.MustCompile(`(?is)^\s*(?:create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?|alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?)([\w."]+)`)
+
+var onDeleteCascade = regexp.MustCompile(`(?is)\bon\s+delete\s+cascade\b`)
+
+// addedForeignKeys reads, from a migration's code, the foreign keys it adds: each references in a
+// create table or alter table statement, from that statement's table. A statement adding one with
+// on delete cascade has every key it adds read as cascading, which reaches more tables, never
+// fewer.
+func addedForeignKeys(code string) []foreignKey {
+	var keys []foreignKey
+	for _, statement := range strings.Split(code, ";") {
+		from := namesMatching(statement, statementTable)
+		if len(from) == 0 {
+			continue
+		}
+		onDelete := "a"
+		if onDeleteCascade.MatchString(statement) {
+			onDelete = "c"
+		}
+		for _, to := range namesMatching(statement, referencesPattern) {
+			keys = append(keys, foreignKey{from: from[0], to: to, onDelete: onDelete})
+		}
+	}
+	return keys
 }
 
 // reachedByForeignKeys names each table a foreign key reaches from the rows writes says the

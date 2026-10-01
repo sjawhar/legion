@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	neturl "net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -664,6 +665,37 @@ func TestCensusRefusesALockHeldOnATouchedTableByAnOldTransaction(t *testing.T) {
 	}
 	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "pid "+strconv.FormatUint(uint64(pid), 10)) || !strings.Contains(got[0], "has held a lock on things for") {
 		t.Errorf("refusals = %v, want one naming pid %d", got, pid)
+	}
+}
+
+// A foreign key an earlier pending migration adds is not in the catalog yet, but the migrations
+// apply in order at boot, so a later one's rows reach through it. Here 0002 gives things a key to
+// parent that cascades, and 0003 deletes from parent: an old transaction holding things refuses
+// 0003 as well as 0002, which names things itself.
+func TestCensusFollowsAForeignKeyAnEarlierPendingMigrationAdds(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	if _, err := store.Pool.Exec(ctx, "create table parent (id integer primary key)"); err != nil {
+		t.Fatal(err)
+	}
+	set := fstest.MapFS{
+		"migrations/0001_things.up.sql":        censusBase["migrations/0001_things.up.sql"],
+		"migrations/0002_things_parent.up.sql": {Data: []byte("alter table things add column parent_id integer references parent on delete cascade")},
+		"migrations/0003_parent_purge.up.sql":  {Data: []byte("delete from parent where id < 0")},
+	}
+	pid := "pid " + strconv.FormatUint(uint64(holdLock(t, store, "things", "access share")), 10)
+	time.Sleep(1100 * time.Millisecond)
+	report, err := census(ctx, url, set, pgmigrate.CensusOptions{LongTransaction: time.Second})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); !slices.ContainsFunc(got, func(r string) bool {
+		return strings.HasPrefix(r, "0003_parent_purge.up.sql: "+pid) && strings.Contains(r, "has held a lock on things")
+	}) {
+		t.Errorf("refusals = %v, want one for 0003 naming %s on things", got, pid)
+	}
+	if out := reportText(report); !strings.Contains(out, "census: 0003_parent_purge.up.sql touches things through a foreign key with parent: ") {
+		t.Errorf("report:\n%s", out)
 	}
 }
 

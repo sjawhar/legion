@@ -186,6 +186,9 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 	if err := tx.QueryRow(ctx, "select current_setting('deadlock_timeout')::interval < $1::interval", lockTimeoutSetting).Scan(&cancelsAutovacuum); err != nil {
 		return nil, fmt.Errorf("census: read deadlock_timeout: %w", err)
 	}
+	// The foreign keys the pending migrations add, in order: at boot each applies before the next,
+	// so a later one's rows reach through them.
+	var pendingKeys []foreignKey
 	for _, migration := range migrations {
 		if recorded[migration.Version] {
 			continue
@@ -194,10 +197,12 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 		if len(report.Pending) == 0 && len(unrecorded) > 0 {
 			entry.refuse("%s records no version, yet the database holds %s: the runner would apply every migration from this one over it", versionTable, someTables(unrecorded))
 		}
-		tables, err := CensusTables(ctx, tx, migration.SQL)
+		code := migrationCode(migration.SQL)
+		tables, err := censusTables(ctx, tx, code, pendingKeys)
 		if err != nil {
 			return nil, fmt.Errorf("census: %s: %w", migration.Name, err)
 		}
+		pendingKeys = append(pendingKeys, addedForeignKeys(code)...)
 		for _, table := range tables {
 			if err := censusTable(ctx, tx, table, options, cancelsAutovacuum, &entry); err != nil {
 				return nil, err
