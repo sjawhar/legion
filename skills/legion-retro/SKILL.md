@@ -65,7 +65,13 @@ before step 3. The design gate is not a substitute for review and retro.
 ## Durable outputs
 
 Write the integrated learning as one or more discoverable documents under `docs/solutions/`.
-Organize by reusable topic rather than by pull request. Each document uses this front matter:
+Organize by reusable topic rather than by pull request. Search `docs/solutions/` for the topic
+first: when a document already states the rule, update it in place (sharpen the rule, add this
+issue and pull request to `related_issues`) rather than writing a sibling; when the new learning
+replaces an old document, set the old one's `status: superseded` and add
+`superseded_by: docs/solutions/<path>.md`. Open each document with the rule in a few imperative
+lines; the incident that taught it goes in an Evidence section below, never in the rule. Each
+document uses this front matter:
 
 ```yaml
 ---

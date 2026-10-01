@@ -7,7 +7,6 @@ import {
   dispatchToolSpecs,
   ISSUE_STATUSES,
   SEARCH_QUERY_MAX,
-  SPEC_SECTIONS,
 } from "./dispatch-tools";
 import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
 
@@ -53,20 +52,14 @@ function recordingSchemaApi(): {
   };
 }
 
-function dispatchSkillSpecSections() {
+/** Every `## ` heading of the Dispatch skill, the names a tool description may point at. */
+function dispatchSkillHeadings() {
   const repoRoot = resolve(import.meta.dir, "../../..");
   const skill = readFileSync(resolve(repoRoot, "skills/dispatch/SKILL.md"), "utf8");
-  const sectionStart = skill.indexOf("## Writing a spec\n");
-  if (sectionStart === -1) throw new Error("Dispatch skill has no Writing a spec section");
-
-  const sectionEnd = skill.indexOf("\n## ", sectionStart + 1);
-  return skill
-    .slice(sectionStart, sectionEnd === -1 ? undefined : sectionEnd)
-    .split("\n")
-    .flatMap((line) => {
-      const match = line.match(/^\| \*\*(.+?)\*\* \|/u);
-      return match === null ? [] : [match[1]];
-    });
+  return skill.split("\n").flatMap((line) => {
+    const match = line.match(/^## (.+)$/u);
+    return match === null ? [] : [match[1]];
+  });
 }
 
 const validCalls = {
@@ -102,7 +95,10 @@ const validCalls = {
     ops: [{ op: "replace", find: "old", with: "new" }],
   },
   dispatch_doc_read: { issue: "DSP-1" },
-  dispatch_request_approval: { issue: "DSP-1" },
+  dispatch_request_approval: {
+    issue: "DSP-1",
+    summary: "Proposes a live sync in place of the nightly export.",
+  },
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
@@ -862,19 +858,33 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ comment: "comment-1", reason: "done" }).success).toBe(false);
   });
-  test("keeps shared spec guidance aligned with the Dispatch skill", () => {
-    const skillSections = dispatchSkillSpecSections();
-    expect(skillSections).toEqual([...SPEC_SECTIONS]);
-    const sectionOrder = SPEC_SECTIONS.join(", ");
+  test("dispatch_request_approval refuses a call with no summary, or an empty one", () => {
+    const schema = schemaFor("dispatch_request_approval");
+    expect(schema.safeParse({ issue: "DSP-1" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", summary: "" }).success).toBe(false);
+    expect(
+      schema.safeParse({ issue: "DSP-1", summary: "Proposes a live sync in place of the export." })
+        .success
+    ).toBe(true);
+  });
+
+  test("points dispatch_issue's spec and dispatch_doc_edit at a section the Dispatch skill has", () => {
     const issue = dispatchToolSpecs.find((spec) => spec.name === "dispatch_issue");
     const documentEdit = dispatchToolSpecs.find((spec) => spec.name === "dispatch_doc_edit");
     if (!issue || !documentEdit) throw new Error("missing spec-writing tools");
-
     const issueArguments = issue.arguments(schemaApi) as unknown as {
       spec: z.ZodOptional<z.ZodString>;
     };
-    expect(issueArguments.spec.unwrap().description).toContain(sectionOrder);
-    expect(documentEdit.description).toContain(sectionOrder);
+    const headings = dispatchSkillHeadings();
+
+    for (const [tool, description] of [
+      ["dispatch_issue spec", issueArguments.spec.unwrap().description ?? ""],
+      ["dispatch_doc_edit", documentEdit.description],
+    ] as const) {
+      const section = description.match(/the "([^"]+)" section of skill:\/\/dispatch/u)?.[1];
+      if (section === undefined) throw new Error(`${tool} names no section of skill://dispatch`);
+      expect(headings, tool).toContain(section);
+    }
   });
 
   test("dispatch_follow takes a full ask id and follow or unfollow, nothing else", () => {

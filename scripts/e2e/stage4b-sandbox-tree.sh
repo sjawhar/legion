@@ -46,6 +46,10 @@
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
 #   takes tree 3 out, so a checkpoint after it runs while the controller's own defect is unfixed.
+# - STAGE4B_DESIGN_GATE=root-issues, in a development run that stops at spec-posted or before it,
+#   arms the design gate (`gates.design: root-issues`) and runs tree 1 alone: its root architect
+#   settles its spec's decision blocks with a human, requests approval with a summary and registers
+#   the gate, and spec-posted waits up to 12 hours for a human to approve the spec in Dispatch.
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
@@ -85,6 +89,7 @@ dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
 envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
+design_gate=${STAGE4B_DESIGN_GATE:-}
 # The Dispatch project key (the workflow's) and its token (the pods' label, the claims' prefix).
 project=LEGSMOKE
 run_label=legsmoke
@@ -446,7 +451,7 @@ dispatch_token_file: $work/dispatch-token
 projects:
   $project: { repo: $repo }
 gates:
-  design: "off"
+  design: "${design_gate:-off}"
 admission_cap: 2
 linger_hours: 0.3
 controller_wake_interval_seconds: 60
@@ -1415,6 +1420,15 @@ if [ -n "$skip_controller" ]; then
   [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
   note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
 fi
+if [ -n "$design_gate" ]; then
+  [ "$design_gate" = root-issues ] || fail "STAGE4B_DESIGN_GATE=$design_gate: the one policy it arms is root-issues"
+  [ -n "$until" ] || fail "STAGE4B_DESIGN_GATE is for a development run: set STAGE4B_UNTIL too"
+  # Only tree 1 exists under the switch, so a checkpoint past spec-posted, which drives trees 2 to
+  # 4, cannot run.
+  sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
+    fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
+  note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
+fi
 read_bearers
 pass
 
@@ -1582,19 +1596,35 @@ note "the first probe attempt's timeline (scheduling, node launch, image pull): 
 pass
 
 begin admitted-issue-cap
-tree1=$(new_issue "Stage 4b proof tree 1: the whole workflow ($work)")
-tree2=$(new_issue "Stage 4b proof tree 2: planner beside tree 1, with the repository fixture ($work)")
-tree3=$(new_issue "Stage 4b proof tree 3: the held phase for the controller ($work)")
-push_fixture "$tree2"
-for issue in "$tree1" "$tree2" "$tree3"; do set_status "$issue" todo; done
-until_true 300 "two roots admitted and one waiting in rank order" sh -c \
-  "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$tree1' --arg b '$tree2' --arg c '$tree3' '.admission.cap == 2 and .admission.active == [\$a,\$b] and .admission.waiting == [\$c]'"
+if [ -n "$design_gate" ]; then
+  # One root: each admitted root's architect requests approval on its own, so a second tree would
+  # put a second approval in a human's Inbox. The cap check needs three roots, so it is skipped.
+  # Tree 1's document leaves one choice to the human, so its architect has a decision block to
+  # settle before it may request approval.
+  gate_spec=$(printf '%s\n' "## Summary" "" \
+    "A Legion smoke proof of the design gate. Make one tiny, concrete one-file change in \`$repo\`: add one new Markdown file holding a single line that names this issue." "" \
+    "Where the file goes is the human's choice, and nobody has made it yet: under \`smoke/\` at the repository root, or under \`docs/smoke/\`." "" \
+    "## Scope" "" \
+    "A review of the pull request may ask for one more line appended to that same file; that is in scope. Nothing else changes.")
+  tree1=$(new_issue "Stage 4b design gate tree 1: the spec's decision blocks, then approval ($work)" "" "$gate_spec")
+  set_status "$tree1" todo
+  until_true 300 "tree 1 admitted" sh -c \
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$tree1' '.admission.active == [\$a]'"
+else
+  tree1=$(new_issue "Stage 4b proof tree 1: the whole workflow ($work)")
+  tree2=$(new_issue "Stage 4b proof tree 2: planner beside tree 1, with the repository fixture ($work)")
+  tree3=$(new_issue "Stage 4b proof tree 3: the held phase for the controller ($work)")
+  push_fixture "$tree2"
+  for issue in "$tree1" "$tree2" "$tree3"; do set_status "$issue" todo; done
+  until_true 300 "two roots admitted and one waiting in rank order" sh -c \
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$tree1' --arg b '$tree2' --arg c '$tree3' '.admission.cap == 2 and .admission.active == [\$a,\$b] and .admission.waiting == [\$c]'"
+fi
 state_file admission
 note "active $(jq -c .admission.active "$evidence/admission.json"), waiting $(jq -c .admission.waiting "$evidence/admission.json")"
 shape_pid=
 pod_shape_watcher 9>&- 7>&- &
 shape_pid=$!
-pass
+if [ -n "$design_gate" ]; then skipped "STAGE4B_DESIGN_GATE: tree 1 alone, so the cap is not exercised"; else pass; fi
 
 # drive_spec ISSUE: the architect registers the gate on its own (architect_registers_gate); with
 # gates.design off the daemon approves the registered version itself and the issue moves to
@@ -1604,11 +1634,55 @@ drive_spec() {
   architect_registers_gate "$issue" "the $issue"
   wait_for_phase "$issue" planning
 }
+gate_open() {
+  daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
+    '.issues[$issue].designGate as $g | $g.artifactId == $artifact and $g.approvedVersion != null and $g.approvedVersion == $g.currentVersion'
+}
+# drive_gated_spec ISSUE waits, up to 12 hours, for a human to answer the spec's decision blocks and
+# approve the version the architect asked about, then checks what the architect did
+# (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
+# "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
+# approval request it made on the spec, retracted ones included, named a version holding one open or
+# came before a human answered one.
+drive_gated_spec() {
+  local issue=$1 artifact approved asks version verdict request early blocks
+  local -a requested=()
+  artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
+  wait_for_worker "$issue" architect
+  until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
+  until_true 43200 "a human to approve the $issue spec in Dispatch, opening its design gate" gate_open "$issue" "$artifact"
+  approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
+  asks=$(dispatch_get "issues/$issue/asks")
+  jq . <<<"$asks" >"$evidence/$issue-asks.json"
+  # Each version of the spec an approval request named, as the human was asked to approve it.
+  for version in $(jq -r --arg artifact "$artifact" '[.[] | select(.kind == "approval" and .approval.artifact_id == $artifact) | .approval.version] | unique | .[]' <<<"$asks"); do
+    dispatch_get "artifacts/$artifact/versions/$version" >"$evidence/$issue-spec-v$version.json" ||
+      fail "$issue: version $version of its spec could not be read"
+    requested+=("$evidence/$issue-spec-v$version.json")
+  done
+  verdict=$(jq -c -s --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "${requested[@]}")
+  printf '%s\n' "$verdict" >"$evidence/$issue-gate-verdict.json"
+  request=$(jq -r '.request // empty' <<<"$verdict")
+  [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
+  jq -e .summarized <<<"$verdict" >/dev/null || fail "$issue: the approval request carries no summary: $request"
+  early=$(jq -c .early <<<"$verdict")
+  [ "$early" = "[]" ] || fail "$issue: approval was requested before the spec's decision blocks were settled: $early"
+  blocks=$(jq .blocks <<<"$verdict")
+  [ "$blocks" -gt 0 ] || fail "$issue: a human answered none of the spec's decision blocks, so its open choice was never settled as one ($evidence/$issue-asks.json)"
+  note "$issue: a human answered $blocks of the spec's decision blocks, and every approval request came after those answers on a version with none open"
+  note "$issue: the approval request at version $approved asked: $request"
+  wait_for_phase "$issue" planning
+}
 
 begin spec-posted
-drive_spec "$tree1"
-drive_spec "$tree2"
-for issue in "$tree1" "$tree2"; do
+specs=("$tree1")
+if [ -n "$design_gate" ]; then
+  drive_gated_spec "$tree1"
+else
+  specs+=("$tree2")
+  for issue in "${specs[@]}"; do drive_spec "$issue"; done
+fi
+for issue in "${specs[@]}"; do
   version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   note "$issue: the architect posted its spec (version $version) and the daemon moved it to planning"
 done

@@ -364,10 +364,10 @@ pass
 
 begin gate-refuses-a-missing-skill
 # The gate's load probe resolves every skill Legion's prompts load through the pane's own Oh My Pi.
-# The installed plugin without the rubric its thermonuclear-deep-review agent loads is refused,
-# naming the skill and the agent definition that loads it.
+# The installed plugin without the rubric that its thermonuclear-deep-review agent and the
+# reviewer's role prompt load is refused, naming the skill and both files that load it.
 mv "$work/plugin/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
-expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"
+expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)"
 mv "$work/rubric.aside" "$work/plugin/dist/skills/thermonuclear-deep-review"
 [ -f "$work/plugin/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
 pass
