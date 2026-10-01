@@ -3487,6 +3487,26 @@ describe("executeDispatchTool", () => {
       expect(posts).toEqual([]);
     });
 
+    test("a line quoting a block's opener cannot hide the open block below it", async () => {
+      const quoted =
+        'A settled block opens like `:::ask{#b-1 urgency="med" multiple="false" state="resolved"}`.';
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [quoted, opening("b-1", "open")],
+        [blockAsk("b-1", "open")]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(0, 2)).toEqual([
+        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would retract this request.",
+        '- "Question of b-1?" (block b-1, ask ask-b-1)',
+      ]);
+      expect(posts).toEqual([]);
+    });
+
     test("requests approval once the named version holds every block answered or resolved", async () => {
       const { outcome, posts } = await requestOver(
         ["b-1", "b-2"],
@@ -3496,6 +3516,123 @@ describe("executeDispatchTool", () => {
 
       expect((await outcome).text).toStartWith("Approval requested for spec.md");
       expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+  });
+
+  describe("dispatch_doc_edit over a decision block", () => {
+    // A callout holding the open block b-1, then b-2, whose ask a human has answered.
+    const blocks = [
+      { id: "p-1", type: "paragraph", from: 0, to: 9 },
+      { id: "c-1", type: "callout", from: 10, to: 120 },
+      { id: "b-1", type: "ask", from: 20, to: 110 },
+      { id: "b-2", type: "ask", from: 130, to: 200 },
+    ];
+    const asks = [
+      {
+        id: "ask-b-1",
+        kind: "question",
+        block_id: "b-1",
+        block_artifact: { id: "artifact-42" },
+        state: "open",
+        question: "Where should the nightly file be written?",
+      },
+      {
+        id: "ask-b-2",
+        kind: "question",
+        block_id: "b-2",
+        block_artifact: { id: "artifact-42" },
+        state: "answered",
+        question: "Which format?",
+      },
+    ];
+    const edit = (ops: unknown[]) => {
+      const reads: string[] = [];
+      const edits: unknown[] = [];
+      const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+            open_asks: [],
+          });
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/blocks") {
+          reads.push(target.pathname);
+          return response(blocks);
+        }
+        if (target.pathname === "/api/v1/issues/DSP-42/asks") {
+          reads.push(target.pathname);
+          return response(asks);
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/edits") {
+          edits.push(JSON.parse(init?.body as string).ops);
+          return response({ applied: ops.length, version: { number: 5 }, token: "sha256:t" });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const outcome = executeDispatchTool({
+        tool: "dispatch_doc_edit",
+        args: { issue: "DSP-42", artifact: "spec", ops },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      }).then(
+        (result) => result.text,
+        (error: Error) => error.message
+      );
+      return { outcome, reads, edits };
+    };
+
+    test("refuses to remove a block whose ask is open, sending nothing", async () => {
+      // Removing the block writes a version at once and settlement retracts the ask without
+      // another, so an approval request sent next would name a version with no open block.
+      for (const ops of [
+        [{ op: "delete", block: "b-1" }],
+        [{ op: "retype", block: "b-1", type: "callout", attributes: { kind: "note" } }],
+        [{ op: "delete", block: "c-1" }],
+        // Text that only quotes the block's opener does not write the block back.
+        [
+          { op: "delete", block: "b-1" },
+          { op: "insert", after: "block:p-1", markdown: "A block opens like `:::ask{#b-1 }`." },
+        ],
+      ]) {
+        const { outcome, edits } = edit(ops);
+        expect((await outcome).split("\n")).toEqual([
+          "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
+          '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
+          "A decision block leaves the document once its ask is answered or resolved.",
+        ]);
+        expect(edits).toEqual([]);
+      }
+    });
+
+    test("sends an edit that keeps every open block, reading nothing when no block is removed", async () => {
+      for (const ops of [
+        [{ op: "delete", block: "b-2" }],
+        [{ op: "retype", block: "b-1", type: "ask", attributes: { urgency: "high" } }],
+        [{ op: "delete", block: "p-1" }],
+        // The delete-then-insert rewrite of a typed block writes it back under its id.
+        [
+          { op: "delete", block: "b-1" },
+          {
+            op: "insert",
+            after: "block:p-1",
+            markdown: ':::ask{#b-1 urgency="med"}\nWhere should the nightly file go?\n:::',
+          },
+        ],
+      ]) {
+        const { outcome, edits } = edit(ops);
+        expect(await outcome).toStartWith(`Applied ${ops.length} ops`);
+        expect(edits).toEqual([ops]);
+      }
+      const moved = edit([{ op: "move", block: "b-1", after: "block:b-2" }]);
+      expect(await moved.outcome).toStartWith("Applied 1 ops (version 5)");
+      expect(moved.reads).toEqual([]);
     });
   });
 

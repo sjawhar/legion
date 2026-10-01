@@ -14344,7 +14344,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14395,7 +14395,7 @@ var dispatchToolSpecs = [
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
-      summary: z2.string({ min: 1 }).describe("The proposals in this version the human hasn't already agreed to, in one to three sentences. Request approval only when the spec has no open decision blocks.")
+      summary: z2.string({ min: 1 }).describe("The proposals in this version the human hasn't already agreed to, in one to three sentences.")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -16545,9 +16545,6 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0)
     return;
-  if (resolved.owner.kind !== "project" && resolved.issue === undefined) {
-    throw new Error("issue document is missing its issue");
-  }
   const [owned, version2] = await Promise.all([
     resolved.issue === undefined ? client.getArtifactAsks(artifact.id) : client.listIssueAsks(resolved.issue.key),
     client.docRead(artifact.id, latest)
@@ -16558,10 +16555,10 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
     const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
-    const opening = lines.find((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
-    if (opening === undefined)
+    const states = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)).map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
+    if (states.length === 0)
       return [`${named}, which version ${latest} does not hold yet`];
-    if ((/\bstate="(\w+)"/.exec(opening)?.[1] ?? "open") !== "open")
+    if (!states.includes("open") && states.some((state) => state !== undefined))
       return [];
     if (ask === undefined)
       return [`${named}, whose ask Dispatch has not opened yet`];
@@ -16580,6 +16577,47 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
     "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again."
   ].join(`
 `));
+}
+async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
+  const removing = ops.filter((operation) => operation.block !== undefined && (operation.op === "delete" || operation.op === "retype" && operation.type !== "ask"));
+  if (removing.length === 0)
+    return;
+  const artifact = resolved.artifact;
+  const blocks = await client.artifactBlocks(artifact.id);
+  const askBlocks = blocks.filter((block) => block.type === "ask");
+  const reinserted = ops.flatMap((operation) => operation.op === "insert" && operation.markdown !== undefined ? [operation.markdown] : []);
+  const removed = new Set;
+  for (const operation of removing) {
+    const target = blocks.find((block) => block.id === operation.block);
+    if (target === undefined)
+      continue;
+    for (const block of askBlocks) {
+      const reached = block.id === target.id || operation.op === "delete" && block.from >= target.from && block.to <= target.to;
+      const kept = reinserted.some((markdown) => opensAskBlock(markdown, block.id));
+      if (reached && !kept)
+        removed.add(block.id);
+    }
+  }
+  if (removed.size === 0)
+    return;
+  const owned = resolved.issue === undefined ? await client.getArtifactAsks(artifact.id) : await client.listIssueAsks(resolved.issue.key);
+  const open = owned.filter((ask) => ask.state === "open" && ask.block_id != null && ask.block_artifact?.id === artifact.id && removed.has(ask.block_id));
+  if (open.length === 0)
+    return;
+  const [what, question] = open.length === 1 ? ["a decision block whose ask is", "question"] : [`${open.length} decision blocks whose asks are`, "questions"];
+  throw new Error([
+    `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+    ...open.map((ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`),
+    "A decision block leaves the document once its ask is answered or resolved."
+  ].join(`
+`));
+}
+function opensAskBlock(markdown, id) {
+  return markdown.split(`
+`).some((line) => {
+    const opener = line.replace(/^[\s>]*:{3,}/, ":::");
+    return opener.startsWith(`:::ask{#${id} `) || opener.startsWith(`:::ask{#${id}}`);
+  });
 }
 function refusalWithCode(error48, suffix = "") {
   if (!(error48 instanceof DispatchServiceError))
@@ -17141,6 +17179,7 @@ ${followsAsk(askOwner)}`,
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
       const precondition = rawPrecondition;
+      await refuseRemovingOpenDecisionBlocks(client, input.tool, resolved, ops);
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,
         ...summary === undefined ? {} : { summary },

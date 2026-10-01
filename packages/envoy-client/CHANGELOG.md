@@ -9,10 +9,18 @@
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name
   (the document's latest) holds a decision block open (LEGION-387): answering the block would
   write a new version and retract the request. A block is judged by its state in that version, so
-  an answer not yet folded into a version still counts, and so does a block with no ask yet. The
-  refusal names each block and its ask, and tells the agent to ask the human to answer or waive
-  it. It reads `GET /artifacts/{id}/blocks` first, then, only when an `ask` block is present, the
-  owner's asks and that version's markdown; an approved document skips the reads.
+  an answer not yet folded into a version still counts, and so does a block with no ask yet; every
+  line that opens the block counts, so one quoting its opener (in code, say) can add an open block
+  but never hide one. The refusal names each block and its ask, and tells the agent to ask the
+  human to answer or waive it. It reads `GET /artifacts/{id}/blocks` first, then, only when an
+  `ask` block is present, the owner's asks and that version's markdown; an approved document skips
+  the reads.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open (LEGION-387). The edit would write its
+  version at once and settlement would retract the ask without another, so the human's question
+  would leave their Inbox unanswered and an approval request sent next would find no open block.
+  An edit with no `delete` or `retype` by block id reads nothing more; one with reads
+  `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
 
 ### Added
 

@@ -21,8 +21,12 @@
   is closed with `dispatch_resolve_ask`. It also says to request approval in the pass that
   finishes a spec whose remaining choices are the agent's own, rather than making each of them a
   decision block.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open, so its question cannot leave the
+  human's Inbox unanswered.
 - The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
-  decision blocks first, then request approval with a summary of what the tree will do.
+  decision blocks first, as "Approval of a spec" defines settled, then request approval with a
+  summary of what the tree will do. `legion-architect` states that condition once.
 - The run-end nudge that tells an agent to open an ask no longer offers
   `dispatch_request_approval` as a way to wait on a human.
 

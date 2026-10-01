@@ -9,7 +9,9 @@
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing
   headings.
 - `dispatch_request_approval`'s description says the call is refused while the document holds an
-  open decision block, even when a human asked for approval (LEGION-387).
+  open decision block, even when a human asked for approval (LEGION-387); its `summary`
+  description no longer repeats that rule. `dispatch_doc_edit`'s description says a `delete` or
+  `retype` that would take an ask block out of the document while its ask is open is refused.
 
 ### Added
 

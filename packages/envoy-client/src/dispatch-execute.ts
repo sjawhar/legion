@@ -1602,8 +1602,10 @@ async function openArtifactMarks(
  * the latest version, the one the request would name: a block that version shows open counts as
  * open even when its ask is already answered or closed, since that answer reaches a version only
  * when the document settles, about two seconds later, or with the next edit (the agent's fold of
- * the answer into the text). A block not yet in that version counts as open too. A document
- * already approved at its latest version is left to the server, which answers with that approval.
+ * the answer into the text). A block not yet in that version counts as open too. A block removed
+ * from the document is not judged here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is
+ * open in it. A document already approved at its latest version is left to the server, which
+ * answers with that approval.
  */
 async function refuseOpenDecisionBlocks(
   client: DispatchClient,
@@ -1616,10 +1618,6 @@ async function refuseOpenDecisionBlocks(
   if (latest === undefined || latest < 1 || artifact.approval?.state === "approved") return;
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0) return;
-  // An issue's document lists its asks under the issue; the artifact route refuses it.
-  if (resolved.owner.kind !== "project" && resolved.issue === undefined) {
-    throw new Error("issue document is missing its issue");
-  }
   const [owned, version] = await Promise.all([
     resolved.issue === undefined
       ? client.getArtifactAsks(artifact.id)
@@ -1638,12 +1636,14 @@ async function refuseOpenDecisionBlocks(
       ask === undefined
         ? `block ${block.id}`
         : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
-    // The block's opening line, `:::ask{#<id> … state="…"}`; a block with no state is open.
-    const opening = lines.find(
-      (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
-    );
-    if (opening === undefined) return [`${named}, which version ${latest} does not hold yet`];
-    if ((/\bstate="(\w+)"/.exec(opening)?.[1] ?? "open") !== "open") return [];
+    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
+    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
+    // whose lines carries a state is open.
+    const states = lines
+      .filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`))
+      .map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
+    if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
+    if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
     if (ask === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
     if (ask.state === "open") return [named];
     return [
@@ -1659,6 +1659,84 @@ async function refuseOpenDecisionBlocks(
       "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again.",
     ].join("\n")
   );
+}
+
+/**
+ * Refuses a document edit that would take a decision block out of the document while its ask is
+ * open: a `delete` of the block or of a block holding it, or a `retype` of it into another type.
+ * The edit writes its version at once; about two seconds later settlement retracts the ask in the
+ * system's name and writes no version, so the human's question leaves the Inbox unanswered and an
+ * approval request made after it names a version with no open block for
+ * `refuseOpenDecisionBlocks` to find. A block an `insert` of the same batch writes back under its
+ * id stays, so the delete-then-insert rewrite of a typed block passes. Costs nothing for an edit
+ * with no such operation, then one `GET /artifacts/{id}/blocks`, and the owner's asks only when an
+ * operation reaches an `ask` block.
+ */
+async function refuseRemovingOpenDecisionBlocks(
+  client: DispatchClient,
+  tool: string,
+  resolved: ResolvedArtifact,
+  ops: readonly EditOp[]
+): Promise<void> {
+  const removing = ops.filter(
+    (operation) =>
+      operation.block !== undefined &&
+      (operation.op === "delete" || (operation.op === "retype" && operation.type !== "ask"))
+  );
+  if (removing.length === 0) return;
+  const artifact = resolved.artifact;
+  const blocks = await client.artifactBlocks(artifact.id);
+  const askBlocks = blocks.filter((block) => block.type === "ask");
+  const reinserted = ops.flatMap((operation) =>
+    operation.op === "insert" && operation.markdown !== undefined ? [operation.markdown] : []
+  );
+  const removed = new Set<string>();
+  for (const operation of removing) {
+    const target = blocks.find((block) => block.id === operation.block);
+    if (target === undefined) continue;
+    // A delete takes every block inside the one it names; a retype changes only that block.
+    for (const block of askBlocks) {
+      const reached =
+        block.id === target.id ||
+        (operation.op === "delete" && block.from >= target.from && block.to <= target.to);
+      const kept = reinserted.some((markdown) => opensAskBlock(markdown, block.id));
+      if (reached && !kept) removed.add(block.id);
+    }
+  }
+  if (removed.size === 0) return;
+  const owned =
+    resolved.issue === undefined
+      ? await client.getArtifactAsks(artifact.id)
+      : await client.listIssueAsks(resolved.issue.key);
+  const open = owned.filter(
+    (ask) =>
+      ask.state === "open" &&
+      ask.block_id != null &&
+      ask.block_artifact?.id === artifact.id &&
+      removed.has(ask.block_id)
+  );
+  if (open.length === 0) return;
+  const [what, question] =
+    open.length === 1
+      ? ["a decision block whose ask is", "question"]
+      : [`${open.length} decision blocks whose asks are`, "questions"];
+  throw new Error(
+    [
+      `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+      ...open.map(
+        (ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`
+      ),
+      "A decision block leaves the document once its ask is answered or resolved.",
+    ].join("\n")
+  );
+}
+
+/** Whether `markdown` opens an `ask` block with `id` on a line of its own, as a reinsert does. */
+function opensAskBlock(markdown: string, id: string): boolean {
+  return markdown.split("\n").some((line) => {
+    const opener = line.replace(/^[\s>]*:{3,}/, ":::");
+    return opener.startsWith(`:::ask{#${id} `) || opener.startsWith(`:::ask{#${id}}`);
+  });
 }
 
 /**
@@ -2438,6 +2516,7 @@ export async function executeDispatchTool(
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
       const precondition = rawPrecondition as EditPrecondition | undefined;
+      await refuseRemovingOpenDecisionBlocks(client, input.tool, resolved, ops);
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,
         ...(summary === undefined ? {} : { summary }),

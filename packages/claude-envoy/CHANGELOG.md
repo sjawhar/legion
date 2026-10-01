@@ -10,6 +10,9 @@
   It needs a Dispatch server that accepts `summary`; an older one refuses the call.
 - `dispatch_request_approval` is refused, with nothing sent, while the document holds an open
   decision block, and the refusal names each block.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open, so its question cannot leave the
+  human's Inbox unanswered.
 - The `dispatch_issue` and `dispatch_doc_edit` descriptions no longer list spec headings; they
   point at the dispatch skill's "Writing a spec", which describes a spec as the design
   conversation: the problem and its evidence, each open question a decision block at the end of

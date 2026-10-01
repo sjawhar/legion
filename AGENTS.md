@@ -164,7 +164,7 @@ TypeScript daemon does not read it.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's
-decision blocks are answered, the architect requests it with `dispatch_request_approval` and a
+decision blocks are settled, the architect requests it with `dispatch_request_approval` and a
 summary of what the tree will do, and registers the document id and version with the
 daemon, and the daemon opens the gate on the `artifact.approved` event for that document at its
 current version — or at registration itself, when Dispatch already shows the human approved that

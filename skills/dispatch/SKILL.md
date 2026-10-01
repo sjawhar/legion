@@ -383,9 +383,10 @@ See [Following](#following) for why you receive what happens to asks you open an
 Approval is a property of a document, not a question you phrase: a human approves a specific
 version, the way a pull-request review approves a commit, and any later version makes that
 approval stale. Answering a decision block writes a new version, so request approval only when
-both hold: the spec has no open decision blocks, every one answered and folded into the text; and
-it proposes something the human has not already settled. A Legion root spec under an armed design
-gate always goes to approval once its blocks are settled (`skill://legion-architect`).
+both hold: every decision block is settled, which means answered and folded into the text, or
+waived as the next paragraph says; and it proposes something the human has not already settled.
+A Legion root spec under an armed design gate always goes to approval once its blocks are settled
+(`skill://legion-architect`).
 
 When both hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. A choice you can make yourself is not a decision block

@@ -137,8 +137,9 @@ A `delete` whose `find` is a block's entire text removes the block itself — th
 a list emptied of every item disappears with it; a partial match keeps the block with its remaining text. Deleting the text of a bullet
 that holds a nested list hoists that list's items into the bullet's place (as an outliner does); a bullet with any other content
 (paragraphs, code, tables) is refused with `INVALID_OP` naming `delete {block:"<item id>"}`, which removes the item with its content.
-`delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; deleting an open `ask` block
-retracts its ask, while an answered one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
+`delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; the tools refuse a `delete` or
+`retype` that would take out an `ask` block whose ask is open, unless the same batch inserts it back under its id, and an answered or
+resolved one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
 attributes — a moved `ask` keeps its ask and answer. **A block loses its id only when it is removed**, and its anchors go with it:
 `delete` by text or by id removes the block and any container it empties; `delete_row` / `delete_column` remove their cells' ids,
 which is why they are refused while an open ask or unresolved comment sits on them; and a `move` that takes the last block out of a
