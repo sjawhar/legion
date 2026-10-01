@@ -158,8 +158,9 @@ users through `Identity.Login` and write identity errors with
   minted by a human in Settings, sent as `Authorization: Bearer <token>`.
   `DISPATCH_AGENT_TOKEN` is the shared devbox fallback; its callers have no
   owner attribution. The API and the document websocket (`/ws/doc/{room}`)
-  read `Bearer <token>` alike and compare the token with one constant-time
-  helper, `auth.MatchesSharedAgentToken`. Bearer callers cannot act as users.
+  read the bearer with one helper, `auth.BearerToken`, and compare it with one
+  constant-time helper, `auth.MatchesSharedAgentToken`. Bearer callers cannot
+  act as users.
 - `DISPATCH_OIDC_ISSUER` + `DISPATCH_OIDC_AUDIENCE` (both or neither; half the
   pair refuses to boot naming the missing one) make a Kubernetes pod's projected
   service-account token a third bearer credential. `resolveBootConfig` only

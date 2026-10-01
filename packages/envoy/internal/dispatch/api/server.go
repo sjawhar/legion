@@ -386,10 +386,8 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 }
 
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
-	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
-	if authorization != "" {
-		token, ok := strings.CutPrefix(authorization, "Bearer ")
-		if !ok || token == "" {
+	if token, present := auth.BearerToken(r); present {
+		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
 		if auth.MatchesSharedAgentToken(token, s.deps.AgentToken) {

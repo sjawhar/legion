@@ -239,9 +239,8 @@ func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (webs
 }
 
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
-	if authorization := strings.TrimSpace(r.Header.Get("Authorization")); authorization != "" {
-		token, prefixed := strings.CutPrefix(authorization, "Bearer ")
-		if !prefixed || !auth.MatchesSharedAgentToken(token, s.agentToken) {
+	if token, present := auth.BearerToken(r); present {
+		if !auth.MatchesSharedAgentToken(token, s.agentToken) {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
 		var supplied model.Actor
