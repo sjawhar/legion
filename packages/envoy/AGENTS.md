@@ -1448,7 +1448,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-AGENTC-393 v9's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+AGENTC-393's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
@@ -1572,7 +1572,7 @@ broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a fil
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
-environment — AGENTC-393 v9's `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
+environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), and `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
 checks no WebAuthn origin) — so a stale deployment fails loudly rather than silently running on
@@ -1650,8 +1650,8 @@ still-live grant covering the exact same name set (`reuseLiveGrant`: no new requ
 as long as the current rules still allow it and the grant's whole chain still verifies), then
 evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
 name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per contract v9) instead of being folded into an ordinary `deny` decision — no
-request row is written either, matching the "at record time" wording; a name
+UNKNOWN_SECRET`, per the AGENTC-393 overview document) instead of being folded into an ordinary
+`deny` decision — no request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
 nothing pending, the request and, if granted, its grant are written with no record; a request
@@ -1686,7 +1686,7 @@ a no-op, writing no second audit row. Audit rows never carry secret values: `aud
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (`login_hint` required — the
 approving operator's login — and exactly one `launcher_credential` authorization detail), mints an
-eight-symbol confirmation code (`XXXX-XXXX`, the pre-v9 alphabet unchanged) and a separate opaque
+eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
 pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)

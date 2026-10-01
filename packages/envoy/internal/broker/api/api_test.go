@@ -387,23 +387,29 @@ func TestEnrollmentRouteWithOldBearerHeaderIsLauncherInvalid(t *testing.T) {
 func (ts *testServer) mintLauncherCredential(t *testing.T, loginHint, host string) (credentialID string, key *ecdsa.PrivateKey) {
 	t.Helper()
 	key = newSigningKey(t)
-	compact := signMachineLoginRequest(t, key, ts.URL, loginHint, host)
+	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, loginHint, host), loginHint), key
+}
+
+// approveMachineLogin posts a signed machine-login request object, looks its record up by the
+// typed code as the UI does, approves it as approver, and returns the minted launcher credential's
+// id.
+func (ts *testServer) approveMachineLogin(t *testing.T, compact, approver string) string {
+	t.Helper()
 	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	login := decode[struct {
-		PendingID string `json:"pending_id"`
-		Code      string `json:"code"`
+		Code string `json:"code"`
 	}](t, body)
 	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
 	looked := decode[wireRecord](t, body)
 	_, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"approver": loginHint, "code": login.Code})
+		map[string]any{"approver": approver, "code": login.Code})
 	approved := decode[struct {
 		CredentialID *string `json:"credential_id"`
 	}](t, body)
 	if approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("mintLauncherCredential: approve response = %+v, want a credential_id", approved)
+		t.Fatalf("approve machine login: answered %s, want a credential_id", body)
 	}
-	return *approved.CredentialID, key
+	return *approved.CredentialID
 }
 
 // TestSessionProofRejectedOnLauncherAuthRoute pins authenticate()'s authLauncher guard: a VALID

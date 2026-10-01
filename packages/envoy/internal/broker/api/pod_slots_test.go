@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"crypto/ecdsa"
-	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -23,16 +22,8 @@ const (
 func (ts *testServer) podToken(t *testing.T, account, podUID string) string {
 	t.Helper()
 	claims := ts.podIssuer.Claims(account, podAudience)
-	raw, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var merged map[string]any
-	if err := json.Unmarshal(raw, &merged); err != nil {
-		t.Fatal(err)
-	}
-	merged["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
-	return ts.podIssuer.Mint(t, ts.podKey, merged)
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
+	return ts.podIssuer.Mint(t, ts.podKey, claims)
 }
 
 // mintServiceLauncherCredential is mintLauncherCredential for a service login (a launcher
@@ -47,21 +38,7 @@ func (ts *testServer) mintServiceLauncherCredential(t *testing.T) (credentialID 
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
-	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	login := decode[struct {
-		Code string `json:"code"`
-	}](t, body)
-	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
-	looked := decode[wireRecord](t, body)
-	_, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"approver": testApprover, "code": login.Code})
-	approved := decode[struct {
-		CredentialID *string `json:"credential_id"`
-	}](t, body)
-	if approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("mintServiceLauncherCredential: approve answered %s, want a credential_id", body)
-	}
-	return *approved.CredentialID, key
+	return ts.approveMachineLogin(t, compact, testApprover), key
 }
 
 type wireEnrolled struct {
