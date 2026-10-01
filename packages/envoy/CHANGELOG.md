@@ -41,12 +41,15 @@
 - `GET /api/v1/artifacts/{id}/blocks/{block_id}` says where one block stands in a Dispatch
   document: its path from the top-level block down (each node's type, block id and child index)
   and, for a table block, row or cell, the table's id, the row index (0 is the header row), the
-  cell's column index (the indexes `delete_row` and `delete_column` take), that column's header
-  text and the row's cells. An id the live document does not hold is `404 TARGET_NOT_FOUND`.
+  cell's column index (the indexes `delete_row` and `delete_column` take), the text of the header
+  cell drawn above it (in a table with colspans or rowspans, the column the cell is drawn in) and
+  the row's cells. An id the live document does not hold is `404 TARGET_NOT_FOUND`.
   `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` carry the same answer for their
   anchor's block as `anchor_block`, derived from the live document at read time and absent when
   the anchor names no block or the block has left the document; lists and events do not carry
-  it (LEGION-460).
+  it. When the anchor's document cannot be read, those two reads still answer `200`, without
+  `anchor_block` and with `anchor_block_error` (`document_unavailable` or `document_unreadable`),
+  logged at WARN, and they do not wait for a failed document room's recovery (LEGION-460).
 
 ### Changed
 

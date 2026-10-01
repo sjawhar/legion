@@ -37,7 +37,8 @@
   `Position:` line after the quote: in a table, the row (0 is the header), the cells before the
   anchored one and the column's header, so a reader can name the row and column a comment on a
   table cell is about without reading the document; outside a table, the path down to the block.
-  An ask's read also prints its quote (LEGION-460).
+  When Dispatch could not read the document it prints `Position: unavailable (<reason>)`, and the
+  read still answers. An ask's read also prints its quote (LEGION-460).
 - The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
   `task(agent="plan-gap-analyst")`, which finds the hidden requirements, ambiguities, and
   acceptance criteria no machine could check that the issue leaves unsaid, each with what the plan

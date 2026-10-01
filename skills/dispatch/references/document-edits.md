@@ -59,8 +59,8 @@ row and any row's last column cannot be deleted. An index is required. A missing
 canonicalizes short ragged rows by padding missing cells, so column deletion preserves every non-selected cell in the canonical table.
 `GET /api/v1/artifacts/<artifact UUID>/blocks` reports a table's own references plus its descendant cell anchors.
 `GET /api/v1/artifacts/<artifact UUID>/blocks/<block id>` places one block: its path from the top-level block down, and for a cell
-the row index (0 is the header, what `delete_row` takes), the column index (what `delete_column` takes), that column's header text
-and the row's cells. A row or column
+the row index (0 is the header, what `delete_row` takes), the column index (what `delete_column` takes), the text of the header cell
+drawn above it (with colspans or rowspans, the column the cell is drawn in) and the row's cells. A row or column
 deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
 answered asks and resolved comments are history and do not block it. A `find` or quote anchor tolerates inline Markdown
 (`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the quote and the three nearest blocks so

@@ -86,7 +86,7 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	comments[0].AnchorBlock, err = s.anchorBlock(r.Context(), comments[0].Anchor)
+	comments[0].AnchorBlock, comments[0].AnchorBlockError, err = s.anchorBlock(r.Context(), comments[0].Anchor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

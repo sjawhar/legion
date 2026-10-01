@@ -5581,6 +5581,90 @@ describe("executeDispatchTool", () => {
       ].join("\n")
     );
   });
+
+  test("says the position is unavailable, and why, when Dispatch could not read the document", async () => {
+    const anchor = {
+      artifact_id: "artifact-42",
+      block_id: "p-5-2",
+      mark_id: "m-1",
+      version: 1,
+      quote: "Today, Oct 1",
+      orphaned: false,
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/comments/cccccccc-0000-4000-8000-000000000042") {
+        return response({
+          comment: {
+            id: "cccccccc-0000-4000-8000-000000000042",
+            issue_key: "DSP-42",
+            author: { kind: "user", id: "sami" },
+            body: "I want this done today",
+            anchor,
+            anchor_block_error: "document_unavailable",
+            reply_to: null,
+            resolved: false,
+            suggestion: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [],
+        });
+      }
+      if (target.pathname === "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042") {
+        return response({
+          ask: {
+            id: "aaaaaaaa-0000-4000-8000-000000000042",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "author-1" },
+            question: "Which day is meant?",
+            options: [],
+            multiple: false,
+            urgency: "high",
+            anchor,
+            anchor_block_error: "document_unreadable",
+            state: "open",
+            answer: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("node"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const tool = {
+      tool: "dispatch_read",
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    } as const;
+
+    const comment = await executeDispatchTool({
+      ...tool,
+      args: { ref: "dispatch://DSP-42/comment/cccccccc-0000-4000-8000-000000000042" },
+    });
+    expect(comment.text.split("\n").slice(0, 5)).toEqual([
+      "Comment:",
+      "cccccccc-0000-4000-8000-000000000042 · user sami",
+      "> Today, Oct 1",
+      "Position: unavailable (document_unavailable)",
+      "Body: I want this done today",
+    ]);
+    const ask = await executeDispatchTool({
+      ...tool,
+      args: { ref: "dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042" },
+    });
+    expect(ask.text.split("\n").slice(0, 4)).toEqual([
+      "Question: Which day is meant?",
+      "> Today, Oct 1",
+      "Position: unavailable (document_unreadable)",
+      "Options:",
+    ]);
+  });
+
   test("reads the targeted message and its reply chain from a Dispatch message reference", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -7294,19 +7378,5 @@ describe("positionText", () => {
         ],
       })
     ).toBe("bullet_list[7] › list_item[0] › paragraph[0]");
-  });
-
-  test("a table position whose path holds no table entry reads as the path alone", () => {
-    expect(
-      positionText({
-        id: "p",
-        type: "paragraph",
-        path: [
-          { type: "table_cell", id: "c", index: 2 },
-          { type: "paragraph", id: "p", index: 0 },
-        ],
-        table: anchoredRow,
-      })
-    ).toBe("table_cell[2] › paragraph[0]");
   });
 });

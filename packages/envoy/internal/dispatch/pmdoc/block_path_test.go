@@ -90,3 +90,52 @@ func TestBlockPathOfNamesAnEmptyHeaderWhereTheHeaderRowIsShort(t *testing.T) {
 		t.Fatalf("wide cell = %#v err=%v, want column 1 with an empty header", path.Table, err)
 	}
 }
+
+// A pasted HTML table can hold cells spanning columns or rows. The header is the one drawn above
+// the column the cell is written in, while column stays the cell's child index, which
+// delete_column takes.
+func TestBlockPathOfNamesTheHeaderAboveTheColumnASpannedCellIsDrawnIn(t *testing.T) {
+	cell := func(kind, value string, colspan, rowspan int) *Node {
+		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
+	}
+	for _, test := range []struct {
+		name   string
+		rows   []*Node
+		row    int
+		column int
+		header string
+	}{
+		{
+			// | Owner |  | Due | over | Sami | Lucas | Today |
+			name: "a header cell spanning two columns",
+			rows: []*Node{
+				{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1)}},
+				{Type: "table_row", Children: []*Node{cell("table_cell", "Sami", 1, 1), cell("table_cell", "Lucas", 1, 1), cell("table_cell", "Today", 1, 1)}},
+			},
+			row: 1, column: 1, header: "Owner",
+		},
+		{
+			// | Line | Owner | Due | over | Backfill | Sami | Oct 1 | and |  | Lucas | Oct 2 |
+			name: "a body cell spanning two rows",
+			rows: []*Node{
+				{Type: "table_header_row", Children: []*Node{cell("table_header", "Line", 1, 1), cell("table_header", "Owner", 1, 1), cell("table_header", "Due", 1, 1)}},
+				{Type: "table_row", Children: []*Node{cell("table_cell", "Backfill", 1, 2), cell("table_cell", "Sami", 1, 1), cell("table_cell", "Oct 1", 1, 1)}},
+				{Type: "table_row", Children: []*Node{cell("table_cell", "Lucas", 1, 1), cell("table_cell", "Oct 2", 1, 1)}},
+			},
+			row: 2, column: 0, header: "Owner",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{{Type: "table", Children: test.rows}}}
+			EnsureBlockIDs(doc)
+			target := doc.Children[0].Children[test.row].Children[test.column].Children[0].Attrs[BlockIDAttr].(string)
+			path, err := BlockPathOf(doc, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := path.Table; *got.Row != test.row || *got.Column != test.column || *got.Header != test.header {
+				t.Fatalf("spanned cell = row %d, column %d headed %q, want row %d, column %d headed %q", *got.Row, *got.Column, *got.Header, test.row, test.column, test.header)
+			}
+		})
+	}
+}

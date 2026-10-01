@@ -3,11 +3,13 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -109,18 +111,29 @@ func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner,
 
 // anchorBlock is where anchor's block stands in its document, for the single-record comment and
 // ask reads: nil for no anchor, an anchor naming no block, or a block the live document no longer
-// holds (a deleted row's cell). A document the service cannot read fails the read, as GET /blocks
-// does.
-func (s *server) anchorBlock(ctx context.Context, anchor *model.Anchor) (*model.BlockPath, error) {
+// holds (a deleted row's cell). The position is one derived field of the read, so a document it
+// cannot read leaves the read standing: no position, and the anchor_block_error that names why
+// (contracts.AnchorBlockDocumentUnavailable, contracts.AnchorBlockDocumentUnreadable), logged at
+// WARN. Nor does it wait for a failed room's recovery (docs.WithoutRecoveryWait). Only a request
+// that has gone away fails the read.
+func (s *server) anchorBlock(ctx context.Context, anchor *model.Anchor) (*model.BlockPath, string, error) {
 	if anchor == nil || anchor.BlockID == nil || *anchor.BlockID == "" {
-		return nil, nil
+		return nil, "", nil
 	}
-	path, err := s.deps.Docs.BlockPath(ctx, anchor.ArtifactID, *anchor.BlockID)
-	if errors.Is(err, pmdoc.ErrTargetNotFound) {
-		return nil, nil
+	path, err := s.deps.Docs.BlockPath(docs.WithoutRecoveryWait(ctx), anchor.ArtifactID, *anchor.BlockID)
+	switch {
+	case err == nil:
+		return &path, "", nil
+	case errors.Is(err, pmdoc.ErrTargetNotFound):
+		return nil, "", nil
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return nil, "", err
 	}
-	if err != nil {
-		return nil, err
+	reason := contracts.AnchorBlockDocumentUnreadable
+	if errors.Is(err, docs.ErrServiceUnavailable) {
+		reason = contracts.AnchorBlockDocumentUnavailable
 	}
-	return &path, nil
+	slog.Warn("dispatch: answer a comment or ask read without its anchor's block position",
+		"artifact", anchor.ArtifactID, "block", *anchor.BlockID, "anchor_block_error", reason, "error", err)
+	return nil, reason, nil
 }

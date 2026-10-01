@@ -1,12 +1,21 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 func TestBlockPathReadsPlaceAnAnchoredCellByRowAndColumn(t *testing.T) {
@@ -118,4 +127,97 @@ func TestBlockPathReadsPlaceAnAnchoredCellByRowAndColumn(t *testing.T) {
 	}](t, stale); staleRead.Comment.Anchor == nil || staleRead.Comment.Anchor.BlockID == nil || *staleRead.Comment.Anchor.BlockID != *comment.Anchor.BlockID {
 		t.Fatalf("the deleted row's comment anchor = %#v, want it to keep block_id %q", staleRead.Comment.Anchor, *comment.Anchor.BlockID)
 	}
+}
+
+// The position is one derived field of a comment's or ask's read, so a document Dispatch cannot
+// read leaves the read standing: 200, no anchor_block, and anchor_block_error saying why. Each
+// case reads through a second server on the same database, where the document's room is not
+// resident, so the read goes to its store: one that cannot load it (a persistence outage), or one
+// whose live tree leaves the schema.
+func TestCommentAndAskReadsStandWhenTheAnchorDocumentCannotBeRead(t *testing.T) {
+	writer, database, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, writer, "TEST", "Table position",
+		"Intro.\n\n| # | Line | Due |\n| --- | --- | --- |\n| 1 | GDM backfill | Oct 1 |\n| 2 | Red-teamer loop | Today |\n")
+	created := func(path string, body map[string]any) string {
+		t.Helper()
+		return decodeBody[struct {
+			ID string `json:"id"`
+		}](t, dispatchRequest(t, writer, http.MethodPost, path, body, "alice")).ID
+	}
+	anchor := map[string]any{"artifact": "spec", "quote": "Today"}
+	comment := created("/api/v1/issues/"+issue.Key+"/comments", map[string]any{"anchor": anchor, "body": "I want this done today"})
+	ask := created("/api/v1/issues/"+issue.Key+"/asks", map[string]any{"anchor": anchor, "question": "Which day is meant?"})
+	floating := created("/api/v1/issues/"+issue.Key+"/comments", map[string]any{"body": "No anchor."})
+
+	for _, test := range []struct {
+		name  string
+		store docs.VersionedStore
+		want  string
+	}{
+		{"the store cannot load the document", failingLoadStore{VersionedStore: docs.NewPgVersioned(database)}, "document_unavailable"},
+		{"the live tree leaves the schema", outsideSchemaStore{VersionedStore: docs.NewPgVersioned(database)}, "document_unreadable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := readingServer(t, database, test.store)
+			for _, read := range []struct{ path, record string }{
+				{"/api/v1/comments/" + comment, "comment"},
+				{"/api/v1/asks/" + ask, "ask"},
+			} {
+				response := dispatchRequest(t, reader, http.MethodGet, read.path, nil, "alice")
+				body := response.Body.String()
+				if response.Code != http.StatusOK {
+					t.Fatalf("GET %s: status=%d body=%s, want 200", read.path, response.Code, body)
+				}
+				var record map[string]json.RawMessage
+				if err := json.Unmarshal(decodeBody[map[string]json.RawMessage](t, response)[read.record], &record); err != nil {
+					t.Fatalf("GET %s: decode %s: %v", read.path, read.record, err)
+				}
+				if _, carried := record["anchor_block"]; carried || string(record["anchor_block_error"]) != `"`+test.want+`"` || record["anchor"] == nil {
+					t.Fatalf("GET %s: body=%s, want its anchor, no anchor_block and anchor_block_error %q", read.path, body, test.want)
+				}
+			}
+			// Negative control: a comment with no anchor reads no document and carries neither field.
+			plain := dispatchRequest(t, reader, http.MethodGet, "/api/v1/comments/"+floating, nil, "alice")
+			if plain.Code != http.StatusOK || strings.Contains(plain.Body.String(), "anchor_block") {
+				t.Fatalf("a floating comment read: status=%d body=%s, want 200 without either field", plain.Code, plain.Body.String())
+			}
+		})
+	}
+}
+
+// readingServer is a second server on database whose document service reads through persist.
+func readingServer(t *testing.T, database *store.Store, persist docs.VersionedStore) http.Handler {
+	t.Helper()
+	broker := events.NewBroker()
+	documents := docs.New(docs.Deps{Store: database, Persistence: persist, Events: broker})
+	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	allowed := map[string]struct{}{"alice": {}}
+	deps, err := NewDeps(DepsInput{
+		Store:         database,
+		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins: allowed,
+		Docs:          documents,
+		Events:        broker,
+	})
+	if err != nil {
+		t.Fatalf("new API dependencies: %v", err)
+	}
+	mux := http.NewServeMux()
+	Register(mux, deps)
+	return mux
+}
+
+// outsideSchemaStore loads every document as a live tree the Proof schema refuses: an empty
+// callout, which needs at least one block.
+type outsideSchemaStore struct {
+	docs.VersionedStore
+}
+
+func (outsideSchemaStore) Load(context.Context, string) (persistence.LoadResult, error) {
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment("prosemirror")
+	doc.Transact(func(txn *crdt.Transaction) {
+		fragment.InsertElement(txn, 0, crdt.NewYXmlElement("callout"))
+	})
+	return persistence.LoadResult{Update: crdt.EncodeStateAsUpdateV1(doc, nil)}, nil
 }

@@ -142,6 +142,14 @@ const DeliveryDuplicateWindow = 259200000 * time.Millisecond
 // and the string the dashboard keys its retry wording on cannot drift apart.
 const ReceiptTimeoutCause = "The listener didn't answer within the send window; the message may already have been delivered."
 
+// AnchorBlockDocumentUnavailable and AnchorBlockDocumentUnreadable are the anchor_block_error a
+// comment's or ask's single read carries in place of anchor_block when it could not read the
+// anchor's document: its room or store could not be reached, or its live tree is outside the
+// schema. Generated from ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE and ANCHOR_BLOCK_DOCUMENT_UNREADABLE in
+// packages/contracts so the codes Dispatch writes and the ones its clients type cannot drift apart.
+const AnchorBlockDocumentUnavailable = "document_unavailable"
+const AnchorBlockDocumentUnreadable = "document_unreadable"
+
 // MaxBroadcastRecipients is the most sessions one broadcast sends to. Generated from
 // MAX_BROADCAST_RECIPIENTS in packages/contracts so the server's limit and the dashboard's
 // cannot drift apart.

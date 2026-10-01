@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
+  ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE,
+  ANCHOR_BLOCK_DOCUMENT_UNREADABLE,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
   MAX_BROADCAST_RECIPIENTS,
@@ -87,6 +89,14 @@ const DeliveryDuplicateWindow = ${DELIVERY_DUPLICATE_WINDOW_MS} * time.Milliseco
 // send. Generated from RECEIPT_TIMEOUT_CAUSE in packages/contracts so the string Dispatch writes
 // and the string the dashboard keys its retry wording on cannot drift apart.
 const ReceiptTimeoutCause = ${JSON.stringify(RECEIPT_TIMEOUT_CAUSE)}
+
+// AnchorBlockDocumentUnavailable and AnchorBlockDocumentUnreadable are the anchor_block_error a
+// comment's or ask's single read carries in place of anchor_block when it could not read the
+// anchor's document: its room or store could not be reached, or its live tree is outside the
+// schema. Generated from ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE and ANCHOR_BLOCK_DOCUMENT_UNREADABLE in
+// packages/contracts so the codes Dispatch writes and the ones its clients type cannot drift apart.
+const AnchorBlockDocumentUnavailable = ${JSON.stringify(ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE)}
+const AnchorBlockDocumentUnreadable = ${JSON.stringify(ANCHOR_BLOCK_DOCUMENT_UNREADABLE)}
 
 // MaxBroadcastRecipients is the most sessions one broadcast sends to. Generated from
 // MAX_BROADCAST_RECIPIENTS in packages/contracts so the server's limit and the dashboard's

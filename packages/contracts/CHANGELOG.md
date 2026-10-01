@@ -17,10 +17,14 @@
 
 - `BlockPath`, `BlockPathEntry` and `TablePosition`, the shape of
   `GET /api/v1/artifacts/{id}/blocks/{block_id}`: a block's path from the top-level block down
-  and, in a table, the row and column indexes `delete_row` and `delete_column` take, the column's
-  header text and the row's cells. `Comment.anchor_block` and `Ask.anchor_block` carry the same
-  for the anchor's block on the single-record reads, and `dispatch_read`'s description names the
-  `Position:` line it prints (LEGION-460).
+  and, in a table, the row and column indexes `delete_row` and `delete_column` take, the text of
+  the header cell drawn above the cell and the row's cells. `Comment.anchor_block` and
+  `Ask.anchor_block` carry the same for the anchor's block on the single-record reads, and
+  `Comment.anchor_block_error` and `Ask.anchor_block_error` (`AnchorBlockError`:
+  `ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE`, `ANCHOR_BLOCK_DOCUMENT_UNREADABLE`, generated into Go as
+  `contracts.AnchorBlockDocumentUnavailable` and `contracts.AnchorBlockDocumentUnreadable`) say
+  why `anchor_block` is absent when the read could not read the anchor's document.
+  `dispatch_read`'s description names the `Position:` line it prints (LEGION-460).
 - `CreateBroadcastInput.idempotency_key` (required): names one send, so the server answers a
   repeat of it with the broadcast the first request made and refuses the key's reuse for a
   different request with `409 BROADCAST_KEY_REUSED` (LEGION-446).

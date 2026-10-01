@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -27,8 +28,10 @@ type BlockPathEntry struct {
 // rows, 0 the header row, and Column the cell's index in its row - the indexes DeleteTableRow and
 // DeleteTableColumn take, so a cell spanning columns (a pasted HTML table's colspan) counts once.
 // Row is nil for the table block itself; Column and Header are nil for the table and for a row
-// block. Header is the header row's cell text at Column, "" where the header row has no cell
-// there. Cells is each cell of the row as its opening words, by column; nil for the table block.
+// block. Header is the text of the header cell drawn above the cell: the one covering the column
+// the cell is written in once the colspans before it and the rowspans reaching down from the rows
+// above take their places (tableGrid), "" where no header cell covers that column. Cells is each
+// cell of the row as its opening words, by child index; nil for the table block.
 type TablePosition struct {
 	ID     string
 	Row    *int
@@ -46,40 +49,68 @@ func BlockPathOf(doc *Node, blockID string) (BlockPath, error) {
 	if !ok {
 		return BlockPath{}, fmt.Errorf("%w: block %q", ErrTargetNotFound, blockID)
 	}
-	path := BlockPath{ID: blockID, Path: make([]BlockPathEntry, 0, len(indexes))}
-	var table *Node
+	path := BlockPath{ID: blockID, Path: make([]BlockPathEntry, len(indexes))}
 	node := doc
-	for _, index := range indexes {
-		parent := node
+	for depth, index := range indexes {
 		node = node.Children[index]
 		id, _ := node.Attrs[BlockIDAttr].(string)
-		path.Path = append(path.Path, BlockPathEntry{Type: node.Type, ID: id, Index: index})
-		switch {
-		case node.Type == "table":
-			table = node
-			path.Table = &TablePosition{ID: id}
-		case table != nil && parent == table:
-			row := index
-			path.Table.Row = &row
-			path.Table.Cells = make([]string, 0, len(node.Children))
-			for _, cell := range node.Children {
-				path.Table.Cells = append(path.Table.Cells, openingWords(tableCellText(cell)))
-			}
-		case table != nil && (parent.Type == "table_row" || parent.Type == "table_header_row"):
-			column := index
-			header := ""
-			if headerRow := table.Children[0]; column < len(headerRow.Children) {
-				header = tableCellText(headerRow.Children[column])
-			}
-			path.Table.Column, path.Table.Header = &column, &header
+		path.Path[depth] = BlockPathEntry{Type: node.Type, ID: id, Index: index}
+		if node.Type == "table" {
+			path.Table = tablePosition(node, id, indexes[depth+1:])
 		}
 	}
 	path.Type = node.Type
 	return path, nil
 }
 
-// tableCellText is a table cell's text on one line, as the renderer writes a cell (hard breaks
-// as spaces).
-func tableCellText(cell *Node) string {
-	return strings.Join(strings.Fields(textContent(cell)), " ")
+// tablePosition places the block at below, the child indexes under table (a row, then a cell).
+func tablePosition(table *Node, id string, below []int) *TablePosition {
+	position := &TablePosition{ID: id}
+	if len(below) == 0 {
+		return position
+	}
+	row := below[0]
+	cells := table.Children[row].Children
+	position.Row, position.Cells = &row, make([]string, len(cells))
+	for index, cell := range cells {
+		position.Cells[index] = openingWords(oneLineText(cell))
+	}
+	if len(below) == 1 {
+		return position
+	}
+	column := below[1]
+	header := columnHeader(table, row, column)
+	position.Column, position.Header = &column, &header
+	return position
+}
+
+// columnHeader is the text of the header cell drawn above the cell at row and column, both child
+// indexes: the header cell covering the column the renderer writes that cell in (tableGrid), or ""
+// where none covers it. Each grid is laid out on a budget of its own, as if its table were the
+// document's only one, and only through the anchored row, since no row below moves a cell above.
+func columnHeader(table *Node, row, column int) string {
+	rows := (&renderer{spanBudget: maxSpanCells}).tableGrid(&Node{Type: table.Type, Children: table.Children[:row+1]})
+	at := slices.Index(rows[row], table.Children[row].Children[column])
+	// The header row is the first, so no rowspan reaches it, and laid out alone it is not widened
+	// to a longer row: each header cell stands at its own first column, followed by the columns
+	// its colspan adds, and nothing else.
+	headers := table.Children[0].Children
+	grid := (&renderer{spanBudget: maxSpanCells}).tableGrid(&Node{Type: table.Type, Children: table.Children[:1]})[0]
+	if at >= len(grid) {
+		return ""
+	}
+	var covering *Node
+	next := 0
+	for _, cell := range grid[:at+1] {
+		if next < len(headers) && cell == headers[next] {
+			covering, next = cell, next+1
+		}
+	}
+	return oneLineText(covering)
+}
+
+// oneLineText is node's text on one line, as the renderer writes a table cell (hard breaks as
+// spaces).
+func oneLineText(node *Node) string {
+	return strings.Join(strings.Fields(textContent(node)), " ")
 }

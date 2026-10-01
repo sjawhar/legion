@@ -186,11 +186,21 @@ fills legacy anchors only when their cached quote has one current match.
 the document `readDocument` serves): its path of `{type, id, index}` from the top-level block
 down, and for a table block, row or cell a `table` naming the table's id, the row's child index
 (0 is the header row), the cell's child index in its row (the indexes `delete_row` and
-`delete_column` take, so a spanning cell counts once), that column's header text and the row's
-cells as their opening words. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` attach the
+`delete_column` take, so a spanning cell counts once), the text of the header cell drawn above
+the cell and the row's cells as their opening words. The header is found where the renderer
+writes the cell (`tableGrid`, laid out on a span budget of its own through the anchored row), so
+in a table with colspans or rowspans it is the column the cell is drawn in, not the header row's
+child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` attach the
 same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
 time and never stored or carried on lists and events; a block the live document no longer holds
-leaves it absent while the anchor keeps its stale `block_id`.
+leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
+of those reads, so a document they cannot read does not fail them: the read answers 200 without
+`anchor_block` and with `anchor_block_error` (`document_unavailable` for a room or store that
+could not be reached, `document_unreadable` for a live tree outside the schema; generated from
+`packages/contracts` as `contracts.AnchorBlockDocumentUnavailable` and
+`contracts.AnchorBlockDocumentUnreadable`), logged at WARN, and only a request that has gone away
+fails. Nor does that read wait for a failed room's recovery (`docs.WithoutRecoveryWait`): it is
+`document_unavailable` at once, where `GET /text`, `GET /blocks` and the block route wait.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code

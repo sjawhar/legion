@@ -470,9 +470,9 @@ export interface BlockPathEntry {
 /** Where a block stands in the table holding it. `row` is the row's index (0 is the header row)
  *  and `column` the cell's index in its row — the indexes `delete_row` and `delete_column` take.
  *  `row` is null for the table block itself; `column` and `header` are null for the table and for
- *  a row block. `header` is the header row's cell text at `column`, "" where the header row has no
- *  cell there. `cells` is each cell of the row as its opening words, by column; null for the table
- *  block. */
+ *  a row block. `header` is the text of the header cell drawn above the cell's column once colspans
+ *  and rowspans take their places, "" where no header cell covers it. `cells` is each cell of the
+ *  row as its opening words, by child index; null for the table block. */
 export interface TablePosition {
   readonly id: string;
   readonly row: number | null;
@@ -490,6 +490,18 @@ export interface BlockPath {
   readonly path: readonly BlockPathEntry[];
   readonly table?: TablePosition;
 }
+
+/** A comment's or ask's `anchor_block_error` when Dispatch could not read the anchor's document
+ *  for `anchor_block`: the room or the store holding it could not be reached, which a later read
+ *  can find recovered. Generated into Go as `contracts.AnchorBlockDocumentUnavailable`. */
+export const ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE = "document_unavailable";
+/** A comment's or ask's `anchor_block_error` when the anchor's live document is a tree Dispatch
+ *  cannot read (outside the Proof schema), until someone repairs it. Generated into Go as
+ *  `contracts.AnchorBlockDocumentUnreadable`. */
+export const ANCHOR_BLOCK_DOCUMENT_UNREADABLE = "document_unreadable";
+export type AnchorBlockError =
+  | typeof ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE
+  | typeof ANCHOR_BLOCK_DOCUMENT_UNREADABLE;
 
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
 export interface EditBlockPrecondition {
@@ -548,8 +560,12 @@ export interface Ask {
   readonly anchor: Anchor | null;
   /** Where `anchor.block_id` stands in the live document. Set on the single-record read alone
    *  (`GET /api/v1/asks/{id}`); lists and events never carry it, and it is absent when the anchor
-   *  names no block, the block has left the document, or the server predates it. */
+   *  names no block, the block has left the document, the document could not be read
+   *  (`anchor_block_error` then says why), or the server predates it. */
   readonly anchor_block?: BlockPath;
+  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
+   *  document. The ask's read still answers. */
+  readonly anchor_block_error?: AnchorBlockError;
   readonly state: "open" | "answered" | "resolved";
   readonly answer: AskAnswer | null;
   readonly resolution?: AskResolution;
@@ -772,8 +788,12 @@ export interface Comment {
   readonly anchor: Anchor | null;
   /** Where `anchor.block_id` stands in the live document. Set on the single-record read alone
    *  (`GET /api/v1/comments/{id}`); lists and events never carry it, and it is absent when the
-   *  anchor names no block, the block has left the document, or the server predates it. */
+   *  anchor names no block, the block has left the document, the document could not be read
+   *  (`anchor_block_error` then says why), or the server predates it. */
   readonly anchor_block?: BlockPath;
+  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
+   *  document. The comment's read still answers. */
+  readonly anchor_block_error?: AnchorBlockError;
   readonly reply_to: string | null;
   readonly ask_id: string | null;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is

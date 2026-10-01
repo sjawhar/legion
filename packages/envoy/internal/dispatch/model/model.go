@@ -484,9 +484,10 @@ type BlockPathEntry struct {
 
 // TablePosition places a block in the table holding it. Row is the row's index (0 the header row)
 // and Column the cell's index in its row, the indexes delete_row and delete_column take; Row is
-// nil for the table block, Column and Header for the table and a row block. Header is the header
-// row's cell text at Column, "" where the header row is shorter. Cells is each cell of the row as
-// its opening words; nil for the table block.
+// nil for the table block, Column and Header for the table and a row block. Header is the text of
+// the header cell drawn above the cell's column once colspans and rowspans take their places, ""
+// where no header cell covers it. Cells is each cell of the row as its opening words; nil for the
+// table block.
 type TablePosition struct {
 	ID     string   `json:"id"`
 	Row    *int     `json:"row"`
@@ -530,13 +531,18 @@ type Ask struct {
 	Anchor   *Anchor     `json:"anchor"`
 	// AnchorBlock is where Anchor's block stands in the live document. Set by the single-record
 	// read alone (GET /api/v1/asks/{id}), never by lists or events; nil when there is no anchor,
-	// the anchor names no block, or the block has left the document.
-	AnchorBlock   *BlockPath     `json:"anchor_block,omitempty"`
-	State         string         `json:"state"`
-	Answer        *AskAnswer     `json:"answer"`
-	Resolution    *AskResolution `json:"resolution,omitempty"`
-	OpenedEventID *int64         `json:"opened_event_id,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
+	// the anchor names no block, the block has left the document, or the document could not be
+	// read, which AnchorBlockError then names.
+	AnchorBlock *BlockPath `json:"anchor_block,omitempty"`
+	// AnchorBlockError is why AnchorBlock is absent when the document could not be read
+	// (contracts.AnchorBlockDocumentUnavailable, contracts.AnchorBlockDocumentUnreadable);
+	// empty otherwise.
+	AnchorBlockError string         `json:"anchor_block_error,omitempty"`
+	State            string         `json:"state"`
+	Answer           *AskAnswer     `json:"answer"`
+	Resolution       *AskResolution `json:"resolution,omitempty"`
+	OpenedEventID    *int64         `json:"opened_event_id,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
 	// ReferencedByCount is batched with ask-list reads so a card can suppress an empty backlink
 	// disclosure without issuing one graph request per ask. It is absent from mutation responses.
 	ReferencedByCount *int    `json:"referenced_by_count,omitempty"`
@@ -774,10 +780,15 @@ type Comment struct {
 	Anchor     *Anchor `json:"anchor"`
 	// AnchorBlock is where Anchor's block stands in the live document. Set by the single-record
 	// read alone (GET /api/v1/comments/{id}), never by lists or events; nil when there is no
-	// anchor, the anchor names no block, or the block has left the document.
+	// anchor, the anchor names no block, the block has left the document, or the document could
+	// not be read, which AnchorBlockError then names.
 	AnchorBlock *BlockPath `json:"anchor_block,omitempty"`
-	ReplyTo     *string    `json:"reply_to"`
-	AskID       *string    `json:"ask_id"`
+	// AnchorBlockError is why AnchorBlock is absent when the document could not be read
+	// (contracts.AnchorBlockDocumentUnavailable, contracts.AnchorBlockDocumentUnreadable);
+	// empty otherwise.
+	AnchorBlockError string  `json:"anchor_block_error,omitempty"`
+	ReplyTo          *string `json:"reply_to"`
+	AskID            *string `json:"ask_id"`
 	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
 	// turn after this comment: "human" when the human needs to act, "agent" when the
 	// comment is a progress note and the asking agent still owes the next move. A

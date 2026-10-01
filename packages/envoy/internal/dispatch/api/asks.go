@@ -684,7 +684,7 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	ask.AnchorBlock, err = s.anchorBlock(r.Context(), ask.Anchor)
+	ask.AnchorBlock, ask.AnchorBlockError, err = s.anchorBlock(r.Context(), ask.Anchor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
