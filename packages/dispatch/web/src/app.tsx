@@ -329,7 +329,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
   // Which palette is open, and `null` for none: `$mod+k` and the rail's Search control list this
-  // page's actions above the hits, `/` searches only, and `g p` lists projects.
+  // page's actions and the hits, `/` searches only, and `g p` lists projects.
   const [paletteMode, setPaletteMode] = useState<PaletteMode | null>(null);
   const [sidebarHidden, setSidebarHidden] = useUserPreference(
     "shell.sidebar",

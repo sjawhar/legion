@@ -36,9 +36,12 @@ export interface KeyBinding {
    *  contentEditable element, or a text-entry `INPUT`. */
   inEditable?: boolean;
   /** Whether `⌘K` offers this binding as an action. The default is `true` for a binding with one
-   *  key or none, and `false` for one with several: a row presses only its first key, and such a
-   *  binding's `run` may pick what it does by the key pressed (the arrows, `1`–`9`), so one whose
-   *  keys all do the same thing says `true`. Keys that walk a list with the row in hand set
+   *  key or none that is not `inEditable`, and `false` otherwise. A row presses only its first
+   *  key, and a binding with several keys may pick what it does by the key pressed (the arrows,
+   *  `1`–`9`), so one whose keys all do the same thing says `true`. An `inEditable` binding's key
+   *  is one that has to work while the reader types, which today is Escape or `$mod+k`, and both
+   *  mean something else inside the palette (Escape closes it; `$mod+k` is its own key), so such
+   *  a binding is a row only when it says `true`. Keys that walk a list with the row in hand set
    *  `false`, as does a second key for an action that already has a row; any other binding that
    *  sets it says why beside it. */
   palette?: boolean;
@@ -229,11 +232,10 @@ export interface KeymapOptions {
 
 export interface Keymap {
   /**
-   * The palette's rows: every enabled, palette-eligible binding of the scopes beneath the
-   * innermost dialog, innermost scope first. Left out: a binding whose `palette` is `false`
-   * (unset, the default for a binding with several keys) and one that fires in an editable. A row
-   * runs its binding only if the binding is still registered and its `when()` still holds when
-   * the row is chosen.
+   * The palette's rows: every enabled binding of the scopes beneath the innermost dialog whose
+   * `palette` is `true`, innermost scope first. Unset, `palette` is `false` for a binding with
+   * several keys or one that fires in an editable (`KeyBinding.palette`). A row runs its binding
+   * only if the binding is still registered and its `when()` still holds when the row is chosen.
    */
   actions(): KeymapAction[];
   /** Every registered binding with its `when()` evaluated now — the source for `?`. */
@@ -364,8 +366,7 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
           const keys = keysOf(binding);
           if (
             registration.scope !== scope ||
-            !(binding.palette ?? keys.length <= 1) ||
-            binding.inEditable === true ||
+            !(binding.palette ?? (keys.length <= 1 && binding.inEditable !== true)) ||
             binding.when?.() === false
           ) {
             continue;

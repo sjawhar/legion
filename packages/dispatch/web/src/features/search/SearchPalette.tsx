@@ -47,6 +47,7 @@ import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
 const emptyResults: SearchResult[] = [];
 const emptyProjects: Project[] = [];
 const ACTIONS_GROUP_ID = "search-group-actions";
+const MORE_ACTIONS_GROUP_ID = "search-group-more-actions";
 const PROJECTS_GROUP_ID = "search-group-projects";
 
 /** Which list the palette is: this page's actions and search hits, search alone, or projects. */
@@ -259,7 +260,8 @@ function CommandOption({
   );
 }
 
-/** One labelled run of command rows: the Actions a page offers, or the Projects `g p` lists. */
+/** One labelled run of command rows: the Actions a query leads to, the More actions it matches
+ *  further in, or the Projects `g p` lists. */
 interface CommandSection {
   id: string;
   label: string;
@@ -319,9 +321,9 @@ export function SearchPalette({
   // whatever opened it: run inside the palette, with focus in its input, it would act on nothing,
   // and a row that moves focus would have its move undone by that cleanup a moment later.
   const pendingAction = useRef<(() => void) | null>(null);
-  // The last `/` search, which `/` reopens on as `main`'s always-mounted palette did: its hits do
-  // not depend on the page. `⌘K` and `g p` open empty, since a query left there would filter a
-  // new page's actions, or its projects, down to nothing.
+  // The last `/` search, which `/` reopens on: its hits do not depend on the page. `⌘K` and `g p`
+  // open empty, since a query left there would filter a new page's actions, or its projects, down
+  // to nothing.
   const lastSearch = useRef("");
   // On the commit that closes the palette React runs every passive-effect cleanup, the unmounted
   // palette's `useDialog` among them, before any passive-effect setup, so focus is back by the
@@ -378,6 +380,7 @@ function PaletteDialog({
   // replaces it and Enter still opens its highlighted hit.
   const selectOnFocus = useRef(initialQuery !== "");
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   // The rows this open offers, decided on its first render, while focus is still on whatever
   // opened the palette, since `useDialog` moves it into the input after that commit. Read any
@@ -417,20 +420,30 @@ function PaletteDialog({
   const projects = useQuery({ ...projectsQuery(), enabled: mode === "projects" });
   const results = search.data?.results ?? emptyResults;
   const groups = groupResults(results);
-  const actionRows: ActionRow[] = actions
-    .filter((action) => needle === "" || action.label.toLowerCase().includes(needle))
-    .map((action) => ({
-      action,
-      id: `search-option-action-${action.scope}-${action.id}`,
-      kind: "action",
-    }));
+  // An action whose label the query starts (every action, while the query is empty) is the one
+  // the reader is typing, and it heads the list. One that holds the query further in (`issue` in
+  // `Close issue`, `status` in `Move card to the next status`) is a coincidence of words: it is
+  // listed below the hits and never highlighted for the reader, so a search and Enter opens a
+  // hit, and such an action runs only once the reader has arrowed to it.
+  const actionOptions = actions
+    .filter((action) => action.label.toLowerCase().includes(needle))
+    .map((action) => {
+      const row: ActionRow = {
+        action,
+        id: `search-option-action-${action.scope}-${action.id}`,
+        kind: "action",
+      };
+      return {
+        hint: <KeyHints keys={action.keys} />,
+        label: action.label,
+        leads: action.label.toLowerCase().startsWith(needle),
+        row,
+      };
+    });
   const projectRows: ProjectRow[] =
     mode === "projects"
       ? (projects.data ?? emptyProjects)
-          .filter(
-            (project) =>
-              needle === "" || `${project.key} ${project.name}`.toLowerCase().includes(needle)
-          )
+          .filter((project) => `${project.key} ${project.name}`.toLowerCase().includes(needle))
           .map((project) => ({
             id: `search-option-project-${project.key}`,
             kind: "project",
@@ -454,11 +467,7 @@ function PaletteDialog({
     {
       id: ACTIONS_GROUP_ID,
       label: "Actions",
-      options: actionRows.map((row) => ({
-        hint: <KeyHints keys={row.action.keys} />,
-        label: row.action.label,
-        row,
-      })),
+      options: actionOptions.filter((option) => option.leads),
     },
     {
       id: PROJECTS_GROUP_ID,
@@ -474,17 +483,26 @@ function PaletteDialog({
       })),
     },
   ];
+  const moreActions: CommandSection = {
+    id: MORE_ACTIONS_GROUP_ID,
+    label: "More actions",
+    options: actionOptions.filter((option) => !option.leads),
+  };
   // What the list shows, in the order it shows it: the arrows walk this same list.
   const rows: PaletteRow[] = [
     ...commandSections.flatMap((section) => section.options.map((option) => option.row)),
     ...hitGroups.flatMap((group) => group.rows),
+    ...moreActions.options.map((option) => option.row),
   ];
   // The highlight is the row the reader sees highlighted, held by its id: hits arriving below
   // the actions, or a refetch re-ranking them, leave it on that row. A new query sends it to the
   // head, and so does its row leaving the list; the head it lands on is then adopted, so the row
-  // coming back does not take the highlight back from it.
-  const activeRow = rows.find((row) => row.id === activeId) ?? rows[0];
-  const activeIndex = activeRow === undefined ? 0 : rows.indexOf(activeRow);
+  // coming back does not take the highlight back from it. The head is the first row unless that
+  // is one of the More actions, which come last: with only those listed, nothing is highlighted,
+  // and Enter runs nothing until the reader arrows.
+  const chosen = rows.findIndex((row) => row.id === activeId);
+  const activeIndex = chosen === -1 && rows.length > moreActions.options.length ? 0 : chosen;
+  const activeRow = rows[activeIndex];
   const shownId = activeRow?.id ?? null;
   if (shownId !== activeId) {
     setActiveId(shownId);
@@ -501,7 +519,7 @@ function PaletteDialog({
       document.getElementById(shownId)?.scrollIntoView({ block: "nearest" });
     };
     keepInView();
-    const list = document.getElementById("search-results");
+    const list = listRef.current;
     if (list === null) {
       return;
     }
@@ -525,12 +543,17 @@ function PaletteDialog({
     onClose();
   };
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "ArrowDown" && rows.length > 0) {
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && rows.length > 0) {
       event.preventDefault();
-      setActiveId(rows[stepActive(activeIndex, 1, rows.length)]?.id ?? null);
-    } else if (event.key === "ArrowUp" && rows.length > 0) {
-      event.preventDefault();
-      setActiveId(rows[stepActive(activeIndex, -1, rows.length)]?.id ?? null);
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      // From no highlight, Down takes the first row and Up the last.
+      const next =
+        activeIndex === -1
+          ? delta === 1
+            ? 0
+            : rows.length - 1
+          : stepActive(activeIndex, delta, rows.length);
+      setActiveId(rows[next]?.id ?? null);
     } else if (event.key === "Enter" && activeRow !== undefined) {
       event.preventDefault();
       selectRow(activeRow);
@@ -583,6 +606,7 @@ function PaletteDialog({
             <div
               className="max-h-[60vh] min-h-20 flex-1 overflow-y-auto"
               id="search-results"
+              ref={listRef}
               role="listbox"
             >
               {commandSections.map((section) => (
@@ -665,6 +689,7 @@ function PaletteDialog({
                   </Fragment>
                 );
               })}
+              <CommandGroup activeId={activeRow?.id} onSelect={selectRow} section={moreActions} />
             </div>
           )}
           {mode === "projects" ? (
