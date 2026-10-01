@@ -460,27 +460,29 @@ export class TmuxRuntime implements Runtime {
   private provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
     const repo = this.deps.repoForIssue(issue);
     const [owner] = repo.split("/") as [string, string];
-    return serialize(this.provisionQueue, repo, async () => {
-      const spec = await provisionIssueWorkspace(issue, {
+    return serialize(this.provisionQueue, repo, () =>
+      provisionIssueWorkspace(issue, {
         repo,
         stateDir: this.deps.stateDir,
         provisioningToken: () => this.deps.provisioningToken(owner),
         credentialHelper: this.deps.credentialHelper,
         commandTimeoutMs: this.deps.slowCommandTimeoutMs,
         run: this.workspaceRun,
-      });
-      await this.ensureCodegraphIndex(spec.workspaceDir);
-      return spec;
-    });
+      })
+    );
   }
 
   /** Warms `@bopstack/pi-codegraph`'s index for the issue's working copy (research report
    * AGENTC-1305 §7): the tester's `affected` and the reviewer's `impact`/`callers` queries need
-   * one already built, not one built on first use. `codegraph status` is a fast no-op on an
-   * already-indexed directory, so provisioning the same workspace again for a later phase worker
-   * of the same issue costs one quick check, not a re-index. A missing CLI or a failed build is
-   * logged loudly — never silently swallowed — but never fails the provision: a worker without an
-   * index falls back to grep, per its role prompt, rather than being wedged by an optional tool. */
+   * one already built, not one built on first use. Runs after `provisionWorkspace` releases the
+   * per-repository provisioning lock (`this.provisionQueue`): indexing reads the issue's own
+   * workspace directory, not the shared clone that lock protects, so holding it across indexing
+   * would serialize every other issue of the repository behind one potentially slow index build
+   * for no correctness reason. `codegraph status` is a fast no-op on an already-indexed
+   * directory, so provisioning the same workspace again for a later phase worker of the same
+   * issue costs one quick check, not a re-index. A missing CLI or a failed build is logged
+   * loudly — never silently swallowed — but never fails the provision: a worker without an index
+   * falls back to grep, per its role prompt, rather than being wedged by an optional tool. */
   private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
     try {
       const status = await this.deps.run(["codegraph", "status", "--json"], {
@@ -545,8 +547,10 @@ export class TmuxRuntime implements Runtime {
     secrets: Array<[string, string]>
   ): Promise<TmuxLocator> {
     // Today's order, kept: provision, then the prompt stat and session-file stat inside the
-    // command assembly, then the socket, secret file, and tmux argv.
+    // command assembly, then the socket, secret file, and tmux argv. Codegraph indexing runs
+    // after provisioning releases the per-repository lock (see `ensureCodegraphIndex`'s doc).
     const workspace = await this.provisionWorkspace(issue);
+    await this.ensureCodegraphIndex(workspace.workspaceDir);
     const innerCommand = await this.issueInnerCommand(
       issue,
       spec.launch,

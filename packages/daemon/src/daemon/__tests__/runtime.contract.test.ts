@@ -1240,7 +1240,11 @@ describe("TmuxRuntime", () => {
         return "token";
       },
       provisioningRun: async (command) => {
-        commands.push(command);
+        // Codegraph indexing (`ensureCodegraphIndex`) runs after a repository's provisioning
+        // lock releases, by design (AGENTC-1305 §7: no reason to block a sibling issue's
+        // provisioning on indexing), so its commands are not part of the contiguous
+        // jj/git provisioning block this test asserts and are excluded from `commands`.
+        if (command[0] !== "codegraph") commands.push(command);
         if (commands.length === 1) {
           firstCommand.resolve();
           await gate.promise;

@@ -68,6 +68,20 @@ WORKDIR /repo
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
+ARG CODEGRAPH_VERSION
+# CodeGraph CLI (@colbymchenry/codegraph): `bin.codegraph` in the main npm package is a thin
+# `#!/usr/bin/env node` launcher shim that locates and execs the per-platform optionalDependency
+# (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no system `node` (only
+# bun's own fallback shim, which the final runtime stage does not copy over), so the shim itself
+# cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh` wrapper that execs a
+# *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
+# anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
+# Installed before any application-source COPY: it depends on nothing this checkout builds, so an
+# unrelated daemon/workspace/pi-envoy source change never invalidates this layer.
+RUN mkdir -p /out \
+    && bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
+    && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
+    && /out/codegraph/bin/codegraph --version
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -91,17 +105,7 @@ RUN mkdir -p /out \
     && bun build --compile --target=bun-linux-x64 packages/daemon/src/cli/index.ts --outfile /out/legion \
     && bun packages/daemon/src/daemon/omp-pin.ts > /out/omp-pin \
     && test -s /out/omp-pin
-ARG CODEGRAPH_VERSION
-# CodeGraph CLI (@colbymchenry/codegraph): `bin.codegraph` in the main npm package is a thin
-# `#!/usr/bin/env node` launcher shim that locates and execs the per-platform optionalDependency
-# (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no system `node` (only
-# bun's own fallback shim, which the final runtime stage does not copy over), so the shim itself
-# cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh` wrapper that execs a
-# *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
-# anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
-RUN bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
-    && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
-    && /out/codegraph/bin/codegraph --version
+
 # The plugin ships from this checkout with the steps release.yaml's pi_envoy job runs before
 # `bun pm pack` (prepack.sh refuses to pack with the source manifest). The tarball is unpacked into a
 # directory: `omp plugin install` links a directory and rejects a tarball path (ENOTDIR).
