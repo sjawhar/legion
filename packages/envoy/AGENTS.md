@@ -1599,8 +1599,9 @@ any login but the record's own approver (`403 NOT_APPROVER`) and, on approval, m
 credential in the same transaction: bound to the request object's own key (its thumbprint and
 embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
 from the decision, so a crash between minting and recording the decision never orphans a
-credential no decision names. A key that already holds a live launcher credential under another
-record is `409 RECORD_TERMINAL` too. `Read` (the machine's own
+credential no decision names. Approving a login whose key already holds a live launcher credential
+under another record (a machine that signed two logins with one key) is `409
+KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
 poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
 the minted credential's id — no token is ever returned; the credential is usable only with proofs
 signed by the key the request object embedded.

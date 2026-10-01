@@ -37,8 +37,13 @@ var (
 	// dashboard actually shows, refused before the approver is even checked.
 	ErrCodeMismatch = errors.New("confirmation code does not match")
 	// ErrAlreadyDecided is ApplyDecision's refusal for a record that already carries its one
-	// terminal event: a second approve or deny, or one that lost the race to a concurrent one.
+	// terminal event: a second approve or deny, one that lost the race to a concurrent one, or one
+	// after the sweeper recorded the login expired.
 	ErrAlreadyDecided = errors.New("this machine login has already been decided")
+	// ErrKeyHoldsLiveCredential is ApplyDecision's refusal to approve a pending login whose key
+	// already holds a live launcher credential under another record: a machine signed two logins
+	// with one key and the first was approved. The record stays pending.
+	ErrKeyHoldsLiveCredential = errors.New("this machine login's key already holds a live launcher credential")
 )
 
 type Service struct {
@@ -190,7 +195,9 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // second decision and one racing the first both answer the same way. Approval mints the
 // credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
 // CredentialLifetime counted from the decision — in the same transaction that records the
-// decision, so a crash between the two never orphans a credential no decision names.
+// decision, so a crash between the two never orphans a credential no decision names. A key that
+// already holds a live credential under another record is ErrKeyHoldsLiveCredential, and the
+// record stays pending.
 func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bool, login, code string) (state, credentialID string, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -264,7 +271,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
 			time.Now().Add(time.Duration(body.LifetimeSeconds)*time.Second))
 		if isUniqueViolation(err) {
-			return "", "", fmt.Errorf("%w: its key already holds a live launcher credential", ErrAlreadyDecided)
+			return "", "", ErrKeyHoldsLiveCredential
 		}
 		if err != nil {
 			return "", "", err

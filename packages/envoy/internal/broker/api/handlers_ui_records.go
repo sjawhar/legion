@@ -144,6 +144,9 @@ func (s *server) decideMachineLogin(w http.ResponseWriter, r *http.Request, reco
 	case errors.Is(err, machine.ErrAlreadyDecided):
 		writeError(w, http.StatusConflict, "RECORD_TERMINAL", err.Error())
 		return
+	case errors.Is(err, machine.ErrKeyHoldsLiveCredential):
+		writeError(w, http.StatusConflict, "KEY_HOLDS_LIVE_CREDENTIAL", err.Error())
+		return
 	case err != nil:
 		writeInternal(w, "decide machine login", err)
 		return
