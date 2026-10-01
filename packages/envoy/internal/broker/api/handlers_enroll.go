@@ -9,10 +9,13 @@ import (
 )
 
 // createEnrollmentBody is POST /v1/enrollments's exact contract v9 shape: the v8 "approver" field
-// is gone — the rules pick a request's approver at request time, never at enrollment.
+// is gone — the rules pick a request's approver at request time, never at enrollment. slot is
+// optional and pod-only: omitted or "" is the runtime's one enrollment, and a slot names one of
+// several independent enrollments of the same pod (enroll.Enrollment.Slot).
 type createEnrollmentBody struct {
 	Kind       string  `json:"kind"`
 	RuntimeID  string  `json:"runtime_id"`
+	Slot       string  `json:"slot"`
 	Operator   *string `json:"operator"`
 	Thumbprint string  `json:"thumbprint"`
 	SessionID  *string `json:"session_id"`
@@ -35,12 +38,16 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	result, err := s.deps.Enroll.Create(r.Context(), cred, enroll.Enrollment{
 		Kind:       body.Kind,
 		RuntimeID:  body.RuntimeID,
+		Slot:       body.Slot,
 		Operator:   body.Operator,
 		Thumbprint: body.Thumbprint,
 		SessionID:  body.SessionID,
 		PodToken:   derefOr(body.PodToken, ""),
 	})
 	switch {
+	case errors.Is(err, enroll.ErrInvalidSlot):
+		writeError(w, http.StatusBadRequest, "INVALID_SLOT", err.Error())
+		return
 	case errors.Is(err, enroll.ErrOperatorMismatch):
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return
@@ -61,6 +68,7 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	}
 	writeJSON(w, status, map[string]any{
 		"enrollment_id":    result.ID.String(),
+		"slot":             strPtr(result.Slot),
 		"lease_expires_at": result.LeaseExpires,
 	})
 }
@@ -137,6 +145,7 @@ func (s *server) readSelf(w http.ResponseWriter, r *http.Request, id string) {
 		"enrollment_id":    enr.ID.String(),
 		"kind":             enr.Kind,
 		"operator":         enr.Operator,
+		"slot":             strPtr(enr.Slot),
 		"lease_expires_at": enr.LeaseExpires,
 		"grants":           grants,
 	})

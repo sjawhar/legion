@@ -1462,7 +1462,18 @@ broker checks it against the record's approver and records it on the decision ev
 bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
 agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
-service-account token); `internal/broker/rules` evaluates `agent-secret-rules.yaml` policy per
+service-account token). A live enrollment is unique per launcher credential, runtime id and slot:
+`POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400
+INVALID_SLOT`, and a slot on a box or host is refused the same way) naming one of several
+independent identities in one pod — the Legion daemon derives `<role>-g<generation>` from its own
+claim and never takes one from the pod — so each role of a pod holds its own key, lease, requests
+and grants, while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the
+runtime's one enrollment, every box's and host's. The same key in the same slot gets its live
+enrollment back (200), a different key in a live slot is `409 ALREADY_ENROLLED`, and the rules
+never see the slot: every slot of a pod matches on its verified service account alone. Migration
+0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id,
+unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted
+enrollment exists. `internal/broker/rules` evaluates `agent-secret-rules.yaml` policy per
 request (the AGENTC-393 overview document, contract v9, is its contract; a file that still has an
 `approvers:` section is refused, naming the removal); `internal/broker/proof` authenticates a
 session's or a launcher's signed request against its live enrollment or credential;
@@ -1599,16 +1610,19 @@ for the current, authoritative route list.
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
-object verbatim, the approver, the enrollment triple, lifetime, rules version, expiry, and the
+object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
+a pod's slot as a fourth field only when it has one, lifetime, rules version, expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
-record's own content-addressed id — and `ParseBody` is `Canonical`'s exact inverse, refusing any
-stored body that would not reproduce itself byte-for-byte. `VerifyRequestObject` enforces the
-requester's signed request object end to end (single ES256 JWS, `typ` `agent-secrets-request+jwt`
-— disjoint from the per-call proof's `agent-secrets-proof+jwt`, each verifier refusing the other's
-— embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud` equal to `BROKER_PUBLIC_URL`,
-`iat`/`exp` within skew and a 600-second cap, a `reason` of at most 400 runes with bidi/zero-width
-categories refused, and `authorization_details` either every entry `agent_secret` or exactly one
-`launcher_credential` entry naming a valid hostname and an optional `[a-z0-9-]{1,64}` service).
+record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
+is `Canonical`'s exact inverse, refusing any stored body that would not reproduce itself
+byte-for-byte and any fourth enrollment field that is not a pod's valid slot. `VerifyRequestObject`
+enforces the requester's signed request object end to end (single ES256 JWS, `typ`
+`agent-secrets-request+jwt` — disjoint from the per-call proof's `agent-secrets-proof+jwt`, each
+verifier refusing the other's — embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud`
+equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `reason` of at most
+400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
+`agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
+`[a-z0-9-]{1,64}` service).
 `Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
 the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
 `approver: operator`, or a machine login's `login_hint`), and every decision and every chain

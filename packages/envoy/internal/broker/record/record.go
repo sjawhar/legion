@@ -38,7 +38,15 @@ var ErrRequestInvalid = errors.New("request object invalid")
 var (
 	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?)*$`)
 	servicePattern  = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+	slotPattern     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 )
+
+// ValidSlot reports whether slot may name a pod enrollment's slot: one of several independent
+// identities in one pod, such as a Legion role and its generation. The empty slot is the
+// enrollment's one identity and is not a slot value.
+func ValidSlot(slot string) bool {
+	return slotPattern.MatchString(slot)
+}
 
 // CanonicalLogin lowercases and trims a GitHub login. Every login comparison in the module goes
 // through this form on both sides.
@@ -195,8 +203,9 @@ func validateReason(reason string) error {
 }
 
 // Enrollment identifies the enrollment a credential request came from. A machine login (no
-// enrollment) carries "-", "-", "-".
-type Enrollment struct{ Kind, RuntimeID, Operator string }
+// enrollment) carries "-", "-", "-". Slot is a pod enrollment's slot, "" for every enrollment
+// without one.
+type Enrollment struct{ Kind, RuntimeID, Operator, Slot string }
 
 // Body is the credential-request record's decision fields, fixed at creation, plus the verbatim
 // signed request object. It is never updated after creation.
@@ -211,7 +220,9 @@ type Body struct {
 }
 
 // Canonical renders the body in the contract's exact line format. Every line is "\n"-terminated;
-// an empty operator or code renders as "-".
+// an empty operator or code renders as "-". The enrollment line carries a pod's slot as a fourth
+// tab-separated field only when there is one: a body with no slot keeps the three-field line, the
+// bytes and record id every slotless record is stored under.
 func (b Body) Canonical() string {
 	operator := b.Enrollment.Operator
 	if operator == "" {
@@ -236,6 +247,10 @@ func (b Body) Canonical() string {
 	sb.WriteString(b.Enrollment.RuntimeID)
 	sb.WriteByte('\t')
 	sb.WriteString(operator)
+	if b.Enrollment.Slot != "" {
+		sb.WriteByte('\t')
+		sb.WriteString(b.Enrollment.Slot)
+	}
 	sb.WriteByte('\n')
 	sb.WriteString("lifetime_seconds: ")
 	sb.WriteString(strconv.Itoa(b.LifetimeSeconds))
@@ -285,8 +300,15 @@ func ParseBody(canonical string) (Body, error) {
 		return Body{}, fmt.Errorf("canonical body: bad enrollment line")
 	}
 	fields := strings.Split(enrollmentLine, "\t")
-	if len(fields) != 3 {
-		return Body{}, fmt.Errorf("canonical body: enrollment is not three tab-separated fields")
+	if len(fields) != 3 && len(fields) != 4 {
+		return Body{}, fmt.Errorf("canonical body: enrollment is not three or four tab-separated fields")
+	}
+	slot := ""
+	if len(fields) == 4 {
+		slot = fields[3]
+		if fields[0] != "pod" || !ValidSlot(slot) {
+			return Body{}, fmt.Errorf("canonical body: an enrollment's fourth field must be a pod's slot")
+		}
 	}
 	operator := fields[2]
 	if operator == "-" {
@@ -323,7 +345,7 @@ func ParseBody(canonical string) (Body, error) {
 	b := Body{
 		Request:         request,
 		Approver:        approver,
-		Enrollment:      Enrollment{Kind: fields[0], RuntimeID: fields[1], Operator: operator},
+		Enrollment:      Enrollment{Kind: fields[0], RuntimeID: fields[1], Operator: operator, Slot: slot},
 		LifetimeSeconds: lifetime,
 		RulesVersion:    rulesVersion,
 		ExpiresAt:       expiresAt.UTC(),

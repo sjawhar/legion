@@ -31,6 +31,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
@@ -42,15 +44,23 @@ const (
 
 // testServer is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to
 // its store — needed to seed fixtures (an enrollment, a launcher credential) the API itself has
-// no route to create directly.
+// no route to create directly — and the local OIDC issuer its pod verifier trusts, which mints the
+// projected service-account tokens a pod enrollment presents.
 type testServer struct {
-	URL   string
-	Store *store.Store
+	URL       string
+	Store     *store.Store
+	podIssuer *oidctest.Issuer
+	podKey    *oidctest.Key
 }
 
-// newTestServer writes a rules file naming the box operator sjawhar as DEEL_API_KEY's approver
-// and mounts api.Register on an httptest.Server so every proof's htu and every request object's
-// aud have one real, consistent PublicURL to check against.
+// podAudience is the audience the test server's pod verifier checks and podToken mints for.
+const podAudience = "legion-broker-pod"
+
+// newTestServer writes a rules file naming the box operator sjawhar as DEEL_API_KEY's approver,
+// and login sjawhar for a pod of service account legion:worker, which WORKER_TOKEN is automatic
+// for; wires a real pod verifier against a local OIDC issuer, as cmd/broker/main.go does when
+// BROKER_K8S_OIDC_ISSUER is set; and mounts api.Register on an httptest.Server so every proof's
+// htu and every request object's aud have one real, consistent PublicURL to check against.
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	st := storetest.Open(t)
@@ -64,6 +74,14 @@ secrets:
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
+      - {kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: approval, approver: "login:sjawhar"}
+  WORKER_TOKEN:
+    source: example/agent-secrets/WORKER_TOKEN
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 3600
+    requesters:
+      - {kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: automatic}
 `
 	rulesPath := t.TempDir() + "/rules.yaml"
 	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
@@ -78,11 +96,17 @@ secrets:
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	enr := &enroll.Service{Store: st, Lease: time.Hour}
+	issuer := oidctest.New(t)
+	podKey := issuer.PublishKey(t, "signing-key")
+	podVerifier, err := oidc.New(context.Background(), issuer.URL(), podAudience)
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1"},
+		Store: st, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1", "example/agent-secrets/WORKER_TOKEN": "worker-v1"},
 		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
@@ -99,7 +123,7 @@ secrets:
 		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 	})
 
-	return &testServer{URL: srv.URL, Store: st}
+	return &testServer{URL: srv.URL, Store: st, podIssuer: issuer, podKey: podKey}
 }
 
 // newSessionEnrollment inserts a live box enrollment (and its backing launcher_credentials row)
@@ -214,9 +238,10 @@ type wireError struct {
 }
 
 type wireEnrollmentInfo struct {
-	Kind      string `json:"kind"`
-	RuntimeID string `json:"runtime_id"`
-	Operator  string `json:"operator"`
+	Kind      string  `json:"kind"`
+	RuntimeID string  `json:"runtime_id"`
+	Operator  string  `json:"operator"`
+	Slot      *string `json:"slot"`
 }
 
 type wireDecided struct {
@@ -624,8 +649,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if readBack.State != "pending" || readBack.Approver != testApprover {
 		t.Fatalf("record read = %+v, want pending with approver %s", readBack, testApprover)
 	}
-	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "box" || readBack.Enrollment.Operator != "sjawhar" {
-		t.Fatalf("record enrollment = %+v, want kind=box operator=sjawhar", readBack.Enrollment)
+	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "box" || readBack.Enrollment.Operator != "sjawhar" || readBack.Enrollment.Slot != nil {
+		t.Fatalf("record enrollment = %+v, want kind=box operator=sjawhar and no slot", readBack.Enrollment)
 	}
 
 	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
@@ -691,8 +716,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if listed == nil {
 		t.Fatalf("GET /v1/grants = %+v, want grant %s listed", grantList, grantID)
 	}
-	if len(listed.Names) != 1 || listed.Names[0] != "DEEL_API_KEY" || listed.Approver != testApprover {
-		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] approved by %s", listed, testApprover)
+	if len(listed.Names) != 1 || listed.Names[0] != "DEEL_API_KEY" || listed.Approver != testApprover || listed.Enrollment.Slot != nil {
+		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] approved by %s on an enrollment with no slot", listed, testApprover)
 	}
 
 	// Revoking by approver takes the grant's approver or its enrollment's operator (both sjawhar

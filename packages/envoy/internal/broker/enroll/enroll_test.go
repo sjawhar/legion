@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -663,5 +664,106 @@ func TestPodEnrollmentRecordsTheVerifiedSubject(t *testing.T) {
 	}
 	if subject == nil || *subject != "system:serviceaccount:legion:worker" {
 		t.Fatalf("stored subject = %v, want the token's system:serviceaccount:legion:worker, never the caller's", subject)
+	}
+}
+
+// TestEachSlotOfAPodIsAnEnrollmentOfItsOwn pins per-slot uniqueness: two roles in one pod, and two
+// generations of one role, are distinct live enrollments under one launcher credential and one pod
+// UID; a retry in a slot with its own key gets that slot's enrollment back, a different key in a
+// live slot is refused, the slotless enrollment of the same pod is a third identity, and revoking
+// one slot leaves the others live.
+func TestEachSlotOfAPodIsAnEnrollmentOfItsOwn(t *testing.T) {
+	svc := newService(t)
+	issuer, key := withPodVerifier(t, svc)
+	ctx := context.Background()
+	cred := mintCredential(t, svc, nil, str("legion-daemon"), "cluster")
+	const podUID = "pod-uid-roles"
+	pod := func(slot, thumbprint string) Enrollment {
+		return Enrollment{
+			Kind: "pod", RuntimeID: podUID, Slot: slot, Thumbprint: thumbprint,
+			PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", podUID),
+		}
+	}
+	ids := map[uuid.UUID]string{}
+	for _, in := range []Enrollment{
+		pod("implementer-g1", "tp-implementer-g1"),
+		pod("reviewer-g1", "tp-reviewer-g1"),
+		pod("implementer-g2", "tp-implementer-g2"),
+		pod("", "tp-no-slot"),
+	} {
+		enr, err := svc.Create(ctx, cred, in)
+		if err != nil || enr.Existing {
+			t.Fatalf("Create(slot %q) = %+v, %v; want a fresh enrollment", in.Slot, enr, err)
+		}
+		ids[enr.ID] = in.Slot
+		got, err := svc.Get(ctx, enr.ID.String())
+		if err != nil || got.Slot != in.Slot || got.RuntimeID != podUID {
+			t.Fatalf("Get(slot %q) = %+v, %v; want runtime %s in that slot", in.Slot, got, err, podUID)
+		}
+	}
+	if len(ids) != 4 {
+		t.Fatalf("enrollments %v, want four distinct ids", ids)
+	}
+	var implementerG1 uuid.UUID
+	for id, slot := range ids {
+		if slot == "implementer-g1" {
+			implementerG1 = id
+		}
+	}
+
+	again, err := svc.Create(ctx, cred, pod("implementer-g1", "tp-implementer-g1"))
+	if err != nil || !again.Existing || again.ID != implementerG1 {
+		t.Fatalf("Create(implementer-g1 retry, same key) = %+v, %v; want Existing %s", again, err, implementerG1)
+	}
+	if _, err := svc.Create(ctx, cred, pod("implementer-g1", "tp-copied")); !errors.Is(err, ErrAlreadyEnrolled) {
+		t.Fatalf("Create(implementer-g1, a different key) = %v, want ErrAlreadyEnrolled", err)
+	}
+
+	if err := svc.Revoke(ctx, cred, implementerG1.String(), "launcher:"+cred.ID.String()); err != nil {
+		t.Fatalf("Revoke(implementer-g1): %v", err)
+	}
+	for id, slot := range ids {
+		_, live, err := svc.Lookup(ctx, id.String())
+		if err != nil || live != (id != implementerG1) {
+			t.Fatalf("Lookup(slot %q) live = %v, %v after revoking implementer-g1 alone", slot, live, err)
+		}
+	}
+}
+
+// TestASlotIsRefusedOffAPodAndWhenMalformed pins the slot's validation: a slot on a box or host
+// enrollment, or one that does not match record.ValidSlot, is ErrInvalidSlot and writes no row;
+// and a pod's runtime id stays the pod UID its token proves, never a UID composed with a role.
+func TestASlotIsRefusedOffAPodAndWhenMalformed(t *testing.T) {
+	svc := newService(t)
+	issuer, key := withPodVerifier(t, svc)
+	ctx := context.Background()
+	operatorCred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	serviceCred := mintCredential(t, svc, nil, str("legion-daemon"), "cluster")
+
+	for _, kind := range []string{"box", "host"} {
+		_, err := svc.Create(ctx, operatorCred, Enrollment{Kind: kind, RuntimeID: kind + "-slot", Operator: str("sjawhar"), Thumbprint: "tp-" + kind, Slot: "implementer-g1"})
+		if !errors.Is(err, ErrInvalidSlot) {
+			t.Fatalf("Create(%s with a slot) = %v, want ErrInvalidSlot", kind, err)
+		}
+	}
+	for _, slot := range []string{"Implementer-g1", "1mplementer", "-implementer", "implementer_g1", "a" + strings.Repeat("b", 63)} {
+		_, err := svc.Create(ctx, serviceCred, Enrollment{
+			Kind: "pod", RuntimeID: "pod-uid-bad-slot", Thumbprint: "tp-bad-slot", Slot: slot,
+			PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-uid-bad-slot"),
+		})
+		if !errors.Is(err, ErrInvalidSlot) {
+			t.Fatalf("Create(pod, slot %q) = %v, want ErrInvalidSlot", slot, err)
+		}
+	}
+	_, err := svc.Create(ctx, serviceCred, Enrollment{
+		Kind: "pod", RuntimeID: "pod-uid-composed/implementer", Thumbprint: "tp-composed", Slot: "implementer-g1",
+		PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-uid-composed"),
+	})
+	if !errors.Is(err, ErrPodIdentity) {
+		t.Fatalf("Create(pod, runtime id composed with a role) = %v, want ErrPodIdentity", err)
+	}
+	var n int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from enrollments`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("enrollments written by refused creates = %d (%v), want none", n, err)
 	}
 }
