@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { api } from "../../api/client";
 import type {
   Agent,
+  BroadcastCreated,
   InboxRow,
   IssueSummary,
   Message,
@@ -1566,7 +1567,7 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
       target: { value: "btw" },
     });
     expect(
-      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise BTW\)/)
+      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise btw\)/)
     ).toBeTruthy();
     fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
       target: { value: "Stand down and report status." },
@@ -1583,6 +1584,23 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
     page.view.unmount();
     page.restore();
   }
+});
+
+test("a broadcast composer keeps a mode mismatch reason byte-for-byte with the server create response", () => {
+  const [, reviewer] = agents;
+  const composer = broadcastPlan(new Set([reviewer.session_id]), [reviewer], "btw");
+  const serverCreateResponse = {
+    excluded: [
+      {
+        reason: "does not advertise btw",
+        session_id: reviewer.session_id,
+        title: reviewer.title,
+      },
+    ],
+  } satisfies Pick<BroadcastCreated, "excluded">;
+
+  expect(composer.excluded).toHaveLength(serverCreateResponse.excluded.length);
+  expect(composer.excluded[0]?.reason).toBe(serverCreateResponse.excluded[0]?.reason);
 });
 
 test("a mode both recipients advertise takes the excluded one back in", async () => {
@@ -1745,24 +1763,24 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
   // live one.
   expect(state(both, [reviewer], "btw")).toEqual(
     nobody(
-      `Excluded: session:planner-… (no live session), Reviewer (does not advertise BTW). ${tail} Sending as Aside would reach 1 of them.`
+      `Excluded: session:planner-… (no live session), Reviewer (does not advertise btw). ${tail} Sending as aside would reach 1 of them.`
     )
   );
-  // The hint picks the mode that reaches the most: Aside reaches both, BTW only the Planner.
+  // The hint picks the mode that reaches the most: aside reaches both, btw only the Planner.
   expect(state(both, agents, "steer").refusal).toMatch(
-    / Sending as Aside would reach 2 of them\.$/
+    / Sending as aside would reach 2 of them\.$/
   );
   // One session alone is "it"; a session advertising nothing gets no hint at all.
   expect(state([reviewer.session_id], [reviewer], "btw").refusal).toMatch(
-    / Sending as Aside would reach it\.$/
+    / Sending as aside would reach it\.$/
   );
   expect(state([deaf.session_id], [deaf], "btw")).toEqual(
-    nobody(`Excluded: Deaf (does not advertise BTW). ${tail}`)
+    nobody(`Excluded: Deaf (does not advertise btw). ${tail}`)
   );
 
   // Someone reached: the label counts, and an Excluded line is context beside Send, never its
   // reason, with no hint since the mode reaches someone.
-  const reviewerLeftOut = `Excluded: Reviewer (does not advertise BTW). ${tail}`;
+  const reviewerLeftOut = `Excluded: Reviewer (does not advertise btw). ${tail}`;
   expect(state(both, agents, "btw")).toEqual({
     label: "Send to 1",
     notice: reviewerLeftOut,
@@ -1843,7 +1861,7 @@ test("the header checkbox follows the filters and its count never hides a select
       within(chips)
         .getAllByRole("button")
         .map((chip) => chip.textContent)
-    ).toEqual(["Reviewer · does not advertise BTW ✕"]);
+    ).toEqual(["Reviewer · does not advertise btw ✕"]);
 
     // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
     fireEvent.change(directory, { target: { value: "" } });
