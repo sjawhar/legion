@@ -3,7 +3,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -393,7 +392,7 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		if !ok || token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
-		if matchesSharedAgentToken(token, s.deps.AgentToken) {
+		if auth.MatchesSharedAgentToken(token, s.deps.AgentToken) {
 			return model.Actor{}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
@@ -416,10 +415,6 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, err
 	}
 	return model.Actor{Kind: "user", ID: login}, true, nil
-}
-
-func matchesSharedAgentToken(token, configured string) bool {
-	return configured != "" && subtle.ConstantTimeCompare([]byte(token), []byte(configured)) == 1
 }
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
