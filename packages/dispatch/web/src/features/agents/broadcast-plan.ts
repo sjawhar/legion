@@ -35,6 +35,25 @@ export interface BroadcastSendState {
   readonly refusalOnNotice: boolean;
 }
 
+/** The registry by session id. */
+function sessionsById(agents: readonly Agent[]): Map<string, Agent> {
+  return new Map(agents.map((agent) => [agent.session_id, agent]));
+}
+
+/** Why the live registry leaves a selected session out of a send in `delivery`, or undefined when
+ *  it can take it. */
+function liveExclusion(
+  sessionID: string,
+  agent: Agent | undefined,
+  delivery: MessageDeliveryMode
+): BroadcastExclusionPlan | undefined {
+  if (agent === undefined) return { agent: undefined, reason: "no live session", sessionID };
+  if (!agent.capabilities.includes(delivery)) {
+    return { agent, reason: `does not advertise ${MODE_LABELS[delivery]}`, sessionID };
+  }
+  return undefined;
+}
+
 /**
  * What sending the current selection would do: the sessions it reaches, and the selected
  * sessions it leaves out. A session that does not advertise the chosen mode is excluded
@@ -47,51 +66,82 @@ export function broadcastPlan(
   agents: readonly Agent[],
   delivery: MessageDeliveryMode
 ): BroadcastPlan {
-  const live = new Map(agents.map((agent) => [agent.session_id, agent]));
+  const live = sessionsById(agents);
   const excluded: BroadcastExclusionPlan[] = [];
   const recipients: string[] = [];
   for (const sessionID of selected) {
-    const agent = live.get(sessionID);
-    if (agent === undefined) {
-      excluded.push({ agent: undefined, reason: "no live session", sessionID });
-      continue;
-    }
-    if (!agent.capabilities.includes(delivery)) {
-      excluded.push({ agent, reason: `does not advertise ${MODE_LABELS[delivery]}`, sessionID });
-      continue;
-    }
-    recipients.push(agent.session_id);
+    const exclusion = liveExclusion(sessionID, live.get(sessionID), delivery);
+    if (exclusion === undefined) recipients.push(sessionID);
+    else excluded.push(exclusion);
   }
   return { excluded, recipients };
 }
 
-/** Why a selected session is left out of a restored send: it was not reachable when the refused
- *  send was pressed, so the request being re-sent does not name it. */
+/** Why a selected session that has come back is left out of a restored send: it was not
+ *  reachable when the refused send was pressed, so the request being re-sent does not name it. */
 const NOT_IN_RESTORED_SEND = "not in the refused send; edit to include it";
 
 /**
  * What re-sending a refused request word for word would do: it reaches exactly the sessions it
- * named, whatever the registry says now. A selected session the request does not name - one that
- * was not live, or lacked the mode, at the refused press and has come back since - is excluded
- * with NOT_IN_RESTORED_SEND, so the composer never shows as reached a session the request will
- * not ask for; editing anything drops the restored request and the live plan takes over. A named
- * session that has left since is still a recipient here: the request asks for it, and the server
- * excludes it against its own registry and names it on the broadcast.
+ * named, whatever the registry says now. A selected session the request does not name is
+ * excluded, so the composer never shows as reached a session the request will not ask for: with
+ * NOT_IN_RESTORED_SEND when it has come back since and an edit - which drops the restored request
+ * for the live plan - would include it, and otherwise with the reason the live plan would give.
+ * A named session that has left since is still a recipient here: the request asks for it, and the
+ * server excludes it against its own registry and names it on the broadcast.
  */
-export function restoredBroadcastPlan(
+function restoredBroadcastPlan(
   restored: CreateBroadcastInput,
   selected: ReadonlySet<string>,
   agents: readonly Agent[]
 ): BroadcastPlan {
-  const live = new Map(agents.map((agent) => [agent.session_id, agent]));
+  const live = sessionsById(agents);
   const named = new Set(restored.session_ids);
   const excluded: BroadcastExclusionPlan[] = [];
   for (const sessionID of selected) {
-    if (!named.has(sessionID)) {
-      excluded.push({ agent: live.get(sessionID), reason: NOT_IN_RESTORED_SEND, sessionID });
-    }
+    if (named.has(sessionID)) continue;
+    const agent = live.get(sessionID);
+    excluded.push(
+      liveExclusion(sessionID, agent, restored.delivery) ?? {
+        agent,
+        reason: NOT_IN_RESTORED_SEND,
+        sessionID,
+      }
+    );
   }
   return { excluded, recipients: [...restored.session_ids] };
+}
+
+/** What the composer would send, and the plan it shows for it. */
+export interface ComposedBroadcast {
+  readonly input: CreateBroadcastInput;
+  readonly plan: BroadcastPlan;
+}
+
+/**
+ * The composer's one restored-or-live decision. A restored request goes out word for word and is
+ * described as it is (`restoredBroadcastPlan`); otherwise the live plan of the current composition
+ * names the sessions, under the composition's key.
+ */
+export function composedBroadcast(
+  composition: {
+    readonly delivery: MessageDeliveryMode;
+    readonly draft: string;
+    readonly restored: CreateBroadcastInput | null;
+    readonly selected: ReadonlySet<string>;
+    readonly sendKey: string;
+  },
+  agents: readonly Agent[]
+): ComposedBroadcast {
+  const { delivery, draft, restored, selected, sendKey } = composition;
+  if (restored !== null) {
+    return { input: restored, plan: restoredBroadcastPlan(restored, selected, agents) };
+  }
+  const plan = broadcastPlan(selected, agents, delivery);
+  return {
+    input: { body: draft, delivery, idempotency_key: sendKey, session_ids: plan.recipients },
+    plan,
+  };
 }
 
 /**

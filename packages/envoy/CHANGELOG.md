@@ -32,8 +32,9 @@
   is answered `200` with the broadcast the key made, even while the listener is down; the same
   key with a different request is `409 BROADCAST_KEY_REUSED`, naming that broadcast as
   `broadcast_id`, and sends nothing; two requests carrying one key at once write one broadcast.
-  A missing or malformed key is `400 BROADCAST_INPUT`, whose text tells a page loaded before
-  this change to restore its draft, copy the message, reload and send again. Keys are stored
+  A missing key or one with another character is `400 BROADCAST_INPUT`, and one over 128
+  characters `400 CAP_EXCEEDED`; only the missing-key text adds what a page loaded before this
+  change should do (restore its draft, copy the message, reload and send again). Keys are stored
   per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
   broadcast (LEGION-446).
 

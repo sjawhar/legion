@@ -3,6 +3,7 @@ import type { Message } from "../web/src/api/types";
 import {
   type FakeSession,
   getSentMessages,
+  postedBroadcasts,
   refuseBroadcasts,
   setLiveSessions,
   setSessionLive,
@@ -1271,12 +1272,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted: unknown[] = [];
-    page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-        posted.push(request.postDataJSON());
-      }
-    });
+    const posted = postedBroadcasts(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1335,12 +1331,7 @@ test("a human-paced double click on one Retry sends that message once, and never
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted: { body: string }[] = [];
-    page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-        posted.push(request.postDataJSON());
-      }
-    });
+    const posted = postedBroadcasts(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1397,12 +1388,7 @@ test("a selection over the broadcast limit says so and never asks the server", a
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posts: string[] = [];
-    page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-        posts.push(request.url());
-      }
-    });
+    const posts = postedBroadcasts(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const composer = page.getByRole("region", { name: "Broadcast" });
@@ -1453,12 +1439,7 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posts: string[] = [];
-    page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-        posts.push(request.url());
-      }
-    });
+    const posts = postedBroadcasts(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const composer = page.getByRole("region", { name: "Broadcast" });

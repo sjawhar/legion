@@ -137,11 +137,7 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	key := broadcastKey{login: canonicalLogin(actor.ID), key: input.IdempotencyKey}
-	if key.digest, err = broadcastRequestDigest(input.Body, input.Delivery, requested); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
+	key := newBroadcastKey(actor, input.IdempotencyKey, input.Body, input.Delivery, requested)
 	// A key this human has already used answers its broadcast before anything else is read: a
 	// retry of a send that landed owes nothing to the registry and must not fail because the
 	// listener is down.
@@ -224,12 +220,12 @@ func validateBroadcastInput(body, delivery, key string, sessionIDs []string) ([]
 	if !validDelivery(delivery) {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "delivery must be one of btw, aside, steer")
 	}
-	// The refusal a tab opened before this field shipped meets: it names the hole it closes and
-	// what to do, in order - the failed row is the only copy of the message, a reload drops it,
-	// and the shell's new-version notice checks only on a window focus.
+	// The rule comes first, since it is the answer for every keyless caller; the second sentence is
+	// for a page loaded before the field shipped, whose failed row is the only copy of the message
+	// and which a reload drops, so it says what to do, in order.
 	if key == "" {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT",
-			"idempotency_key is required. This page predates send keys (LEGION-446), without which a repeated press would reach every agent twice: press Restore draft and copy the message, then reload the page and send it again")
+			"idempotency_key is required, one per send. On a page loaded before it was required: press Restore draft and copy the message, then reload the page and send it again")
 	}
 	if !broadcastKeyPattern.MatchString(key) {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT",
@@ -263,20 +259,22 @@ func validateBroadcastInput(body, delivery, key string, sessionIDs []string) ([]
 	return requested, nil
 }
 
-// broadcastRequestDigest fingerprints what a send asked for - the body, the mode and the
-// requested sessions in order, after validateBroadcastInput trimmed and de-duplicated them - so a
-// repeat of an idempotency key can be told from a reuse of it.
-func broadcastRequestDigest(body, delivery string, requested []string) (string, error) {
+// newBroadcastKey is what a send's key is judged by: the sender's canonical login, the key, and a
+// fingerprint of what the send asked for - the body, the mode and the requested sessions in order,
+// after validateBroadcastInput trimmed and de-duplicated them - so a repeat of a key can be told
+// from a reuse of it.
+func newBroadcastKey(actor model.Actor, key, body, delivery string, requested []string) broadcastKey {
 	encoded, err := json.Marshal(struct {
 		Body       string   `json:"body"`
 		Delivery   string   `json:"delivery"`
 		SessionIDs []string `json:"session_ids"`
 	}{body, delivery, requested})
 	if err != nil {
-		return "", err
+		// A struct of strings always encodes.
+		panic(err)
 	}
 	sum := sha256.Sum256(encoded)
-	return hex.EncodeToString(sum[:]), nil
+	return broadcastKey{login: canonicalLogin(actor.ID), key: key, digest: hex.EncodeToString(sum[:])}
 }
 
 // answerHeldBroadcastKey answers a send whose key this human has already used, and reports

@@ -18,7 +18,7 @@ import type {
 } from "../../api/types";
 import { AuthGate } from "../../app";
 import { orderAgents, partitionAgents } from "./AgentsPage";
-import { broadcastPlan, broadcastSendState } from "./broadcast-plan";
+import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -1693,7 +1693,7 @@ function posted(page: BroadcastSpy, index: number): CreateBroadcastInput {
 // human sends it again. Until something is edited the request goes out word for word, key
 // included, so a send that did land behind the refusal is answered as the repeat it is; the first
 // edit makes it a new composition, under a new key.
-test("Restore draft re-sends the refused request word for word, and the first edit mints a new key", async () => {
+test("Restore draft re-sends the refused request word for word, and the first edit drops it for a new send", async () => {
   const page = renderAgents();
   const refuse = async () => {
     throw new Error("Envoy listener unreachable");
@@ -1863,6 +1863,34 @@ test("a selected agent that came back is shown as not in the restored send, and 
     page.view.unmount();
     page.restore();
   }
+});
+
+// The security review's minor: only a session an edit would bring in is "not in the refused send";
+// one the live plan still leaves out keeps the reason the live plan gives.
+test("a restored send names a selected session it leaves out by the reason an edit would keep, unless it has come back", () => {
+  const [planner, reviewer] = agents;
+  const restored = {
+    body: "Still here?",
+    delivery: "btw",
+    idempotency_key: "refused-key",
+    session_ids: ["planner-session"],
+  } satisfies CreateBroadcastInput;
+  const composition = {
+    delivery: "btw",
+    draft: "Still here?",
+    restored,
+    selected: new Set(["planner-session", "reviewer-session"]),
+    sendKey: "next-key",
+  } as const;
+  const reasons = (live: readonly Agent[]) =>
+    composedBroadcast(composition, live).plan.excluded.map((item) => item.reason);
+
+  expect(reasons([planner, reviewer])).toEqual(["does not advertise BTW"]);
+  expect(reasons([planner])).toEqual(["no live session"]);
+  expect(reasons([planner, { ...reviewer, capabilities: ["aside", "btw"] }])).toEqual([
+    "not in the refused send; edit to include it",
+  ]);
+  expect(composedBroadcast(composition, [planner, reviewer]).input).toBe(restored);
 });
 
 // Two deliberate sends of the same words are two broadcasts: each composition carries a key of its

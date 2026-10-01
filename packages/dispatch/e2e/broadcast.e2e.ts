@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-import type { CreateBroadcastInput } from "../web/src/api/types";
 import {
   type FakeSession,
   getSentMessages,
+  postedBroadcasts,
   refuseBroadcasts,
   setLiveSessions,
   setSessionLive,
@@ -208,12 +208,7 @@ test("a second identical send of one composition is answered the original broadc
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted: CreateBroadcastInput[] = [];
-    page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-        posted.push(request.postDataJSON() as CreateBroadcastInput);
-      }
-    });
+    const posted = postedBroadcasts(page);
     await page.goto("/agents");
     await page
       .getByRole("region", { name: "Agents" })
@@ -266,12 +261,7 @@ test("a session that leaves between a refused send and its restore is still in t
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted: CreateBroadcastInput[] = [];
-    page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
-        posted.push(request.postDataJSON() as CreateBroadcastInput);
-      }
-    });
+    const posted = postedBroadcasts(page);
     const refusal = await refuseBroadcasts(page);
     await page.goto("/agents");
     await page
