@@ -23,6 +23,9 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
+- `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
+  CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
+  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/pi-envoy/roles/core/tester.md`, `core/reviewer.md`);
 - the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon resolves and validates its bundle at boot from that override or `role-prompts` beside its own executable, then snapshots it into its state directory before a pane can read it. It inlines that snapshot into each pod it runs, and `legion probe-image` resolves the task agents and skills the configured bundle names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). The role prompts are not part of the packed plugin (its `files` is `dist`), so the image supplies this explicit copy;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and

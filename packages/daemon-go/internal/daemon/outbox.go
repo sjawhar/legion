@@ -604,13 +604,15 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if err != nil {
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
-	if _, err := r.provision(ctx, workspace.Request{
+	provisioned, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: credentialHelper(r.stateDir),
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
+	workspace.WarmCodegraphIndex(ctx, provisioned.Dir)
 	return nil
 }
 
