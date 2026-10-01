@@ -78,6 +78,10 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := removeRepositoryIdentity(ctx, run, workspace.Clone); err != nil {
 		return Workspace{}, err
 	}
+	// The CodeGraph warm-up (WarmCodegraphIndex, AGENTC-1305 §7) runs outside Provision: each
+	// caller's own repository-wide serialization (the pod init container's flock,
+	// cmd/legion/workspace_init.go; the Go daemon's host provisioning has none on this path) must
+	// not queue behind an index build that reads only this one issue's own workspace.
 	return workspace, nil
 }
 

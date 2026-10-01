@@ -250,6 +250,72 @@ func TestBroadcastRecipientRepliesAppearInTheBroadcastAndItsSummary(t *testing.T
 	}
 }
 
+// Every message read names the broadcast that sent the message, and says null for a message no
+// broadcast sent, so a session reading a direct message back can tell a person's own message to
+// it from one recipient's copy of a broadcast: the thread read a session confirms a delivery
+// with, the Agents page's conversation list, and each reply in a thread.
+func TestMessageReadsNameTheBroadcastThatSentThem(t *testing.T) {
+	listener, _ := newBroadcastListener(t, broadcastSessions)
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+
+	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+		"body": "Status?", "delivery": "steer", "session_ids": []string{"planner"},
+	}, "alice"))
+	broadcastMessage := awaitBroadcastDeliveries(t, handler, created.ID).Recipients[0].Message.ID
+	direct := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/planner/messages", map[string]any{
+		"body": "Where is the dashboard?", "delivery": "steer",
+	}, "alice")
+	if direct.Code != http.StatusCreated {
+		t.Fatalf("direct message: status=%d body=%s", direct.Code, direct.Body.String())
+	}
+	directMessage := decodeBody[model.Message](t, direct).ID
+	if reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+broadcastMessage+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "planner"}, "attempt": 1, "body": "Green.",
+	}); reply.Code != http.StatusCreated {
+		t.Fatalf("recipient reply: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+
+	type rawRead struct {
+		Message map[string]json.RawMessage   `json:"message"`
+		Replies []map[string]json.RawMessage `json:"replies"`
+	}
+	broadcastID := `"` + created.ID + `"`
+	threadRead := func(id string) rawRead {
+		t.Helper()
+		read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+id+"?session=planner", nil)
+		if read.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/messages/%s: status=%d body=%s", id, read.Code, read.Body.String())
+		}
+		return decodeBody[rawRead](t, read)
+	}
+	fromBroadcast := threadRead(broadcastMessage)
+	if got := string(fromBroadcast.Message["broadcast_id"]); got != broadcastID {
+		t.Fatalf("a broadcast recipient's message reads broadcast_id %s, want %s", got, broadcastID)
+	}
+	if len(fromBroadcast.Replies) != 1 || string(fromBroadcast.Replies[0]["broadcast_id"]) != "null" {
+		t.Fatalf("the session's reply in a broadcast thread = %v, want one reply with broadcast_id null", fromBroadcast.Replies)
+	}
+	if got, present := threadRead(directMessage).Message["broadcast_id"]; !present || string(got) != "null" {
+		t.Fatalf("a direct message reads broadcast_id %q (present %v), want null", got, present)
+	}
+
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/planner/messages", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/agents/planner/messages: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	byID := map[string]string{}
+	for _, read := range decodeBody[[]rawRead](t, listed) {
+		var id string
+		if err := json.Unmarshal(read.Message["id"], &id); err != nil {
+			t.Fatalf("decode a listed conversation's id: %v", err)
+		}
+		byID[id] = string(read.Message["broadcast_id"])
+	}
+	if byID[broadcastMessage] != broadcastID || byID[directMessage] != "null" {
+		t.Fatalf("the Agents page's conversations read broadcast_id %v, want %s for the broadcast and null for the direct message", byID, broadcastID)
+	}
+}
+
 // Nothing is written when no selected session can take the mode: the sender is told why
 // rather than left with an empty broadcast to explain.
 func TestBroadcastWithNoReachableRecipientIsRefusedAndWritesNothing(t *testing.T) {

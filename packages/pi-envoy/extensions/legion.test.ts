@@ -33,6 +33,7 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import pkg from "../package.json";
+import { noteInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
@@ -148,6 +149,7 @@ type TestPi = {
     readonly discriminatedUnion: (key: string, options: readonly unknown[]) => unknown;
   };
   readonly sendMessage: PiApi["sendMessage"];
+  readonly sendUserMessage: PiApi["sendUserMessage"];
   readonly appendEntry: PiApi["appendEntry"];
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
@@ -241,6 +243,7 @@ afterEach(async () => {
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   resetLegionBootstrappedSessionForTests();
+  resetInjectedUserTurnsForTests();
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
     if (value === undefined) delete process.env[key];
@@ -300,6 +303,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       discriminatedUnion: () => ({}),
     },
     sendMessage: (message) => sentMessages.push(message),
+    sendUserMessage: () => undefined,
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
     },
@@ -463,6 +467,7 @@ function sessionContext(
       getSessionId: () => sessionID,
       getSessionFile: () => sessionFile,
       ensureOnDisk,
+      getEntries: () => [],
     },
     setInterval: () => undefined,
     setTimeout: () => undefined,
@@ -2674,7 +2679,9 @@ describe("Legion OMP extension", () => {
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       bash("legion gh -- pr view 7"),
       bash(`legion handoff write --phase implement --data '{"proof":["ran it"]}'`),
-      bash("jq '.rounds += [$r]' --argjson r '{}' .legion/test.json | legion handoff write --phase test"),
+      bash(
+        "jq '.rounds += [$r]' --argjson r '{}' .legion/test.json | legion handoff write --phase test"
+      ),
       bash("legion handoff read"),
       bash('"$LEGION_STATE_DIR/bin/legion" handoff read --phase plan'),
       bash("legion handoff write --help"),
@@ -3209,6 +3216,7 @@ describe("Legion OMP extension", () => {
           getSessionId: () => liveSessionID,
           getSessionFile: () => liveSessionFile,
           ensureOnDisk: async () => undefined,
+          getEntries: () => [],
         },
         setInterval: (callback) => ticks.push(callback),
       },
@@ -4682,6 +4690,49 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Round 2 pushed.")).toEqual(followUp("handoff_complete"));
     });
 
+    // A person's Send or Aside from Dispatch's Agents page reaches the session as its own user
+    // turn (extensions/envoy.ts), a user message exactly like the daemon's assignment. It is an
+    // inbound event, as its Envoy card was before: it does not open a phase, and it wakes a stall
+    // that already had its follow-up or a WAITING reply.
+    const personsMessage = {
+      message: {
+        role: "user",
+        attribution: "user",
+        content: [{ type: "text", text: "Where is the dashboard?" }],
+        timestamp: 1,
+      },
+    };
+
+    test("a person's direct message the session took as its own turn opens no phase; the daemon's assignment still does", async () => {
+      const worker = await bootStalling({});
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?", "m-1");
+      await worker.arrives(personsMessage);
+      expect(await worker.settles("It is at /dash.")).toBeUndefined();
+
+      await worker.arrives(assignment);
+      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("a person's direct message wakes a stall that had its WAITING reply, as its card did", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("WAITING: CI on the pull request")).toBeUndefined();
+
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?", "m-1");
+      await worker.arrives(personsMessage);
+      expect(await worker.settles("It is at /dash.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("the same words arriving again as a user message are the daemon's, not the person's", async () => {
+      const worker = await bootStalling({});
+      noteInjectedUserTurn("ses_stall", "Where is the dashboard?", "m-1");
+      await worker.arrives(personsMessage);
+      expect(await worker.settles("It is at /dash.")).toBeUndefined();
+
+      await worker.arrives({ message: { ...personsMessage.message, timestamp: 2 } });
+      expect(await worker.settles("Answered.")).toEqual(followUp("handoff_complete"));
+    });
+
     test("a handoff_complete whose command fails is an error result and leaves the phase open", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
@@ -4769,7 +4820,10 @@ describe("Legion OMP extension", () => {
         )
       ).toEqual({
         content: [
-          { type: "text", text: "handoff_complete takes no phase for a merger, which writes no handoff" },
+          {
+            type: "text",
+            text: "handoff_complete takes no phase for a merger, which writes no handoff",
+          },
         ],
         details: {},
         isError: true,
@@ -5284,14 +5338,26 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
 
     await expect(
-      toolCall({ toolName: "bash", toolCallId: "go-grant-one", input: { command: "legion gh -- pr view 7" } }, pane.context)
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "go-grant-one",
+          input: { command: "legion gh -- pr view 7" },
+        },
+        pane.context
+      )
     ).resolves.toBeUndefined();
     await expect(
-      toolCall({ toolName: "bash", toolCallId: "go-grant-two", input: { command: "legion state" } }, pane.context)
+      toolCall(
+        { toolName: "bash", toolCallId: "go-grant-two", input: { command: "legion state" } },
+        pane.context
+      )
     ).resolves.toBeUndefined();
 
     expect(await grantFileContents(pane.grantFile)).toEqual({ grant: "go-grant-2", mode: 0o600 });
-    expect(daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")).toEqual([
+    expect(
+      daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")
+    ).toEqual([
       {
         path: "/legion/v1/grants",
         body: {

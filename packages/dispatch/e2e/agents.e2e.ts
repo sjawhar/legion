@@ -975,7 +975,7 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
     agents,
     composer,
     excludedChip: (title: string) =>
-      composer.getByRole("button", { name: new RegExp(`^${title} · does not advertise btw`) }),
+      composer.getByRole("button", { name: new RegExp(`^${title} · does not advertise BTW`) }),
     excludedLine: composer.getByText(/^Excluded:/),
     limit: composer.getByText(/^At most 100 recipients per broadcast/),
     notice: composer.getByText(NOTICE),
@@ -1004,7 +1004,7 @@ test("with half the recipients unable to take the mode, the compact composer kee
       for (let index = 21; index <= 40; index += 1) {
         await expect
           .soft(fixture.excludedLine, at)
-          .toContainText(`Planner ${index} (does not advertise btw)`);
+          .toContainText(`Planner ${index} (does not advertise BTW)`);
       }
       const last = await fixture.excludedLine.evaluate((element) => {
         const lastName = "Planner 40";
@@ -1485,7 +1485,7 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
     // Excluded line, which names each agent, why, and the mode that would reach them.
     const dead = composer.getByRole("button", { name: "No recipient" });
     const why =
-      "Excluded: Builder A (does not advertise btw), Builder B (does not advertise btw). Nothing is sent to them, and no other mode is substituted. Sending as steer would reach 2 of them.";
+      "Excluded: Builder A (does not advertise BTW), Builder B (does not advertise BTW). Nothing is sent to them, and no other mode is substituted. Sending as Send would reach 2 of them.";
     await expect(dead).toBeDisabled();
     await expect(dead).toHaveAccessibleDescription(why);
     await expect(dead).toHaveAttribute("title", why);

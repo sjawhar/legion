@@ -33,6 +33,23 @@
 
 ### Added
 
+- The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
+  `task(agent="plan-gap-analyst")`, which finds the hidden requirements, ambiguities, and
+  acceptance criteria no machine could check that the issue leaves unsaid, each with what the plan
+  must answer. After it drafts, it runs `task(agent="plan-reviewer")`, which checks that the plan
+  can be carried out as written, approves when in doubt, and names at most three blocking issues,
+  each with its evidence. The planner revises for at most three rounds, then proceeds with the
+  issues still standing; a check whose model call fails is recorded and never blocks the plan. The
+  plan handoff records both results (`gapAnalysis`, `planReview`). Both agents ship in `agents/`
+  with read-only file tools: the gap analyst runs on the operator's `@oracle` role and the reviewer
+  on `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the
+  reviewer's pair. Oh My Pi also gives each the Dispatch and Envoy tools; their prompts forbid
+  writing through them, and nothing enforces it (LEGION-428). The Go daemon build's role prompts
+  dispatch `plan-gap-analyst` and `plan-reviewer`, and its boot gate refuses a plugin that ships
+  neither, so install the plugin first on either runtime: on the Sandbox runtime, the worker image
+  built from this release before the Go daemon build; on the tmux runtime, this
+  `@sjawhar/pi-legion-envoy` release before restarting the Go daemon. An old daemon build boots on
+  the new plugin.
 - Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
   `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
   ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`
@@ -126,6 +143,24 @@
 
 ### Changed
 
+- A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
+  turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
+  (LEGION-394). The extension asks Dispatch, with its own bearer, to accept the frame's attempt
+  (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`, which takes only a person's own fresh
+  Send or Aside to this session; its conditions are that route's row in
+  `packages/envoy/cmd/dispatch/AGENTS.md`), and only on that 200 sends the body Dispatch stored,
+  never the frame's text: Send (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`), as
+  the accepted attempt says. Its own checks can only keep a card: it never accepts an attempt it
+  already delivered, as a card or as a turn, recording each one in the session's transcript
+  (`envoy-dispatch-handled-attempt`) before it goes out and reading every such entry back on
+  restore, so a replayed frame, or one forged for a Send that arrived as a card, is a card, even
+  after a restart, while a person's retry of that Send can still be their turn. Anything else, a
+  refused accept, an error, a timeout or a Dispatch configuration that no longer resolves, keeps
+  its card and posts nothing. The live stream tags that user message with `dispatchMessageId`, so
+  Dispatch's conversation view shows it once, and in a Legion phase worker it counts as an inbound
+  event, as its card did, except a Send or an Aside sent in between the run's last queue or aside
+  poll and its `agent_end`, which the host runs as a turn of its own: that one shows twice and
+  counts as an assignment (`packages/pi-envoy/AGENTS.md`).
 - The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
   quote or attribution that came with it; every rule, command and example stays, and a decision
   keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules

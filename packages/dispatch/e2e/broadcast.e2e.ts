@@ -79,7 +79,7 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
     await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("steer");
     // The Reviewer advertises `aside` only. It stays visible and is left out; no other mode is
     // substituted for it.
-    await expect(composer.getByText("Excluded: Reviewer (does not advertise steer)")).toBeVisible();
+    await expect(composer.getByText("Excluded: Reviewer (does not advertise Send)")).toBeVisible();
     await expect(
       composer.getByRole("heading", { name: "Broadcast to 3 of 4 selected" })
     ).toBeVisible();
@@ -100,7 +100,7 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
     await expect(view.getByRole("article")).toHaveText([/Tester/, /Observer/, /Planner/]);
     for (const title of ["Tester", "Observer", "Planner"]) {
       await expect(
-        view.getByRole("article", { name: title }).getByText(`Sent to ${title} (steer)`)
+        view.getByRole("article", { name: title }).getByText(`Sent to ${title} (Send)`)
       ).toBeVisible();
     }
     await expect(view.getByRole("article", { name: "Reviewer" })).toHaveCount(0);

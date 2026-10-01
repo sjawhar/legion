@@ -468,12 +468,24 @@ func TestMarkSnippetEscapesMarkupBeforeInjectingSearchMarks(t *testing.T) {
 	}
 }
 
+func TestSearchReturnsEmptyResultsForStopWordOnlyQueries(t *testing.T) {
+	handler := newTestHandler(t)
+
+	for _, query := range []string{"down", "up", "is", "the"} {
+		t.Run(query, func(t *testing.T) {
+			body := searchResponse(t, handler, "q="+query)
+			if len(body.Results) != 0 {
+				t.Fatalf("search %q results = %#v, want no results", query, body.Results)
+			}
+		})
+	}
+}
+
 func TestSearchRejectsInvalidQueries(t *testing.T) {
 	handler := newTestHandler(t)
 	cases := map[string]string{
 		"q=a":                  "INVALID_QUERY",
 		"":                     "INVALID_QUERY",
-		"q=the":                "INVALID_QUERY",
 		"q=astrolabe&limit=0":  "INVALID_LIMIT",
 		"q=astrolabe&limit=51": "INVALID_LIMIT",
 		"q=astrolabe&limit=x":  "INVALID_LIMIT",

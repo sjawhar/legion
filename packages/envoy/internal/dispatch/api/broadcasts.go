@@ -305,11 +305,12 @@ func (s *server) writeBroadcast(
 		// later left a stranded recipient with no attempt at all, which only a delivery in a
 		// DIFFERENT mode could move, and that is a genuine second frame where the first landed.
 		// claimed_at stays null, so recordPendingMessageDelivery reads the row as free and
-		// resumes it instead of opening a second attempt beside it.
+		// resumes it instead of opening a second attempt beside it. The author asked for it, and
+		// the resume keeps that.
 		attempt, err := scanMessageDelivery(tx.QueryRow(ctx, `
-			insert into message_deliveries (message_id, attempt, delivery, session_id, state)
-			values ($1, 1, $2, $3, 'pending')
-			returning `+messageDeliveryColumns, message.ID, delivery, recipient.sessionID))
+			insert into message_deliveries (message_id, attempt, delivery, session_id, state, requested_by)
+			values ($1, 1, $2, $3, 'pending', $4)
+			returning `+messageDeliveryColumns, message.ID, delivery, recipient.sessionID, author))
 		if err != nil {
 			return broadcastRead{}, nil, err
 		}

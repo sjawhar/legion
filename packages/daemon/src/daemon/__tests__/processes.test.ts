@@ -1042,6 +1042,21 @@ describe("ProcessManager", () => {
       ],
       ["jj", "config", "list", "--repo", "--include-overridden", "-R", repo, "user.name"],
       ["jj", "config", "list", "--repo", "--include-overridden", "-R", repo, "user.email"],
+      [
+        "sh",
+        "-c",
+        'exec env -i PATH="$PATH" HOME="$HOME" DO_NOT_TRACK=1 codegraph "$@"',
+        "codegraph",
+        "status",
+        "--json",
+      ],
+      [
+        "sh",
+        "-c",
+        'exec env -i PATH="$PATH" HOME="$HOME" DO_NOT_TRACK=1 codegraph "$@"',
+        "codegraph",
+        "init",
+      ],
       ["tmux", "-L", "legion-omp", "has-session", "-t", "legion-omp"],
       [
         "tmux",

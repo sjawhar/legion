@@ -17,6 +17,7 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import { MODE_LABELS } from "../conversation/delivery";
 import { firstLine } from "../conversation/ReplyQuote";
 import { useAgents } from "../conversation/useAgents";
 import { Timestamp } from "../refs/Timestamp";
@@ -71,7 +72,7 @@ export function BroadcastsPage(): ReactNode {
                 <p
                   className={`flex flex-wrap items-center gap-2 self-stretch text-xs ${textMutedOnCanvas}`}
                 >
-                  <LabelPill>{sent.delivery}</LabelPill>
+                  <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
                   <span>{resolveAuthor(sent.author, titles).label}</span>
                   <Timestamp at={sent.created_at} />
                   <span>

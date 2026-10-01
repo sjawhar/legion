@@ -73,7 +73,13 @@ import {
   type ThreadReply,
   visibleConversationItems,
 } from "./conversation-model";
-import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  duplicateText,
+  isSafeRetry,
+  MODE_LABELS,
+  safeRetryGuidance,
+  withGuidance,
+} from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -497,13 +503,7 @@ function CommentDeliveryList({
             )}
             {disabled || canRetry ? null : (
               <span className={textMutedOnSurface}>
-                {delivery.target} no longer supports{" "}
-                {delivery.delivery === "btw"
-                  ? "BTW"
-                  : delivery.delivery === "aside"
-                    ? "Aside"
-                    : "normal delivery"}
-                .
+                {delivery.target} no longer supports {MODE_LABELS[delivery.delivery]}.
               </span>
             )}
           </li>

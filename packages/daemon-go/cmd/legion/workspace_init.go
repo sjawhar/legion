@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -116,7 +117,8 @@ func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, usage string, s
 // run where the provisioning token is pointed at: this is the process that runs git and jj against what every
 // agent of the tree can write. Then it installs the gh shim, creates the directories the main
 // container mounts, holds a resume to the same agent, and provisions from the feed under the
-// repository lock, which it holds until it returns.
+// repository lock, released as soon as Provision returns so the CodeGraph warm-up that follows
+// never queues a sibling pod's provisioning behind one potentially slow index build.
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
@@ -183,7 +185,8 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	if err != nil {
 		return err
 	}
-	defer release()
+	releaseOnce := sync.OnceFunc(release)
+	defer releaseOnce()
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repository, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
@@ -192,6 +195,11 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	if err != nil {
 		return err
 	}
+	// The repository lock is this pod's alone to hold; indexing reads only this issue's own
+	// workspace directory, so it must not queue a sibling pod's provisioning behind a
+	// potentially slow index build (WarmCodegraphIndex's doc).
+	releaseOnce()
+	workspace.WarmCodegraphIndex(ctx, provisioned.Dir)
 	fmt.Fprintf(stdout, "workspace-init: %s on %s\n", provisioned.Dir, provisioned.Bookmark)
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
 		return writeRecoveryMarker(ctx, run, provisioned.Dir, fromRef)

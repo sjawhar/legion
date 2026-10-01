@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -9,6 +10,8 @@ import type {
   InboxRow,
   IssueSummary,
   Message,
+  MessageDelivery,
+  MessageDeliveryMode,
   MessageRead,
   UserAgentStates,
 } from "../../api/types";
@@ -847,7 +850,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
+    const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(false);
     const sameMode = within(planner).getByRole("button", { name: "Retry" });
     expect(sameMode.hasAttribute("disabled")).toBe(false);
@@ -867,7 +870,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
   }
 });
 
-test("Send normally disables when the target does not advertise steer", async () => {
+test("Use Send instead is disabled when the target does not advertise steer", async () => {
   const root = message("Can this ship?", {
     deliveries: [
       {
@@ -889,10 +892,10 @@ test("Send normally disables when the target does not advertise steer", async ()
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
+    const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     expect(retry.hasAttribute("title")).toBe(false);
-    await within(planner).findByText("Planner does not support normal delivery — use BTW.");
+    await within(planner).findByText("Planner does not support Send — use BTW.");
     expect(within(planner).getByRole("button", { name: "Retry" }).hasAttribute("disabled")).toBe(
       false
     );
@@ -901,6 +904,134 @@ test("Send normally disables when the target does not advertise steer", async ()
     page.restore();
   }
 });
+
+/** One attempt of `messageID` to `sessionID` in `delivery` mode, sent. */
+function sentAttempt(
+  messageID: string,
+  delivery: "aside" | "btw" | "steer",
+  overrides: Partial<MessageDelivery> = {}
+): MessageDelivery {
+  return {
+    attempt: 1,
+    created_at: recentAttemptAt,
+    delivery,
+    envelope_id: "envelope-1",
+    error: null,
+    message_id: messageID,
+    reply_id: null,
+    session_id: "planner-session",
+    state: "sent",
+    ...overrides,
+  };
+}
+
+const accepted = { accepted_as: "user_turn", accepted_at: recentAttemptAt } as const;
+
+// A person's direct Send or Aside that an Oh My Pi session took as its own user turn is answered
+// in the session's conversation, never with a Dispatch reply, so its card waits on no reply and
+// offers no other way to send it. The session records that with Dispatch; nothing else says it,
+// so every attempt the session did not accept - a Claude Code session's, an older plugin's, an
+// accept Dispatch refused - keeps today's card and its mode-change row.
+for (const [name, session, read, headline, retries] of [
+  [
+    "a person's direct Aside the session took as its own turn",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside", accepted)],
+      }),
+      replies: [],
+    },
+    "Delivered to Planner's conversation (Aside)",
+    0,
+  ],
+  [
+    "a person's reply the session took as its own turn",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside", accepted)],
+      }),
+      replies: [
+        message("And the logs?", {
+          deliveries: [sentAttempt("message-2", "steer", accepted)],
+          id: "message-2",
+          in_reply_to: "message-1",
+        }),
+      ],
+    },
+    "Delivered to Planner's conversation (Send)",
+    0,
+  ],
+  [
+    "a turn the session took whose send the listener later recorded as failed",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [
+          sentAttempt("message-1", "aside", {
+            ...accepted,
+            envelope_id: null,
+            error: RECEIPT_TIMEOUT_CAUSE,
+            state: "failed",
+          }),
+        ],
+      }),
+      replies: [],
+    },
+    "Delivered to Planner's conversation (Aside)",
+    0,
+  ],
+  [
+    "a person's direct Aside the session did not accept",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside")],
+      }),
+      replies: [],
+    },
+    "Sent to Planner (Aside)",
+    1,
+  ],
+  [
+    "an Aside an aside-only session got as a card",
+    "Reviewer",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside", { session_id: "reviewer-session" })],
+        target: "session:reviewer-session",
+      }),
+      replies: [],
+    },
+    "Sent to Reviewer (Aside)",
+    1,
+  ],
+] as const satisfies readonly (readonly [string, string, MessageRead, string, number])[]) {
+  test(`Agents shows ${name} as ${retries === 0 ? "delivered to the conversation" : "sent, awaiting a reply"}`, async () => {
+    // As a current Dispatch answers: a direct message no broadcast sent reads broadcast_id null.
+    const page = renderAgents({
+      messages: [
+        {
+          message: { ...read.message, broadcast_id: null },
+          replies: read.replies.map((reply) => ({ ...reply, broadcast_id: null })),
+        },
+      ],
+    });
+
+    try {
+      const target = card(await screen.findByRole("region", { name: "Agents" }), session);
+      expand(target, session);
+      await within(target).findByText(headline);
+      expect(within(target).queryAllByRole("button", { name: "Use BTW instead" })).toHaveLength(
+        retries
+      );
+    } finally {
+      page.view.unmount();
+      page.restore();
+    }
+  });
+}
 
 /** One exchange: a root from Alice at `createdAt`, optionally answered by the planner. */
 function exchange(
@@ -1336,9 +1467,7 @@ test("a root targeted-message retry on the Agents page checks the role's current
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard)
-        .getByRole("button", { name: "Send as BTW instead" })
-        .hasAttribute("disabled")
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();
@@ -1414,9 +1543,7 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard)
-        .getByRole("button", { name: "Send as BTW instead" })
-        .hasAttribute("disabled")
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();
@@ -1439,7 +1566,7 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
       target: { value: "btw" },
     });
     expect(
-      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise btw\)/)
+      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise BTW\)/)
     ).toBeTruthy();
     fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
       target: { value: "Stand down and report status." },
@@ -1456,6 +1583,15 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
     page.view.unmount();
     page.restore();
   }
+});
+
+test("a broadcast composer labels a mode-mismatched recipient", () => {
+  const [, reviewer] = agents;
+  const composer = broadcastPlan(new Set([reviewer.session_id]), [reviewer], "btw");
+
+  // `packages/dispatch/AGENTS.md:36-41` and `features/conversation/delivery.ts:8-12` name this
+  // composer-facing label.
+  expect(composer.excluded[0]?.reason).toBe("does not advertise BTW");
 });
 
 test("a mode both recipients advertise takes the excluded one back in", async () => {
@@ -1594,7 +1730,7 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
   const state = (
     selected: readonly string[],
     live: readonly Agent[],
-    delivery: "aside" | "btw" | "steer",
+    delivery: MessageDeliveryMode,
     body = "Report status."
   ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
   const both = [planner.session_id, reviewer.session_id];
@@ -1618,24 +1754,24 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
   // live one.
   expect(state(both, [reviewer], "btw")).toEqual(
     nobody(
-      `Excluded: session:planner-… (no live session), Reviewer (does not advertise btw). ${tail} Sending as aside would reach 1 of them.`
+      `Excluded: session:planner-… (no live session), Reviewer (does not advertise BTW). ${tail} Sending as Aside would reach 1 of them.`
     )
   );
-  // The hint picks the mode that reaches the most: aside reaches both, btw only the Planner.
+  // The hint picks the mode that reaches the most: Aside reaches both, BTW only the Planner.
   expect(state(both, agents, "steer").refusal).toMatch(
-    / Sending as aside would reach 2 of them\.$/
+    / Sending as Aside would reach 2 of them\.$/
   );
   // One session alone is "it"; a session advertising nothing gets no hint at all.
   expect(state([reviewer.session_id], [reviewer], "btw").refusal).toMatch(
-    / Sending as aside would reach it\.$/
+    / Sending as Aside would reach it\.$/
   );
   expect(state([deaf.session_id], [deaf], "btw")).toEqual(
-    nobody(`Excluded: Deaf (does not advertise btw). ${tail}`)
+    nobody(`Excluded: Deaf (does not advertise BTW). ${tail}`)
   );
 
   // Someone reached: the label counts, and an Excluded line is context beside Send, never its
   // reason, with no hint since the mode reaches someone.
-  const reviewerLeftOut = `Excluded: Reviewer (does not advertise btw). ${tail}`;
+  const reviewerLeftOut = `Excluded: Reviewer (does not advertise BTW). ${tail}`;
   expect(state(both, agents, "btw")).toEqual({
     label: "Send to 1",
     notice: reviewerLeftOut,
@@ -1716,7 +1852,7 @@ test("the header checkbox follows the filters and its count never hides a select
       within(chips)
         .getAllByRole("button")
         .map((chip) => chip.textContent)
-    ).toEqual(["Reviewer · does not advertise btw ✕"]);
+    ).toEqual(["Reviewer · does not advertise BTW ✕"]);
 
     // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
     fireEvent.change(directory, { target: { value: "" } });

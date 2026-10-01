@@ -1071,6 +1071,30 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual(["/api/v1/search?q=astrolabe"]);
   });
 
+  test("dispatch_search reports no results for an accepted stop-word query", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({ results: [], took_ms: 0 });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_search",
+      args: { query: "the" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe('No results for "the".');
+    expect(result.details).toEqual({ query: "the", results: [] });
+    expect(requests).toEqual(["/api/v1/search?q=the"]);
+  });
+
   test("dispatch_search rejects a one-character query before any request", async () => {
     let requests = 0;
     const fetchImpl = (() => {

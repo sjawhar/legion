@@ -49,7 +49,7 @@ const (
 	podHome = "/home/legion"
 	// imagePath is the image's PATH. A container's env PATH replaces the image's, so the pod's
 	// PATH repeats it after its own directories.
-	imagePath = "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"
+	imagePath = "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
 	// defaultAgent is Oh My Pi, by the path the image installs it at (LEGION_OMP_PATH).
 	defaultAgent = "/opt/omp/bin/omp"
 	// legionPlugin is the packed pi-legion-envoy the image carries, whose package.json names its

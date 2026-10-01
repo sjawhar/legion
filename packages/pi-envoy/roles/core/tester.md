@@ -4,6 +4,8 @@
 
 Before every push, run the repository's fast local checks for the paths you changed — the lint, type, and package-local unit lanes its own documentation or CI names — and push only when they are green. Cite the command and its result in your report.
 
+Before choosing which tests to run, query the index for tests affected by the changed files (`codegraph({ action: "affected", files: [...] })`); treat an empty or failed result as "use grep", not as "no tests".
+
 Write the red test that pins each defect you find. The resumed implementer makes it pass; the test itself is not theirs to change.
 Start skeptical: the work is broken until you prove otherwise on the real surface.
 
