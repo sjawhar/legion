@@ -71,9 +71,7 @@ function renderBroadcast(read: BroadcastRead, state?: { excluded: readonly Broad
     attempt({ attempt: 2, state: "sent" })
   );
   const view = render(
-    <MemoryRouter
-      initialEntries={[{ pathname: "/agents/broadcasts/broadcast-1", state }]}
-    >
+    <MemoryRouter initialEntries={[{ pathname: "/agents/broadcasts/broadcast-1", state }]}>
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
@@ -110,7 +108,8 @@ test("a broadcast page keeps the server exclusion reason as written", async () =
     expect(
       await screen.findByText(
         (_, element) =>
-          element?.textContent === "Excluded: Reviewer (does not advertise btw). Nothing was sent to them."
+          element?.textContent ===
+          "Excluded: Reviewer (does not advertise btw). Nothing was sent to them."
       )
     ).toBeTruthy();
   } finally {
@@ -155,7 +154,8 @@ test("a pending attempt nobody is carrying offers a same-mode retry and no mode 
     expect(
       within(row).getByText(
         (_, element) =>
-          element?.textContent === "Nobody is carrying this send. Retry uses Send again, which cannot deliver it twice."
+          element?.textContent ===
+          "Nobody is carrying this send. Retry uses Send again, which cannot deliver it twice."
       )
     ).toBeTruthy();
     fireEvent.click(within(row).getByRole("button", { name: "Retry" }));
