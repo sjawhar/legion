@@ -2,7 +2,7 @@ import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { dispatchPort, fakeEnvoyPort, fakeGithubPort, harnessPorts } from "./harness-ports";
-import { plainHttpHost, plainHttpProject } from "./plain-http-origin";
+import { plainHttpHost } from "./plain-http-origin";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchPort}`;
 // The plain-HTTP project's origin: the harness `baseURL` names, by a host name Chromium maps back
@@ -11,7 +11,6 @@ const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchP
 // `iphone` ignore it, since its first assertion (no secure context) fails on loopback by design.
 const harness = new URL(baseURL);
 const plainHttpOrigin = new URL(baseURL);
-plainHttpOrigin.protocol = "http:";
 plainHttpOrigin.hostname = plainHttpHost;
 const plainHttpSpec = /plain-http-origin\.e2e\.ts/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
@@ -186,7 +185,7 @@ export default defineConfig({
       use: { ...devices["Desktop Firefox"] },
     },
     {
-      name: plainHttpProject,
+      name: "chromium-plain-http",
       testMatch: plainHttpSpec,
       use: {
         ...devices["Desktop Chrome"],

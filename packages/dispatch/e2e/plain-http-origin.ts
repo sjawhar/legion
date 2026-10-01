@@ -5,4 +5,3 @@
  *  the manual check — while every request still reaches the listener. `.test` is reserved (RFC 6761)
  *  and resolves nowhere else; `.localhost` would not do, Chromium treats it as loopback. */
 export const plainHttpHost = "dispatch-e2e.test";
-export const plainHttpProject = "chromium-plain-http";

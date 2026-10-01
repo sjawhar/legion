@@ -1,7 +1,7 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, getArtifactText } from "./api";
-import { connectedDot, documentEditor, placeCaret } from "./editor";
+import { connectedDot, documentEditor, typeAtEnd } from "./editor";
 import { plainHttpHost } from "./plain-http-origin";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -24,23 +24,17 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("the page's origin is a plain-HTTP host name and not a secure context", async ({
-  browser,
-}) => {
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto("/");
-    const url = new URL(page.url());
-    expect(url.protocol).toBe("http:");
-    expect(url.hostname).toBe(plainHttpHost);
-    expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
-    expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
-    expect(await page.evaluate(() => typeof crypto.getRandomValues)).toBe("function");
-  } finally {
-    await alice.close();
-  }
-});
+/** Each test checks its own origin once its page opens. On a secure origin `crypto.randomUUID`
+ * exists and both tests pass with or without the fix, so a fixture that drifted there must fail
+ * here, in any run, filtered to one test or not. */
+async function expectPlainHttpOrigin(page: Page): Promise<void> {
+  const url = new URL(page.url());
+  expect(url.protocol).toBe("http:");
+  expect(url.hostname).toBe(plainHttpHost);
+  expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
+  expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
+  expect(await page.evaluate(() => typeof crypto.getRandomValues)).toBe("function");
+}
 
 test("a document opens and takes a new paragraph with no page error", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -54,15 +48,11 @@ test("a document opens and takes a new paragraph with no page error", async ({ b
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(`${error.name}: ${error.message}`));
     await page.goto(`/issues/${issue.key}/spec`);
+    await expectPlainHttpOrigin(page);
     await expect(documentEditor(page)).toContainText("Ship it.");
     await expect(connectedDot(page)).toHaveText("connected");
 
-    // Not `typeAtEnd`: its click and Control+End race the editor's own selection handling
-    // (ProseMirror writes its selection back to the page 20 ms after focus), and the paragraph can
-    // then open above the heading. `placeCaret` hands the editor a selectionchange it reads at once.
-    await placeCaret(page, "after", "Ship it.");
-    await page.keyboard.press("Enter");
-    await page.keyboard.type(typed);
+    await typeAtEnd(page, typed);
     // Its own paragraph: a failed Enter leaves the text appended to "Ship it." instead.
     await expect(documentEditor(page).locator("p", { hasText: typed })).toHaveText(typed);
     await expect
@@ -82,6 +72,7 @@ test("a comment body renders formatted rather than as literal Markdown", async (
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
+    await expectPlainHttpOrigin(page);
     const turns = page.getByRole("list", { name: "Conversation turns" });
     await expect(turns.locator("strong", { hasText: "formatted" })).toBeVisible();
     await expect(turns.locator("[data-markdown-fallback]")).toHaveCount(0);

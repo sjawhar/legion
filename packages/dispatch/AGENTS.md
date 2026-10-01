@@ -568,11 +568,12 @@ The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` alone, sel
 `--host-resolver-rules=MAP dispatch-e2e.test <harness host>` (`e2e/plain-http-origin.ts`) and a `baseURL` of
 `http://dispatch-e2e.test:<harness port>`, so the page's origin is a plain-HTTP host name that is not loopback — what a
 LAN address, a tailnet name or the phone of the manual check gets — where `isSecureContext` is false and
-`crypto.randomUUID` is undefined, while every request still reaches the harness listener. Its first test asserts that
-insecure context, so a fixture that drifted to a secure origin fails rather than passing for another reason; the other
-two open a document and type a paragraph into it, and check a comment body renders formatted — block ids and Markdown
-bodies both mint through `@legion/proof-editor`'s `uuidV4` (LEGION-461). `chromium` and `iphone` ignore that spec by
-file name. It skips when `PLAYWRIGHT_BASE_URL` is `https:`, where there is no plain-HTTP origin to map.
+`crypto.randomUUID` is undefined, while every request still reaches the harness listener. Its two tests open a
+document and type a paragraph into it, and check a comment body renders formatted — block ids and Markdown bodies both
+mint through `@legion/proof-editor`'s `uuidV4` (LEGION-461). Each first asserts that insecure context, so a fixture
+that drifted to a secure origin fails in any run, one test or both, rather than passing for another reason. `chromium`
+and `iphone` ignore that spec by file name. It skips when `PLAYWRIGHT_BASE_URL` is `https:`, where there is no
+plain-HTTP origin to map.
 
 ## Phone acceptance
 
