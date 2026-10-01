@@ -26,7 +26,8 @@ import { credentialGrantsQuery } from "./grants";
  * The live approval-granted credential grants the viewer approved, and those on enrollments the
  * viewer operates whoever approved them, each naming its approver and revocable with one click:
  * Dispatch sends the broker the viewer's own login, and the broker allows the revoke only when that
- * login is the grant's approver or its enrollment's operator. Rendered on the Settings page.
+ * login is the grant's approver or its enrollment's operator. A pod enrollment's slot shows under
+ * its enrollment, so the grants of two roles in one pod read apart. Rendered on the Settings page.
  */
 export function GrantsSection(): ReactNode {
   const queryClient = useQueryClient();
@@ -96,7 +97,12 @@ export function GrantsSection(): ReactNode {
                   <tr className="border-b last:border-0" key={grant.grant_id}>
                     <td className={`px-4 py-3 font-medium ${textPrimaryOnSurface}`}>
                       {grant.enrollment.kind} · {grant.enrollment.runtime_id} ·{" "}
-                      {grant.enrollment.operator ?? "—"}
+                      {grant.enrollment.operator || "—"}
+                      {grant.enrollment.slot ? (
+                        <span className={`block text-xs font-normal ${textSecondaryOnSurface}`}>
+                          slot {grant.enrollment.slot}
+                        </span>
+                      ) : null}
                     </td>
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       {grant.names.join(", ")}

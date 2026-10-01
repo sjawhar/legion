@@ -150,6 +150,9 @@ export interface CredentialEnrollment {
   kind: string;
   runtime_id: string;
   operator: string | null;
+  /** A pod enrollment's slot: one of several independent identities in one pod, which Legion
+   *  names `<role>-g<generation>`. Null for every enrollment without one. */
+  slot: string | null;
 }
 export interface CredentialDecisionEvent {
   event: string; // "approved" | "denied" | "expired" | "cancelled" | "revoked"

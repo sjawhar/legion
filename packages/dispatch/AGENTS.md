@@ -163,8 +163,11 @@ direct record link can never approve a machine login).
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-lifetime, requested/expiry timestamps, rules version, approver, then the agent's reason) and
-`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
+a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, rules
+version, approver, then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
+pair, shown whenever the record is `pending`). The broker's `enrollment.slot` (`implementer-g3`,
+null without one) is what tells the requests of two roles in one pod apart, since they share the
+pod's kind and runtime id.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
@@ -182,8 +185,8 @@ surfaces verbatim through `ApiError`'s message, never reworded.
 `GrantsSection.tsx` renders on `/settings`, under the same `FEATURE_OFF` gate: the live
 approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever
 approved them (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names its approver
-(the broker's `approver` field) and has a Revoke button that POSTs `{}` to
-`/api/v1/credential-grants/{id}/revoke`.
+(the broker's `approver` field), a pod enrollment's slot under its enrollment, and has a Revoke
+button that POSTs `{}` to `/api/v1/credential-grants/{id}/revoke`.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
