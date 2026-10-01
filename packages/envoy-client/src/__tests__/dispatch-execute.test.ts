@@ -3659,6 +3659,23 @@ describe("executeDispatchTool", () => {
       }
     });
 
+    test("names dispatch_edit_ask for the urgency, multiple and options replace and move cannot change", async () => {
+      // Rewriting an open block to raise its urgency is the delete-then-insert this refuses. replace
+      // and move keep the block but change only its text and place; dispatch_edit_ask changes its
+      // urgency, multiple and options and keeps the ask open (acceptance at 656e50a5 and 92f1c112).
+      const { outcome, edits } = edit([
+        { op: "delete", block: "b-1" },
+        {
+          op: "insert",
+          after: "block:p-1",
+          markdown: ':::ask{#b-1 urgency="high"}\nWhere should the nightly file be written?\n:::',
+        },
+      ]);
+      const guidance = (await outcome).split("\n").at(-1);
+      expect(guidance).toContain("dispatch_edit_ask");
+      expect(edits).toEqual([]);
+    });
+
     test("sends an edit that keeps every open block, reading nothing when no block is removed", async () => {
       for (const ops of [
         [{ op: "delete", block: "b-2" }],
