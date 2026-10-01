@@ -43,6 +43,7 @@ import {
   blockPlacements as collectBlockPlacements,
   composerKindFor,
   markPlacements,
+  selectionBarKindFor,
   setActiveBlockClass,
   setActiveMarkClass,
 } from "./marks";
@@ -75,23 +76,6 @@ export interface ProofDocumentProps {
   onVersionChange(version: number | null): void;
   user: AuthenticatedUser;
   version?: number;
-}
-
-function removeMarkFromDocument(editor: EditorHandle, markId: string): void {
-  let transaction = editor.view.state.tr;
-  editor.view.state.doc.descendants((node, position) => {
-    if (!node.isText) {
-      return true;
-    }
-    const mark = node.marks.find((candidate) => candidate.attrs.id === markId);
-    if (mark !== undefined) {
-      transaction = transaction.removeMark(position, position + node.nodeSize, mark);
-    }
-    return true;
-  });
-  if (transaction.docChanged) {
-    editor.view.dispatch(transaction);
-  }
 }
 
 interface SearchHighlightSupport {
@@ -359,24 +343,16 @@ export function ProofDocument({
                   case "comment":
                   case "suggest":
                   case "ask":
-                    return marginRef.current
-                      .composeForMark({
-                        anchor: {
-                          artifact: artifact.id,
-                          mark_id: action.markId,
-                          quote: action.quote,
-                        },
-                        kind: composerKindFor(action.kind),
-                      })
-                      .catch((error: unknown) => {
-                        if (editor === undefined) {
-                          throw new Error(
-                            "The editor must exist before its selection action can be cancelled."
-                          );
-                        }
-                        removeMarkFromDocument(editor, action.markId);
-                        throw error;
-                      });
+                    // The margin owns the mark from here: it removes it when the composer ends
+                    // unsaved and retypes it when the composer's kind changes.
+                    return marginRef.current.composeForMark({
+                      anchor: {
+                        artifact: artifact.id,
+                        mark_id: action.markId,
+                        quote: action.quote,
+                      },
+                      kind: composerKindFor(action.kind),
+                    });
                   default:
                     throw new Error(
                       `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
@@ -411,6 +387,9 @@ export function ProofDocument({
                     requestAnimationFrame(() => handle.focusBlock(blockId));
                   },
                   focusMark: (markId) => handle.focusMark(markId),
+                  removeMark: (markId) => handle.removeMark(markId),
+                  retypeMark: (markId, kind) =>
+                    handle.retypeMark(markId, selectionBarKindFor(kind)),
                   setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
                   setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
                 });
