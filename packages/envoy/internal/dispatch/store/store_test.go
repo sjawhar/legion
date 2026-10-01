@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -326,6 +327,56 @@ func TestEveryMigrationFromTheCensusRuleOnDeclaresACensus(t *testing.T) {
 func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
 	if err := pgmigratetest.CheckTouchedTablesAreKnown(migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The census's reading of which tables a migration touches is held to what every real migration
+// locks, applied in order to an empty database (pgmigratetest.CheckTouchedTablesAgainstLocks): a
+// statement form the patterns miss fails here, which no reading of names alone can catch.
+func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	if err := pgmigratetest.CheckTouchedTablesAgainstLocks(ctx, conn, migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The lock audit fails both ways: on a table a migration locks that the reading misses (reindex
+// is a form the patterns do not know), and on a table the reading names that the migration never
+// locks (an update spelled inside a string).
+func TestTheLockAuditRefusesAMissedTableAndAMisreadOne(t *testing.T) {
+	for name, tc := range map[string]struct{ second, want string }{
+		"a form the patterns do not know": {
+			second: "reindex table things",
+			want:   "migration 0002_second.up.sql locks things above ACCESS SHARE, which pgmigrate.TouchedTables does not read from it",
+		},
+		"a name read out of a string": {
+			second: "create table notes (body text); insert into notes (body) values ('update things set kind = null')",
+			want:   "migration 0002_second.up.sql names things, which pgmigrate.TouchedTables reads from it, but takes no lock on it",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEmptyTestStore(t)
+			conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { conn.Close(context.Background()) })
+			set := fstest.MapFS{
+				"migrations/0001_things.up.sql": {Data: []byte("create table things (id integer, kind text)")},
+				"migrations/0002_second.up.sql": {Data: []byte(tc.second)},
+			}
+			err = pgmigratetest.CheckTouchedTablesAgainstLocks(ctx, conn, set, "migrations")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckTouchedTablesAgainstLocks = %v, want it to say %q", err, tc.want)
+			}
+		})
 	}
 }
 

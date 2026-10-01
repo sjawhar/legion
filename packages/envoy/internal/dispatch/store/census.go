@@ -39,8 +39,5 @@ func census(ctx context.Context, databaseURL string, fsys fs.FS, options pgmigra
 		return nil, fmt.Errorf("connect: %w", err)
 	}
 	defer conn.Close(ctx)
-	if options.VersionTable == "" {
-		options.VersionTable = "schema_migrations"
-	}
-	return pgmigrate.Census(ctx, conn, migrations, options)
+	return pgmigrate.Census(ctx, conn, migrations, "schema_migrations", options)
 }

@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"io/fs"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -65,6 +67,18 @@ func reportText(report *pgmigrate.Report) string {
 	return out.String()
 }
 
+// refusals is every refusal in the report as it prints them after "REFUSED ": the migration's
+// name, a colon, and the reason.
+func refusals(report *pgmigrate.Report) []string {
+	var out []string
+	for _, entry := range report.Pending {
+		for _, reason := range entry.Refusals {
+			out = append(out, entry.Migration.Name+": "+reason)
+		}
+	}
+	return out
+}
+
 // A pending migration whose census counts rows is refused, naming the migration, the count and the
 // census file, and the database is left as it was: the version table does not move and the rows
 // are still there.
@@ -78,12 +92,12 @@ func TestCensusRefusesAPendingMigrationWhoseCensusCountsRowsAndWritesNothing(t *
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if !report.Refused() || len(report.Refusals) != 1 {
-		t.Fatalf("refusals = %v, want one", report.Refusals)
+	if !report.Refused() || len(refusals(report)) != 1 {
+		t.Fatalf("refusals = %v, want one", refusals(report))
 	}
 	for _, want := range []string{"0002_things_kind_check.up.sql", "counts 3", "0002_things_kind_check.census.sql"} {
-		if !strings.Contains(report.Refusals[0], want) {
-			t.Errorf("refusal %q lacks %q", report.Refusals[0], want)
+		if !strings.Contains(refusals(report)[0], want) {
+			t.Errorf("refusal %q lacks %q", refusals(report)[0], want)
 		}
 	}
 	out := reportText(report)
@@ -110,7 +124,7 @@ func TestCensusPassesAtZeroAndNamesTheTouchedTable(t *testing.T) {
 		t.Fatalf("census: %v", err)
 	}
 	if report.Refused() {
-		t.Fatalf("refused: %v", report.Refusals)
+		t.Fatalf("refused: %v", refusals(report))
 	}
 	out := reportText(report)
 	for _, want := range []string{
@@ -156,8 +170,8 @@ func TestCensusRefusesACensusThatWrites(t *testing.T) {
 			if err != nil {
 				t.Fatalf("census: %v", err)
 			}
-			if len(report.Refusals) != 1 || !strings.Contains(report.Refusals[0], tc.wantCode) || !strings.Contains(report.Refusals[0], "0002_things_kind_check.census.sql") {
-				t.Errorf("refusals = %v, want one naming %s and the census file", report.Refusals, tc.wantCode)
+			if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], tc.wantCode) || !strings.Contains(got[0], "0002_things_kind_check.census.sql") {
+				t.Errorf("refusals = %v, want one naming %s and the census file", got, tc.wantCode)
 			}
 			if got := countThings(t, store); got != 1 {
 				t.Errorf("things has %d rows, want the 1 that was there: the census wrote", got)
@@ -185,27 +199,24 @@ func TestCensusNeverPrintsRowContentWhenACensusFails(t *testing.T) {
 		t.Fatalf("census: %v", err)
 	}
 	out := reportText(report)
-	if len(report.Refusals) != 1 || !strings.Contains(report.Refusals[0], "SQLSTATE 22P02") || !strings.Contains(report.Refusals[0], "0002_things_kind_check.census.sql") {
-		t.Errorf("refusals = %v, want one naming SQLSTATE 22P02 and the census file", report.Refusals)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "SQLSTATE 22P02") || !strings.Contains(got[0], "0002_things_kind_check.census.sql") {
+		t.Errorf("refusals = %v, want one naming SQLSTATE 22P02 and the census file", got)
 	}
 	if strings.Contains(out, sentinel) || strings.Contains(out, "SENTINEL") {
 		t.Fatalf("the report printed a row's value:\n%s", out)
 	}
 }
 
-// A census that names a column the database lacks refuses when its migration is the first pending
-// one: at that schema the census was written against exactly this database, so the name is a typo.
-func TestCensusRefusesAMissingColumnInTheFirstPendingMigrationsCensus(t *testing.T) {
+// A census that names a column the database lacks refuses, and since that error points into the
+// census's own text (its position), the report prints Postgres's message, which names the column.
+func TestCensusRefusesACensusNamingAMissingColumn(t *testing.T) {
 	_, url := migratedToOne(t)
 	report, err := census(context.Background(), url, withCheck("select count(*) from things where colour = 'bad'"), pgmigrate.CensusOptions{})
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if len(report.Refusals) != 1 || !strings.Contains(report.Refusals[0], "SQLSTATE 42703") || !strings.Contains(report.Refusals[0], "first pending migration") {
-		t.Errorf("refusals = %v, want one naming 42703 and that it is the first pending migration", report.Refusals)
-	}
-	if report.Pending[0].NotAnswerable != "" {
-		t.Errorf("the typo was reported as not answerable (%q) instead of refused", report.Pending[0].NotAnswerable)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], `SQLSTATE 42703: column "colour" does not exist`) {
+		t.Errorf("refusals = %v, want one naming 42703 and the column, whose message points into the census", got)
 	}
 }
 
@@ -228,18 +239,18 @@ func TestCensusRefusesAMalformedCensus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("census: %v", err)
 			}
-			if len(report.Refusals) != 1 || !strings.Contains(report.Refusals[0], "0002_things_kind_check.census.sql") || !strings.Contains(report.Refusals[0], tc.want) {
-				t.Errorf("refusals = %v, want one naming the census file and %q", report.Refusals, tc.want)
+			if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "0002_things_kind_check.census.sql") || !strings.Contains(got[0], tc.want) {
+				t.Errorf("refusals = %v, want one naming the census file and %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// A census naming a table or column the database does not have yet refuses nothing when an
-// earlier pending migration exists, since that migration may be what creates it: here 0001, with
-// no census of its own, is pending ahead of 0002, whose census names 0001's table. The same
-// census as the FIRST pending migration refuses (the test above).
-func TestCensusReportsACensusItCannotAnswerAtThisSchemaWithoutRefusing(t *testing.T) {
+// A census naming a table or column the database does not have refuses even behind an earlier
+// pending migration that may be what creates it: the census cannot tell that from a typo without
+// applying that migration, which takes the very locks it measures. Here 0001 is pending ahead of
+// 0002, whose census names 0001's table; the refusal says to deploy the earlier one first.
+func TestCensusRefusesACensusNamingWhatOnlyAnEarlierPendingMigrationCreates(t *testing.T) {
 	store := openEmptyTestStore(t)
 	url := store.Pool.Config().ConnString()
 	set := withCheck("select count(*) from things where kind = 'bad'") // nothing applied: things does not exist yet
@@ -247,28 +258,257 @@ func TestCensusReportsACensusItCannotAnswerAtThisSchemaWithoutRefusing(t *testin
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if report.Refused() {
-		t.Fatalf("refused on an empty database: %v", report.Refusals)
-	}
-	if report.SchemaVersion != 0 || len(report.Pending) != 2 || report.Pending[1].NotAnswerable == "" {
-		t.Errorf("report = version %d, %d pending, not answerable %q", report.SchemaVersion, len(report.Pending), report.Pending[1].NotAnswerable)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "0002_things_kind_check.up.sql") || !strings.Contains(got[0], "SQLSTATE 42P01") || !strings.Contains(got[0], "deploy that migration first") {
+		t.Errorf("refusals = %v, want one for 0002 naming 42P01 and to deploy the earlier migration first", got)
 	}
 	out := reportText(report)
-	if !strings.Contains(out, "is not answerable at schema 0, so it refuses nothing") || !strings.Contains(out, "touches things: not in the database yet") {
+	if report.SchemaVersion != 0 || len(report.Pending) != 2 || !strings.Contains(out, "touches things: not in the database yet") {
 		t.Errorf("report:\n%s", out)
 	}
 }
 
-// A touched table above the limit refuses; the limit is injected so the test needs no gigabyte.
+// The same holds for a typo behind an earlier pending migration: 0002 adds a column, and 0003's
+// census misspells the one it means. A census that let it pass would let 0003 fail at boot on the
+// very row it exists to count.
+func TestCensusRefusesAMissingColumnBehindAnEarlierPendingMigration(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	if _, err := store.Pool.Exec(ctx, "insert into things (id, kind) values (1, 'bad')"); err != nil {
+		t.Fatal(err)
+	}
+	set := fstest.MapFS{
+		"migrations/0001_things.up.sql":                censusBase["migrations/0001_things.up.sql"],
+		"migrations/0002_things_note.up.sql":           {Data: []byte("alter table things add column note text")},
+		"migrations/0003_things_kind_check.up.sql":     {Data: []byte("alter table things add constraint things_kind_check check (kind <> 'bad')")},
+		"migrations/0003_things_kind_check.census.sql": {Data: []byte("select count(*) from things where knd = 'bad'")},
+	}
+	report, err := census(ctx, url, set, pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "0003_things_kind_check.up.sql") || !strings.Contains(got[0], "SQLSTATE 42703") {
+		t.Errorf("refusals = %v, want one for 0003 naming 42703", got)
+	}
+}
+
+// Pending is the runner's own rule: every version schema_migrations does not record, not every
+// version above the highest it does. A database that recorded 3 out of order (by hand, or one that
+// ran a branch) still applies 0002 at boot, so the census takes 0002's census too.
+func TestCensusTakesEveryVersionTheRunnerHasNotRecordedAsPending(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	if _, err := store.Pool.Exec(ctx, "create table others (id integer)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool.Exec(ctx, "insert into schema_migrations (version) values (3)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool.Exec(ctx, "insert into things (id, kind) values (1, 'bad')"); err != nil {
+		t.Fatal(err)
+	}
+	set := withCheck("select count(*) from things where kind = 'bad'")
+	set["migrations/0003_others.up.sql"] = &fstest.MapFile{Data: []byte("create table others (id integer)")}
+	report, err := census(ctx, url, set, pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	out := reportText(report)
+	if len(report.Pending) != 1 || report.Pending[0].Migration.Name != "0002_things_kind_check.up.sql" || !strings.Contains(out, "pending: 0002_things_kind_check.up.sql\n") {
+		t.Errorf("pending is not exactly the unrecorded 0002:\n%s", out)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "counts 1") {
+		t.Errorf("refusals = %v, want 0002's count", got)
+	}
+}
+
+// A census that casts a row's text to a reg* type fails in the type's input function, which
+// quotes the value it was given under a class-42 SQLSTATE. The census prints Postgres's message
+// only for an error that points into the census's own text (a position), never this one.
+func TestCensusNeverPrintsARowValueAnInputFunctionQuotes(t *testing.T) {
+	for name, tc := range map[string]struct{ census, code string }{
+		"regclass": {"select count(*) from things where kind::regclass is not null", "SQLSTATE 42P01"},
+		"regtype":  {"select count(*) from things where kind::regtype is not null", "SQLSTATE 42704"},
+		"regproc":  {"select count(*) from things where kind::regproc is not null", "SQLSTATE 42883"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store, url := migratedToOne(t)
+			if _, err := store.Pool.Exec(ctx, "insert into things (id, kind) values (1, 'ghp_SENTINEL_ROW_VALUE')"); err != nil {
+				t.Fatal(err)
+			}
+			report, err := census(ctx, url, withCheck(tc.census), pgmigrate.CensusOptions{})
+			if err != nil {
+				t.Fatalf("census: %v", err)
+			}
+			out := reportText(report)
+			if strings.Contains(strings.ToLower(out), "sentinel") {
+				t.Fatalf("the report printed a row's value:\n%s", out)
+			}
+			if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], tc.code) {
+				t.Errorf("refusals = %v, want one naming %s", got, tc.code)
+			}
+		})
+	}
+}
+
+// A lock holder of another role whose transaction's age Postgres hides from the census's role
+// (no pg_read_all_stats) refuses: the census cannot rule out the long transaction it exists to
+// catch. Granting that role pg_read_all_stats lets it read the age, and a young holder passes.
+func TestCensusRefusesALockHolderWhoseAgeItCannotSee(t *testing.T) {
+	ctx := context.Background()
+	store, base := migratedToOne(t)
+	suffix := randomDatabaseSuffix(t)
+	censusRole, otherRole := "census_"+suffix, "other_"+suffix
+	for _, role := range []string{censusRole, otherRole} {
+		if _, err := store.Pool.Exec(ctx, "create role "+role+" login password 'census-test'"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			// The grants in this database first, then the role itself, which spans the cluster.
+			for _, statement := range []string{"drop owned by " + role, "drop role " + role} {
+				if _, err := store.Pool.Exec(context.Background(), statement); err != nil {
+					t.Errorf("%s: %v", statement, err)
+				}
+			}
+		})
+		if _, err := store.Pool.Exec(ctx, "grant select on all tables in schema public to "+role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	holderConfig := store.Pool.Config().ConnConfig.Copy()
+	holderConfig.User, holderConfig.Password = otherRole, "census-test"
+	holder, err := pgx.ConnectConfig(ctx, holderConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { holder.Close(context.Background()) })
+	held, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { held.Rollback(context.Background()) })
+	if _, err := held.Exec(ctx, "lock table things in access share mode"); err != nil {
+		t.Fatal(err)
+	}
+	asCensus, err := neturl.Parse(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asCensus.User = neturl.UserPassword(censusRole, "census-test")
+	pid := "pid " + strconv.FormatUint(uint64(holder.PgConn().PID()), 10)
+	report, err := census(ctx, asCensus.String(), withCheck("select 0"), pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], pid) || !strings.Contains(got[0], "pg_read_all_stats") {
+		t.Errorf("refusals = %v, want one naming %s and pg_read_all_stats", got, pid)
+	}
+	if _, err := store.Pool.Exec(ctx, "grant pg_read_all_stats to "+censusRole); err != nil {
+		t.Fatal(err)
+	}
+	report, err = census(ctx, asCensus.String(), withCheck("select 0"), pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if report.Refused() {
+		t.Errorf("a young holder refused once the census could read its age: %v", refusals(report))
+	}
+}
+
+// A touched table above the limit refuses on its size and is not counted; the limit is injected so
+// the test needs no gigabyte.
 func TestCensusRefusesATouchedTableAboveTheLimit(t *testing.T) {
 	_, url := migratedToOne(t)
 	report, err := census(context.Background(), url, withCheck("select 0"), pgmigrate.CensusOptions{TableLimit: 1})
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if len(report.Refusals) != 1 || !strings.Contains(report.Refusals[0], "things is ") || !strings.Contains(report.Refusals[0], "above the 1 bytes") {
-		t.Errorf("refusals = %v", report.Refusals)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "things is ") || !strings.Contains(got[0], "above the 1 bytes") {
+		t.Errorf("refusals = %v", got)
 	}
+	if out := reportText(report); !strings.Contains(out, ", above the 1 bytes limit, so its rows were not counted;") {
+		t.Errorf("report:\n%s", out)
+	}
+}
+
+// A read of a touched table that outlasts the statement timeout refuses that table, and the census
+// still prints its report rather than exiting without one. Here the read waits on an ACCESS
+// EXCLUSIVE holder under a statement timeout shorter than the lock timeout, so Postgres cancels it
+// as a statement timeout (57014), as it cancels a slow count of a large table.
+func TestCensusRefusesATouchedTableWhoseReadOutlastsTheStatementTimeout(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	pid := "pid " + strconv.FormatUint(uint64(holdLock(t, store, "things", "access exclusive")), 10)
+	report, err := census(ctx, url, withCheck("select 0"), pgmigrate.CensusOptions{StatementTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "could not read things within the 1s statement timeout (SQLSTATE 57014)") || !strings.Contains(got[0], pid) {
+		t.Errorf("refusals = %v, want one naming the table, 57014 and %s", got, pid)
+	}
+	out := reportText(report)
+	if !strings.Contains(out, "touches things: not read, its read outlasted the 1s statement timeout;") || !strings.HasSuffix(out, "census: REFUSED (1 reason)\n") {
+		t.Errorf("report:\n%s", out)
+	}
+}
+
+// Every census the repository ships answers one integer at the schema just before its migration:
+// a database migrated through N-1, and the set cut at N, so N is the one pending migration. The
+// census refuses a census naming what its schema lacks, so a shipped one that did would refuse
+// every deploy carrying it; this catches it at review instead.
+func TestEveryShippedCensusAnswersAtTheSchemaBeforeItsMigration(t *testing.T) {
+	ctx := context.Background()
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := openEmptyTestStore(t)
+	url := store.Pool.Config().ConnString()
+	answered := 0
+	for _, migration := range migrations {
+		if migration.Census == "" {
+			continue
+		}
+		migrateThrough(t, store, migration.Version-1)
+		report, err := census(ctx, url, migrationsThrough(t, migration.Version), pgmigrate.CensusOptions{})
+		if err != nil {
+			t.Fatalf("census of %s: %v", migration.CensusName, err)
+		}
+		if len(report.Pending) != 1 || report.Pending[0].Count == nil || report.Refused() {
+			t.Errorf("%s did not answer one integer at schema %d:\n%s", migration.CensusName, migration.Version-1, reportText(report))
+		}
+		answered++
+	}
+	if answered == 0 {
+		t.Fatal("the set declares no census")
+	}
+}
+
+// migrationsThrough is the embedded set's files numbered up to version: what a binary built when
+// version was the newest migration would carry.
+func migrationsThrough(t *testing.T, version int) fstest.MapFS {
+	t.Helper()
+	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := fstest.MapFS{}
+	for _, entry := range entries {
+		digits, _, _ := strings.Cut(entry.Name(), "_")
+		number, err := strconv.Atoi(digits)
+		if err != nil {
+			t.Fatalf("%s: %v", entry.Name(), err)
+		}
+		if number > version {
+			continue
+		}
+		data, err := migrationFiles.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		set["migrations/"+entry.Name()] = &fstest.MapFile{Data: data}
+	}
+	return set
 }
 
 // holdLock opens a connection of its own to store's database and takes mode on table in a
@@ -308,7 +548,7 @@ func TestCensusRefusesALockHeldOnATouchedTableByAnOldTransaction(t *testing.T) {
 		t.Fatalf("census: %v", err)
 	}
 	if report.Refused() {
-		t.Fatalf("a hold on an untouched table refused: %v", report.Refusals)
+		t.Fatalf("a hold on an untouched table refused: %v", refusals(report))
 	}
 	if len(report.LongTransactions) != 1 {
 		t.Errorf("long transactions = %v, want the holder reported", report.LongTransactions)
@@ -319,8 +559,8 @@ func TestCensusRefusesALockHeldOnATouchedTableByAnOldTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if len(report.Refusals) != 1 || !strings.Contains(report.Refusals[0], "pid "+strconv.FormatUint(uint64(pid), 10)) || !strings.Contains(report.Refusals[0], "has held a lock on things for") {
-		t.Errorf("refusals = %v, want one naming pid %d", report.Refusals, pid)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "pid "+strconv.FormatUint(uint64(pid), 10)) || !strings.Contains(got[0], "has held a lock on things for") {
+		t.Errorf("refusals = %v, want one naming pid %d", got, pid)
 	}
 }
 
@@ -337,8 +577,8 @@ func TestCensusRefusesATouchedTableItCannotReadWithinTheLockTimeout(t *testing.T
 	if err != nil {
 		t.Fatalf("census: %v (after %s)", err, time.Since(started).Round(time.Millisecond))
 	}
-	if len(report.Refusals) != 1 || !strings.Contains(report.Refusals[0], "could not read things within 5s (SQLSTATE 55P03)") || !strings.Contains(report.Refusals[0], "pid "+strconv.FormatUint(uint64(pid), 10)) {
-		t.Errorf("refusals = %v, want one naming the table, 55P03 and pid %d", report.Refusals, pid)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "could not read things within 5s (SQLSTATE 55P03)") || !strings.Contains(got[0], "pid "+strconv.FormatUint(uint64(pid), 10)) {
+		t.Errorf("refusals = %v, want one naming the table, 55P03 and pid %d", got, pid)
 	}
 	out := reportText(report)
 	if !strings.Contains(out, "touches things: not read, its lock was not granted within 5s") || !strings.Contains(out, "census: transactions open longer than 1m0s: none") {

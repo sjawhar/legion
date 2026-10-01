@@ -757,9 +757,32 @@ func listenAddress(getenv func(string) string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-// subcommandNames are the arguments envoy-dispatch takes in place of serving, as runSubcommand
-// names them when it refuses one.
-var subcommandNames = []string{"backfill-block-ids", "backfill-anchor-blocks", "rebuild-refs", "redeliver-webhooks", "census"}
+// subcommand is an argument envoy-dispatch takes in place of serving. run gets the arguments
+// after the name.
+type subcommand struct {
+	name string
+	run  func(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int
+}
+
+// subcommands are every argument envoy-dispatch takes in place of serving: runSubcommand both
+// dispatches on this table and names it, in this order, when it refuses an argument.
+var subcommands = []subcommand{
+	{"backfill-block-ids", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
+		return backfillBlockIDs(ctx, getenv("DATABASE_URL"), stdout)
+	}},
+	{"backfill-anchor-blocks", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
+		return backfillAnchorBlocks(ctx, getenv("DATABASE_URL"), stdout)
+	}},
+	{"rebuild-refs", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
+		return rebuildRefs(ctx, getenv("DATABASE_URL"), loadServerURL(), stdout)
+	}},
+	{"redeliver-webhooks", func(ctx context.Context, args []string, _ func(string) string, stdout, _ io.Writer) int {
+		return redeliverWebhooks(ctx, args, stdout)
+	}},
+	{"census", func(ctx context.Context, _ []string, getenv func(string) string, stdout, stderr io.Writer) int {
+		return census(ctx, getenv("DATABASE_URL"), stdout, stderr)
+	}},
+}
 
 // runSubcommand runs the subcommand args name and returns its exit code. A name it does not know
 // is refused with exit 2 rather than falling through to the server: the server migrates the
@@ -767,19 +790,14 @@ var subcommandNames = []string{"backfill-block-ids", "backfill-anchor-blocks", "
 // the subcommand must get a refusal, never a boot that applies the migrations the census was to
 // inspect.
 func runSubcommand(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
-	switch args[0] {
-	case "backfill-block-ids":
-		return backfillBlockIDs(ctx, getenv("DATABASE_URL"), stdout)
-	case "backfill-anchor-blocks":
-		return backfillAnchorBlocks(ctx, getenv("DATABASE_URL"), stdout)
-	case "rebuild-refs":
-		return rebuildRefs(ctx, getenv("DATABASE_URL"), loadServerURL(), stdout)
-	case "redeliver-webhooks":
-		return redeliverWebhooks(ctx, args[1:], stdout)
-	case "census":
-		return census(ctx, getenv("DATABASE_URL"), stdout, stderr)
+	names := make([]string, len(subcommands))
+	for i, sub := range subcommands {
+		if sub.name == args[0] {
+			return sub.run(ctx, args[1:], getenv, stdout, stderr)
+		}
+		names[i] = sub.name
 	}
-	fmt.Fprintf(stderr, "envoy-dispatch: unknown subcommand %q; the subcommands are %s, and envoy-dispatch with no argument serves\n", args[0], strings.Join(subcommandNames, ", "))
+	fmt.Fprintf(stderr, "envoy-dispatch: unknown subcommand %q; the subcommands are %s, and envoy-dispatch with no argument serves\n", args[0], strings.Join(names, ", "))
 	return 2
 }
 

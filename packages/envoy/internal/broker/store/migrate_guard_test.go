@@ -41,6 +41,21 @@ func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
 	}
 }
 
+// And to what every broker migration locks, applied in order to an empty schema
+// (pgmigratetest.CheckTouchedTablesAgainstLocks).
+func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
+	ctx := context.Background()
+	s := emptySchemaStore(t)
+	conn, err := pgx.ConnectConfig(ctx, s.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	if err := pgmigratetest.CheckTouchedTablesAgainstLocks(ctx, conn, migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The broker's runner applies its whole set in one transaction, so a set it accepted with two
 // files numbered 2 would apply the first, pass over the second as already applied, and commit.
 func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.T) {

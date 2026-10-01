@@ -260,22 +260,37 @@ DATABASE_URL=postgres://... envoy-dispatch census
 ```
 
 The census is one `repeatable read, read only` transaction over the migrations this binary carries
-that the database has not applied: every migration above the highest version in
-`schema_migrations` (a database without that table is at version 0, so everything is pending). For
-each it prints the tables the migration's statements touch (`pgmigrate.TouchedTables`: the targets
-of `alter table`, `create index … on`, `drop table`, `truncate`, `create trigger … on`, `update`,
-`delete from`, `insert into`, `lock table`, and a foreign key's `references`; a dropped or altered
-index is resolved to its table), with each table's row count and total size, and the sessions
-holding locks on them; the transactions open longer than a minute anywhere in the database; and the
-count the migration's own census answers. It refuses:
+that the database has not applied: every migration whose version `schema_migrations` does not
+record, the rule the runner applies them by (a database without that table records none, so
+everything is pending). For each it prints the tables the migration's statements lock above ACCESS
+SHARE (`pgmigrate.TouchedTables`: the targets of `alter table`, `create index … on`, `drop table`,
+`truncate`, `create trigger … on`, `update` with or without an alias, `delete from`,
+`insert into`, `lock table`, and a foreign key's `references`; a dropped or altered index is
+resolved to its table), with each table's total size, its row count, and the sessions holding
+locks on it; the transactions open longer than a minute anywhere in the database; and the count
+the migration's own census answers. A table a statement only reads (`insert … select from`,
+`create view … as`) is not listed: its ACCESS SHARE waits only behind an ACCESS EXCLUSIVE holder.
+Each store's tests apply every one of its migrations in turn and require the census's reading to
+be exactly the tables that migration locks above ACCESS SHARE
+(`pgmigratetest.CheckTouchedTablesAgainstLocks`), so a migration written in a form the patterns do
+not know (`reindex`, `cluster`, `create policy … on`, `merge into`) fails there and needs a pattern.
+It refuses:
 
 - a migration whose census answers non-zero, naming the migration, the count and the census file;
-- a touched table above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST): a
-  migration that locks a table that size needs another shape (`CONCURRENTLY`, batches);
+- a touched table above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST), whose rows
+  it then does not count: a migration that locks a table that size needs another shape
+  (`CONCURRENTLY`, batches);
 - a session holding a lock on a touched table whose transaction has been open at least a minute
   (`pgmigrate.CensusLongTransaction`): the migration would give up on that lock during the rollout;
+- a session holding a lock on a touched table whose transaction's age Postgres hides from the
+  census's role. `pg_stat_activity` shows another role's `xact_start` and `state` only to a
+  superuser or a member of `pg_read_all_stats`, so without that grant every other role's holder
+  (an operator's session, autovacuum) refuses, since the census cannot tell it is young; granting
+  the census's role `pg_read_all_stats` lets it read the age, and then only a holder older than a
+  minute refuses;
 - a touched table the census cannot read within five seconds (`pgmigrate.LockTimeout`), because
-  another session holds a lock every read waits behind, naming the holders;
+  another session holds a lock every read waits behind, or within the statement timeout (a minute,
+  `pgmigrate.CensusStatementTimeout`), naming the holders;
 - a census that fails or answers anything but one integer in one row.
 
 A migration declares its census in `<version>_<name>.census.sql` beside it: one `select` (or
@@ -284,11 +299,15 @@ validating constraint's violators) or rewrite. Every migration from `censusRequi
 (`internal/dispatch/store/store_test.go`) on declares one; one that cannot refuse or rewrite a row
 says so with `select 0` and a comment (`0054_message_delivery_acceptance.census.sql`;
 `0053_asks_approval_kind_check.census.sql`, the check's own predicate negated, is the other
-shape). A census that names a table or column the database does not have yet refuses nothing when
-an earlier pending migration exists, since that migration may create it; for the first pending
-migration it was written against exactly this schema, so the name is a defect and refuses. The
-runner never runs a census. Exit 0 passes, 1 refuses (every reason is in the report), 2 the census
-could not be taken (no `DATABASE_URL`, no connection, a migration set `pgmigrate.Load` refuses).
+shape). A census is written against the schema just before its migration, and the store's tests
+run every shipped census at exactly that schema and require it to answer
+(`TestEveryShippedCensusAnswersAtTheSchemaBeforeItsMigration`). A census that names a table or
+column the database does not have refuses, even behind an earlier pending migration that may be
+what creates it: the census cannot tell that from a typo without applying that migration, which
+takes the very locks it measures. Such a release deploys the earlier migration first; the census
+of the later one then answers. The runner never runs a census. Exit 0 passes, 1 refuses (every
+reason is in the report), 2 the census could not be taken (no `DATABASE_URL`, no connection, a
+migration set `pgmigrate.Load` refuses).
 
 **A census is production-executed code, reviewed like the migration beside it.** It runs as the
 service's own database role. The read-only transaction stops every write, and the census's
@@ -298,13 +317,16 @@ cannot carry a second statement (a `commit` of its own, then a write). Read-only
 advisory locks or `pg_sleep`: `pgmigrate.Load` refuses a census naming any of them, and review is
 the control past that, since any non-zero integer a census answers is printed.
 
-**What the report prints:** counts, sizes, versions, file names and session metadata (pid, role,
-application name, state, transaction age; never query text). For a census that fails, its file
-name and the SQLSTATE; Postgres's own message only for class 42 (syntax and access-rule errors,
-which quote the census's own text and identifiers, the two "does not exist" codes among them) —
-never for a data exception, whose message quotes the row value that failed to cast. The census
-writes nothing. An argument `envoy-dispatch` does not know is refused with exit 2, never served, so
-an image that predates a subcommand cannot boot and migrate when a deployment asks it for one.
+**What the report prints:** counts, sizes (in KiB, MiB and GiB), versions, file names and session
+metadata (pid, role, application name, state, transaction age; never query text, and "not
+visible" for a field Postgres hides). For a census that fails, its file name and the SQLSTATE;
+Postgres's own message only when the error points into the census's own text (a position, which a
+parse or analysis error carries), since then it quotes that text and its identifiers. An error
+raised while the census runs carries none, and its message is never printed: a data exception's
+quotes the row value that failed to cast, and a `reg*` cast's (`regclass`, `regtype`, `regproc`)
+quotes the row's text under a class-42 SQLSTATE. The census writes nothing. An argument
+`envoy-dispatch` does not know is refused with exit 2, never served, so an image that predates a
+subcommand cannot boot and migrate when a deployment asks it for one.
 
 ## Reference graph
 
