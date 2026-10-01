@@ -182,6 +182,15 @@ latest version number, or `null` when it has none (the live markdown beside it a
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
+`GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (`pmdoc.BlockPathOf`, over
+the document `readDocument` serves): its path of `{type, id, index}` from the top-level block
+down, and for a table block, row or cell a `table` naming the table's id, the row's child index
+(0 is the header row), the cell's child index in its row (the indexes `delete_row` and
+`delete_column` take, so a spanning cell counts once), that column's header text and the row's
+cells as their opening words. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` attach the
+same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
+time and never stored or carried on lists and events; a block the live document no longer holds
+leaves it absent while the anchor keeps its stale `block_id`.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code

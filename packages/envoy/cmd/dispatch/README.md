@@ -406,7 +406,7 @@ table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
 
 | Status / code | Meaning |
 | --- | --- |
-| `404 TARGET_NOT_FOUND` | The quote requested by an anchor or document edit is absent. |
+| `404 TARGET_NOT_FOUND` | The quote requested by an anchor or document edit is absent, or the block id a block read (`GET /api/v1/artifacts/{id}/blocks/{block_id}`) names is not in the live document. |
 | `409 TARGET_AMBIGUOUS` | A quote matches more than once without an `occurrence`; the response includes candidate ranges and context. |
 | `400 TARGET_SPANS_BLOCKS` | A document edit quote crosses textblock boundaries. |
 | `400 TABLE_WIDTH` | A table-row fragment holds text in a cell past its target table's width; blank cells there are dropped. |

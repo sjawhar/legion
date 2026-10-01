@@ -463,6 +463,38 @@ type BlockReferences struct {
 	Asks     int `json:"asks"`
 }
 
+// BlockPath is where a block stands in its document: GET /api/v1/artifacts/{id}/blocks/{block_id}'s
+// answer, and the anchor_block a comment's or ask's single read carries for its anchor's block.
+// Derived from the live document at read time; nothing stores it.
+type BlockPath struct {
+	ID    string           `json:"id"`
+	Type  string           `json:"type"`
+	Path  []BlockPathEntry `json:"path"`
+	Table *TablePosition   `json:"table,omitempty"`
+}
+
+// BlockPathEntry is one node on a block's path from the document's top-level block down to the
+// block: its type, block id ("" for a node the live document has not stamped yet) and index
+// among its parent's children.
+type BlockPathEntry struct {
+	Type  string `json:"type"`
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+}
+
+// TablePosition places a block in the table holding it. Row is the row's index (0 the header row)
+// and Column the cell's index in its row, the indexes delete_row and delete_column take; Row is
+// nil for the table block, Column and Header for the table and a row block. Header is the header
+// row's cell text at Column, "" where the header row is shorter. Cells is each cell of the row as
+// its opening words; nil for the table block.
+type TablePosition struct {
+	ID     string   `json:"id"`
+	Row    *int     `json:"row"`
+	Column *int     `json:"column"`
+	Header *string  `json:"header"`
+	Cells  []string `json:"cells"`
+}
+
 // Version is an immutable artifact version.
 type Version struct {
 	Number    int       `json:"number"`
@@ -490,12 +522,16 @@ type Ask struct {
 	Author          Actor              `json:"author"`
 	// Kind is "question" for ordinary asks, whose asker chooses the options, and
 	// "approval" for server-created document reviews.
-	Kind          string         `json:"kind"`
-	Question      string         `json:"question"`
-	Options       []AskOption    `json:"options"`
-	Multiple      bool           `json:"multiple"`
-	Urgency       string         `json:"urgency"`
-	Anchor        *Anchor        `json:"anchor"`
+	Kind     string      `json:"kind"`
+	Question string      `json:"question"`
+	Options  []AskOption `json:"options"`
+	Multiple bool        `json:"multiple"`
+	Urgency  string      `json:"urgency"`
+	Anchor   *Anchor     `json:"anchor"`
+	// AnchorBlock is where Anchor's block stands in the live document. Set by the single-record
+	// read alone (GET /api/v1/asks/{id}), never by lists or events; nil when there is no anchor,
+	// the anchor names no block, or the block has left the document.
+	AnchorBlock   *BlockPath     `json:"anchor_block,omitempty"`
 	State         string         `json:"state"`
 	Answer        *AskAnswer     `json:"answer"`
 	Resolution    *AskResolution `json:"resolution,omitempty"`
@@ -736,8 +772,12 @@ type Comment struct {
 	Author     Actor   `json:"author"`
 	Body       string  `json:"body"`
 	Anchor     *Anchor `json:"anchor"`
-	ReplyTo    *string `json:"reply_to"`
-	AskID      *string `json:"ask_id"`
+	// AnchorBlock is where Anchor's block stands in the live document. Set by the single-record
+	// read alone (GET /api/v1/comments/{id}), never by lists or events; nil when there is no
+	// anchor, the anchor names no block, or the block has left the document.
+	AnchorBlock *BlockPath `json:"anchor_block,omitempty"`
+	ReplyTo     *string    `json:"reply_to"`
+	AskID       *string    `json:"ask_id"`
 	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
 	// turn after this comment: "human" when the human needs to act, "agent" when the
 	// comment is a progress note and the asking agent still owes the next move. A

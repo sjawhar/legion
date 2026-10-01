@@ -129,6 +129,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the approval ask open at that version, and retracts one naming an older version.", s.createArtifactReview},
 		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open the approval ask for a document's latest version, with an optional summary; a repeated request returns the ask open at that version and replaces a stale one, which names an older version.", s.requestArtifactApproval},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks", authAny, "A document's blocks with markdown ranges, tokens, and reference counts.", s.getArtifactBlocks},
+		{http.MethodGet, "/api/v1/artifacts/{id}/blocks/{block_id}", authAny, "Where one block stands in a document: its path from the top-level block down (type, id, child index), and for a table block, row or cell the table's id, the row index (0 is the header), the cell's column index, that column's header text and the row's cells; 404 TARGET_NOT_FOUND for an id the live document does not hold.", s.getArtifactBlockPath},
 		{http.MethodGet, "/api/v1/artifacts/{id}/text", authAny, "A document's canonical markdown and whole-document token.", s.getArtifactText},
 		{http.MethodGet, "/api/v1/artifacts/{id}/versions/{number}", authAny, "One named or settled document version.", s.getArtifactVersion},
 		{http.MethodPost, "/api/v1/artifacts/{id}/versions", authAny, "Name the current document version.", s.createNamedVersion},

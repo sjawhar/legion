@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // resolveAnchor returns the anchor, its document's name, and the version the anchor snapshot
@@ -103,4 +105,22 @@ func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner,
 		return model.Artifact{}, errorf(http.StatusBadRequest, "INVALID_ANCHOR", "anchor must target this document")
 	}
 	return artifact, nil
+}
+
+// anchorBlock is where anchor's block stands in its document, for the single-record comment and
+// ask reads: nil for no anchor, an anchor naming no block, or a block the live document no longer
+// holds (a deleted row's cell). A document the service cannot read fails the read, as GET /blocks
+// does.
+func (s *server) anchorBlock(ctx context.Context, anchor *model.Anchor) (*model.BlockPath, error) {
+	if anchor == nil || anchor.BlockID == nil || *anchor.BlockID == "" {
+		return nil, nil
+	}
+	path, err := s.deps.Docs.BlockPath(ctx, anchor.ArtifactID, *anchor.BlockID)
+	if errors.Is(err, pmdoc.ErrTargetNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &path, nil
 }
