@@ -115,6 +115,20 @@
     ]
   },
   {
+    "body": "A % that two hex digits do not follow stays a %: https://dispatch.test/issues/CORE-3/spec?comment=c%2%34 here",
+    "refs": [
+      "dispatch://CORE-3/comment/c%24"
+    ]
+  },
+  {
+    "body": "|ref|state|\n|---|---|\n|dispatch://CORE-1/artifact/plan-md|done|\n|dispatch://CORE-2|open|\n|https://dispatch.test/issues/CORE-3/spec|open|",
+    "refs": [
+      "dispatch://CORE-1/artifact/plan-md",
+      "dispatch://CORE-2",
+      "dispatch://CORE-3/spec"
+    ]
+  },
+  {
     "body": "A control character or a BOM after a slug or an id: dispatch://CORE-1/artifact/notes-md\u000b dispatch://CORE-1/comment/c1\u0001 dispatch://CORE/artifact/handbook-md https://dispatch.test/issues/CORE-1/asks/a1 dispatch://CORE-1/ask/a1﻿",
     "refs": []
   },

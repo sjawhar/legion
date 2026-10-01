@@ -13999,6 +13999,9 @@ function itemFromSearch(search) {
   } catch {
     return null;
   }
+  if (/\p{Cc}/u.test(id)) {
+    return null;
+  }
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
 }
 // ../contracts/src/dispatch-snippet.ts

@@ -761,9 +761,12 @@ so a change to the rule changes both readers and the table: `**dispatch://KEY**`
 `<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
 link. The Go reader parses a reference as the browser does: a query's pairs split on `&` alone,
 as `URLSearchParams` splits them (`searchParams`), an item id is decoded as `decodeURIComponent`
-decodes it, a slug is the whole segment, and a reference holding a control character names
-nothing. Where a browser normalizes a URL and net/url does not (host case, a default port, dot
-segments, a backslash), the two still differ.
+decodes it, a slug is the whole segment, and a reference holding a control character, or an item
+id that decodes to one, names nothing; the index binds ids as `text[]`, where Postgres refuses a
+NUL, so a decoded NUL would fail the write and stop `rebuild-refs` at the body holding it. Where a
+browser normalizes a URL and net/url does not (host case, a default port, dot segments, a
+backslash), the two still differ, and so does how many U+FFFD stand for the invalid UTF-8 in a
+query's item id, an id no item has.
 
 The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
 That editor builds each node it loads with its schema, so an attribute the live document lacks

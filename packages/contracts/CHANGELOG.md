@@ -12,6 +12,9 @@
   open decision block, even when a human asked for approval (LEGION-387); its `summary`
   description no longer repeats that rule. `dispatch_doc_edit`'s description says a `delete` or
   `retype` that would take an ask block out of the document while its ask is open is refused.
+- `itemFromSearch` answers `null` for an item id that decodes to a control character, as the
+  Dispatch server's reference reader names nothing for one (LEGION-463). No item has such an id,
+  and a NUL in one failed the write that cited it.
 
 ### Added
 

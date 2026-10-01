@@ -19,6 +19,7 @@ describe("itemFromSearch", () => {
     expect(itemFromSearch("?comment=")).toBeNull();
     expect(itemFromSearch("?comment=a/b")).toBeNull();
     expect(itemFromSearch("?comment=%E0%A4%A")).toBeNull();
+    expect(itemFromSearch("?comment=%2500")).toBeNull();
   });
 });
 

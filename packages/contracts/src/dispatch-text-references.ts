@@ -6,8 +6,8 @@
  * reader `text.Extract`, which writes the reference graph, through its JSON copy in
  * `packages/envoy/internal/dispatch/text/testdata` - so neither where a reference ends nor what it
  * names can change on one side only. A reference ends at whitespace (Unicode space separators
- * included, a vertical tab and U+FEFF not), an angle or square bracket, a quote or a backtick;
- * the sentence punctuation, emphasis and strikethrough delimiters and unbalanced closing
+ * included, a vertical tab and U+FEFF not), an angle or square bracket, a quote, a backtick or a
+ * pipe; the sentence punctuation, emphasis and strikethrough delimiters and unbalanced closing
  * parenthesis after it are dropped. External URLs cite nothing.
  */
 export const DISPATCH_TEXT_REFERENCES: readonly {
@@ -81,6 +81,16 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "Pairs part at & alone: https://dispatch.test/issues/CORE-1/spec?comment=c1;c2, https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2;3 and https://dispatch.test/issues/CORE-2/spec?ask=a1;x&comment=c1.",
     refs: ["dispatch://CORE-1/comment/c1%3Bc2"],
+  },
+  {
+    body: "A % that two hex digits do not follow stays a %: https://dispatch.test/issues/CORE-3/spec?comment=c%2%34 here",
+    refs: ["dispatch://CORE-3/comment/c%24"],
+  },
+  // A table cell written without padding ends its reference at the cell's `|`, as the dashboard's
+  // markdown parser reads the cell.
+  {
+    body: "|ref|state|\n|---|---|\n|dispatch://CORE-1/artifact/plan-md|done|\n|dispatch://CORE-2|open|\n|https://dispatch.test/issues/CORE-3/spec|open|",
+    refs: ["dispatch://CORE-1/artifact/plan-md", "dispatch://CORE-2", "dispatch://CORE-3/spec"],
   },
   {
     body: "A control character or a BOM after a slug or an id: dispatch://CORE-1/artifact/notes-md\u000b dispatch://CORE-1/comment/c1\u0001 dispatch://CORE/artifact/handbook-md\u0085 https://dispatch.test/issues/CORE-1/asks/a1\u007f dispatch://CORE-1/ask/a1\ufeff",

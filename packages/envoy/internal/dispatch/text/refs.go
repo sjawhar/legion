@@ -10,15 +10,16 @@ import (
 )
 
 // referenceEnd is every character that ends a reference: whitespace (the Unicode space separators
-// a no-break or ideographic space belongs to as well), an angle or square bracket, a quote or a
-// backtick. No Dispatch reference holds one, so a reference in a code span ends at its closing
-// backtick, and the link a document stores for the autolink `<dispatch://CORE-1>`,
+// a no-break or ideographic space belongs to as well), an angle or square bracket, a quote, a
+// backtick or a pipe. No Dispatch reference holds one, so a reference in a code span ends at its
+// closing backtick, one in a table cell at the cell's `|` however the cell is padded, and the link
+// a document stores for the autolink `<dispatch://CORE-1>`,
 // `[dispatch://CORE-1](dispatch://CORE-1)`, is two references to CORE-1 rather than one
 // unparseable one. The whitespace is spelled out rather than written `\s`, which means another set
 // in each language: JavaScript's also matches a vertical tab and U+FEFF. The dashboard composer
 // reads text by the same rule, and `testdata/dispatch-text-references.json` is the table both are
 // tested against.
-const referenceEnd = `\t\n\f\r \p{Z}<>"'` + "`" + `\[\]`
+const referenceEnd = `\t\n\f\r \p{Z}<>"'` + "`" + `\[\]|`
 
 // referencePattern is a reference span. The one bracket a span may hold is a bracketed IPv6 host
 // right after `http(s)://`, so a server at an IPv6 literal keeps its dashboard URLs as references.
@@ -162,8 +163,10 @@ func parseDispatch(value string) (Ref, bool) {
 	}
 	parts := strings.Split(artifact, "/")
 	slug, ok := parseArtifactSlug(parts[0])
+	if !ok {
+		return Ref{}, false
+	}
 	switch {
-	case !ok:
 	case len(parts) == 1:
 		return Ref{Kind: "artifact", Project: key, ID: slug}, true
 	case len(parts) == 3 && (parts[1] == "ask" || parts[1] == "comment"):
@@ -192,21 +195,24 @@ func parseArtifactSlug(value string) (string, bool) {
 // itemSegment is an item id as a reference writes it, decoded, as the dashboard reads one: written
 // without a `/`, `?`, `#` or whitespace (JavaScript's `\s`, which adds U+FEFF to the Unicode space
 // separators; its ASCII whitespace is control characters, which no reference holds), then decoded
-// by `decodeURIComponent`.
+// by `decodeItemID`.
 func itemSegment(raw string) (string, bool) {
 	if raw == "" || strings.ContainsFunc(raw, func(r rune) bool {
 		return r == '/' || r == '?' || r == '#' || r == '\ufeff' || unicode.Is(unicode.Z, r)
 	}) {
 		return "", false
 	}
-	return decodeURIComponent(raw)
+	return decodeItemID(raw)
 }
 
-// decodeURIComponent decodes value as JavaScript's decodeURIComponent does, refusing a `%` that
-// two hex digits do not follow and escapes that do not decode to UTF-8.
-func decodeURIComponent(value string) (string, bool) {
+// decodeItemID decodes an item id as JavaScript's decodeURIComponent does, refusing a `%` that two
+// hex digits do not follow and escapes that do not decode to UTF-8, and refuses an id that decodes
+// to a control character, as a reference written with one is refused: no item has such an id, and
+// the index binds ids as `text[]`, where Postgres refuses a NUL and fails the write holding it.
+func decodeItemID(value string) (string, bool) {
 	decoded, err := url.PathUnescape(value)
-	return decoded, err == nil && utf8.ValidString(decoded)
+	return decoded, err == nil && utf8.ValidString(decoded) &&
+		!strings.ContainsFunc(decoded, unicode.IsControl)
 }
 
 // parseServer reads a dashboard URL of serverURL as the dashboard's `referenceRouteFromHref` reads
@@ -279,9 +285,9 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 
 // documentItem is the one link rule every Dispatch URL parser applies: `?comment=` or `?ask=` on a
 // document path names that item, not the document. A query Dispatch never emits - both parameters
-// at once, or an id that is empty, holds a `/` or does not decode - names nothing rather than a
-// guess. The same rule is `itemFromSearch` in `@legion/contracts` for the SPA and the agent
-// client, and `testdata/dispatch-href-references.json` is the one table all three are tested
+// at once, or an id that is empty, holds a `/` or does not decode (`decodeItemID`) - names nothing
+// rather than a guess. The same rule is `itemFromSearch` in `@legion/contracts` for the SPA and the
+// agent client, and `testdata/dispatch-href-references.json` is the one table all three are tested
 // against.
 func documentItem(document Ref, query url.Values) (Ref, bool) {
 	hasAsk, hasComment := query.Has("ask"), query.Has("comment")
@@ -299,7 +305,7 @@ func documentItem(document Ref, query url.Values) (Ref, bool) {
 	if raw == "" || strings.Contains(raw, "/") {
 		return Ref{}, false
 	}
-	id, ok := decodeURIComponent(raw)
+	id, ok := decodeItemID(raw)
 	if !ok {
 		return Ref{}, false
 	}
@@ -308,9 +314,9 @@ func documentItem(document Ref, query url.Values) (Ref, bool) {
 
 // searchParams reads a query as the browser's URLSearchParams does, which is how the dashboard
 // reads one: pairs split on `&` alone, `+` a space, `%` and two hex digits a byte and any other
-// `%` itself, and the bytes UTF-8 (`decodeUTF8`). net/url's ParseQuery is not that reading: it
-// also splits on `;`, and drops a pair holding one or holding a bad escape, so it names the
-// document where the dashboard names the item, or a version the dashboard refuses.
+// `%` itself, and the bytes UTF-8. net/url's ParseQuery is not that reading: it also splits on
+// `;`, and drops a pair holding one or holding a bad escape, so it names the document where the
+// dashboard names the item, or a version the dashboard refuses.
 func searchParams(rawQuery string) url.Values {
 	params := url.Values{}
 	for pair := range strings.SplitSeq(rawQuery, "&") {
@@ -338,51 +344,5 @@ func formDecode(value string) string {
 		}
 		decoded = append(decoded, char)
 	}
-	return decodeUTF8(decoded)
-}
-
-// decodeUTF8 reads bytes as the WHATWG UTF-8 decoder does, each maximal prefix of a sequence that
-// does not complete read as one U+FFFD; strings.ToValidUTF8 reads a whole run of them as one.
-func decodeUTF8(bytes []byte) string {
-	var decoded strings.Builder
-	for len(bytes) > 0 {
-		r, size := utf8.DecodeRune(bytes)
-		if r != utf8.RuneError || size > 1 {
-			decoded.Write(bytes[:size])
-			bytes = bytes[size:]
-			continue
-		}
-		decoded.WriteRune(utf8.RuneError)
-		bytes = bytes[incompleteSequence(bytes):]
-	}
-	return decoded.String()
-}
-
-// incompleteSequence is how many bytes from the start of bytes, which holds no valid UTF-8
-// sequence there, belong to one replacement: the byte that leads a sequence and each continuation
-// byte it can still take, with the narrower second-byte ranges that rule out overlong encodings,
-// surrogates and code points past U+10FFFF.
-func incompleteSequence(bytes []byte) int {
-	needed, lower, upper := 0, byte(0x80), byte(0xBF)
-	switch lead := bytes[0]; {
-	case lead >= 0xC2 && lead <= 0xDF:
-		needed = 1
-	case lead == 0xE0:
-		needed, lower = 2, 0xA0
-	case lead == 0xED:
-		needed, upper = 2, 0x9F
-	case lead >= 0xE1 && lead <= 0xEF:
-		needed = 2
-	case lead == 0xF0:
-		needed, lower = 3, 0x90
-	case lead == 0xF4:
-		needed, upper = 3, 0x8F
-	case lead >= 0xF1 && lead <= 0xF3:
-		needed = 3
-	}
-	length := 1
-	for length <= needed && length < len(bytes) && bytes[length] >= lower && bytes[length] <= upper {
-		length, lower, upper = length+1, 0x80, 0xBF
-	}
-	return length
+	return strings.ToValidUTF8(string(decoded), "\uFFFD")
 }

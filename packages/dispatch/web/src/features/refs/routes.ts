@@ -100,10 +100,12 @@ export function issueTabForRoute(
   return route.kind === "issue" || route.kind === "spec" ? "spec" : "conversation";
 }
 
+/** A path segment decoded; `undefined` for one that does not decode, decodes empty, or decodes to
+ * a control character, which no id or slug holds and the server's `text.Extract` refuses. */
 function decodedSegment(value: string): string | undefined {
   try {
     const decoded = decodeURIComponent(value);
-    return decoded === "" ? undefined : decoded;
+    return decoded === "" || /\p{Cc}/u.test(decoded) ? undefined : decoded;
   } catch {
     return undefined;
   }
@@ -358,21 +360,21 @@ export interface ReferenceSpan {
 
 /**
  * The reference-shaped spans in text: `dispatch://` references and `http(s)://` URLs, each ending
- * at whitespace (Unicode space separators included), an angle or square bracket, a quote or a
- * backtick, then trimmed by `trimReference`. The one bracket a span may hold is a bracketed IPv6
- * host right after `http(s)://`, so a server at an IPv6 literal keeps its dashboard URLs as
- * references. The whitespace is spelled out rather than written `\s`, which in JavaScript also
- * matches a vertical tab and U+FEFF, where Go's `\s` matches neither. It is the rule the server's
- * `text.ExtractAt` indexes mentions by, and `DISPATCH_TEXT_REFERENCES` in `@legion/contracts` is
- * the table both are tested against.
+ * at whitespace (Unicode space separators included), an angle or square bracket, a quote, a
+ * backtick or a pipe, then trimmed by `trimReference`. The one bracket a span may hold is a
+ * bracketed IPv6 host right after `http(s)://`, so a server at an IPv6 literal keeps its dashboard
+ * URLs as references. The whitespace is spelled out rather than written `\s`, which in JavaScript
+ * also matches a vertical tab and U+FEFF, where Go's `\s` matches neither. It is the rule the
+ * server's `text.ExtractAt` indexes mentions by, and `DISPATCH_TEXT_REFERENCES` in
+ * `@legion/contracts` is the table both are tested against.
  */
 const referencePattern =
-  /(?:dispatch:\/\/|https?:\/\/(?:\[[0-9A-Fa-f:.]+\])?)[^\t\n\f\r \p{Z}<>"'`[\]]+/gu;
+  /(?:dispatch:\/\/|https?:\/\/(?:\[[0-9A-Fa-f:.]+\])?)[^\t\n\f\r \p{Z}<>"'`[\]|]+/gu;
 
 /**
  * Every reference span in text that starts with `prefix`, trimmed; a span starting otherwise is
- * skipped untrimmed. The spans are the same whatever the prefix, so a `dispatch://` inside a URL
- * is never a span of its own, as the server reads it.
+ * omitted from the result. The spans are the same whatever the prefix, so a `dispatch://` inside a
+ * URL is never a span of its own, as the server reads it.
  */
 export function referenceSpans(text: string, prefix = ""): ReferenceSpan[] {
   const spans: ReferenceSpan[] = [];

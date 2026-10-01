@@ -13,7 +13,8 @@ export interface DispatchHrefItem {
 /**
  * The item a dashboard URL's query names: `undefined` when it names none, `null` when the query
  * is not a shape Dispatch emits (both parameters at once, or an id that is not a decodable
- * segment) and the caller should treat the URL as unresolvable rather than guess.
+ * segment or decodes to a control character, which no item's id holds, as the server's
+ * `text.Extract` reads it) and the caller should treat the URL as unresolvable rather than guess.
  */
 export function itemFromSearch(search: string): DispatchHrefItem | undefined | null {
   const params = new URLSearchParams(search);
@@ -33,6 +34,9 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
   try {
     id = decodeURIComponent(raw);
   } catch {
+    return null;
+  }
+  if (/\p{Cc}/u.test(id)) {
     return null;
   }
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
