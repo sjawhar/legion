@@ -3487,7 +3487,7 @@ describe("executeDispatchTool", () => {
       expect(posts).toEqual([]);
     });
 
-    test("a waived block not yet in a version is named with the decision to write in", async () => {
+    test("a resolved block the named version still holds open is named with the decision to write in", async () => {
       const { outcome, posts } = await requestOver(
         ["b-1"],
         [opening("b-1", "open")],
@@ -3631,7 +3631,7 @@ describe("executeDispatchTool", () => {
         expect((await outcome).split("\n")).toEqual([
           "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace or relocate it with move, which keep it.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
         ]);
         expect(edits).toEqual([]);
       }
@@ -3653,7 +3653,7 @@ describe("executeDispatchTool", () => {
         expect((await outcome).split("\n")).toEqual([
           "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace or relocate it with move, which keep it.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
         ]);
         expect(edits).toEqual([]);
       }

@@ -1633,11 +1633,11 @@ async function refuseOpenDecisionBlocks(
   if (latest === undefined || latest < 1 || artifact.approval?.state === "approved") return;
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0) return;
-  const [owned, version] = await Promise.all([
+  const [documentAsks, version] = await Promise.all([
     blockAsks(client, resolved),
     client.docRead(artifact.id, latest),
   ]);
-  const asks = new Map(owned.map((ask) => [ask.block_id, ask]));
+  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version.markdown.split("\n");
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
@@ -1718,8 +1718,8 @@ async function refuseRemovingOpenDecisionBlocks(
     }
   }
   if (removed.size === 0) return;
-  const owned = await blockAsks(client, resolved);
-  const open = owned.filter((ask) => ask.state === "open" && removed.has(ask.block_id));
+  const asks = await blockAsks(client, resolved);
+  const open = asks.filter((ask) => ask.state === "open" && removed.has(ask.block_id));
   if (open.length === 0) return;
   const [what, question] =
     open.length === 1
@@ -1731,7 +1731,7 @@ async function refuseRemovingOpenDecisionBlocks(
       ...open.map(
         (ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`
       ),
-      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace or relocate it with move, which keep it.",
+      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
     ].join("\n")
   );
 }

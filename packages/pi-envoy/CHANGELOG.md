@@ -23,7 +23,7 @@
   decision block.
 - `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
   decision block out of the document while its ask is open, even in a batch that inserts it
-  again; the refusal says to reword it with `replace` or move it with `move`. A whole-document
+  again; the refusal names `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. A whole-document
   replace through `dispatch_artifact` is not refused, so it can still remove an open block.
 - The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
   decision blocks first, as "Approval of a spec" defines settled, then request approval with a

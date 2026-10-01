@@ -19,8 +19,8 @@
   take a decision block out of the document while its ask is open, even in a batch that inserts
   markdown carrying its id (LEGION-387). The edit would write its version at once and settlement
   would retract the ask without another, so the question would leave the human's Inbox
-  unanswered and an approval request sent next would find no open block. The refusal says to
-  reword the block with `replace` or move it with `move`. It covers `dispatch_doc_edit` only: a
+  unanswered and an approval request sent next would find no open block. The refusal names
+  `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. It covers `dispatch_doc_edit` only: a
   whole-document replace through `dispatch_artifact` is sent with no reads and can still remove an
   open block. An edit with no `delete` or `retype` by block id reads nothing more; one with reads
   `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
