@@ -149,12 +149,12 @@ row before it waits for the slot. The slot is in memory, where Postgres cannot s
 no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
 flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
 either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
-fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
-the caller retries once the room has reloaded; so does a write whose room fails before its first
-append, since the reloaded room may lack it. A room's own load never waits for that recovery
-either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would
-hold each other - and refuses instead, which ends the eviction; the replacement room's load then
-runs the one settlement the failure dropped.
+fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the
+transaction rolls back, and the caller retries once the room has reloaded; so does a write whose
+room fails before its first append, since the reloaded room may lack it. A room's own load never
+waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready
+barrier, so the two would hold each other - and refuses instead, which ends the eviction; the
+replacement room's load then runs the one settlement the failure dropped.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -195,13 +195,17 @@ same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), c
 time and never stored or carried on lists and events; a block the live document no longer holds
 leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
 of those reads, so a document they cannot read does not fail them: the read answers 200 without
-`anchor_block` and with `anchor_block_error`, the code `writeHandlerError` answers that error with
-elsewhere (`DOC_SERVICE_UNAVAILABLE` for a room or store that could not be reached, `DOC_SCHEMA`
-for a live tree outside the schema, `INTERNAL` for anything else), logged at WARN. Only a request
-that has gone away fails, decided by that request's own context rather than the error, since a
-room a writer's cancelled commit failed carries that writer's `context.Canceled` in its cause.
-Nor does that read wait for a failed room's recovery (`docs.WithoutRecoveryWait`): it is
-`DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`, `GET /blocks` and the block route wait.
+`anchor_block` and with `anchor_block_error`, logged at WARN. `api.documentErrorCode` names that
+error for the read and for `writeHandlerError` alike, so `anchor_block_error` is the code the
+block route answers the same error with: `DOC_SERVICE_UNAVAILABLE` for a room or store that
+could not serve the document, whatever failed the room (a failed room carries its cause, which
+can be settlement's schema refusal or a publish refused because the issue closed, and the read
+never renders), `DOC_SCHEMA` for a live tree outside the schema, and `INTERNAL`, as
+`writeHandlerError` answers, for anything else. Only a request that has gone away fails, decided
+by that request's own context rather than the error, since a room a writer's cancelled commit
+failed carries that writer's `context.Canceled` in its cause. Nor does that read wait for a
+failed room's recovery (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once,
+where `GET /text`, `GET /blocks` and the block route wait.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code

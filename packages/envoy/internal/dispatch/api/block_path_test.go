@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -237,6 +238,72 @@ func TestAnAnchoredReadDecidesCancellationByItsOwnRequest(t *testing.T) {
 		if cancelled.Code != http.StatusInternalServerError || !strings.Contains(cancelled.Body.String(), `"code":"`+codeInternal+`"`) {
 			t.Fatalf("cancelled GET %s: status=%d body=%s, want 500 %s", read.path, cancelled.Code, cancelled.Body.String(), codeInternal)
 		}
+	}
+}
+
+// A comment's or ask's anchor_block_error names a document error as the block route answers the
+// same error, since both reads place one block and writeHandlerError serves the route's error. A
+// failed room is DOC_SERVICE_UNAVAILABLE on both, whatever failed it: settlement's schema refusal
+// and a publish refused because the issue closed are causes another operation met, and the room
+// serves the document again once it is evicted. A live tree outside the schema is DOC_SCHEMA on
+// both, and any other failure INTERNAL.
+func TestAnAnchoredReadNamesADocumentErrorAsTheBlockRouteDoes(t *testing.T) {
+	writer, database, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, writer, "TEST", "One code", "Intro.\n\nThe quoted line.\n")
+	created := func(path string, body map[string]any) (string, string) {
+		t.Helper()
+		record := decodeBody[struct {
+			ID     string       `json:"id"`
+			Anchor model.Anchor `json:"anchor"`
+		}](t, dispatchRequest(t, writer, http.MethodPost, path, body, "alice"))
+		if record.Anchor.BlockID == nil {
+			t.Fatalf("POST %s: anchor pinned no block", path)
+		}
+		return record.ID, *record.Anchor.BlockID
+	}
+	anchor := map[string]any{"artifact": "spec", "quote": "The quoted line."}
+	comment, blockID := created("/api/v1/issues/"+issue.Key+"/comments", map[string]any{"anchor": anchor, "body": "Quoted."})
+	ask, _ := created("/api/v1/issues/"+issue.Key+"/asks", map[string]any{"anchor": anchor, "question": "Keep it?"})
+	// What awaitRoomRecovery answers a read that may not wait for a room failed with cause.
+	failedRoom := func(cause error) error { return fmt.Errorf("%w: %w", docs.ErrServiceUnavailable, cause) }
+	outsideSchema := fmt.Errorf("%w: callout needs at least one block", docs.ErrDocSchema)
+
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"a room settlement's schema refusal failed", failedRoom(outsideSchema), http.StatusServiceUnavailable, codeDocServiceUnavailable},
+		{"a room a publish refused for a closed issue failed", failedRoom(fmt.Errorf("apply committed live document write: %w", docs.ErrIssueClosed)), http.StatusServiceUnavailable, codeDocServiceUnavailable},
+		{"a live tree outside the schema", outsideSchema, http.StatusInternalServerError, codeDocSchema},
+		{"an unclassified failure", errors.New("unexpected document failure"), http.StatusInternalServerError, codeInternal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := readingServer(t, database, docs.NewPgVersioned(database), func(documents docs.API) docs.API {
+				return failingBlockPath{API: documents, err: test.err}
+			})
+			route := dispatchRequest(t, reader, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks/"+blockID, nil, "alice")
+			if route.Code != test.status || !strings.Contains(route.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("block route: status=%d body=%s, want %d %s", route.Code, route.Body.String(), test.status, test.code)
+			}
+			for _, read := range []struct{ path, record string }{
+				{"/api/v1/comments/" + comment, "comment"},
+				{"/api/v1/asks/" + ask, "ask"},
+			} {
+				response := dispatchRequest(t, reader, http.MethodGet, read.path, nil, "alice")
+				if response.Code != http.StatusOK {
+					t.Fatalf("GET %s: status=%d body=%s, want 200", read.path, response.Code, response.Body.String())
+				}
+				var record map[string]json.RawMessage
+				if err := json.Unmarshal(decodeBody[map[string]json.RawMessage](t, response)[read.record], &record); err != nil {
+					t.Fatalf("GET %s: decode %s: %v", read.path, read.record, err)
+				}
+				if string(record["anchor_block_error"]) != `"`+test.code+`"` {
+					t.Fatalf("GET %s: anchor_block_error=%s, want %q, the block route's code", read.path, record["anchor_block_error"], test.code)
+				}
+			}
+		})
 	}
 }
 

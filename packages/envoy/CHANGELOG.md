@@ -120,6 +120,13 @@
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
 
+- A Dispatch request that meets a failed document room answers `503 DOC_SERVICE_UNAVAILABLE`
+  whatever failed the room, as a comment's or ask's `anchor_block_error` names it: both name a
+  document error through one classification (`api.documentErrorCode`). A room failed by
+  settlement's schema refusal answered `500 DOC_SCHEMA`, and one failed by a publish refused
+  because its issue closed `409 ISSUE_CLOSED`, though the request had met neither itself; it
+  retries once the room is evicted, and its retry meets the document (LEGION-460).
+
 - A search that contains only stop words now returns `200` with no results, so every consumer
   can show an empty result rather than a retryable failure.
 

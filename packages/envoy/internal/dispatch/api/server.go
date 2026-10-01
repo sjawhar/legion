@@ -248,13 +248,31 @@ func errorf(status int, code, format string, args ...any) *apiError {
 	return &apiError{status: status, code: code, message: fmt.Sprintf(format, args...)}
 }
 
-// The codes writeHandlerError answers a document it cannot read and an unclassified failure
-// with, which a comment's or ask's single read also carries as anchor_block_error (anchorBlock).
+// The codes writeHandlerError answers a document it cannot read or serve and an unclassified
+// failure with, which a comment's or ask's single read also carries as anchor_block_error
+// (anchorBlock).
 const (
 	codeDocSchema             = "DOC_SCHEMA"
 	codeDocServiceUnavailable = "DOC_SERVICE_UNAVAILABLE"
 	codeInternal              = "INTERNAL"
 )
+
+// documentErrorCode names an error a document operation returns when it could not read or serve
+// the document; ok is false for any other error. writeHandlerError and anchorBlock both name a
+// document error by it, so the two cannot name one error differently. A room or store that could
+// not serve the document is DOC_SERVICE_UNAVAILABLE whatever failed it: a failed room carries the
+// cause another operation failed it with (settlement's schema refusal, a publish refused because
+// the issue closed, a writer's cancelled commit), and the caller retries once the room is evicted,
+// when its own operation meets the document itself. A live tree outside the schema is DOC_SCHEMA.
+func documentErrorCode(err error) (code string, ok bool) {
+	switch {
+	case errors.Is(err, docs.ErrServiceUnavailable):
+		return codeDocServiceUnavailable, true
+	case errors.Is(err, docs.ErrDocSchema):
+		return codeDocSchema, true
+	}
+	return "", false
+}
 
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
@@ -363,17 +381,17 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
 		return
 	}
-	if errors.Is(err, docs.ErrDocSchema) {
-		writeError(w, codeDocSchema, http.StatusInternalServerError, err.Error())
+	if code, ok := documentErrorCode(err); ok {
+		if code == codeDocServiceUnavailable {
+			writeError(w, code, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
+			return
+		}
+		writeError(w, code, http.StatusInternalServerError, err.Error())
 		slog.Error("dispatch: API document outside Proof schema", "error", err)
 		return
 	}
 	if errors.Is(err, docs.ErrIssueClosed) {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict, err.Error())
-		return
-	}
-	if errors.Is(err, docs.ErrServiceUnavailable) {
-		writeError(w, codeDocServiceUnavailable, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
 		return
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
