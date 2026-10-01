@@ -53,42 +53,52 @@ describe("DispatchClient", () => {
     );
   });
 
-  // Dispatch deploys apart from the hosts that release this client, so a client meets servers
-  // from before and after the listing paged; each answer shape is read for what it is.
-  test("reads a paging Dispatch's page as served and pages an older Dispatch's whole array itself", async () => {
+  test("reads a paging Dispatch's page as served", async () => {
     // Only the key matters to paging, so the rest of each summary is left out.
     const issue = (key: string) => ({ key, title: key, status: "todo" }) as unknown as IssueSummary;
     const served = { issues: [issue("DSP-4")], total: 4, limit: 3, offset: 3 };
-    const { fetchImpl } = fakeFetch([
-      jsonResponse(served),
-      jsonResponse(["DSP-1", "DSP-2", "DSP-3", "DSP-4"].map(issue)),
-    ]);
+    const { fetchImpl } = fakeFetch([jsonResponse(served)]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
 
     // The page a paging Dispatch cut is the page: nothing is sliced out of it again.
     await expect(
       client.listIssuePage({ project: "DSP" }, { limit: 3, offset: 3 })
     ).resolves.toEqual(served);
-    // A Dispatch that predates paging ignored limit and offset and answered every issue.
-    await expect(
-      client.listIssuePage({ project: "DSP" }, { limit: 2, offset: 1 })
-    ).resolves.toEqual({
-      issues: [issue("DSP-2"), issue("DSP-3")],
-      total: 4,
-      limit: 2,
-      offset: 1,
-    });
   });
 
-  test("refuses an issue listing answer that is neither a page nor an array", async () => {
-    const { fetchImpl } = fakeFetch([jsonResponse({ issues: "DSP-1", total: 1 })]);
+  // A Dispatch that ignores limit and offset answers the whole listing as an array. That is a
+  // server older than the paging listing or a regression of it, so the client refuses it rather
+  // than read every issue to cut the page itself.
+  test("refuses a bare array answered to a paged request, naming a Dispatch older than #1612", async () => {
+    const issue = (key: string) => ({ key, title: key, status: "todo" }) as unknown as IssueSummary;
+    const { fetchImpl } = fakeFetch([
+      jsonResponse(["DSP-1", "DSP-2", "DSP-3", "DSP-4"].map(issue)),
+    ]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
 
-    await expect(
-      client.listIssuePage({ project: "DSP" }, { limit: 50, offset: 0 })
-    ).rejects.toThrow(
-      "GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues"
+    await expect(client.listIssuePage({ project: "DSP" }, { limit: 2, offset: 1 })).rejects.toThrow(
+      "GET /api/v1/issues?limit=2&offset=1 asked for a page ({issues, total, limit, offset}) and " +
+        "got a bare array of 4 entries, the unpaged listing: a Dispatch older than " +
+        "sjawhar/legion#1612, which pages it, or a regression of that change"
     );
+  });
+
+  test("refuses an issue listing answer that is not a page, naming what arrived", async () => {
+    const { fetchImpl } = fakeFetch([
+      jsonResponse({ issues: "DSP-1", total: 1 }),
+      jsonResponse(null),
+      new Response("<html>bad gateway</html>", { status: 200 }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const list = () => client.listIssuePage({ project: "DSP" }, { limit: 50, offset: 0 });
+    const asked =
+      "GET /api/v1/issues?limit=50&offset=0 asked for a page ({issues, total, limit, offset}) and got ";
+
+    await expect(list()).rejects.toThrow(
+      `${asked}an object without an issues array or a numeric limit or a numeric offset`
+    );
+    await expect(list()).rejects.toThrow(`${asked}null`);
+    await expect(list()).rejects.toThrow(`${asked}a string`);
   });
 
   // The executor prints `showing A-B of N` from the served limit and offset, so a page missing
@@ -101,13 +111,17 @@ describe("DispatchClient", () => {
       jsonResponse({ issues: [issue], total: 5, limit: "1", offset: 1 }),
     ]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const asked =
+      "GET /api/v1/issues?limit=1&offset=1 asked for a page ({issues, total, limit, offset}) and got ";
 
-    for (let answer = 0; answer < 3; answer++) {
+    for (const lacking of [
+      "a numeric limit or a numeric offset",
+      "a numeric offset",
+      "a numeric limit",
+    ]) {
       await expect(
         client.listIssuePage({ project: "DSP" }, { limit: 1, offset: 1 })
-      ).rejects.toThrow(
-        "GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues"
-      );
+      ).rejects.toThrow(`${asked}an object without ${lacking}`);
     }
   });
 
