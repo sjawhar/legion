@@ -612,7 +612,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
-	workspace.WarmCodegraphIndex(ctx, provisioned.Dir)
+	workspace.WarmCodegraphIndexInBackground(provisioned.Dir)
 	return nil
 }
 
