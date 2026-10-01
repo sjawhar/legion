@@ -11,7 +11,7 @@ While the head still carries `.legion/`, submit `REQUEST_CHANGES` when any corre
 
 ```json
 {"commit_id": "<head-sha>", "event": "REQUEST_CHANGES",
- "body": "<summary>\n\nSecurity: <the line the Security Guidelines define>\n\nFast-follow: <one named cleanup item>\n\n<!-- legion: {\"session\":\"<session-id>\",\"phase\":\"review\"} -->",
+ "body": "<summary>\n\n<the Security line the Security Guidelines define>\n\nFast-follow: <one named cleanup item>\n\n<!-- legion: {\"session\":\"<session-id>\",\"phase\":\"review\"} -->",
  "comments": [{"path": "<file>", "line": <n>, "side": "RIGHT", "body": "<finding>"}]}
 ```
 

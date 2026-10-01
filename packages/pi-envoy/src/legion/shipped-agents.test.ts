@@ -37,21 +37,25 @@ test.each(agents)("%s declares its model only as role aliases", (file) => {
 });
 
 // Oh My Pi only logs an autoloaded skill it cannot find, and the agent is told not to read its
-// rubric again, so a name that drifted would leave the review without it. The Go daemon's boot gate
-// resolves a skill only from a `skill://<name>` token (packages/daemon-go/internal/promptrefs,
-// whose name pattern this repeats), so each autoloaded name must also appear in the body as one.
-test.each(agents)("%s names every skill it autoloads as skill://<name>", (file) => {
+// rubric again, so a name that drifted would leave the review without it — in either direction:
+// an autoload a deleted body no longer names leaves nothing "already in context" to skip re-reading,
+// and a body that names a skill:// its frontmatter no longer autoloads is never actually in context.
+// The Go daemon's boot gate resolves a skill only from a `skill://<name>` token
+// (packages/daemon-go/internal/promptrefs, whose name pattern this repeats), so the set of names
+// autoloaded must equal the set the body names, not merely contain it.
+test.each(agents)("%s autoloads exactly the skill:// names its body already has", (file) => {
   const { fields, body } = definition(file);
   const autoload = fields.autoloadSkills;
   // Oh My Pi reads a list or a comma-separated scalar (parseArrayOrCSV).
   const entries =
     autoload === undefined ? [] : Array.isArray(autoload) ? autoload : String(autoload).split(",");
-  const named = [...body.matchAll(/skill:\/\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)/g)].map(
-    ([, name]) => name
+  const autoloaded = new Set(entries.map((name) => String(name).trim()).filter(Boolean));
+  const named = new Set(
+    [...body.matchAll(/skill:\/\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)/g)].map(([, name]) => name)
   );
-  for (const entry of entries.map((name) => String(name).trim()).filter(Boolean)) {
-    expect(named, `${file} autoloads ${entry} but names no skill://${entry}`).toContain(entry);
-  }
+  expect([...autoloaded].sort(), `${file}'s autoloadSkills vs its skill:// names`).toEqual(
+    [...named].sort()
+  );
 });
 
 // deep-worker.md's frontmatter says why.
