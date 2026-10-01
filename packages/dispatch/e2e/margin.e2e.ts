@@ -927,9 +927,10 @@ async function markText(page: Page, markId: string): Promise<string> {
   return spans.join("");
 }
 
-// Bob comments on "quick brown", then Alice on "brown". Each record mark keeps its own text in
-// both browsers and in the server's reading of the document, so the anchor refresh a document
-// version runs leaves Bob's quote "quick brown" rather than cutting it to "quick ".
+// Bob comments on "quick brown"; Alice starts a comment on "brown" and cancels it, then comments on
+// "brown". Each record mark keeps its own text in both browsers and in the server's reading of the
+// document, so the anchor refresh a document version runs leaves Bob's quote "quick brown" rather
+// than cutting it to "quick ".
 test("two readers' comments can cover the same text, and neither cuts the other's anchor", async ({
   browser,
 }, testInfo) => {
@@ -963,6 +964,23 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     expect(bobComment.anchor.quote).toBe("quick brown");
     const bobMark = bobComment.anchor.mark_id;
     await expect.poll(() => markText(alicePage, bobMark)).toBe("quick brown");
+
+    // A comment Alice starts on "brown" and cancels takes its provisional mark away, and only it.
+    await setSheet(alicePage, testInfo.project.name, false);
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Comment");
+    await expect(alicePage.getByRole("form", { name: "Comment composer" })).toContainText("brown");
+    await alicePage.keyboard.press("Escape");
+    for (const page of [alicePage, bobPage]) {
+      await expect
+        .poll(() =>
+          documentEditor(page)
+            .locator("span[data-proof][data-id]")
+            .evaluateAll((spans) => [...new Set(spans.map((span) => span.getAttribute("data-id")))])
+        )
+        .toEqual([bobMark]);
+      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
+    }
 
     await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "brown");
@@ -1011,25 +1029,6 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     await expect.poll(() => markText(bobPage, aliceMark)).toBe("brown");
     await expect(marginCard(bobPage, bobComment.id)).toBeAttached();
     await expect(marginCard(bobPage, aliceComment.id)).toBeAttached();
-
-    // A comment Alice starts on "brown" and cancels takes its provisional mark away, and only it.
-    await setSheet(alicePage, testInfo.project.name, false);
-    await selectEditorText(alicePage, "brown");
-    await barAction(alicePage, "Comment");
-    await expect(alicePage.getByRole("form", { name: "Comment composer" })).toContainText("brown");
-    await alicePage.keyboard.press("Escape");
-    for (const page of [alicePage, bobPage]) {
-      await expect
-        .poll(() =>
-          documentEditor(page)
-            .locator("span[data-proof][data-id]")
-            .evaluateAll((spans) =>
-              [...new Set(spans.map((span) => span.getAttribute("data-id")))].sort()
-            )
-        )
-        .toEqual([bobMark, aliceMark].sort());
-      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
-    }
   } finally {
     await bob.close();
     await alice.close();
