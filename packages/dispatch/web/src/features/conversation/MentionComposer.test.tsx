@@ -1062,12 +1062,16 @@ test("a refused send's Retry asks what Send asks, and Discard takes the notice w
   }
 });
 
-// The composer holds its own controls while a send is out, but a host can still hand it a new
-// seed then - here, to a channel that seeds nothing, which strips the seeded mention. The refusal
-// is about what was sent: the reader gets exactly that back, records and all, to retry or edit.
-test("a refusal hands back the draft that was sent, not the one the channel moved to", async () => {
+// While a send is out nothing moves it to another channel: the composer holds Cancel reply, and
+// the Agents page holds its picker and every Reply. A host can still start a reply on the same
+// channel - the Conversation's own Reply buttons do - whose prefill replaces the field. The
+// refusal is about what was sent: the reader gets exactly that back, records and all, to retry or
+// edit, and on the channel it was written for, since the seed has not moved.
+test("a refusal hands back the draft that was sent, though a reply started since replaced the field", async () => {
   const refused = Promise.withResolvers<Comment>();
-  const createComment = spyOn(api, "createComment").mockReturnValue(refused.promise);
+  const createComment = spyOn(api, "createComment")
+    .mockReturnValueOnce(refused.promise)
+    .mockResolvedValueOnce(createdComment);
   const { rerender, view } = renderComposer({ seedMentions: [plannerMention] });
 
   try {
@@ -1075,12 +1079,27 @@ test("a refusal hands back the draft that was sent, not the one the channel move
     fireEvent.change(field, { target: { value: "@Planner hello" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
-    rerender({ owner: { kind: "session", sessionId: "A" } });
-    await waitFor(() => expect(field.value).toBe("hello"));
+    rerender({
+      replyTo: { author: "Bob", excerpt: "Earlier", id: "comment-0" },
+      seedMentions: [plannerMention],
+    });
+    await waitFor(() => expect(field.value).toBe(""));
 
     refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
     await screen.findByText("Couldn't send — the server is down");
     expect(field.value).toBe("@Planner hello");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]).toEqual([
+      "CORE-1",
+      {
+        body: "@Planner hello",
+        delivery: "steer",
+        mentions: [{ target: "session:A" }],
+        reply_to: "comment-0",
+      },
+    ]);
   } finally {
     view.unmount();
     createComment.mockRestore();

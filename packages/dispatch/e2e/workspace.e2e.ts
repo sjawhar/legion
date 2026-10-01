@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { setLiveSessions } from "./agents";
+import { setLiveSessions, shownAgentRows } from "./agents";
 import { getInbox } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -37,25 +37,25 @@ test("the seeded workspace fills every human-only surface", async ({ browser }, 
     await page.screenshot({ path: testInfo.outputPath("workspace-inbox.png"), fullPage: true });
 
     // Every session with Dispatch activity is an open row; the one Dispatch never heard from and
-    // the one unseen for twenty minutes each sit under their own fold.
+    // the one unseen for twenty minutes each sit under their own fold. A fold's rows follow the
+    // open rows in the page's one list, mounted and hidden while it is closed.
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const quiet = agents.getByRole("button", { name: "No Dispatch activity (1)" });
     const inactive = agents.getByRole("button", { name: "Inactive (1)" });
+    const shownTitles = shownAgentRows(page).locator("h2");
     await expect(quiet).toBeVisible();
     await expect(inactive).toBeVisible();
     await expect
-      .poll(async () => (await agents.locator("article h2").allTextContents()).sort())
+      .poll(async () => (await shownTitles.allTextContents()).sort())
       .toEqual(["Planner", "Reviewer", "Tester"]);
     await quiet.click();
-    await expect(
-      agents.getByRole("region", { name: "No Dispatch activity" }).locator("article h2")
-    ).toHaveText(["Observer"]);
+    await expect(shownTitles).toHaveCount(4);
+    await expect(shownTitles.last()).toHaveText("Observer");
     await quiet.click();
     await inactive.click();
-    await expect(agents.getByRole("region", { name: "Inactive" }).locator("article h2")).toHaveText(
-      ["Archivist"]
-    );
+    await expect(shownTitles).toHaveCount(4);
+    await expect(shownTitles.last()).toHaveText("Archivist");
     await inactive.click();
     const plannerCard = agents
       .locator("article")

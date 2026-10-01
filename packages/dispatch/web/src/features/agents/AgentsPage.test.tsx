@@ -2167,3 +2167,202 @@ test("the header checkbox selects a folded row and the fold says how many of its
     page.restore();
   }
 });
+
+// A closed fold keeps its rows mounted, hidden, so a row the reader had open is still expanded
+// in there. Nobody can see it, so a reply that arrives then must stay unread - in the navigation
+// and on the row - until the fold opens and puts the conversation back on screen.
+test("an open row a closed fold hides marks nothing read, and opening the fold reads what it shows", async () => {
+  const asked = exchange("m1", "Still there?", "2026-09-14T01:00:00Z");
+  const page = renderAgents({ listedAgents: [stale, ...agents], messages: [asked] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const fold = within(region).getByRole("button", { name: "Inactive (1)" });
+    fireEvent.click(fold);
+    const staleCard = card(region, "Stale");
+    expand(staleCard, "Stale");
+    await within(staleCard).findByText("Still there?");
+    fireEvent.click(fold);
+    expectFolded(region, "Stale");
+
+    const answered = exchange("m1", "Still there?", "2026-09-14T01:00:00Z", {
+      body: "Yes, still here.",
+      createdAt: "2026-09-14T01:05:00Z",
+      unread: true,
+    });
+    page.listAgentMessages.mockResolvedValue([
+      {
+        ...answered,
+        replies: answered.replies.map((reply) => ({
+          ...reply,
+          author: { id: "stale-session", kind: "session" as const },
+        })),
+      },
+    ]);
+    page.getMyAgentState.mockResolvedValue({ "stale-session": { unread_replies: 1 } });
+    await page.queryClient.invalidateQueries();
+    await within(staleCard).findByText("Yes, still here.");
+    // A mark the hidden row sent would go out from an effect a few microtasks on; give it a
+    // task, so the assertion below is not merely early.
+    const settled = Promise.withResolvers<void>();
+    setTimeout(settled.resolve, 20);
+    await settled.promise;
+    expect(page.putAgentState).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "New reply 1" })).toBeTruthy();
+
+    fireEvent.click(fold);
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("stale-session", {
+        read_through: "2026-09-14T01:05:00Z",
+      })
+    );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+const coreIssue: IssueSummary = {
+  assignee: null,
+  claim: null,
+  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  key: "CORE-1",
+  last_seq: 0,
+  open_asks: 0,
+  parent: null,
+  priority: null,
+  rank: "U",
+  route: null,
+  route_holder: null,
+  route_status: null,
+  status: "todo",
+  title: "Core work",
+  updated_at: "2026-09-14T00:00:00Z",
+};
+
+// A collapse keeps the row's picker as the reader left it, open included, so `i` opens the
+// picker rather than toggling it: on a picker already open it goes into the select instead of
+// clicking it shut.
+test("i on a row collapsed with its picker open goes back into the picker's select", async () => {
+  const page = renderAgents({ issues: [coreIssue] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    const toggle = within(planner).getByRole("button", { name: "Choose issue" });
+    fireEvent.click(toggle);
+    await within(planner).findByRole("combobox", { name: "Issue" });
+    expand(planner, "Planner");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    planner.focus();
+    fireEvent.keyDown(planner, { key: "i" });
+    const select = within(planner).getByRole("combobox", { hidden: true, name: "Issue" });
+    await waitFor(() => expect(document.activeElement).toBe(select));
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// One failed poll of the registry is not the agents leaving: each row keeps what it holds - here
+// a draft - and the page says the list could not be refreshed.
+test("a registry poll that fails keeps every row and what it holds, and says so", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Half a thought" } });
+
+    page.listAgents.mockRejectedValue(new Error("Envoy listener unreachable"));
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Could not refresh agents: Envoy listener unreachable"
+    );
+    expect(card(region, "Planner")).toBe(planner);
+    expect(field.isConnected).toBe(true);
+    expect(field.value).toBe("Half a thought");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A row whose session leaves the registry unmounts, and the send it had out goes on without it.
+// The row that comes back has a composer of its own, with no send of its own out, so it holds
+// nothing: its picker and its field are the reader's at once.
+test("a row back after its session left mid-send holds nothing for the send it did not make", async () => {
+  const held = Promise.withResolvers<Message>();
+  const page = renderAgents({ issues: [coreIssue] });
+  page.createAgentMessage.mockImplementationOnce(() => held.promise);
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Status please" },
+    });
+    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    await waitFor(() =>
+      expect(
+        (within(planner).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement)
+          .disabled
+      ).toBe(true)
+    );
+
+    page.listAgents.mockResolvedValue([agents[1]]);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    await waitFor(() =>
+      expect(within(region).queryByRole("heading", { name: "Planner" })).toBeNull()
+    );
+    page.listAgents.mockResolvedValue(agents);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    const back = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expect(back).not.toBe(planner);
+    expand(back, "Planner");
+    expect(
+      (within(back).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement).disabled
+    ).toBe(false);
+    expect(
+      (within(back).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement).disabled
+    ).toBe(false);
+  } finally {
+    held.resolve(message("Status please"));
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// A filter hides the rows it excludes rather than dropping them, as a closed fold does, so
+// narrowing the list and widening it again loses nothing a row holds.
+test("a row a filter hides keeps its draft and comes back as the reader left it", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    expand(planner, "Planner");
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "Half a thought" } });
+    const directory = within(region).getByRole("searchbox", { name: "Directory contains" });
+
+    fireEvent.change(directory, { target: { value: "REVIEWER" } });
+    expectFolded(region, "Planner");
+    fireEvent.change(directory, { target: { value: "" } });
+
+    expect(card(region, "Planner")).toBe(planner);
+    expect(
+      within(planner).getByRole("button", { name: "Planner" }).getAttribute("aria-expanded")
+    ).toBe("true");
+    expect(field.value).toBe("Half a thought");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});

@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { openAgents, seedAgents, setLiveSessions } from "./agents";
+import { openAgents, seedAgents, setLiveSessions, shownAgentRows } from "./agents";
 import {
   createAsk,
   createIssue,
@@ -791,7 +791,7 @@ test("the Agents page offers a row's picker, which then commits a keyboard pick 
   try {
     const page = await context.newPage();
     await openAgents(page);
-    const row = page.locator("[data-agent-row]").nth(0);
+    const row = shownAgentRows(page).nth(0);
     await page.keyboard.press("j");
     await expect(row).toBeFocused();
 

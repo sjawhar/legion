@@ -1,5 +1,5 @@
 import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
@@ -26,11 +26,20 @@ export interface AgentReply {
   readonly target: ReplyTarget;
 }
 
+/** Agent rows mounted this page load, so each mount's send has a name no other mount shares. */
+let agentRowMounts = 0;
+
 /** The name of an agent row's send. The row reads it (`useIsMutating`) to hold what a message on
  *  its way has already fixed - the picker and the Reply buttons - and the composer names its send
- *  with it, so the two keys cannot drift apart. */
-export function agentComposerMutationKey(sessionID: string): MutationKey {
-  return ["agent-composer", sessionID];
+ *  with it, so the two keys cannot drift apart. It belongs to one mount of the row: a row that
+ *  unmounts mid-send (its session left the registry, or the reader left the page) comes back with
+ *  a fresh composer, which holds nothing for a send it did not make. */
+export function useAgentSendKey(sessionID: string): MutationKey {
+  const [mount] = useState(() => {
+    agentRowMounts += 1;
+    return agentRowMounts;
+  });
+  return useMemo(() => ["agent-composer", sessionID, mount], [sessionID, mount]);
 }
 
 /**
@@ -45,6 +54,7 @@ export function AgentMessageComposer({
   onClose,
   replyTo,
   sending,
+  sendKey,
 }: {
   agent: Agent;
   onCancelReply: () => void;
@@ -53,9 +63,11 @@ export function AgentMessageComposer({
    *  which is NOT one level out; that case is filtered below. */
   onClose: () => void;
   replyTo: AgentReply | null;
-  /** Whether this row's send is in flight (`agentComposerMutationKey`). The message is addressed
-   *  by then, so the picker holds until it lands. */
+  /** Whether this row's send is in flight (`sendKey`). The message is addressed by then, so the
+   *  picker holds until it lands. */
   sending: boolean;
+  /** The row's `useAgentSendKey`, which names the composer's send. */
+  sendKey: MutationKey;
 }): ReactNode {
   const queryClient = useQueryClient();
   const [issueKey, setIssueKey] = useState("");
@@ -277,7 +289,7 @@ export function AgentMessageComposer({
             ? undefined
             : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
         }
-        mutationKey={agentComposerMutationKey(agent.session_id)}
+        mutationKey={sendKey}
         onCancelReply={onCancelReply}
         onClose={() => {
           if (sentJustNow.current) {

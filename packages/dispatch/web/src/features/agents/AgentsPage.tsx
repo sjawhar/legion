@@ -64,11 +64,7 @@ import { Timestamp } from "../refs/Timestamp";
 import { closestMatching, focusOnDocument } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
-import {
-  AgentMessageComposer,
-  type AgentReply,
-  agentComposerMutationKey,
-} from "./AgentMessageComposer";
+import { AgentMessageComposer, type AgentReply, useAgentSendKey } from "./AgentMessageComposer";
 import { deliveryAttempts } from "./attempts";
 import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
@@ -556,7 +552,8 @@ function AgentRow({
   selected,
 }: {
   agent: Agent;
-  /** A row in a closed fold: still mounted, so a pin or a fold's toggle loses nothing it holds. */
+  /** A row in a closed fold, or one the filters exclude: still mounted, so a pin, a fold's toggle
+   *  or a filter loses nothing it holds. */
   hidden: boolean;
   liveAgents: readonly Agent[];
   needsYou: number;
@@ -580,7 +577,8 @@ function AgentRow({
   // the reader unfolded each have one owner, which a collapse no more discards than a pin does.
   const [opened, setOpened] = useState(false);
   if (expanded && !opened) setOpened(true);
-  const sending = useIsMutating({ mutationKey: agentComposerMutationKey(agent.session_id) }) > 0;
+  const sendKey = useAgentSendKey(agent.session_id);
+  const sending = useIsMutating({ mutationKey: sendKey }) > 0;
   const detailsId = useId();
 
   return (
@@ -711,9 +709,9 @@ function AgentRow({
             agent={agent}
             liveAgents={liveAgents}
             onReply={setReplyTo}
-            // Open means on screen: an expanded row in a closed fold is as unseen as a collapsed
-            // one, so it marks nothing read, and reopening the fold is an open that freezes its
-            // unread set afresh.
+            // Open means on screen: an expanded row a closed fold or a filter hides is as unseen
+            // as a collapsed one, so it marks nothing read, and showing it again is an open that
+            // freezes its unread set afresh.
             open={expanded && !hidden}
             replyDisabled={sending}
           />
@@ -724,6 +722,7 @@ function AgentRow({
               onClose={leaveAgentComposer}
               replyTo={replyTo}
               sending={sending}
+              sendKey={sendKey}
             />
           </div>
         </div>
@@ -777,13 +776,12 @@ export interface AgentFilters {
 
 export const NO_AGENT_FILTERS: AgentFilters = { dir: "", machine: "", role: "" };
 
-export function filterAgents(agents: readonly Agent[], filters: AgentFilters): Agent[] {
+function matchesFilters(agent: Agent, filters: AgentFilters): boolean {
   const dir = filters.dir.trim().toLowerCase();
-  return agents.filter(
-    (agent) =>
-      (filters.machine === "" || agent.machine_id === filters.machine) &&
-      (filters.role === "" || agent.roles.includes(filters.role)) &&
-      (dir === "" || agent.dir.toLowerCase().includes(dir))
+  return (
+    (filters.machine === "" || agent.machine_id === filters.machine) &&
+    (filters.role === "" || agent.roles.includes(filters.role)) &&
+    (dir === "" || agent.dir.toLowerCase().includes(dir))
   );
 }
 
@@ -1071,18 +1069,22 @@ export function AgentsPage(): ReactNode {
     : null;
   const showComposer = selected.size > 0 && agents.length > 0;
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
-  // and is recomputed on every render of this page.
+  // and is recomputed on every render of this page. Every listed session is split, the ones the
+  // filters exclude included: their rows stay mounted, hidden, like a closed fold's.
   const { active, quiet, inactive } = partitionAgents(
-    filterAgents(agents, filters),
+    agents,
     pinned,
     needsYouBySession,
     Date.now()
   );
+  const matches = (agent: Agent) => matchesFilters(agent, filters);
   // The rows the filters match, in the order the page shows them - the open list, then each fold.
   // Select-all ticks this set in order and the composer names the selection in tick order, so a
   // set ordered any other way (the registry's own, say) would name the recipients in an order the
   // reader never sees, and send them in it.
-  const matching = [...active, ...quiet, ...inactive];
+  const matchingQuiet = quiet.filter(matches);
+  const matchingInactive = inactive.filter(matches);
+  const matching = [...active.filter(matches), ...matchingQuiet, ...matchingInactive];
   /** The row a pin was made from while it held focus, until the render that moves it. A pin can
    *  move a row between the open list and a fold: React moves its node, which can drop focus to
    *  the document, or the row lands in a closed fold, hidden. Focus follows the row to where it
@@ -1134,10 +1136,10 @@ export function AgentsPage(): ReactNode {
     if (focused !== row && !focusOnDocument()) return;
     if (focused !== target) target?.focus();
   }, [pinned]);
-  const rowIn = (section: AgentSection, hidden: boolean) => (agent: Agent) => (
+  const rowIn = (section: AgentSection, foldOpen: boolean) => (agent: Agent) => (
     <AgentRow
       agent={agent}
-      hidden={hidden}
+      hidden={!foldOpen || !matches(agent)}
       key={agent.session_id}
       liveAgents={agents}
       needsYou={needsYouBySession.get(agent.session_id) ?? 0}
@@ -1151,13 +1153,13 @@ export function AgentsPage(): ReactNode {
   // One list, keyed by session, with each fold's toggle as an item between the rows - the Inbox's
   // pattern (`Inbox.tsx`). A row that moves between the open list and a fold moves within the one
   // parent, so React moves its node instead of remounting it, and a closed fold's rows stay
-  // mounted, hidden: nothing a row holds is ever handed from one instance to another. One flat
-  // array, not three: each array in the children is a slot of its own, and a row changing slots
-  // would remount.
+  // mounted, hidden, as do the rows the filters exclude: nothing a row holds is ever handed from
+  // one instance to another. One flat array, not three: each array in the children is a slot of
+  // its own, and a row changing slots would remount.
   const rows = [
-    ...active.map(rowIn("active", false)),
+    ...active.map(rowIn("active", true)),
     <FoldToggle
-      agents={quiet}
+      agents={matchingQuiet}
       expanded={quietOpen}
       fold="quiet"
       key="fold:quiet"
@@ -1165,9 +1167,9 @@ export function AgentsPage(): ReactNode {
       onToggle={() => setQuietOpen((open) => !open)}
       selected={selected}
     />,
-    ...quiet.map(rowIn("quiet", !quietOpen)),
+    ...quiet.map(rowIn("quiet", quietOpen)),
     <FoldToggle
-      agents={inactive}
+      agents={matchingInactive}
       expanded={inactiveOpen}
       fold="inactive"
       key="fold:inactive"
@@ -1175,11 +1177,15 @@ export function AgentsPage(): ReactNode {
       onToggle={() => setInactiveOpen((open) => !open)}
       selected={selected}
     />,
-    ...inactive.map(rowIn("inactive", !inactiveOpen)),
+    ...inactive.map(rowIn("inactive", inactiveOpen)),
   ];
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
-  if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;
+  // A refresh that fails keeps the list it has: unmounting every row would throw away what each
+  // holds - a draft, a send's refusal, an upload. With no rows there is nothing to keep.
+  if (isError && agents.length === 0) {
+    return <p className={dangerText}>Could not load agents: {error}</p>;
+  }
 
   return (
     <section aria-label="Agents" ref={listRef}>
@@ -1194,6 +1200,11 @@ export function AgentsPage(): ReactNode {
           </Link>
         </p>
       </header>
+      {isError ? (
+        <p className={`mb-3 text-sm ${dangerText}`} role="alert">
+          Could not refresh agents: {error}
+        </p>
+      ) : null}
       {agents.length === 0 ? (
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
@@ -1211,9 +1222,8 @@ export function AgentsPage(): ReactNode {
               label="Agents filtered empty state"
               message="No agent matches these filters."
             />
-          ) : (
-            <div className="flex flex-col gap-3">{rows}</div>
-          )}
+          ) : null}
+          <div className="flex flex-col gap-3">{rows}</div>
         </>
       )}
       {/* The sends sit outside the composer and outside the list, so a send's row outlives both:

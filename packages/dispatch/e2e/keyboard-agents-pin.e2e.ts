@@ -7,6 +7,7 @@ import {
   openAgents,
   pasteFile,
   plannerSession,
+  refusePosts,
   reviewerSession,
   seedAgents,
   setLiveSessions,
@@ -17,10 +18,11 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // What an Agents row keeps when it moves between the open list and a fold - by Shift+P, or by
-// its fold closing. The page keeps every row in one keyed list (`AgentsPage.tsx`), so the row that
-// moves is the same row: these rows pin what it still holds when it lands - focus, whether it is
-// open, its draft, its issue, a reply in progress, a send or an upload still out, and the unread
-// set it opened with - and that while a closed fold hides it, it marks nothing read.
+// its fold closing - or when a filter hides it. The page keeps every row in one keyed list
+// (`AgentsPage.tsx`), so the row that moves is the same row: these rows pin what it still holds
+// when it lands - focus, whether it is open, its draft, its issue, a reply in progress, a send or
+// an upload still out, and the unread set it opened with - and that while a closed fold hides
+// it, it marks nothing read.
 
 /** `seedAgents`, plus `Quiet` and `Silent`: live sessions with no Dispatch activity, which fold
  *  under `No Dispatch activity` until one is pinned - the rows a pin moves across. */
@@ -488,8 +490,8 @@ test.describe("agents page pins", () => {
     }
   });
 
-  // The same loss by the other road into a closed fold: Shift+P hands an open, pinned row back to
-  // it. (Written by the acceptance run, which saw it fail at 4881f7bb on chromium and iphone.)
+  // The same loss by the other road into a closed fold: Shift+P hands an open, pinned row back
+  // to it.
   test("an open row Shift+P unpins into a closed fold marks nothing read there", async ({
     browser,
   }) => {
@@ -551,6 +553,52 @@ test.describe("agents page pins", () => {
       await fold.click();
       await expect(staleRow.getByText("Yes, here")).toBeVisible();
       await expect.poll(unread).toBe(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A filter hides the rows it excludes, as a closed fold does, rather than dropping them. A row
+  // a filter hides mid-send keeps the send's own composer, so the refusal comes back with the row,
+  // beside the draft that was sent, and nothing stays held once the server has answered.
+  test("a row a filter hides mid-send keeps its send, and the refusal comes back with it", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = agentRow(page, plannerSession.session_id);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const notice = row.getByText("Couldn't send — the server is down");
+      const role = page.getByRole("combobox", { exact: true, name: "Role" });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Control+Enter");
+      await expect(field).toBeDisabled();
+
+      await role.selectOption("reviewer");
+      await expect(row).toHaveCount(1);
+      await expect(row).toBeHidden();
+      refuse();
+      // The refusal lands while the row is hidden, in the row's own composer.
+      await expect(notice).toBeAttached();
+      await role.selectOption("");
+
+      await expect(row).toBeVisible();
+      await expect(row.getByRole("button", { exact: true, name: "Planner" })).toHaveAttribute(
+        "aria-expanded",
+        "true"
+      );
+      await expect(notice).toBeVisible();
+      await expect(field).toBeEnabled();
+      await expect(field).toHaveValue("Status please");
+      await expect(row.getByRole("button", { name: "Choose issue" })).toBeEnabled();
     } finally {
       await context.close();
     }

@@ -641,4 +641,55 @@ test.describe("agents page", () => {
       await context.close();
     }
   });
+
+  // A message on its way holds the picker and Reply of the row that sent it. A reader who leaves
+  // the page mid-send and comes back gets a new row, with a composer of its own and no send of its
+  // own out, so it holds nothing: the send it lost goes on without it.
+  test("a row back after the reader left mid-send holds nothing for the send it lost", async ({
+    browser,
+  }) => {
+    const issueKey = await seedAgents();
+    await createMessage(issueKey, {
+      body: "Can this ship?",
+      delivery: "btw",
+      target: `session:${plannerSession.session_id}`,
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = agentRow(page, plannerSession.session_id);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const reply = row.getByRole("button", { name: "Reply" }).first();
+      const send = await holdPosts(page, "**/api/v1/agents/*/messages");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await expect(toggle).toBeDisabled();
+      await expect(reply).toBeDisabled();
+
+      // Away to the Inbox and back, by the global keys, so the app - and the send - stay loaded.
+      await page.locator("body").focus();
+      await page.keyboard.press("g");
+      await page.keyboard.press("i");
+      await expect(row).toHaveCount(0);
+      await page.keyboard.press("g");
+      await page.keyboard.press("a");
+      await row.getByRole("button", { exact: true, name: "Planner" }).click();
+
+      await expect(field).toBeEnabled();
+      await expect(field).toHaveValue("");
+      await expect(toggle).toBeEnabled();
+      await expect(reply).toBeEnabled();
+      send.release();
+      expect(send.posts()).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
 });
