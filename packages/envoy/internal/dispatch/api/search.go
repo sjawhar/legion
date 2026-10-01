@@ -121,7 +121,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if nodes == 0 {
-		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "query has no searchable terms")
+		WriteJSON(w, http.StatusOK, model.SearchResponse{Results: []model.SearchResult{}})
 		return
 	}
 

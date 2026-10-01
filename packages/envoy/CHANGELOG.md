@@ -61,6 +61,8 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+- A search that contains only stop words now returns `200` with no results, so every consumer
+  can show an empty result rather than a retryable failure.
 
 - Dispatch no longer stores a table row without its last cells. A cell ends at every `|` not
   written `\|`, inside code and links too, and the parser dropped the cells a body row held past
