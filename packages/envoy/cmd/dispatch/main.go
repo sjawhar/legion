@@ -83,16 +83,7 @@ type bootConfig struct {
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "backfill-block-ids":
-			os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-		case "backfill-anchor-blocks":
-			os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-		case "rebuild-refs":
-			os.Exit(rebuildRefs(context.Background(), os.Getenv("DATABASE_URL"), loadServerURL(), os.Stdout))
-		case "redeliver-webhooks":
-			os.Exit(redeliverWebhooks(context.Background(), os.Args[2:], os.Stdout))
-		}
+		os.Exit(runSubcommand(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 	}
 	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {
@@ -720,6 +711,32 @@ func listenAddress(getenv func(string) string) (string, error) {
 		}
 	}
 	return net.JoinHostPort(host, port), nil
+}
+
+// subcommandNames are the arguments envoy-dispatch takes in place of serving, as runSubcommand
+// names them when it refuses one.
+var subcommandNames = []string{"backfill-block-ids", "backfill-anchor-blocks", "rebuild-refs", "redeliver-webhooks", "census"}
+
+// runSubcommand runs the subcommand args name and returns its exit code. A name it does not know
+// is refused with exit 2 rather than falling through to the server: the server migrates the
+// database at boot, so a deployment running `envoy-dispatch census` on an image that predates
+// the subcommand must get a refusal, never a boot that applies the migrations the census was to
+// inspect.
+func runSubcommand(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	switch args[0] {
+	case "backfill-block-ids":
+		return backfillBlockIDs(ctx, getenv("DATABASE_URL"), stdout)
+	case "backfill-anchor-blocks":
+		return backfillAnchorBlocks(ctx, getenv("DATABASE_URL"), stdout)
+	case "rebuild-refs":
+		return rebuildRefs(ctx, getenv("DATABASE_URL"), loadServerURL(), stdout)
+	case "redeliver-webhooks":
+		return redeliverWebhooks(ctx, args[1:], stdout)
+	case "census":
+		return census(ctx, getenv("DATABASE_URL"), stdout, stderr)
+	}
+	fmt.Fprintf(stderr, "envoy-dispatch: unknown subcommand %q; the subcommands are %s, and envoy-dispatch with no argument serves\n", args[0], strings.Join(subcommandNames, ", "))
+	return 2
 }
 
 // openMigrated opens the database a DB subcommand works on and brings it to the current
