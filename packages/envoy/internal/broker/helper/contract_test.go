@@ -128,16 +128,6 @@ func waitForIssued(t *testing.T, b *Broker) {
 
 // --- wire-shape mirrors (contract v9), for decoding the real broker's own responses ---
 
-type contractLookupResponse struct {
-	RecordID string `json:"record_id"`
-	State    string `json:"state"`
-}
-
-type contractApproveResponse struct {
-	State        string  `json:"state"`
-	CredentialID *string `json:"credential_id"`
-}
-
 type contractSelfResponse struct {
 	EnrollmentID string `json:"enrollment_id"`
 	Kind         string `json:"kind"`
@@ -179,24 +169,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	}
 
 	// --- approve (human/operator side, over the rig's own UI-bearer HTTP calls) ---
-	status, body := cr.broker.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
-	}
-	looked := contractDecode[contractLookupResponse](t, body)
-	if looked.State != "pending" || looked.RecordID == "" {
-		t.Fatalf("lookup = %+v, want a pending record", looked)
-	}
-	status, body = cr.broker.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"approver": cr.broker.Operator, "code": code})
-	if status != http.StatusOK {
-		t.Fatalf("approve machine record = %d: %s", status, body)
-	}
-	approved := contractDecode[contractApproveResponse](t, body)
-	if approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("approve response = %+v, want state=approved with a credential_id", approved)
-	}
-	credentialID := *approved.CredentialID
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
 
 	// --- LoginStatus reaches issued ---
 	waitForIssued(t, b)
@@ -237,7 +210,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if !signed.OK || signed.Proof == "" || signed.EnrollmentID != reg.EnrollmentID {
 		t.Fatalf("sign: %+v", signed)
 	}
-	status, body = cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": signed.Proof}, nil)
+	status, body := cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": signed.Proof}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/enrollments/self (real broker) = %d: %s", status, body)
 	}
