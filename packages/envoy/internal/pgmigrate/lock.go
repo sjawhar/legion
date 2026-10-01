@@ -80,19 +80,24 @@ type LockWait struct {
 // open when it was read, nil when Postgres hides it: pg_stat_activity shows another role's
 // xact_start, and its state, only to a superuser or a member of pg_read_all_stats. The census
 // refuses a lock holder whose age it cannot see, so a deployment that grants the census's role
-// pg_read_all_stats lets it read the age instead.
+// pg_read_all_stats lets it read the age instead. Autovacuum is an autovacuum worker, which the
+// census tells apart however much Postgres hides (holdersQuery).
 type Session struct {
 	PID         uint32 `json:"pid"`
 	User        string `json:"user"`
 	Application string `json:"application"`
 	State       string `json:"state"`
 	XactSeconds *int64 `json:"xact_seconds"`
+	Autovacuum  bool   `json:"autovacuum"`
 }
 
 // String is the session as every message names it, saying which fields Postgres hid.
 func (s Session) String() string {
 	user := "user " + s.User
-	if s.User == "" {
+	switch {
+	case s.Autovacuum:
+		user = "autovacuum worker"
+	case s.User == "":
 		user = "user not visible"
 	}
 	state := s.State

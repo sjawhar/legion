@@ -1,17 +1,18 @@
 // Package pgmigratetest holds the rules Envoy's migration sets are held to in tests: what a store
 // embeds is its whole migrations directory, the set is numbered 1 to N, every migration from a
-// store's chosen number declares a census, and the census's reading of which tables a migration
-// touches is held to the set, both by name (CheckTouchedTablesAreKnown) and against the locks each
-// migration really takes (CheckTouchedTablesAgainstLocks). It is an ordinary package rather than a
-// _test.go file so Dispatch's and the broker's store tests can both call it; Go shares no
-// test-only code across packages.
+// store's chosen number declares a census, a census names the new migrations whose objects it
+// reads (CheckCensusNamesTheMigrationsItReads), and the census's reading of which tables a
+// migration touches is held to the set, both by name (CheckTouchedTablesAreKnown) and against the
+// locks each migration really takes (CheckTouchedTablesAgainstLocks). It is an ordinary package
+// rather than a _test.go file so Dispatch's and the broker's store tests can both call it; Go
+// shares no test-only code across packages.
 package pgmigratetest
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -102,8 +103,10 @@ var (
 
 // CheckTouchedTablesAreKnown reports an error unless every table pgmigrate.TouchedTables finds in
 // a migration is one the set creates in that migration or an earlier one. It reads file text
-// alone and needs no database, and it is one-sided: it catches a misread name, never a statement
-// form the extractor misses, which names nothing. CheckTouchedTablesAgainstLocks catches that.
+// alone and needs no database, so a store's plain unit tests, run without a test database, still
+// catch a name the extractor misread. It is one-sided: it never catches a statement form the
+// extractor misses, which names nothing; CheckTouchedTablesAgainstLocks catches that, and a misread
+// name too, where a database is at hand.
 func CheckTouchedTablesAreKnown(fsys fs.FS, dir string) error {
 	migrations, err := pgmigrate.Load(fsys, dir)
 	if err != nil {
@@ -119,7 +122,7 @@ func CheckTouchedTablesAreKnown(fsys fs.FS, dir string) error {
 		}
 		for _, table := range pgmigrate.TouchedTables(migration.SQL) {
 			if !known[table] {
-				return fmt.Errorf("migration %s touches %q, which no migration up to it creates: either the migration names a table that does not exist or pgmigrate.TouchedTables misread a statement; fix the extractor's patterns in census.go", migration.Name, table)
+				return fmt.Errorf("migration %s touches %q, which no migration up to it creates: either the migration names a table that does not exist or pgmigrate.TouchedTables misread a statement; fix the extractor's patterns in touched.go", migration.Name, table)
 			}
 		}
 	}
@@ -127,19 +130,26 @@ func CheckTouchedTablesAreKnown(fsys fs.FS, dir string) error {
 }
 
 // CheckTouchedTablesAgainstLocks applies every migration of the set in fsys, in version order and
-// each in a transaction of its own as the runners do, to the empty database conn is connected to,
-// and reports an error unless what the census reads from each migration is exactly what it locks.
-// The census's reading is pgmigrate.TouchedTables plus the tables of the indexes
-// pgmigrate.TouchedIndexes names; what the migration locks is read from pg_locks for its own
-// backend before it commits, an index lock counted as its table's. Only tables that existed before
-// the migration count, since a table it creates holds no row and nobody else's lock. Two ways to
-// fail:
+// each in a transaction of its own as the runners do, on the database conn is connected to, and
+// reports an error unless what the census reads from each migration, pgmigrate.CensusTables read
+// just before the migration applies, is what it locks above ACCESS SHARE. What the migration locks
+// is read from pg_locks for its own backend before it commits, an index lock counted as its
+// table's. Only tables that existed before the migration count, since a table it creates holds no
+// row and nobody else's lock. Two ways to fail:
 //
 //   - a table the migration locks above ACCESS SHARE (every write and every DDL) that the reading
 //     misses: a statement form the census's patterns do not know, whose table the census would
 //     neither count nor check for holders;
-//   - a table the reading names that the migration never locks: a misread statement, which would
-//     refuse a deploy over a table the migration leaves alone.
+//   - a table a statement of the migration is read to name that the migration never locks: a
+//     misread statement, which would refuse a deploy over a table the migration leaves alone. A
+//     table a foreign key reaches is not held to this, since it is locked only when the migration
+//     writes a row there or in the table it is reached from.
+//
+// The locks a foreign key takes are taken on rows: a row the migration writes is checked against,
+// or cascades into, the tables its keys connect. The audit sees them only where the set's earlier
+// migrations leave rows, as the tests' own sets do; a store's real set is applied to an empty
+// database, where the audit holds its statements' own locks to the reading, and the tables a
+// foreign key reaches are the catalog's (CensusTables).
 //
 // A table the migration only reads (ACCESS SHARE: insert … select from, create view … as) is left
 // out of the reading on purpose: its lock waits only behind an ACCESS EXCLUSIVE holder, and
@@ -166,20 +176,15 @@ func auditMigrationLocks(ctx context.Context, conn *pgx.Conn, migration pgmigrat
 	for _, name := range before {
 		existed[name] = true
 	}
-	read := map[string]bool{}
-	for _, table := range pgmigrate.TouchedTables(migration.SQL) {
-		read[table] = true
+	reading, err := pgmigrate.CensusTables(ctx, conn, migration.SQL)
+	if err != nil {
+		return fmt.Errorf("migration %s: %w", migration.Name, err)
 	}
-	for _, index := range pgmigrate.TouchedIndexes(migration.SQL) {
-		var table uint32
-		err := conn.QueryRow(ctx, "select indrelid from pg_index where indexrelid = to_regclass($1)", index).Scan(&table)
-		switch {
-		case err == nil:
-			if name, ok := before[table]; ok {
-				read[name] = true
-			}
-		case !errors.Is(err, pgx.ErrNoRows):
-			return fmt.Errorf("migration %s: resolve index %s: %w", migration.Name, index, err)
+	read, named := map[string]bool{}, map[string]bool{}
+	for _, table := range reading {
+		read[table.Name] = true
+		if table.Through == "" {
+			named[table.Name] = true
 		}
 	}
 	tx, err := conn.Begin(ctx)
@@ -219,14 +224,14 @@ func auditMigrationLocks(ctx context.Context, conn *pgx.Conn, migration pgmigrat
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("migration %s: read its locks: %w", migration.Name, err)
 	}
-	for _, name := range sortedKeys(lockedAboveRead) {
+	for _, name := range slices.Sorted(maps.Keys(lockedAboveRead)) {
 		if !read[name] {
-			return fmt.Errorf("migration %s locks %s above ACCESS SHARE, which pgmigrate.TouchedTables does not read from it: the census would neither count that table nor check who holds it; add the statement's form to the patterns in census.go and a row to TestTouchedTablesFindsEveryStatementFormTheMigrationsUse", migration.Name, name)
+			return fmt.Errorf("migration %s locks %s above ACCESS SHARE, which pgmigrate.CensusTables does not read from it: the census would neither count that table nor check who holds it; add the statement's form to the patterns in touched.go and a row to TestTouchedTablesFindsEveryStatementFormTheMigrationsUse", migration.Name, name)
 		}
 	}
-	for _, name := range sortedKeys(read) {
+	for _, name := range slices.Sorted(maps.Keys(named)) {
 		if existed[name] && !locked[name] {
-			return fmt.Errorf("migration %s names %s, which pgmigrate.TouchedTables reads from it, but takes no lock on it: the extractor misread a statement, and the census would refuse a deploy over a table the migration leaves alone; fix the patterns in census.go", migration.Name, name)
+			return fmt.Errorf("migration %s names %s, which pgmigrate.CensusTables reads from it, but takes no lock on it: the extractor misread a statement, and the census would refuse a deploy over a table the migration leaves alone; fix the patterns in touched.go", migration.Name, name)
 		}
 	}
 	return tx.Commit(ctx)
@@ -253,11 +258,121 @@ func schemaTables(ctx context.Context, conn *pgx.Conn) (map[uint32]string, error
 	return tables, rows.Err()
 }
 
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// CheckCensusNamesTheMigrationsItReads applies every migration of the set in fsys, in version
+// order and each in a transaction of its own, on the empty database conn is connected to, recording
+// which migration created each table, column, function and type, and reports an error unless
+// every census names, in its text, each migration numbered from `from` on whose objects it reads.
+// What a census reads is what Postgres records it depends on as a view, created just before its
+// migration applies and rolled back.
+//
+// A deployment takes every census before any migration of its release applies, so a census that
+// reads what an earlier migration of the same release creates names something the database does
+// not have yet, and refuses every deploy of that release. Where releases split is not in the set,
+// so the test cannot tell; naming the migration in the census, in a comment saying it ships in an
+// earlier release, is the author's word that it does. A table or column an earlier migration of
+// the same release creates holds no row the census could count, so such a census does not read it.
+func CheckCensusNamesTheMigrationsItReads(ctx context.Context, conn *pgx.Conn, fsys fs.FS, dir string, from int) error {
+	migrations, err := pgmigrate.Load(fsys, dir)
+	if err != nil {
+		return err
 	}
-	slices.Sort(out)
-	return out
+	created := map[catalogObject]createdBy{}
+	for _, migration := range migrations {
+		if migration.Census != "" {
+			reads, err := censusReads(ctx, conn, migration.Census)
+			if err != nil {
+				return fmt.Errorf("census %s: %w", migration.CensusName, err)
+			}
+			for _, object := range reads {
+				creator, ok := created[object]
+				if !ok || creator.migration.Version < from || strings.Contains(migration.Census, strings.TrimSuffix(creator.migration.Name, ".up.sql")) {
+					continue
+				}
+				return fmt.Errorf("census %s reads %s, which %s creates: a deployment takes the census before any migration of its release applies, so a release carrying both refuses every deploy; ship %s in an earlier release and name it in a comment in the census, or write the census without it (a table or column the same release creates holds no row to count)",
+					migration.CensusName, creator.name, creator.migration.Name, creator.migration.Name)
+			}
+		}
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("migration %s: begin: %w", migration.Name, err)
+		}
+		if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("migration %s: apply: %w", migration.Name, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("migration %s: commit: %w", migration.Name, err)
+		}
+		if err := recordCreated(ctx, conn, migration, created); err != nil {
+			return fmt.Errorf("migration %s: %w", migration.Name, err)
+		}
+	}
+	return nil
+}
+
+// catalogObject is a catalog row a census can depend on, as pg_depend names it: the catalog
+// (pg_class, pg_proc, pg_type), the object's oid, and a column's number, 0 for the object itself.
+type catalogObject struct {
+	class, oid uint32
+	sub        int32
+}
+
+type createdBy struct {
+	migration pgmigrate.Migration
+	name      string
+}
+
+// recordCreated records migration as the creator of every table, column, function and type of
+// the schema the connection creates in that no earlier migration created.
+func recordCreated(ctx context.Context, conn *pgx.Conn, migration pgmigrate.Migration, created map[catalogObject]createdBy) error {
+	rows, err := conn.Query(ctx, `
+		select 'pg_class'::regclass::oid, c.oid, 0, c.relname::text from pg_class c where c.relnamespace = current_schema()::regnamespace
+		union all
+		select 'pg_class'::regclass::oid, c.oid, a.attnum::int, c.relname || '.' || a.attname
+		from pg_attribute a join pg_class c on c.oid = a.attrelid
+		where c.relnamespace = current_schema()::regnamespace and a.attnum > 0 and not a.attisdropped
+		union all
+		select 'pg_proc'::regclass::oid, p.oid, 0, p.proname::text from pg_proc p where p.pronamespace = current_schema()::regnamespace
+		union all
+		select 'pg_type'::regclass::oid, t.oid, 0, t.typname::text from pg_type t where t.typnamespace = current_schema()::regnamespace`)
+	if err != nil {
+		return fmt.Errorf("list what it created: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var object catalogObject
+		var name string
+		if err := rows.Scan(&object.class, &object.oid, &object.sub, &name); err != nil {
+			return fmt.Errorf("list what it created: %w", err)
+		}
+		if _, ok := created[object]; !ok {
+			created[object] = createdBy{migration: migration, name: name}
+		}
+	}
+	return rows.Err()
+}
+
+// censusReads is every catalog object census depends on, read from pg_depend for a temporary
+// view of it, which a rolled-back transaction creates.
+func censusReads(ctx context.Context, conn *pgx.Conn, census string) ([]catalogObject, error) {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "create temporary view pgmigratetest_census as "+strings.TrimSuffix(strings.TrimSpace(census), ";")); err != nil {
+		return nil, fmt.Errorf("read it as a view: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		select d.refclassid, d.refobjid, d.refobjsubid
+		from pg_depend d join pg_rewrite r on r.oid = d.objid
+		where d.classid = 'pg_rewrite'::regclass and r.ev_class = 'pgmigratetest_census'::regclass
+			and d.refobjid <> 'pgmigratetest_census'::regclass`)
+	if err != nil {
+		return nil, fmt.Errorf("read what it depends on: %w", err)
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (catalogObject, error) {
+		var object catalogObject
+		return object, row.Scan(&object.class, &object.oid, &object.sub)
+	})
 }

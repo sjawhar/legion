@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
+	"github.com/sjawhar/envoy/internal/pgmigrate/pgmigratetest"
 )
 
 var censusBase = fstest.MapFS{
@@ -263,22 +264,58 @@ func TestCensusRefusesAMalformedCensus(t *testing.T) {
 
 // A census naming a table or column the database does not have refuses even behind an earlier
 // pending migration that may be what creates it: the census cannot tell that from a typo without
-// applying that migration, which takes the very locks it measures. Here 0001 is pending ahead of
-// 0002, whose census names 0001's table; the refusal says to deploy the earlier one first.
+// applying that migration, which takes the very locks it measures. Here the database is at 0001,
+// 0002 creates others and 0003's census names it; the refusal says such a release cannot pass.
 func TestCensusRefusesACensusNamingWhatOnlyAnEarlierPendingMigrationCreates(t *testing.T) {
-	store := openEmptyTestStore(t)
-	url := store.Pool.Config().ConnString()
-	set := withCheck("select count(*) from things where kind = 'bad'") // nothing applied: things does not exist yet
+	_, url := migratedToOne(t)
+	set := fstest.MapFS{
+		"migrations/0001_things.up.sql":              censusBase["migrations/0001_things.up.sql"],
+		"migrations/0002_others.up.sql":              {Data: []byte("create table others (id integer)")},
+		"migrations/0003_others_id_check.up.sql":     {Data: []byte("alter table others add constraint others_id_check check (id > 0)")},
+		"migrations/0003_others_id_check.census.sql": {Data: []byte("select count(*) from others where id <= 0")},
+	}
 	report, err := census(context.Background(), url, set, pgmigrate.CensusOptions{})
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
-	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "0002_things_kind_check.up.sql") || !strings.Contains(got[0], "SQLSTATE 42P01") || !strings.Contains(got[0], "deploy that migration first") {
-		t.Errorf("refusals = %v, want one for 0002 naming 42P01 and to deploy the earlier migration first", got)
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "0003_others_id_check.up.sql") || !strings.Contains(got[0], "SQLSTATE 42P01") || !strings.Contains(got[0], "a release carrying that migration without this one deploys first") {
+		t.Errorf("refusals = %v, want one for 0003 naming 42P01 and the release that must deploy first", got)
 	}
 	out := reportText(report)
-	if report.SchemaVersion != 0 || len(report.Pending) != 2 || !strings.Contains(out, "touches things: not in the database yet") {
+	if report.SchemaVersion != 1 || len(report.Pending) != 2 || !strings.Contains(out, "touches others: not in the database yet") {
 		t.Errorf("report:\n%s", out)
+	}
+}
+
+// A fresh database, one that records no version and holds no table, has no row a migration could
+// refuse and no session holding a lock on one, so the census passes it with one line: a new
+// stack's first deploy takes the census like every later one.
+func TestCensusPassesAFreshDatabase(t *testing.T) {
+	store := openEmptyTestStore(t)
+	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationFiles, pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if out := reportText(report); report.Refused() || out != "census: fresh database, nothing to check\ncensus: ok\n" {
+		t.Errorf("refusals = %v, report:\n%s", refusals(report), out)
+	}
+}
+
+// A database that records no version but holds tables is not fresh: the runner would apply every
+// migration from the first over what it holds. The census refuses it on the first migration,
+// naming the table, even where every census answers 0.
+func TestCensusRefusesADatabaseHoldingTablesButRecordingNoVersion(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if _, err := store.Pool.Exec(ctx, "create table things (id integer, kind text)"); err != nil {
+		t.Fatal(err)
+	}
+	report, err := census(ctx, store.Pool.Config().ConnString(), withCheck("select count(*) from things where kind = 'bad'"), pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.HasPrefix(got[0], "0001_things.up.sql: ") || !strings.Contains(got[0], "schema_migrations records no version") || !strings.Contains(got[0], "things") {
+		t.Errorf("refusals = %v, want one on 0001 naming schema_migrations and things", got)
 	}
 }
 
@@ -338,7 +375,9 @@ func TestCensusTakesEveryVersionTheRunnerHasNotRecordedAsPending(t *testing.T) {
 
 // A census that casts a row's text to a reg* type fails in the type's input function, which
 // quotes the value it was given under a class-42 SQLSTATE. The census prints Postgres's message
-// only for an error that points into the census's own text (a position), never this one.
+// only for an error that points into the census's own text (a position), never this one. The name
+// regclass misses is a row's, not one a migration creates, so the refusal gives no advice about an
+// earlier pending migration.
 func TestCensusNeverPrintsARowValueAnInputFunctionQuotes(t *testing.T) {
 	for name, tc := range map[string]struct{ census, code string }{
 		"regclass": {"select count(*) from things where kind::regclass is not null", "SQLSTATE 42P01"},
@@ -359,8 +398,8 @@ func TestCensusNeverPrintsARowValueAnInputFunctionQuotes(t *testing.T) {
 			if strings.Contains(strings.ToLower(out), "sentinel") {
 				t.Fatalf("the report printed a row's value:\n%s", out)
 			}
-			if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], tc.code) {
-				t.Errorf("refusals = %v, want one naming %s", got, tc.code)
+			if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], tc.code) || strings.Contains(got[0], "pending migration") {
+				t.Errorf("refusals = %v, want one naming %s and no pending migration", got, tc.code)
 			}
 		})
 	}
@@ -499,6 +538,55 @@ func TestEveryShippedCensusAnswersAtTheSchemaBeforeItsMigration(t *testing.T) {
 	}
 }
 
+// A census is taken before every migration of its release applies, so one that reads what an
+// earlier migration of the same release creates refuses every deploy of that release. The test
+// cannot know where releases split, so every census that reads what a migration from
+// censusRequiredFrom on creates names that migration: the author's word that it ships first.
+func TestEveryShippedCensusNamesTheNewMigrationsItReads(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	if err := pgmigratetest.CheckCensusNamesTheMigrationsItReads(ctx, conn, migrationFiles, "migrations", censusRequiredFrom); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The check finds the pair: 0002 adds things.note and 0003's census counts the rows its check on
+// note would refuse. A release carrying both refuses every deploy, so the check names the column
+// and both files until the census names 0002, and a census that reads only what 0001 made, older
+// than the rule's first number, needs nothing.
+func TestTheCensusPairCheckNamesACensusReadingWhatANewMigrationCreates(t *testing.T) {
+	ctx := context.Background()
+	set := fstest.MapFS{
+		"migrations/0001_things.up.sql":          censusBase["migrations/0001_things.up.sql"],
+		"migrations/0002_things_note.up.sql":     {Data: []byte("alter table things add column note text")},
+		"migrations/0002_things_note.census.sql": {Data: []byte("-- a new nullable column: no row can violate it\nselect count(*) from things where kind = 'never'")},
+		"migrations/0003_note_check.up.sql":      {Data: []byte("alter table things add constraint note_check check (note <> '')")},
+		"migrations/0003_note_check.census.sql":  {Data: []byte("select count(*) from things where note = ''")},
+	}
+	check := func() error {
+		store := openEmptyTestStore(t)
+		conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close(context.Background()) })
+		return pgmigratetest.CheckCensusNamesTheMigrationsItReads(ctx, conn, set, "migrations", 2)
+	}
+	err := check()
+	if err == nil || !strings.Contains(err.Error(), "census 0003_note_check.census.sql reads things.note, which 0002_things_note.up.sql creates") {
+		t.Fatalf("CheckCensusNamesTheMigrationsItReads = %v, want it to name 0003's census, things.note and 0002", err)
+	}
+	set["migrations/0003_note_check.census.sql"] = &fstest.MapFile{Data: []byte("-- note is 0002_things_note's, which ships in an earlier release\nselect count(*) from things where note = ''")}
+	if err := check(); err != nil {
+		t.Errorf("with 0002 named: %v", err)
+	}
+}
+
 // migrationsThrough is the embedded set's files numbered up to version: what a binary built when
 // version was the newest migration would carry.
 func migrationsThrough(t *testing.T, version int) fstest.MapFS {
@@ -598,6 +686,73 @@ func TestCensusRefusesATouchedTableItCannotReadWithinTheLockTimeout(t *testing.T
 	out := reportText(report)
 	if !strings.Contains(out, "touches things: not read, its lock was not granted within 5s") || !strings.Contains(out, "census: transactions open longer than 1m0s: none") {
 		t.Errorf("report:\n%s", out)
+	}
+}
+
+// A migration that writes rows also locks the tables its foreign keys connect, though it names
+// none of them: deleting an ask cascades into ask_followers and user_ask_snooze and checks
+// comments and artifact_reviews for rows that still reference it. The census reads those tables
+// from the catalog and checks them as it checks a table the migration names. Here a scratch 0056
+// deletes an ask with a follower, against the real set at 0055: an old transaction holding a row
+// of ask_followers refuses it, and so does a session holding ask_followers in ACCESS EXCLUSIVE,
+// since at boot the migration's cascade would wait on either until its lock timeout.
+func TestCensusChecksTheTablesAForeignKeyReachesFromARowTheMigrationWrites(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 55)
+	for _, statement := range []string{
+		`insert into projects (key, name) values ('CORE', 'Core')`,
+		`insert into issues (key, project_key, number, title, created_by, rank) values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U')`,
+		`insert into asks (issue_key, author, question) values ('CORE-1', '{"kind":"session","id":"s"}', 'scratch?')`,
+		`insert into ask_followers (ask_id, session_id) select id, 's' from asks`,
+	} {
+		if _, err := store.Pool.Exec(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	set := migrationsThrough(t, 55)
+	set["migrations/0056_scratch_delete.up.sql"] = &fstest.MapFile{Data: []byte("delete from asks where question = 'scratch?';")}
+	set["migrations/0056_scratch_delete.census.sql"] = &fstest.MapFile{Data: []byte("select 0")}
+	url := store.Pool.Config().ConnString()
+
+	holder, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { holder.Close(context.Background()) })
+	held, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := held.Exec(ctx, "update ask_followers set since = now()"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	report, err := census(ctx, url, set, pgmigrate.CensusOptions{LongTransaction: time.Second})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	pid := "pid " + strconv.FormatUint(uint64(holder.PgConn().PID()), 10)
+	if got := refusals(report); len(got) != 1 || !strings.HasPrefix(got[0], "0056_scratch_delete.up.sql: "+pid) || !strings.Contains(got[0], "has held a lock on ask_followers for") {
+		t.Errorf("refusals = %v, want one for 0056 naming %s on ask_followers", got, pid)
+	}
+	out := reportText(report)
+	for _, table := range []string{"ask_followers", "user_ask_snooze", "comments", "artifact_reviews"} {
+		if !strings.Contains(out, "census: 0056_scratch_delete.up.sql touches "+table+" through a foreign key with asks: ") {
+			t.Errorf("report lacks %s, reached from asks:\n%s", table, out)
+		}
+	}
+	if err := held.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	exclusive := "pid " + strconv.FormatUint(uint64(holdLock(t, store, "ask_followers", "access exclusive")), 10)
+	report, err = census(ctx, url, set, pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], "could not read ask_followers within 5s (SQLSTATE 55P03)") || !strings.Contains(got[0], exclusive) {
+		t.Errorf("refusals = %v, want one naming ask_followers, 55P03 and %s", got, exclusive)
 	}
 }
 

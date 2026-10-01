@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -55,8 +53,13 @@ type CensusOptions struct {
 
 // TableCensus is one table a pending migration touches.
 type TableCensus struct {
-	Name   string
-	Exists bool
+	Name string
+	// Through is the table a foreign key reaches this one from (CensusTable.Through); empty for a
+	// table the migration names. Such a table is read for its holders and its size, and its rows
+	// are not counted: the migration locks it only to check or act on the rows its foreign key
+	// connects.
+	Through string
+	Exists  bool
 	// Bytes is its pg_total_relation_size; Rows is its exact row count, read only when Bytes is
 	// within the limit.
 	Bytes int64
@@ -87,6 +90,9 @@ func (m *MigrationCensus) refuse(format string, args ...any) {
 // Report is what Census found, with the bounds it applied.
 type Report struct {
 	VersionTable string
+	// Fresh is a database that records no version and holds no table: nothing a migration could
+	// refuse or wait on, so Census checks nothing else.
+	Fresh bool
 	// SchemaVersion is the highest version VersionTable records, 0 when it records none.
 	SchemaVersion    int
 	TableLimit       int64
@@ -109,20 +115,25 @@ func (r *Report) Refused() bool { return r.refusals() > 0 }
 
 // Census reads, in one repeatable-read read-only transaction on conn, what a deployment must know
 // before the migrations the database has not applied run: for each pending migration the tables
-// its statements touch with their total size, row count and the sessions holding locks on them,
-// and the count its own census answers; and every transaction open longer than LongTransaction.
-// A pending migration is one whose version versionTable does not record, the rule the runners
-// apply it by; a database without that table records none.
+// it locks above ACCESS SHARE (CensusTables), with their total size, row count and the sessions
+// holding locks on them, and the count its own census answers; and every transaction open longer
+// than LongTransaction. A pending migration is one whose version versionTable does not record,
+// the rule the runners apply it by; a database without that table records none. A fresh database,
+// one that records no version and holds no table, has no row to refuse and no holder to wait on,
+// so Census checks nothing there (Report.Fresh).
 //
 // It refuses (MigrationCensus.Refusals, not an error):
-//   - a touched table above TableLimit, or one it cannot read within LockTimeout or the statement
-//     timeout;
-//   - a lock holder on a touched table whose transaction is at least LongTransaction old, or whose
-//     age Postgres hides from the census's role;
+//   - a table the migration names above TableLimit, or a table it touches that the census cannot
+//     read within LockTimeout or the statement timeout;
+//   - a lock holder on a touched table that would hold the migration past LockTimeout
+//     (holderRefusal): a transaction at least LongTransaction old, one whose age Postgres hides
+//     from the census's role, or an autovacuum Postgres will not cancel;
 //   - a census that answers non-zero, or that fails or answers anything but one integer - one that
 //     names a table or column the database does not have included, even behind an earlier pending
 //     migration that may create it, since the census cannot tell that from a typo without applying
-//     that migration.
+//     that migration;
+//   - a database that records no version but holds tables, which the runner would apply every
+//     migration over, on the first pending migration.
 //
 // It returns an error only when the census itself could not be taken. It writes nothing: the
 // transaction is read-only, and a migration's census is sent through the extended protocol, so it
@@ -159,27 +170,36 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 	for version := range recorded {
 		report.SchemaVersion = max(report.SchemaVersion, version)
 	}
+	var unrecorded []string
+	if len(recorded) == 0 {
+		if unrecorded, err = tablesHeld(ctx, tx, versionTable); err != nil {
+			return nil, err
+		}
+		if len(unrecorded) == 0 {
+			report.Fresh = true
+			return report, nil
+		}
+	}
+	// Postgres cancels an autovacuum that holds a lock another session waits for, once that
+	// session has waited deadlock_timeout; the migration waits LockTimeout at most.
+	var cancelsAutovacuum bool
+	if err := tx.QueryRow(ctx, "select current_setting('deadlock_timeout')::interval < $1::interval", lockTimeoutSetting).Scan(&cancelsAutovacuum); err != nil {
+		return nil, fmt.Errorf("census: read deadlock_timeout: %w", err)
+	}
 	for _, migration := range migrations {
 		if recorded[migration.Version] {
 			continue
 		}
 		entry := MigrationCensus{Migration: migration}
-		stripped := stripSQLComments(migration.SQL)
-		tables := matchNames(stripped, touchedTablePatterns)
-		for _, index := range matchNames(stripped, touchedIndexPatterns) {
-			var table string
-			err := tx.QueryRow(ctx, "select indrelid::regclass::text from pg_index where indexrelid = to_regclass($1)", index).Scan(&table)
-			if errors.Is(err, pgx.ErrNoRows) {
-				continue // created by a pending migration, whose statement names its table
-			}
-			if err != nil {
-				return nil, fmt.Errorf("census: resolve index %s: %w", index, err)
-			}
-			tables = append(tables, strings.TrimPrefix(table, "public."))
+		if len(report.Pending) == 0 && len(unrecorded) > 0 {
+			entry.refuse("%s records no version, yet the database holds %s: the runner would apply every migration from this one over it", versionTable, someTables(unrecorded))
 		}
-		slices.Sort(tables)
-		for _, name := range slices.Compact(tables) {
-			if err := censusTable(ctx, tx, name, options, &entry); err != nil {
+		tables, err := CensusTables(ctx, tx, migration.SQL)
+		if err != nil {
+			return nil, fmt.Errorf("census: %s: %w", migration.Name, err)
+		}
+		for _, table := range tables {
+			if err := censusTable(ctx, tx, table, options, cancelsAutovacuum, &entry); err != nil {
 				return nil, err
 			}
 		}
@@ -192,7 +212,7 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 	}
 	report.LongTransactions, err = sessions(ctx, tx, `
 		select pid, coalesce(usename, ''), coalesce(application_name, ''), coalesce(state, ''),
-			extract(epoch from now() - xact_start)::bigint
+			extract(epoch from now() - xact_start)::bigint, coalesce(backend_type = 'autovacuum worker', false)
 		from pg_stat_activity
 		where datname = current_database() and pid <> pg_backend_pid()
 			and xact_start is not null and now() - xact_start >= $1::interval
@@ -227,41 +247,61 @@ func recordedVersions(ctx context.Context, tx pgx.Tx, versionTable string) (map[
 	return recorded, nil
 }
 
+// tablesHeld names, sorted, the tables of the schema the runner creates its tables in
+// (current_schema()), versionTable aside.
+func tablesHeld(ctx context.Context, tx pgx.Tx, versionTable string) ([]string, error) {
+	rows, err := tx.Query(ctx, "select relname::text from pg_class where relnamespace = current_schema()::regnamespace and relkind in ('r', 'p') and relname <> $1 order by 1", versionTable)
+	if err != nil {
+		return nil, fmt.Errorf("census: list the database's tables: %w", err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("census: list the database's tables: %w", err)
+	}
+	return names, nil
+}
+
+// someTables names tables for a sentence: one by name, a few in a list, many by count and the first.
+func someTables(names []string) string {
+	switch {
+	case len(names) == 1:
+		return "table " + names[0]
+	case len(names) <= 3:
+		return fmt.Sprintf("%d tables (%s)", len(names), strings.Join(names, ", "))
+	}
+	return fmt.Sprintf("%d tables (%s, …)", len(names), strings.Join(names[:3], ", "))
+}
+
 // censusTable reads one touched table onto entry, with what it refuses. Its holders come from
 // pg_locks, which takes no lock. Its size and its rows each take ACCESS SHARE on it, so both wait
 // behind a session holding ACCESS EXCLUSIVE (another migration, an ALTER) and run in a savepoint:
 // a wait that outlasts LockTimeout, or a read that outlasts the statement timeout, leaves the
-// transaction usable and is a refusal naming the holders, not an error. A table above the limit is
-// refused on its size, and its rows are not counted.
-func censusTable(ctx context.Context, tx pgx.Tx, name string, options CensusOptions, entry *MigrationCensus) error {
-	table := TableCensus{Name: name}
+// transaction usable and is a refusal naming the holders, not an error. A table the migration
+// names above the limit is refused on its size, and its rows are not counted; a table a foreign
+// key reaches has no limit, since the migration checks or acts on only the rows that key connects,
+// and its rows are never counted.
+func censusTable(ctx context.Context, tx pgx.Tx, touched CensusTable, options CensusOptions, cancelsAutovacuum bool, entry *MigrationCensus) error {
+	name := touched.Name
+	table := TableCensus{Name: name, Through: touched.Through}
 	defer func() { entry.Tables = append(entry.Tables, table) }()
-	var oid *uint32
-	if err := tx.QueryRow(ctx, "select to_regclass($1)::oid", name).Scan(&oid); err != nil {
-		return fmt.Errorf("census: look for %s: %w", name, err)
-	}
-	if oid == nil {
+	var oid uint32
+	var pastFreezeAge bool
+	err := tx.QueryRow(ctx, tableQuery, name).Scan(&oid, &pastFreezeAge)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("census: look for %s: %w", name, err)
+	}
 	table.Exists = true
-	holders, err := sessions(ctx, tx, `
-		select distinct a.pid, coalesce(a.usename, ''), coalesce(a.application_name, ''), coalesce(a.state, ''),
-			extract(epoch from now() - a.xact_start)::bigint
-		from pg_locks l join pg_stat_activity a on a.pid = l.pid
-		where l.granted and l.locktype = 'relation' and l.relation = $1
-			and l.database = (select oid from pg_database where datname = current_database())
-			and l.pid <> pg_backend_pid()
-		order by 5 desc nulls last, 1`, *oid)
+	holders, err := lockHolders(ctx, tx, oid)
 	if err != nil {
 		return fmt.Errorf("census: read lock holders of %s: %w", name, err)
 	}
-	table.Holders = holders
 	for _, holder := range holders {
-		switch {
-		case holder.XactSeconds == nil:
-			entry.refuse("%s holds a lock on %s, and Postgres hides its transaction's age from the census's role, so the census cannot rule out a transaction older than %s; granting that role pg_read_all_stats lets the census read the age", holder, name, options.LongTransaction)
-		case time.Duration(*holder.XactSeconds)*time.Second >= options.LongTransaction:
-			entry.refuse("%s has held a lock on %s for %s, longer than %s", holder, name, seconds(*holder.XactSeconds), options.LongTransaction)
+		table.Holders = append(table.Holders, holder.Session)
+		if reason := holderRefusal(holder, name, pastFreezeAge, cancelsAutovacuum, options.LongTransaction); reason != "" {
+			entry.Refusals = append(entry.Refusals, reason)
 		}
 	}
 	nested, err := tx.Begin(ctx)
@@ -269,10 +309,11 @@ func censusTable(ctx context.Context, tx pgx.Tx, name string, options CensusOpti
 		return fmt.Errorf("census: savepoint: %w", err)
 	}
 	defer nested.Rollback(ctx)
-	err = nested.QueryRow(ctx, "select pg_total_relation_size($1::oid)", *oid).Scan(&table.Bytes)
-	if err == nil {
+	err = nested.QueryRow(ctx, "select pg_total_relation_size($1::oid)", oid).Scan(&table.Bytes)
+	if err == nil && touched.Through == "" {
 		if table.Bytes > options.TableLimit {
-			entry.refuse("%s is %s, above the %s a table a migration touches may be", name, humanBytes(table.Bytes), humanBytes(options.TableLimit))
+			size, limit := sizesAbove(table.Bytes, options.TableLimit)
+			entry.refuse("%s is %s, above the %s a table a migration touches may be", name, size, limit)
 			return nil
 		}
 		err = nested.QueryRow(ctx, "select count(*) from "+pgx.Identifier{name}.Sanitize()).Scan(&table.Rows)
@@ -285,14 +326,99 @@ func censusTable(ctx context.Context, tx pgx.Tx, name string, options CensusOpti
 		return nil
 	case errors.As(err, &pgErr) && pgErr.Code == lockNotAvailable:
 		table.Unread = fmt.Sprintf("its lock was not granted within %s", LockTimeout)
-		entry.refuse("could not read %s within %s (SQLSTATE %s); locks on it are held by %s", name, LockTimeout, pgErr.Code, sessionList(holders))
+		entry.refuse("could not read %s within %s (SQLSTATE %s); %s", name, LockTimeout, pgErr.Code, lockedBy(table.Holders))
 		return nil
 	case errors.As(err, &pgErr) && pgErr.Code == queryCanceled:
 		table.Unread = fmt.Sprintf("its read outlasted the %s statement timeout", options.StatementTimeout)
-		entry.refuse("could not read %s within the %s statement timeout (SQLSTATE %s); locks on it are held by %s", name, options.StatementTimeout, pgErr.Code, sessionList(holders))
+		entry.refuse("could not read %s within the %s statement timeout (SQLSTATE %s); %s", name, options.StatementTimeout, pgErr.Code, lockedBy(table.Holders))
 		return nil
 	}
 	return fmt.Errorf("census: read %s: %w", name, err)
+}
+
+// tableQuery finds a touched table by name: its oid, and whether it is past its freeze age, so
+// that autovacuum launches its vacuums of it to prevent wraparound and Postgres does not cancel
+// one for a lock another session waits for. The table's own reloptions can lower either age, never
+// raise it.
+const tableQuery = `
+	select c.oid,
+		age(c.relfrozenxid) >= least(current_setting('autovacuum_freeze_max_age')::bigint, coalesce(
+			(select option_value::bigint from pg_options_to_table(c.reloptions) where option_name = 'autovacuum_freeze_max_age'), 2147483647))
+		or mxid_age(c.relminmxid) >= least(current_setting('autovacuum_multixact_freeze_max_age')::bigint, coalesce(
+			(select option_value::bigint from pg_options_to_table(c.reloptions) where option_name = 'autovacuum_multixact_freeze_max_age'), 2147483647))
+	from pg_class c where c.oid = to_regclass($1)`
+
+// lockHolder is a session holding a lock on a touched table. antiWraparound says whether an
+// autovacuum holder runs to prevent wraparound, which autovacuum writes into the activity text of
+// a vacuum it launches that way; nil where Postgres hides that text from the census's role, which
+// then judges by the table's freeze age, refusing a vacuum launched just before the table passed
+// it too. The text is read in Postgres and never leaves it.
+type lockHolder struct {
+	Session
+	antiWraparound *bool
+}
+
+// lockHolders reads the other sessions holding a granted lock on the table oid, oldest
+// transaction first. One is an autovacuum worker when pg_stat_activity says so, or, to a role
+// without pg_read_all_stats, which sees no other role's backend_type, when it runs as no role (a
+// client session of another role shows its role); either way only while every lock it holds on
+// the table is the SHARE UPDATE EXCLUSIVE a vacuum or an analyze takes.
+func lockHolders(ctx context.Context, tx pgx.Tx, oid uint32) ([]lockHolder, error) {
+	rows, err := tx.Query(ctx, `
+		select a.pid, coalesce(a.usename, ''), coalesce(a.application_name, ''), coalesce(a.state, ''),
+			extract(epoch from now() - a.xact_start)::bigint,
+			coalesce(a.backend_type = 'autovacuum worker', a.usesysid is null) and bool_and(l.mode = 'ShareUpdateExclusiveLock'),
+			case when a.backend_type is not null then a.query like 'autovacuum: % (to prevent wraparound)' end
+		from pg_locks l join pg_stat_activity a on a.pid = l.pid
+		where l.granted and l.locktype = 'relation' and l.relation = $1
+			and l.database = (select oid from pg_database where datname = current_database())
+			and l.pid <> pg_backend_pid()
+		group by a.pid, a.usename, a.application_name, a.state, a.xact_start, a.backend_type, a.usesysid, a.query
+		order by 5 desc nulls last, 1`, oid)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (lockHolder, error) {
+		var h lockHolder
+		err := row.Scan(&h.PID, &h.User, &h.Application, &h.State, &h.XactSeconds, &h.Autovacuum, &h.antiWraparound)
+		return h, err
+	})
+}
+
+// holderRefusal says why a session holding a lock on table refuses the migration, or "" when it
+// does not: whether it would hold the migration's lock past LockTimeout. An autovacuum worker
+// would not, however long it has run: Postgres cancels it once the migration has waited
+// deadlock_timeout for a lock it holds (cancelsAutovacuum says that is inside LockTimeout), except
+// an anti-wraparound one, which its activity says it is, or, where Postgres hides that, which it
+// may be while the table is past its freeze age (pastFreezeAge). Any other session might, when its
+// transaction is long open or the census cannot see how long.
+func holderRefusal(holder lockHolder, table string, pastFreezeAge, cancelsAutovacuum bool, long time.Duration) string {
+	if holder.Autovacuum {
+		switch {
+		case holder.antiWraparound != nil && *holder.antiWraparound:
+			return fmt.Sprintf("%s holds a lock on %s, and it is an anti-wraparound autovacuum, which Postgres does not cancel for the migration's lock; let it finish", holder.Session, table)
+		case holder.antiWraparound == nil && pastFreezeAge:
+			return fmt.Sprintf("%s holds a lock on %s, which is past its freeze age, so it may be an anti-wraparound autovacuum, which Postgres does not cancel for the migration's lock; granting the census's role pg_read_all_stats lets the census read which", holder.Session, table)
+		case !cancelsAutovacuum:
+			return fmt.Sprintf("%s holds a lock on %s, and the server's deadlock_timeout is not shorter than the migration's %s lock timeout, so the migration would give up before Postgres cancels the autovacuum", holder.Session, table, LockTimeout)
+		}
+		return ""
+	}
+	switch {
+	case holder.XactSeconds == nil:
+		return fmt.Sprintf("%s holds a lock on %s, and Postgres hides its transaction's age from the census's role, so the census cannot rule out a transaction older than %s; granting that role pg_read_all_stats lets the census read the age", holder.Session, table, long)
+	case time.Duration(*holder.XactSeconds)*time.Second >= long:
+		return fmt.Sprintf("%s has held a lock on %s for %s, longer than %s", holder.Session, table, seconds(*holder.XactSeconds), long)
+	}
+	return ""
+}
+
+// lockedBy names the sessions holding a lock on a table the census could not read, for a refusal.
+func lockedBy(holders []Session) string {
+	if len(holders) == 0 {
+		return "no other session holds a lock on it"
+	}
+	return "locks on it are held by " + sessionList(holders)
 }
 
 // censusCount runs the migration's census inside a savepoint and records what it answered.
@@ -303,10 +429,12 @@ func censusTable(ctx context.Context, tx pgx.Tx, name string, options CensusOpti
 // carries), since then it quotes that text and its identifiers. An error raised while the census
 // runs carries no position, and its message can quote a row's value: a data exception's quotes
 // the value that failed to cast, and a reg* input function's (regclass, regtype, regproc) quotes
-// the text it was given under a class-42 SQLSTATE. A name the database does not have (42P01,
-// 42703) refuses like any other failure, with what to do if an earlier pending migration creates
-// it: deploy that one first. An error that is not Postgres's (the connection dropped) is returned:
-// the census could not be taken.
+// the text it was given under a class-42 SQLSTATE. A name the census's own text gives that the
+// database does not have (42P01, 42703, with a position) refuses like any other failure, with what
+// to do if an earlier pending migration creates it: that release cannot pass, and one carrying the
+// earlier migration alone deploys first. A missing name with no position is a row's value (a
+// regclass cast), which no migration creates, and gets no such advice. An error that is not
+// Postgres's (the connection dropped) is returned: the census could not be taken.
 func censusCount(ctx context.Context, tx pgx.Tx, entry *MigrationCensus) error {
 	migration := entry.Migration
 	nested, err := tx.Begin(ctx)
@@ -340,8 +468,8 @@ func censusCount(ctx context.Context, tx pgx.Tx, entry *MigrationCensus) error {
 	} else {
 		unprinted = "; Postgres's message is not printed, since it does not point into the census's text and can quote a row's value"
 	}
-	if pgErr.Code == undefinedTable || pgErr.Code == undefinedColumn {
-		entry.refuse("its census names something the database does not have (%s)%s; if an earlier pending migration creates it, deploy that migration first and take the census again", failure, unprinted)
+	if (pgErr.Code == undefinedTable || pgErr.Code == undefinedColumn) && pgErr.Position > 0 {
+		entry.refuse("its census names something the database does not have (%s); if an earlier pending migration creates it, this release cannot pass: a release carrying that migration without this one deploys first", failure)
 		return nil
 	}
 	entry.refuse("its census failed (%s)%s", failure, unprinted)
@@ -404,6 +532,8 @@ func integer(value any) (int64, bool) {
 	return 0, false
 }
 
+// sessions reads the sessions query names: pid, role, application, state, transaction age in
+// seconds, and whether it is an autovacuum worker.
 func sessions(ctx context.Context, tx pgx.Tx, query string, arg any) ([]Session, error) {
 	rows, err := tx.Query(ctx, query, arg)
 	if err != nil {
@@ -413,7 +543,7 @@ func sessions(ctx context.Context, tx pgx.Tx, query string, arg any) ([]Session,
 	var out []Session
 	for rows.Next() {
 		var s Session
-		if err := rows.Scan(&s.PID, &s.User, &s.Application, &s.State, &s.XactSeconds); err != nil {
+		if err := rows.Scan(&s.PID, &s.User, &s.Application, &s.State, &s.XactSeconds, &s.Autovacuum); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -435,6 +565,15 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%d bytes", n)
 }
 
+// sizesAbove writes a size above limit and the limit so that the two never read as one figure: as
+// humanBytes writes them, or in bytes where it rounds them to the same one.
+func sizesAbove(n, limit int64) (string, string) {
+	if size, bound := humanBytes(n), humanBytes(limit); size != bound {
+		return size, bound
+	}
+	return thousands(n) + " bytes", thousands(limit) + " bytes"
+}
+
 // thousands writes n with , separators: the counts a human compares against a row estimate.
 func thousands(n int64) string {
 	s := strconv.FormatInt(n, 10)
@@ -445,9 +584,14 @@ func thousands(n int64) string {
 }
 
 // Write prints the report, one census: line per fact, every refusal under its migration, ending
-// with census: ok or census: REFUSED (<n> reason(s)). Counts, sizes, versions, file names,
-// session metadata and SQLSTATEs only.
+// with census: ok or census: REFUSED (<n> reason(s)); a fresh database's is one line and the
+// verdict. Counts, sizes, versions, file names, session metadata and SQLSTATEs only.
 func (r *Report) Write(w io.Writer) {
+	if r.Fresh {
+		fmt.Fprintln(w, "census: fresh database, nothing to check")
+		fmt.Fprintln(w, "census: ok")
+		return
+	}
 	names := make([]string, len(r.Pending))
 	for i, entry := range r.Pending {
 		names[i] = entry.Migration.Name
@@ -463,22 +607,29 @@ func (r *Report) Write(w io.Writer) {
 			fmt.Fprintf(w, "census: %s touches no existing table\n", name)
 		}
 		for _, table := range entry.Tables {
+			touches := table.Name
+			if table.Through != "" {
+				touches += " through a foreign key with " + table.Through
+			}
 			holders := sessionList(table.Holders)
 			switch {
 			case !table.Exists:
-				fmt.Fprintf(w, "census: %s touches %s: not in the database yet\n", name, table.Name)
+				fmt.Fprintf(w, "census: %s touches %s: not in the database yet\n", name, touches)
 			case table.Unread != "":
-				fmt.Fprintf(w, "census: %s touches %s: not read, %s; locks held by other sessions: %s\n", name, table.Name, table.Unread, holders)
+				fmt.Fprintf(w, "census: %s touches %s: not read, %s; locks held by other sessions: %s\n", name, touches, table.Unread, holders)
+			case table.Through != "":
+				fmt.Fprintf(w, "census: %s touches %s: %s; locks held by other sessions: %s\n", name, touches, humanBytes(table.Bytes), holders)
 			case table.Bytes > r.TableLimit:
+				size, limit := sizesAbove(table.Bytes, r.TableLimit)
 				fmt.Fprintf(w, "census: %s touches %s: %s, above the %s limit, so its rows were not counted; locks held by other sessions: %s\n",
-					name, table.Name, humanBytes(table.Bytes), humanBytes(r.TableLimit), holders)
+					name, touches, size, limit, holders)
 			default:
 				rows := "rows"
 				if table.Rows == 1 {
 					rows = "row"
 				}
 				fmt.Fprintf(w, "census: %s touches %s: %s %s, %s (limit %s); locks held by other sessions: %s\n",
-					name, table.Name, thousands(table.Rows), rows, humanBytes(table.Bytes), humanBytes(r.TableLimit), holders)
+					name, touches, thousands(table.Rows), rows, humanBytes(table.Bytes), humanBytes(r.TableLimit), holders)
 			}
 		}
 		switch {
@@ -501,62 +652,4 @@ func (r *Report) Write(w io.Writer) {
 		return
 	}
 	fmt.Fprintln(w, "census: ok")
-}
-
-var touchedTablePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?is)\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?([\w."]+)`),
-	regexp.MustCompile(`(?is)\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?[\w."]+\s+on\s+(?:only\s+)?([\w."]+)`),
-	regexp.MustCompile(`(?is)\bdrop\s+table\s+(?:if\s+exists\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`),
-	regexp.MustCompile(`(?is)\btruncate\s+(?:table\s+)?(?:only\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`),
-	regexp.MustCompile(`(?is)\bcreate\s+(?:or\s+replace\s+)?(?:constraint\s+)?trigger\s+[\w."]+.*?\bon\s+([\w."]+)`),
-	// The table may carry an alias (update comments c set …), as 0043 and 0044 write it.
-	regexp.MustCompile(`(?is)\bupdate\s+(?:only\s+)?([\w."]+)(?:\s+(?:as\s+)?[\w"]+)?\s+set\b`),
-	regexp.MustCompile(`(?is)\bdelete\s+from\s+(?:only\s+)?([\w."]+)`),
-	regexp.MustCompile(`(?is)\binsert\s+into\s+([\w."]+)`),
-	regexp.MustCompile(`(?is)\block\s+(?:table\s+)?(?:only\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`),
-	// A foreign key takes SHARE ROW EXCLUSIVE on the table it references, which holds that
-	// table's writes for as long as the migration runs.
-	regexp.MustCompile(`(?is)\breferences\s+(?:only\s+)?([\w."]+)`),
-}
-
-var touchedIndexPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?is)\bdrop\s+index\s+(?:concurrently\s+)?(?:if\s+exists\s+)?([\w."]+)`),
-	regexp.MustCompile(`(?is)\balter\s+index\s+(?:if\s+exists\s+)?([\w."]+)`),
-}
-
-// TouchedTables names, sorted and once each, the tables a migration's statements lock above
-// ACCESS SHARE: the targets of alter table, create index … on, drop table, truncate, create
-// trigger … on, update (with or without an alias), delete from, insert into and lock table, and
-// the table a foreign key references. A table a statement only reads (insert … select from, create
-// view … as) is left out: its ACCESS SHARE waits only behind an ACCESS EXCLUSIVE holder. It reads
-// the SQL textually with its comments removed (DO blocks included), lowercases and strips a
-// public. qualifier and quotes. The forms are the ones the repository's migrations use, and every
-// store's tests hold the reading to what each of its migrations really locks
-// (pgmigratetest.CheckTouchedTablesAgainstLocks), so a migration written in a form this does not
-// know (reindex, cluster, create policy … on, merge into) fails there and needs a pattern here. A
-// table the migration creates itself is reported by Census as not in the database yet.
-func TouchedTables(sql string) []string {
-	return matchNames(stripSQLComments(sql), touchedTablePatterns)
-}
-
-// TouchedIndexes names the indexes a migration drops or alters; Census resolves each to its table.
-func TouchedIndexes(sql string) []string {
-	return matchNames(stripSQLComments(sql), touchedIndexPatterns)
-}
-
-func matchNames(sql string, patterns []*regexp.Regexp) []string {
-	var names []string
-	for _, pattern := range patterns {
-		for _, match := range pattern.FindAllStringSubmatch(sql, -1) {
-			for _, raw := range strings.Split(match[1], ",") {
-				name := strings.ToLower(strings.Trim(strings.TrimSpace(raw), `"`))
-				name = strings.TrimPrefix(name, "public.")
-				if name != "" {
-					names = append(names, name)
-				}
-			}
-		}
-	}
-	slices.Sort(names)
-	return slices.Compact(names)
 }
