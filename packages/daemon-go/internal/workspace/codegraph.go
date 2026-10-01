@@ -21,19 +21,22 @@ const codegraphTimeout = CommandTimeout
 // Runner requires — the daemon and the pod init container must still boot where it is absent (the
 // tmux runtime's host provisioning never installs it) — so this resolves it from PATH on its own,
 // directly with os/exec, and never fails provisioning: a missing CLI, a non-zero exit, or a
-// timeout is logged by name and warming simply does not happen; the worker falls back to grep, per
-// its role prompt. DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its
-// bundled docs rank DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on),
-// so an automatic, non-opt-in warm-up never phones home.
-func warmCodegraphIndex(ctx context.Context, dir string, log func(string)) {
+// timeout is logged loudly to stderr, exactly as the TypeScript daemon's console.error does, and
+// never through Request.Log (reserved for the one structured provisioning message createWorkspace
+// writes; cmd/legion/workspace_init.go and tests assert its stdout exactly). Warming simply does
+// not happen when the CLI is missing or fails; the worker falls back to grep, per its role
+// prompt. DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its bundled
+// docs rank DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on), so an
+// automatic, non-opt-in warm-up never phones home.
+func warmCodegraphIndex(ctx context.Context, dir string) {
 	codegraphPath, err := exec.LookPath("codegraph")
 	if err != nil {
-		log(fmt.Sprintf("codegraph warm-up skipped for %s: %s", dir, err))
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up skipped for %s: %s\n", dir, err)
 		return
 	}
 	status, err := runCodegraph(ctx, codegraphPath, dir, "status", "--json")
 	if err != nil {
-		log(fmt.Sprintf("codegraph warm-up could not run for %s: %s", dir, err))
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return
 	}
 	if status.exitCode == 0 && codegraphInitialized(status.stdout) {
@@ -41,11 +44,11 @@ func warmCodegraphIndex(ctx context.Context, dir string, log func(string)) {
 	}
 	result, err := runCodegraph(ctx, codegraphPath, dir, "init")
 	if err != nil {
-		log(fmt.Sprintf("codegraph warm-up could not run for %s: %s", dir, err))
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return
 	}
 	if result.exitCode != 0 {
-		log(fmt.Sprintf("codegraph init failed for %s (exit %d): %s", dir, result.exitCode, strings.TrimSpace(result.stderr)))
+		fmt.Fprintf(os.Stderr, "[legion] codegraph init failed for %s (exit %d): %s\n", dir, result.exitCode, strings.TrimSpace(result.stderr))
 	}
 }
 

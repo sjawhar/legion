@@ -83,7 +83,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	// container (cmd/legion/workspace_init.go) and the Go daemon's host provisioning for tmux
 	// panes (internal/daemon/outbox.go) — want one already built, and neither may fail or block
 	// on it (see warmCodegraphIndex's doc).
-	warmCodegraphIndex(ctx, workspace.Dir, request.Log)
+	warmCodegraphIndex(ctx, workspace.Dir)
 	return workspace, nil
 }
 

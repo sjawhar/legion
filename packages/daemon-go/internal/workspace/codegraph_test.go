@@ -42,9 +42,7 @@ func TestProvisionWarmsTheCodegraphIndexWhenTheCliIsOnPath(t *testing.T) {
 	callLog := filepath.Join(t.TempDir(), "calls.log")
 	stubCodegraph(t, callLog)
 	run := newLocalRunner(t)
-	var logged []string
 	req := provisionRequest(t)
-	req.Log = func(line string) { logged = append(logged, line) }
 
 	workspace, err := Provision(context.Background(), run, req)
 	if err != nil {
@@ -52,11 +50,6 @@ func TestProvisionWarmsTheCodegraphIndexWhenTheCliIsOnPath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace.Dir, ".codegraph-initialized")); err != nil {
 		t.Fatalf("workspace left uninitialized after provisioning: %v", err)
-	}
-	for _, line := range logged {
-		if strings.Contains(line, "codegraph") {
-			t.Errorf("provisioning logged a codegraph failure with the CLI present: %s", line)
-		}
 	}
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
@@ -82,13 +75,15 @@ func TestProvisionWarmsTheCodegraphIndexWhenTheCliIsOnPath(t *testing.T) {
 	}
 }
 
+// TestProvisionNeverFailsWhenTheCodegraphCliIsMissing proves the acceptance criterion directly:
+// warmCodegraphIndex logs its skip to stderr (never through Request.Log, which cmd/legion's exact
+// stdout assertions own), so this only has to show Provision still succeeds, and leaves no index,
+// when codegraph is absent from PATH entirely — including on this devbox, which has a real one.
 func TestProvisionNeverFailsWhenTheCodegraphCliIsMissing(t *testing.T) {
 	// git and jj resolve to absolute paths before PATH is narrowed below, exactly as
 	// resolveTools does at daemon boot: the Runner never looks PATH up again per command.
 	run := newLocalRunner(t)
 	req := provisionRequest(t)
-	var logged []string
-	req.Log = func(line string) { logged = append(logged, line) }
 	// Narrowed to a fresh, empty directory so this test proves the missing-CLI path even on a
 	// machine (like this one) that has a real `codegraph` on its ordinary PATH.
 	t.Setenv("PATH", t.TempDir())
@@ -100,13 +95,7 @@ func TestProvisionNeverFailsWhenTheCodegraphCliIsMissing(t *testing.T) {
 	if _, err := os.Stat(workspace.Dir); err != nil {
 		t.Fatalf("workspace missing after provisioning with no codegraph: %v", err)
 	}
-	found := false
-	for _, line := range logged {
-		if strings.Contains(line, "codegraph warm-up skipped") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("provisioning logged = %v, want a line naming the skipped codegraph warm-up", logged)
+	if _, err := os.Stat(filepath.Join(workspace.Dir, ".codegraph-initialized")); !os.IsNotExist(err) {
+		t.Fatalf("stat .codegraph-initialized = %v, want it absent with no codegraph on PATH", err)
 	}
 }
