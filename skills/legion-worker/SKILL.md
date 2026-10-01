@@ -93,9 +93,9 @@ Reach any live role on this issue the same way you reach the architect: `envoy_p
 `notifications.role.` followed by that role's encoded token. Use it when you need context an
 earlier phase has that its handoff doesn't cover — ask the planner why a constraint was
 scoped that way, ask the implementer what a commit actually did. A role that finished its
-phase stays idle in its pane for the daemon's idle-retire window and answers; once retired (no
-live holder, a publish is rejected 404), read its committed handoff or ask the architect to
-`spawn_worker` it.
+phase stays live and answers: under the Go daemon until its issue closes, under the TypeScript
+daemon for its idle-retire window. Once a role has no live holder (a publish is rejected 404),
+read its committed handoff, or under the TypeScript daemon ask the architect to `spawn_worker` it.
 
 ## Workspace and handoff precedence
 
@@ -111,10 +111,11 @@ Never rely on the inherited cwd. Every later repository shell command **MUST** b
 native filesystem tool paths **MUST** be absolute under that workspace. Do not create an
 isolated worktree, change the workspace topology, or mix another issue's work into it.
 Concurrent issues have disjoint workspaces; only the currently active phase mutates this
-one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only: you are kept
-alive to answer questions, not to keep editing. Do not create new commits, run
-`jj -R "$LEGION_WORKSPACE" new`, or touch tracked files once your own handoff is committed
-(and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
+one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only in every later
+turn, including one an Envoy question starts: you are kept alive to answer questions, not to keep
+editing. Do not create new commits, run `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files
+once your own handoff is committed (and, for the implementer, pushed) — a code change belongs to
+whichever phase is active now.
 
 On every start, and especially after revival or re-creation, read the issue and then the
 committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legion/`:
@@ -467,10 +468,12 @@ do:
 Quote the answer verbatim in what you tell the architect: with the run and phase it names, the
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
-**Stay in this session afterward.** Your process does not exit when your phase completes;
-it goes idle in its pane, and after `worker_idle_retire_seconds` (default 600 s) idle with no
-active phase the daemon retires it — your next assignment resumes this same session from its
-session file, so it is still you. Other roles on this issue may reach you through Envoy with
+**Stay in this session afterward.** Your process does not exit when your phase completes; it
+goes idle in its pane. Under the Go daemon it stays live until your issue closes, and only that
+close, an operator, or a crash stops it (a crash relaunches this same session). Under the
+TypeScript daemon, after `worker_idle_retire_seconds` (default 600 s) idle with no active phase
+the daemon retires it. Either way your next assignment arrives in this same session, so it is
+still you. Other roles on this issue may reach you through Envoy with
 questions about the work you did — answer them, reading `$LEGION_WORKSPACE` and your own
 committed handoff as needed, without mutating anything (see Workspace and handoff
 precedence above). You will also be the one resumed, with a new prompt in this same

@@ -853,9 +853,10 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 // The architect's retry of a held phase writes a start carrying the retry task. The relaunched
 // claim still holds the task it was started with, so the retry task waits behind it and its row
 // is retried until that task's turn is over. That turn can finish the phase: the implementer
-// completes, and the transition suspends it and starts the tester. The waiting start was written
-// for a phase the issue has left, and it neither relaunches the implementer nor hands it that
-// phase, which would have it push to the pull request its tester is testing.
+// completes, the transition starts the tester, and the implementer stays live, idle once its turn
+// ends. The waiting start was written for a phase the issue has left, and it neither relaunches the
+// implementer nor hands it that phase, which would have it push to the pull request its tester is
+// testing.
 func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -942,17 +943,17 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 		}
 		return n
 	}
-	launches := implementerLaunches()
+	launches, suspends := implementerLaunches(), len(rt.CallsOf("Suspend"))
 	prompts := len(conn.Prompts())
 
-	// The transition's effects run first — the implementer is suspended and the tester started —
+	// The transition's effects run first — the tester is started, and the implementer stays live —
 	// and then every row still waiting comes due.
 	clock = time.Now().Add(10 * time.Second)
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run the transition's effects: %v", err)
 	}
-	if got := machine.Claim().State; got != supervise.StateSuspended {
-		t.Fatalf("after the move to testing the implementer is %s, want suspended", got)
+	if got := machine.Claim().State; got != supervise.StateIdle {
+		t.Fatalf("after the move to testing the implementer is %s, want idle on its process", got)
 	}
 	clock = time.Now().Add(time.Hour)
 	if err := runner.RunOnce(ctx); err != nil {
@@ -960,8 +961,10 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	}
 
 	got := machine.Claim()
-	if relaunched := implementerLaunches() - launches; relaunched != 0 || got.State != supervise.StateSuspended {
-		t.Fatalf("after its phase ended the implementer was launched %d more times and is %s, want no launch and suspended", relaunched, got.State)
+	stopped := len(rt.CallsOf("Suspend")) - suspends
+	if relaunched := implementerLaunches() - launches; relaunched != 0 || got.State != supervise.StateIdle || stopped != 0 {
+		t.Fatalf("after its phase ended the implementer was launched %d more times, suspended %d times, and is %s, want no launch, no stop, and idle",
+			relaunched, stopped, got.State)
 	}
 	if got.Pending != nil || len(conn.Prompts()) != prompts {
 		t.Fatalf("after its phase ended the implementer holds %+v and was prompted %d more times, want no task", got.Pending, len(conn.Prompts())-prompts)
@@ -973,12 +976,13 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 
 // A task handed to a claim waits as its pending delivery until a turn confirms it. An agent that
 // refuses the prompt after acknowledging it — it was already in the turn a human's steer started —
-// has the delivery taken back, and it can finish the phase inside that turn: the transition's
-// suspension, held until that turn ends, then finds the task still pending. The suspension retires
-// that task, so the claim's next start, for the issue's next phase or round, resumes it with the
-// new start's own task rather than the finished phase's — for the next round, or for retro, never
-// "Phase: implementing" again.
-func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
+// has the delivery taken back, and it can finish the phase inside that turn. The worker stays live,
+// so when that turn ends the task is still pending on a claim that can be prompted: it was queued
+// for a phase the issue has left, so it is dropped rather than sent (PhaseHolds), and the claim's
+// next start, for the issue's next phase or round, hands the live worker the new start's own task
+// rather than the finished phase's — for the next round, or for retro, never "Phase: implementing"
+// again — without relaunching it.
+func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		review intake.PullRequestReview
@@ -1000,6 +1004,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 				t.Fatalf("put the pull request: %v", err)
 			}
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+			sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
 			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10}, quietLogger())
 			clock := time.Now()
 			runner := &outbox{
@@ -1075,15 +1080,16 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 				t.Fatalf("refuse the acknowledged prompt: %v", err)
 			}
 
-			// Inside that turn the implementer finishes round 2, and the transition's suspension runs
-			// once the turn ends.
+			// Inside that turn the implementer finishes round 2, and its turn ends after the issue
+			// moved to testing: the round-2 task still pending is the finished phase's, and is dropped.
 			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
 			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
 				t.Fatalf("end the steer's turn: %v", err)
 			}
-			if got := machine.Claim().State; got != supervise.StateSuspended {
-				t.Fatalf("after round 2's turn the implementer is %s, want suspended", got)
+			if got := machine.Claim(); got.State != supervise.StateIdle || got.Pending != nil || len(rt.CallsOf("Suspend")) != 0 {
+				t.Fatalf("after round 2's turn the implementer is %s holding %+v with %d suspensions, want idle, holding nothing, never stopped",
+					got.State, got.Pending, len(rt.CallsOf("Suspend")))
 			}
 
 			// The tester passes, and the reviewer decides.
@@ -1094,23 +1100,31 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			apply("review:after-round-2", review)
 			apply("handoff:reviewer:reviewing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-2"})
-			resumes := len(rt.CallsOf("Resume"))
+			implementerLaunches := func() int {
+				n := 0
+				for _, call := range rt.Calls() {
+					if (call.Method == "Spawn" || call.Method == "Resume") && call.Spec.Claim == implementer {
+						n++
+					}
+				}
+				return n
+			}
+			launches := implementerLaunches()
 			prompted := len(conn.Prompts())
 			due("the implementer's next start")
-			if got := len(rt.CallsOf("Resume")) - resumes; got != 1 {
-				t.Fatalf("the implementer's next start resumed it %d times, want once", got)
+			if got := implementerLaunches() - launches; got != 0 {
+				t.Fatalf("the implementer's next start launched it %d times, want none: the implementer is still live", got)
 			}
-			ready()
 			due("the rows still waiting")
-			testwait.Eventually(t, "the resumed implementer to be handed a task", func() bool { return len(conn.Prompts()) > prompted })
+			testwait.Eventually(t, "the resident implementer to be handed a task", func() bool { return len(conn.Prompts()) > prompted })
 
 			handed := conn.Prompts()[prompted:]
 			if !strings.Contains(handed[0].Message, tc.want) {
-				t.Fatalf("resumed for its next start, the implementer was first handed %q, want the task naming %q", handed[0].Message, tc.want)
+				t.Fatalf("for its next start, the implementer was first handed %q, want the task naming %q", handed[0].Message, tc.want)
 			}
 			for _, p := range handed {
 				if strings.Contains(p.Message, "round 2") {
-					t.Fatalf("resumed for its next start, the implementer was handed the finished round's task %q", p.Message)
+					t.Fatalf("for its next start, the implementer was handed the finished round's task %q", p.Message)
 				}
 			}
 		})

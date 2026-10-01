@@ -15,9 +15,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// RoleFor is the role that works a phase: the one a transition starts, the one it suspends when
-// the issue moves on, and the one whose handoff `legion handoff complete` resolves for a file-backed
-// phase (cmd/legion). A phase no role works — awaiting_merge, done, held — has none.
+// RoleFor is the role that works a phase: the one a transition starts, and the one whose handoff
+// `legion handoff complete` resolves for a file-backed phase (cmd/legion). A phase no role works —
+// awaiting_merge, done, held — has none.
 //
 // It is exported for admission too, which starts the mid-phase children of a tree it re-admits
 // and needs each child's own phase's role to start it on.
@@ -38,31 +38,23 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
-// SuspendApplies is whether a suspend still applies with the issue in phase current. leaves is the
-// phase a transition's suspend ends (record.SuperviseRequest.Leaves): it stopped that phase's role
-// because the issue left the role's phases, so once the issue is back in one of them the role has
-// been handed its work again and the suspend must not stop it there. A suspend with no such phase
-// (a linger's or a child's leave) stops every claim whatever phase its issue holds, and applies.
-func SuspendApplies(leaves, current phase.Phase) bool {
-	return leaves == "" || RoleFor(current) != RoleFor(leaves)
-}
-
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
-// the issue in phase current, lastStart the newest start the outbox ran against the claim (its
-// last_start_row), and root the issue's tree root as recorded, read only for a tree close. The
-// outbox executor asks it of every suspend and every tree close, and StartFor of every queued
-// stop, so all read one rule. A tree close acts while its tree lingers at the root generation it
-// names (record.Issue.LingersAt): never once re-admission has moved the root on. A suspend acts unless the issue is back in a phase its role
-// works (SuspendApplies), or a newer start has already run: that start replaced the run the stop
-// was written for, so acting would suspend the run it began and retire the task with it, whatever
-// the retry timing was. A row with no id is not older than anything: the store gives every row
-// one, and an unknown id must not silently drop a stop. Any other operation is not a stop.
-func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastStart int64, root *record.Issue) bool {
+// lastStart the newest start the outbox ran against the claim (its last_start_row), and root the
+// issue's tree root as recorded, read only for a tree close. The outbox executor asks it of every
+// suspend and every tree close, and StartFor of every queued stop, so all read one rule. A tree
+// close acts while its tree lingers at the root generation it names (record.Issue.LingersAt): never
+// once re-admission has moved the root on. A suspend — an issue's close, a child's leave, or a
+// re-entered child's interrupted run — acts unless a newer start has already run: that start
+// replaced the run the stop was written for, so acting would suspend the run it began and retire
+// the task with it, whatever the retry timing was. A row with no id is not older than anything: the
+// store gives every row one, and an unknown id must not silently drop a stop. Any other operation
+// is not a stop.
+func StopActs(id int64, stop record.SuperviseRequest, lastStart int64, root *record.Issue) bool {
 	switch stop.Op {
 	case "tree_close":
 		return root != nil && root.LingersAt(stop.Linger)
 	case "suspend":
-		return SuspendApplies(stop.Leaves, current) && (id <= 0 || id >= lastStart)
+		return id <= 0 || id >= lastStart
 	default:
 		return false
 	}
@@ -90,7 +82,7 @@ func StartFor(run record.RoleRun, root record.Issue, generation uint64, current 
 	}
 	var stop int64
 	for _, queued := range run.Queued {
-		if StopActs(queued.ID, queued.Request, current, lastStart, &root) {
+		if StopActs(queued.ID, queued.Request, lastStart, &root) {
 			stop = max(stop, queued.ID)
 		}
 	}
@@ -176,13 +168,9 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 	return e.store.PutPhase(ctx, tx, cleared)
 }
 
-// suspend stops the role the issue leaves, the transition's suspend stamped with the phase it ends.
-func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, leaves phase.Phase) error {
-	if role == "" || role == claim.RoleArchitect {
-		return nil
-	}
-	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Leaves: leaves,
-		Reason: fmt.Sprintf("%s left %s", issue.Key, leaves)})
+// suspend stops role's worker on issue, for reason, which the suspended claim logs.
+func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, reason string) error {
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Reason: reason})
 }
 
 // start starts the phase worker of the issue's current phase, a start stamped with that phase.
