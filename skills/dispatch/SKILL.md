@@ -10,9 +10,9 @@ decide, never a log of your work. The transcript is your scratch pad; progress a
 goes through a `dispatch_*` tool.
 
 The server enforces high signal: an ask question is at most 800 characters with at most eight options; comment and message bodies are at
-most 2,000 characters; an artifact is at most 25 MiB. It refuses over-limit input with the number to trim (`question is 50 characters over
-the 800-character limit (850/800)`); it never truncates it. A tool call with several problems is refused once, every problem listed
-(`<tool> was not called: N problems`), so one corrected call lands. GitHub threads and markers no
+most 2,000 characters; a markdown document is at most 1 MiB and any other file at most 25 MiB. It refuses over-limit input with the number
+to trim (`question is 50 characters over the 800-character limit (850/800)`); it never truncates it. A tool call with several problems is
+refused once, every problem listed (`<tool> was not called: N problems`), so one corrected call lands. GitHub threads and markers no
 longer exist.
 
 ## Where the detail lives
