@@ -499,10 +499,13 @@ export class TmuxRuntime implements Runtime {
       "DO_NOT_TRACK=1",
     ];
     try {
-      const status = await this.deps.run(["env", "-i", ...codegraphEnv, "codegraph", "status", "--json"], {
-        cwd: workspaceDir,
-        timeoutMs: this.deps.slowCommandTimeoutMs,
-      });
+      const status = await this.deps.run(
+        ["env", "-i", ...codegraphEnv, "codegraph", "status", "--json"],
+        {
+          cwd: workspaceDir,
+          timeoutMs: this.deps.slowCommandTimeoutMs,
+        }
+      );
       if (status.exitCode === 0 && isCodegraphInitialized(status.stdout)) return;
       const result = await this.deps.run(["env", "-i", ...codegraphEnv, "codegraph", "init"], {
         cwd: workspaceDir,
