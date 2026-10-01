@@ -33,6 +33,14 @@ func TestEveryMigrationFileIsEmbedded(t *testing.T) {
 	}
 }
 
+// The census's textual reading of which tables a migration touches is held to the broker's set
+// too: every name it finds is a table the set itself creates.
+func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
+	if err := pgmigratetest.CheckTouchedTablesAreKnown(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The broker's runner applies its whole set in one transaction, so a set it accepted with two
 // files numbered 2 would apply the first, pass over the second as already applied, and commit.
 func TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny(t *testing.T) {

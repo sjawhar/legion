@@ -307,6 +307,28 @@ func TestEveryMigrationFileIsEmbedded(t *testing.T) {
 	}
 }
 
+// censusRequiredFrom is the first migration number that must declare a census (LEGION-459): one
+// more than the highest migration on main when the census landed, so no migration written before
+// the rule is caught by it. Every migration below it that declares one is a worked example. Read
+// from origin/main on 2026-10-01, where the set ended at 0055.
+const censusRequiredFrom = 56
+
+// Every migration from censusRequiredFrom on declares a census: the count a deployment reads before
+// it applies the migration. One that cannot refuse or rewrite any row declares `select 0` and says why.
+func TestEveryMigrationFromTheCensusRuleOnDeclaresACensus(t *testing.T) {
+	if err := pgmigratetest.CheckCensusDeclaredFrom(migrationFiles, "migrations", censusRequiredFrom); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The census's textual reading of which tables a migration touches is held to the real set: every
+// name it finds is a table the set itself creates.
+func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
+	if err := pgmigratetest.CheckTouchedTablesAreKnown(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
