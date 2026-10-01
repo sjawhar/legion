@@ -443,7 +443,8 @@ test("the header checkbox selects and clears only the rows the filters match, by
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the selection rule");
-  // No `last_seen`: the fixture stamps one at seeding time, so none of them ages into Inactive.
+  // No `last_seen`: the fixture answers every read with the current time, so none of them ages
+  // into Inactive.
   const session = (id: string, title: string, role: string): FakeSession => ({
     capabilities: ["aside", "btw"],
     dir: `/workspaces/${id}`,
