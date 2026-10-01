@@ -32,11 +32,10 @@ func LoadOrCreateSigningKey(path string) (string, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("random: %w", err)
+	key, err := NewSigningKey()
+	if err != nil {
+		return "", err
 	}
-	key := base64.RawURLEncoding.EncodeToString(buf)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("create signing key dir: %w", err)
 	}
@@ -44,6 +43,16 @@ func LoadOrCreateSigningKey(path string) (string, error) {
 		return "", fmt.Errorf("write signing key: %w", err)
 	}
 	return key, nil
+}
+
+// NewSigningKey returns a fresh 32-byte base64url key: the key of a process that must not share
+// cookies with any other (cmd/dispatch's dev sign-in).
+func NewSigningKey() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("random: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // LoadSigningKey returns DISPATCH_SIGNING_KEY when set, otherwise falls

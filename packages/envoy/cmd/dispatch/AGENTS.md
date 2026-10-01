@@ -106,6 +106,20 @@ users through `Identity.Login` and write identity errors with
 - `DISPATCH_IDENTITY=header:<Header-Name>` accepts only allowlisted logins from
   a trusted proxy header. When GitHub OAuth credentials are configured, it also
   requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
+- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>`
+  (`routes.authDevSignIn`), which issues the cookie identity's own session
+  cookie for an allowlisted login with no GitHub exchange and no stored token
+  pair. `resolveBootConfig` refuses it unless identity is cookie,
+  `DISPATCH_LISTEN_HOST` is a loopback IP literal (`routes.LoopbackIP`), every
+  `DATABASE_URL` host `pgx.ParseConfig` finds is loopback or a unix socket, and
+  `DISPATCH_SIGNING_KEY` is unset; `routes.BuildAppContext` (and `main`, before
+  any connection) refuses a `DISPATCH_SERVER_URL` that is not `127.0.0.1`,
+  `[::1]` or `localhost` (`routes.DevSignInOrigin`). The signing key is then
+  `auth.NewSigningKey`, generated per process and never the data-dir file, so a
+  cookie it mints dies with the process. While it is on, the whole router
+  answers a request whose `Host` is not the dashboard origin's
+  `421 HOST_MISMATCH` (`requireDashboardHost`), and the route serves only a
+  loopback peer with no forwarding header and logs every mint at WARN.
 - GitHub OAuth credentials come from `DISPATCH_APP_CLIENT_ID` and
   `DISPATCH_APP_CLIENT_SECRET`, or the Dispatch app credentials file.
 - Agents normally authenticate as a `session` actor with a personal `dsp_` token
@@ -155,6 +169,7 @@ the table says human only.
 | `/auth/callback` | GET | OAuth state | Exchange an allowlisted GitHub login's token pair. |
 | `/auth/logout` | POST | identity | Remove the resolved user's tokens. |
 | `/auth/whoami` | GET | identity | Return the resolved human identity. |
+| `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Issue an allowlisted login's session cookie with no GitHub exchange and redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 LOGIN_NOT_ALLOWED`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
 | `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
 | `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured, plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |

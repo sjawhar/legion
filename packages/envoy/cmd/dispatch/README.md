@@ -15,6 +15,7 @@ application state in Postgres.
 | `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection, and `POST /api/v1/artifacts/_test/quiesce`, which closes every live document and waits for the settlements in flight. Test/e2e only — leave unset in every real deployment. |
+| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<login>&next=<path>`, which signs an allowlisted login in with no GitHub step, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, `DISPATCH_LISTEN_HOST` is a loopback IP literal, `DISPATCH_SERVER_URL` names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, and `DISPATCH_SIGNING_KEY` is unset; the cookies it mints are signed with a key generated for that process alone, so they are worthless on any other server, and while it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). A loopback database address can still be a tunnel you opened to another machine's database; do not point a dev-sign-in server at one. Any value other than `1` or unset is refused. |
 | `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. |
 | `DISPATCH_OIDC_ISSUER` | OIDC issuer whose projected service-account tokens authenticate as agents. Set with `DISPATCH_OIDC_AUDIENCE` or not at all. |
 | `DISPATCH_OIDC_AUDIENCE` | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
@@ -59,7 +60,7 @@ GitHub App credentials come either from these environment variables or from
 | `DISPATCH_APP_CLIENT_SECRET` | GitHub App OAuth client secret. |
 | `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. |
-| `DISPATCH_SIGNING_KEY` | Stable HMAC key for cookie sessions. |
+| `DISPATCH_SIGNING_KEY` | Stable HMAC key for cookie sessions. Must be unset with `DISPATCH_DEV_SIGNIN=1`. |
 
 When no GitHub App credentials are configured, the server still starts, but
 OAuth and GitHub proxy routes respond with `503`, and saving a project's
@@ -146,6 +147,17 @@ envoy-dispatch redeliver-webhooks …`.
 `DISPATCH_INSECURE_COOKIE=1` omits the `Secure` attribute for local plain-HTTP
 testing. Do not use it on an HTTPS deployment.
 
+`DISPATCH_DEV_SIGNIN=1` adds a second way to get the cookie on a local
+instance: `GET /auth/_dev/signin?login=<login>` checks the allowlist as the
+OAuth callback does (lowercase, minting the spelling requested) and issues the
+same session cookie with no GitHub exchange and no stored token pair, so the
+GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` for that login. It serves
+only a loopback peer whose request carries no forwarding header, logs every mint
+at WARN, and boots only behind the fence the configuration table lists. A
+request that reaches the process looking local (`ssh -L`, `socat`, a proxy that
+rewrites `Host` and adds nothing) is indistinguishable from one that is; what
+still holds is that the cookie is signed with that process's own key.
+
 ## Local Postgres
 
 Start the local database once:
@@ -192,7 +204,8 @@ go run ./cmd/dispatch
 ```
 
 The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
-`DISPATCH_PORT` to change it.
+`DISPATCH_PORT` to change it; `DISPATCH_LISTEN_HOST` may be an IPv6 literal
+with or without brackets (`::1` or `[::1]`).
 
 ## Database migrations
 
@@ -290,6 +303,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/auth/callback` | GET | OAuth state | Exchange OAuth code, enforce allowlist, persist tokens, issue cookie. |
 | `/auth/logout` | POST | cookie or trusted header | Remove the caller's stored tokens and clear the session cookie. |
 | `/auth/whoami` | GET | cookie or trusted header | Return the resolved GitHub login. |
+| `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign an allowlisted `login` in without GitHub: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 LOGIN_NOT_ALLOWED` off the allowlist, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the login and the peer. Not mounted otherwise. |
 | `/api/github/rest/...` | any | cookie or trusted header | Proxy a GitHub REST request using the caller's stored token. |
 | `/api/github/graphql` | POST | cookie or trusted header | Proxy GitHub GraphQL using the caller's stored token. |
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — and NATS is connected where configured. A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |

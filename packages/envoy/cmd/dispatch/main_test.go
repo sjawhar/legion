@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -657,4 +658,144 @@ func TestParseAllowedLoginsLowerCasesAndTrimsEntries(t *testing.T) {
 			t.Errorf("logins: missing %q in %v", want, logins)
 		}
 	}
+}
+
+// devSignInEnvironment is a boot environment the dev sign-in fence accepts, with overrides
+// applied; an override of "" leaves that variable empty, which resolveBootConfig reads as unset.
+func devSignInEnvironment(overrides map[string]string) func(string) string {
+	values := map[string]string{
+		"DATABASE_URL":            "postgres://postgres:x@127.0.0.1:5432/dispatch_e2e?sslmode=disable",
+		"DISPATCH_AGENT_TOKEN":    "x",
+		"DISPATCH_ALLOWED_LOGINS": "alice",
+		"DISPATCH_LISTEN_HOST":    "127.0.0.1",
+		"DISPATCH_DEV_SIGNIN":     "1",
+	}
+	for key, value := range overrides {
+		values[key] = value
+	}
+	return envGetter(values)
+}
+
+func TestResolveBootConfigDevSignInFlagValue(t *testing.T) {
+	// Off (getenv answers "" for an unset variable as for an empty one), the fence asks nothing of
+	// the rest of the environment.
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{
+		"DISPATCH_DEV_SIGNIN":  "",
+		"DISPATCH_LISTEN_HOST": "0.0.0.0",
+		"DATABASE_URL":         "postgres://u@db.example.com/d",
+		"DISPATCH_SIGNING_KEY": "abc",
+	}))
+	if err != nil || boot.DevSignIn {
+		t.Fatalf("DISPATCH_DEV_SIGNIN unset: DevSignIn=%t err=%v, want off", boot.DevSignIn, err)
+	}
+
+	boot, err = resolveBootConfig(devSignInEnvironment(nil))
+	if err != nil || !boot.DevSignIn {
+		t.Fatalf("DISPATCH_DEV_SIGNIN=1: DevSignIn=%t err=%v, want on", boot.DevSignIn, err)
+	}
+
+	for _, flag := range []string{"true", "yes", "0", " 1"} {
+		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": flag}))
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_DEV_SIGNIN") || !strings.Contains(err.Error(), strconv.Quote(flag)) {
+			t.Errorf("DISPATCH_DEV_SIGNIN=%q: err = %v, want a refusal naming the variable and the value", flag, err)
+		}
+	}
+}
+
+func TestResolveBootConfigDevSignInRequiresCookieIdentity(t *testing.T) {
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_IDENTITY": "header:X-Dispatch-User"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_IDENTITY") {
+		t.Fatalf("header identity: err = %v, want a refusal naming DISPATCH_IDENTITY", err)
+	}
+}
+
+func TestResolveBootConfigDevSignInRequiresALoopbackListenHost(t *testing.T) {
+	for _, host := range []string{"", "0.0.0.0", "10.0.0.5", "localhost", "::ffff:127.0.0.1", "[::1%lo]", "]]::1[["} {
+		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host}))
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_LISTEN_HOST") {
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: err = %v, want a refusal naming DISPATCH_LISTEN_HOST", host, err)
+		}
+	}
+	for _, host := range []string{"127.0.0.1", "::1", "[::1]"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host})); err != nil {
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: %v, want a loopback host accepted", host, err)
+		}
+	}
+}
+
+func TestResolveBootConfigDevSignInRequiresALoopbackDatabase(t *testing.T) {
+	for _, tc := range []struct{ databaseURL, host string }{
+		{databaseURL: "postgres://postgres:x@db.example.com:5432/d", host: "db.example.com"},
+		{databaseURL: "postgres://u@10.0.0.5/d", host: "10.0.0.5"},
+		{databaseURL: "postgres://u@127.0.0.1:5432,db.example.com:5432/d", host: "db.example.com"},
+		{databaseURL: "host=db.example.com dbname=d", host: "db.example.com"},
+		// pgx dials the host parameter, not the URL's authority.
+		{databaseURL: "postgres://u@127.0.0.1:5432/d?host=db.example.com", host: "db.example.com"},
+	} {
+		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": tc.databaseURL}))
+		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") || !strings.Contains(err.Error(), tc.host) {
+			t.Errorf("DATABASE_URL=%q: err = %v, want a refusal naming DATABASE_URL and %s", tc.databaseURL, err, tc.host)
+		}
+	}
+	for _, databaseURL := range []string{
+		"postgres://u@127.0.0.1:5432/d",
+		"postgres://u@localhost:5432/d",
+		"postgres://u@[::1]:5432/d",
+		"postgres:///d?host=/var/run/postgresql",
+		"host=/tmp dbname=d",
+	} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": databaseURL})); err != nil {
+			t.Errorf("DATABASE_URL=%q: %v, want a loopback database accepted", databaseURL, err)
+		}
+	}
+
+	// A URL naming no host is dialled at libpq's PGHOST default, which the check reads too.
+	t.Setenv("PGHOST", "db.example.com")
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": "postgres:///d"})); err == nil || !strings.Contains(err.Error(), "db.example.com") {
+		t.Errorf("DATABASE_URL=postgres:///d with PGHOST=db.example.com: err = %v, want a refusal naming db.example.com", err)
+	}
+}
+
+func TestResolveBootConfigDevSignInRefusesAConfiguredSigningKey(t *testing.T) {
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": "abc"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") {
+		t.Fatalf("configured signing key: err = %v, want a refusal naming DISPATCH_SIGNING_KEY", err)
+	}
+}
+
+func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
+	for _, tc := range []struct{ host, port, want string }{
+		{host: "::1", port: "", want: "[::1]:8766"},
+		{host: "::1", port: "8799", want: "[::1]:8799"},
+		{host: "[::1]", port: "", want: "[::1]:8766"},
+		{host: "[::1]", port: "8799", want: "[::1]:8799"},
+		{host: "127.0.0.1", port: "8799", want: "127.0.0.1:8799"},
+		{host: "127.0.0.1", port: "", want: "127.0.0.1:8766"},
+		{host: "", port: "", want: ":8766"},
+		{host: "", port: "8799", want: ":8799"},
+	} {
+		t.Setenv("DISPATCH_LISTEN_HOST", tc.host)
+		t.Setenv("DISPATCH_PORT", tc.port)
+		got, err := listenAddress()
+		if err != nil || got != tc.want {
+			t.Errorf("host %q port %q: listenAddress() = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
+		}
+	}
+	for _, port := range []string{"0", "70000"} {
+		t.Setenv("DISPATCH_LISTEN_HOST", "127.0.0.1")
+		t.Setenv("DISPATCH_PORT", port)
+		if got, err := listenAddress(); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
+			t.Errorf("port %q: listenAddress() = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
+		}
+	}
+
+	// The bracketed form JoinHostPort writes binds the IPv6 loopback on this machine.
+	listener, err := net.Listen("tcp", "[::1]:0")
+	if errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.ENETUNREACH) {
+		t.Skipf("no IPv6 loopback on this machine: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("listen on [::1]:0: %v", err)
+	}
+	_ = listener.Close()
 }
