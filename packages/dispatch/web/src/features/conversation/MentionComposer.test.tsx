@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { notifyManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -1056,6 +1056,105 @@ test("a refused send's Retry asks what Send asks, and Discard takes the notice w
     expect(screen.queryByText("Couldn't send — the server is down")).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(createComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A message on its way is the server's until it answers, so its draft is not the reader's to
+// discard: sending takes a `Discard draft?` already up with it, and Escape raises none while the
+// send is out - from a control that stays enabled then, such as a margin composer's Replacement.
+// The outcome then lands on the draft that was sent: a refusal hands it back with its notice.
+test("a send takes the Discard prompt with it and Escape raises none until the server answers", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Discard" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(field.disabled).toBe(true));
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("form", { name: "Comment composer" }), { key: "Escape" });
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("@Planner hello");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// Nor does a reference join a message on its way, for its refusal to drop. In a browser TanStack
+// tells the composer its send has started a task after Send (its scheduler is a zero timeout), so
+// a Ctrl+K landing in that gap still reaches the field: the picker it opens waits for the
+// server's answer, and then adds to the draft the refusal handed back.
+test("a reference picker opened as a send goes out waits for the server's answer", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({ project: "CORE" } as never);
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([
+    { key: "CORE-1", title: "Core issue" },
+  ] as never);
+  const { view } = renderComposer({ seedMentions: [plannerMention] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner see" } });
+    // The browser's gap, held open by hand: this suite's setup notifies at once.
+    const notifications: (() => void)[] = [];
+    notifyManager.setScheduler((callback) => notifications.push(callback));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(field.disabled).toBe(false);
+    fireEvent.keyDown(field, { ctrlKey: true, key: "k" });
+    notifyManager.setScheduler((callback) => callback());
+    act(() => {
+      for (const notify of notifications.splice(0)) notify();
+    });
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    expect(field.disabled).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "Reference picker" })).toBeNull();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("@Planner see");
+    fireEvent.click(await screen.findByRole("button", { name: "CORE-1: Core issue" }));
+    await waitFor(() => expect(field.value).toBe("@Planner see dispatch://CORE-1"));
+  } finally {
+    notifyManager.setScheduler((callback) => callback());
+    view.unmount();
+    createComment.mockRestore();
+    getIssue.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
+// The mention suggestions write into the draft too: a suggestion open when the message goes
+// would put a mention into a draft its refusal then replaces. Sending closes them.
+test("a send closes the mention suggestions open over its draft", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const { view } = renderComposer({ agents: [planner, worker] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { selectionStart: 9, value: "hello @Pl" } });
+    await screen.findByRole("option", { name: "Planner" });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(field.disabled).toBe(true));
+    expect(screen.queryByRole("listbox", { name: "Mention suggestions" })).toBeNull();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("hello @Pl");
   } finally {
     view.unmount();
     createComment.mockRestore();

@@ -25,8 +25,9 @@ import { asUser } from "./users";
 // it, it marks nothing read.
 
 /** `seedAgents`, plus `Quiet` and `Silent`: live sessions with no Dispatch activity, which fold
- *  under `No Dispatch activity` until one is pinned - the rows a pin moves across. */
-async function seedWithFold(): Promise<void> {
+ *  under `No Dispatch activity` until one is pinned - the rows a pin moves across - and any
+ *  `others` a row needs beside them. */
+async function seedWithFold(others: readonly FakeSession[] = []): Promise<void> {
   await seedAgents();
   const folded = (id: string, title: string): FakeSession => ({
     capabilities: ["aside", "btw"],
@@ -41,15 +42,17 @@ async function seedWithFold(): Promise<void> {
     reviewerSession,
     folded("quiet", "Quiet"),
     folded("silent", "Silent"),
+    ...others,
   ]);
 }
 
-/** Opens the fold and roves to its last row, `Silent`, the way a keyboard reader gets there. */
+/** Opens the fold and roves to its last row, `Silent`, the way a keyboard reader gets there: from
+ *  the page, since `j` from the toggle just clicked would go on from the toggle's place. */
 async function roveToSilent(page: Page): Promise<Locator> {
   const row = agentRow(page, "silent-session");
   await page.getByRole("button", { name: /^No Dispatch activity/ }).click();
   await expect(row).toBeVisible();
-  await page.locator("body").focus();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   for (const _ of [1, 2, 3, 4]) await page.keyboard.press("j");
   await expect(row).toBeFocused();
   return row;
@@ -107,7 +110,7 @@ test.describe("agents page pins", () => {
       await expect(silentRow).toBeFocused();
       await fold.click();
       await expect(fold).toHaveAttribute("aria-expanded", "false");
-      await page.locator("body").focus();
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       await page.keyboard.press("j");
       await expect(silentRow).toBeFocused();
       await page.keyboard.press("Shift+P");
@@ -115,6 +118,52 @@ test.describe("agents page pins", () => {
       await expect(silentRow).toBeHidden();
       await expect(fold).toHaveAccessibleName("No Dispatch activity (2)");
       await expect(fold).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  });
+
+  // The fold's toggle that a pin hands focus to sits between the rows, so `j` goes on to the
+  // first row shown after it and `k` to the last one before it, not to either end of the list.
+  test("j and k go on from the fold's toggle a pin left focus on", async ({ browser }) => {
+    await seedWithFold([
+      {
+        capabilities: ["aside", "btw"],
+        dir: "/srv/stale",
+        // Unseen for ten minutes, so it folds under Inactive, below the other fold.
+        last_seen: Date.now() - 45 * 60_000,
+        machine_id: "box-1",
+        roles: ["tester"],
+        session_id: "stale-session",
+        title: "Stale",
+      },
+    ]);
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const fold = page.getByRole("button", { name: /^No Dispatch activity/ });
+      await page.getByRole("button", { name: /^Inactive/ }).click();
+      const silentRow = await roveToSilent(page);
+
+      // Pinned to the top, the quiet fold closed, then back from the top into it.
+      await page.keyboard.press("Shift+P");
+      await expect(silentRow).toBeFocused();
+      await fold.click();
+      await expect(fold).toHaveAttribute("aria-expanded", "false");
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await page.keyboard.press("j");
+      await expect(silentRow).toBeFocused();
+      await page.keyboard.press("Shift+P");
+      await expect(silentRow).toBeHidden();
+      await expect(fold).toBeFocused();
+      await expect(shownAgentRows(page)).toHaveCount(3);
+
+      await page.keyboard.press("j");
+      await expect(agentRow(page, "stale-session")).toBeFocused();
+      await fold.focus();
+      await page.keyboard.press("k");
+      await expect(agentRow(page, reviewerSession.session_id)).toBeFocused();
     } finally {
       await context.close();
     }

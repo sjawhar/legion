@@ -6,6 +6,7 @@ import {
   openAgents,
   pasteFile,
   plannerSession,
+  refusePosts,
   seedAgents,
   setLiveSessions,
   shownAgentRows,
@@ -295,6 +296,64 @@ test.describe("agents page", () => {
 
       await expect(field).toHaveValue("@Planner dispatch://CORE-1/artifact/notes-md");
       expect(upload.posts()).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A message on its way is the server's until it answers, and a refusal hands back exactly the
+  // draft that was sent. An upload's Retry pressed in the meantime would append its reference to
+  // the field for that refusal to drop, leaving the artifact on the issue with nothing pointing
+  // at it, so the Retry waits for the answer, as the rest of the composer does.
+  test("an upload's Retry waits while a send is out, and its reference joins the draft handed back", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      let uploads = 0;
+      // The first upload fails, so its Retry is on screen when the message goes.
+      await page.route("**/api/v1/issues/*/artifacts", (route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        uploads += 1;
+        if (uploads > 1) return route.fallback();
+        return route.fulfill({
+          body: JSON.stringify({ code: "UNAVAILABLE", error: "storage is down" }),
+          contentType: "application/json",
+          status: 503,
+        });
+      });
+      const refuse = await refusePosts(page, "**/api/v1/issues/*/comments");
+      const row = agentRow(page, plannerSession.session_id);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const uploadRetry = row
+        .getByRole("alert")
+        .filter({ hasText: "storage is down" })
+        .getByRole("button", { name: "Retry" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await row.getByRole("button", { name: "Choose issue" }).click();
+      await row.getByRole("combobox", { name: "Issue" }).selectOption("CORE-1");
+      await expect(field).toHaveValue("@Planner");
+      await field.press("End");
+      await page.keyboard.type(" see attached");
+      await pasteFile(field, "notes.md", "# Notes\n");
+      await expect(uploadRetry).toBeVisible();
+
+      await field.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await expect(uploadRetry).toHaveCount(0);
+      refuse();
+
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(field).toHaveValue("@Planner see attached");
+      await uploadRetry.click();
+      await expect(field).toHaveValue("@Planner see attached dispatch://CORE-1/artifact/notes-md");
+      expect(uploads).toBe(2);
     } finally {
       await context.close();
     }

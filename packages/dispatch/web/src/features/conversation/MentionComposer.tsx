@@ -745,8 +745,9 @@ export function MentionComposer({
     mutationKey,
     // A refusal leaves the draft that was sent, not whatever the latest render holds, so the
     // reader gets back exactly the text and records the server turned down, for Retry or an
-    // edit. It lands in the channel it was sent from: while a send is out nothing that moves the
-    // message - Cancel reply here, and a host's own controls - takes effect.
+    // edit. It lands in the channel it was sent from, over nothing written since: while a send is
+    // out nothing that moves the message - Cancel reply here, and a host's own controls - takes
+    // effect, and nothing writes into its draft or drops it (`send`).
     onError: (_error, sent) => replaceDraft(sent),
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
@@ -779,6 +780,13 @@ export function MentionComposer({
     if (form === null) return;
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // A message on its way is the server's until it answers, and so is all Escape could end
+      // here: the reply it answers stays (see Cancel reply), and its draft is the reader's
+      // neither to discard nor to close on. Nothing of the composer's is open meanwhile (`send`).
+      if (save.isPending) {
+        event.preventDefault();
+        return;
+      }
       if (autocomplete !== undefined) {
         event.stopPropagation();
         setAutocomplete(undefined);
@@ -791,8 +799,7 @@ export function MentionComposer({
       }
       if (replyTo !== null) {
         event.preventDefault();
-        // The reply a send is out for stays until the server answers (see Cancel reply).
-        if (!save.isPending) onCancelReply?.();
+        onCancelReply?.();
         return;
       }
       event.stopPropagation();
@@ -947,9 +954,19 @@ export function MentionComposer({
   const submitReason = draftRefusal(kind, body, replacement, outbound);
   const footId = useId();
   const canSubmit = canSubmitComposer(submitReason, save.isPending, pendingUploads);
+  /** Sends the draft as it stands. Until the server answers, the message is the server's: a
+   *  refusal hands back exactly the draft that was sent (`onError`), so nothing may write into it
+   *  or drop it meanwhile. The field holds, the `Discard draft?` prompt and the mention
+   *  suggestions close here, and the reference picker and an upload's Retry wait for the answer. */
+  const send = () =>
+    submitGuard.guard(() => {
+      setConfirmingDiscard(false);
+      setAutocomplete(undefined);
+      save.mutate(currentDraft());
+    });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (canSubmit) submitGuard.guard(() => save.mutate(currentDraft()));
+    if (canSubmit) send();
   };
   const bodyLabel =
     edit !== undefined
@@ -1062,7 +1079,9 @@ export function MentionComposer({
             className="font-semibold underline"
             onClick={() => {
               clearDraft();
-              // The refusal went with the draft it was about.
+              // The prompt never shows while a send is out (`send` closes it, and Escape raises
+              // none then), so the save it resets has its answer: the refusal goes with the
+              // draft it was about.
               save.reset();
               setConfirmingDiscard(false);
               onClose();
@@ -1315,7 +1334,9 @@ export function MentionComposer({
               ))}
             </section>
           )}
-          {owner.kind === "issue" && referencePickerOpen ? (
+          {/* A pick appends to the draft, so while a send is out the picker waits: a Ctrl+K in
+              the task before the field disables itself opens it once the server answers. */}
+          {owner.kind === "issue" && referencePickerOpen && !save.isPending ? (
             <ReferencePicker
               issueKey={owner.issueKey}
               onClose={() => setReferencePickerOpen(false)}
@@ -1338,7 +1359,9 @@ export function MentionComposer({
           {upload.isError ? (
             <QueryError
               message={uploadErrorMessage(upload.error)}
-              onRetry={() => uploadRetryGuard.retryLast(upload)}
+              // Its reference would join a message on its way, for a refusal to drop, so Retry
+              // waits for the answer.
+              onRetry={save.isPending ? undefined : () => uploadRetryGuard.retryLast(upload)}
               retrying={upload.isPending}
             />
           ) : null}
@@ -1354,9 +1377,7 @@ export function MentionComposer({
               : `Couldn't send — ${apiErrorMessage(save.error, "network error")}`
           }
           // Retry sends the draft as it stands, so it asks what Send asks of it.
-          onRetry={
-            canSubmit ? () => submitGuard.guard(() => save.mutate(currentDraft())) : undefined
-          }
+          onRetry={canSubmit ? send : undefined}
           retrying={save.isPending}
         />
       ) : null}

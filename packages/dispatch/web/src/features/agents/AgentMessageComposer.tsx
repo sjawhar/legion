@@ -187,8 +187,7 @@ export function AgentMessageComposer({
     // this composer's own field - keeps where they went.
     const active = document.activeElement;
     const openedOn =
-      active === null ||
-      active === document.body ||
+      focusOnDocument() ||
       active === box.current?.closest(AGENT_ROW_SELECTOR) ||
       (active instanceof Element && active.matches(ISSUE_PICKER_SELECTOR));
     if (!openedOn) return;

@@ -70,7 +70,7 @@ import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./Broadca
 import { useBroadcastComposition } from "./broadcast-composition";
 import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from "./broadcast-plan";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
-import { AGENT_ROW_SELECTOR, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
+import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
@@ -734,8 +734,9 @@ function AgentRow({
 /**
  * A fold's toggle: an item in the one list, between the open rows and the fold's own, labelled by
  * `foldLabel`. Absent when the fold is empty; closed on every load, and open only while this page
- * stays mounted. A block item rather than a bare button, so the toggle keeps its own width and the
- * pin's focus hand-off has a handle on it (`data-agent-fold`).
+ * stays mounted. A block item rather than a bare button, so the toggle keeps its own width, and
+ * `keyboard.ts` has a handle on it (`data-agent-fold`): the pin's focus hand-off lands on it, and
+ * `j`/`k` step on from it.
  */
 function FoldToggle({
   agents,
@@ -1090,7 +1091,7 @@ export function AgentsPage(): ReactNode {
    *  the document, or the row lands in a closed fold, hidden. Focus follows the row to where it
    *  lands - or, when that is a closed fold, to the fold's toggle, as `IssueBoard`'s
    *  `focusAfterMove` lands on a collapsed rail - so the next `j`/`k` go on from the reader's
-   *  place rather than from the top. */
+   *  place rather than from the top (`useAgentsKeymap` steps from a fold's toggle too). */
   const focusAfterPin = useRef<string | null>(null);
   const togglePin = (sessionID: string) => {
     if (
@@ -1127,9 +1128,9 @@ export function AgentsPage(): ReactNode {
       (node) => node.dataset.agentRow === sessionID
     );
     if (row === undefined) return;
-    const target = row.hidden
-      ? list?.querySelector<HTMLElement>(`[data-agent-fold="${row.dataset.agentSection}"] button`)
-      : row;
+    // A row the pin hides is in a closed fold: it held focus, so the filters match it, and a pin
+    // changes nothing they read.
+    const target = row.hidden ? foldToggleOf(row) : row;
     // Only the focus the move took is the page's to give back: still on the row, now hidden, or
     // dropped to the document.
     const focused = document.activeElement;

@@ -668,28 +668,26 @@ test("Agents sends without an issue through the agent message route", async () =
   }
 });
 
+const coreIssue: IssueSummary = {
+  assignee: null,
+  claim: null,
+  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  key: "CORE-1",
+  last_seq: 0,
+  open_asks: 0,
+  parent: null,
+  priority: null,
+  rank: "U",
+  route: null,
+  route_holder: null,
+  route_status: null,
+  status: "todo",
+  title: "Core work",
+  updated_at: "2026-09-14T00:00:00Z",
+};
+
 test("Agents keeps selected-issue sends on the issue message route", async () => {
-  const page = renderAgents({
-    issues: [
-      {
-        route: null,
-        route_status: null,
-        route_holder: null,
-        key: "CORE-1",
-        last_seq: 0,
-        open_asks: 0,
-        parent: null,
-        assignee: null,
-        claim: null,
-        components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-        priority: null,
-        rank: "U",
-        status: "todo",
-        title: "Core work",
-        updated_at: "2026-09-14T00:00:00Z",
-      },
-    ],
-  });
+  const page = renderAgents({ issues: [coreIssue] });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2221,24 +2219,6 @@ test("an open row a closed fold hides marks nothing read, and opening the fold r
     page.restore();
   }
 });
-
-const coreIssue: IssueSummary = {
-  assignee: null,
-  claim: null,
-  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-  key: "CORE-1",
-  last_seq: 0,
-  open_asks: 0,
-  parent: null,
-  priority: null,
-  rank: "U",
-  route: null,
-  route_holder: null,
-  route_status: null,
-  status: "todo",
-  title: "Core work",
-  updated_at: "2026-09-14T00:00:00Z",
-};
 
 // A collapse keeps the row's picker as the reader left it, open included, so `i` opens the
 // picker rather than toggling it: on a picker already open it goes into the select instead of

@@ -481,6 +481,45 @@ test.describe("agents page", () => {
     }
   });
 
+  // A message on its way is the server's until it answers. A `Discard draft?` the reader raised
+  // before sending goes with the send, and the field holds, so nothing they discard or type in the
+  // meantime can be overwritten by the outcome: the refusal hands back the draft that was sent,
+  // with its notice and Retry.
+  test("a send takes the Discard prompt with it, and a refusal hands back the draft with its notice", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = shownAgentRows(page).nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const discard = row.getByRole("button", { name: "Discard" });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await page.keyboard.type("Status please");
+      await page.keyboard.press("Escape");
+      await expect(discard).toBeVisible();
+      await expect(field).toBeFocused();
+      await page.keyboard.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await expect(discard).toHaveCount(0);
+      refuse();
+
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(field).toBeEnabled();
+      await expect(field).toHaveValue("Status please");
+      await expect(row.getByRole("button", { name: "Retry" })).toBeVisible();
+      await expect(discard).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
   // The list is every open issue, so an issue closed after it was picked drops out of it on the
   // next read. The select keeps showing the committed issue, marked closed - as the issue header's
   // Status select keeps a closed issue's own status among its options - so what the picker shows,
