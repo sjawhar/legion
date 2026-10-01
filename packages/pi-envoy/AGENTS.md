@@ -351,6 +351,9 @@ they name.
 Quote anchors returned from Dispatch include nullable `block_id`: new anchors are pinned to the
 lowest block containing their complete quote, while top-level cross-block and legacy anchors remain
 unpinned.
+`GET /comments/{id}` and `GET /asks/{id}` add `anchor_block`, where that block stands (path; in a
+table the row, column, header and cells), and `dispatch_read` prints it as `Position:` after the
+quote.
 
 `dispatch_doc_edit` may retype an identified paragraph or typed block into any schema-declared typed block with
 `{ op: "retype", block, type, attributes }`, delete or move a whole block by id with
