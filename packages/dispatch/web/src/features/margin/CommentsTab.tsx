@@ -44,6 +44,7 @@ interface CommentsTabProps {
   onAction: (id: string, action: MarginItemAction) => void;
   onCloseComposer: () => void;
   onComposerSaved: () => void;
+  onComposerKindChange: (kind: ComposerKind) => string | undefined;
   onEdit: (id: string, body: string) => Promise<unknown>;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
@@ -111,6 +112,7 @@ export function CommentsTab({
   onAction,
   onCloseComposer,
   onComposerSaved,
+  onComposerKindChange,
   onEdit,
   onRetryAction,
   onRetryAnsweredAsk,
@@ -149,7 +151,7 @@ export function CommentsTab({
                 ? null
                 : { author: "", excerpt: "", id: composer.replyTo, parentKind: "comment" }
             }
-            showKindSwitch={composer.anchor !== undefined}
+            onKindChange={composer.anchor === undefined ? undefined : onComposerKindChange}
           />
         </div>
       )}

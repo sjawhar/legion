@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -59,11 +59,13 @@ const createdComment: Comment = {
 function renderComposer(
   options: {
     agents?: readonly Agent[];
+    anchor?: { artifact: string; mark_id: string; quote: string };
     carried?: CarriedDraft;
     edit?: { body: string; id: string };
     initialMentions?: readonly { target: string; title: string }[];
     onCarry?: (draft: CarriedDraft) => void;
     onCancelReply?: () => void;
+    onKindChange?: (kind: "ask" | "comment" | "suggestion") => string | undefined;
     onSent?: () => void;
     owner?: ComposerOwner;
     replyTo?: {
@@ -84,12 +86,14 @@ function renderComposer(
       <QueryClientProvider client={queryClient}>
         <MentionComposer
           agents={options.agents}
+          anchor={options.anchor}
           carried={options.carried}
           edit={options.edit}
           initialMentions={options.initialMentions}
           onCancelReply={options.onCancelReply}
           onCarry={options.onCarry}
           onClose={() => {}}
+          onKindChange={options.onKindChange}
           onSent={options.onSent ?? (() => {})}
           owner={options.owner ?? { issueKey: "CORE-1", kind: "issue" }}
           replyTo={
@@ -1035,6 +1039,82 @@ test("Discard clears the draft and its records, wherever the host takes focus", 
 
     expect(field.value).toBe("");
     expect(carriedDrafts.at(-1)).toEqual({ body: "", mentions: [] });
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the kind switch hands the pick to the host and shows why the host refused it", () => {
+  const picks: string[] = [];
+  const { view } = renderComposer({
+    anchor: { artifact: "artifact-1", mark_id: "m-1", quote: "brown" },
+    onKindChange: (next) => {
+      picks.push(next);
+      return next === "suggestion"
+        ? "A suggestion needs whole words inside one table cell."
+        : undefined;
+    },
+  });
+
+  try {
+    const kinds = screen.getByRole("group", { name: "Kind" });
+    const pressed = (name: string) =>
+      within(kinds).getByRole("button", { name }).getAttribute("aria-pressed");
+
+    fireEvent.click(within(kinds).getByRole("button", { name: "Suggest" }));
+    expect(picks).toEqual(["suggestion"]);
+    expect(screen.getByRole("status").textContent).toBe(
+      "A suggestion needs whole words inside one table cell."
+    );
+    // The kind is the host's: a refused pick leaves the pressed button where it was.
+    expect(pressed("Comment")).toBe("true");
+    expect(pressed("Suggest")).toBe("false");
+
+    fireEvent.click(within(kinds).getByRole("button", { name: "Ask" }));
+    expect(picks).toEqual(["suggestion", "ask"]);
+    expect(screen.queryByRole("status")).toBeNull();
+    // ...and an accepted pick shows only once the host answers through `kind`.
+    expect(pressed("Comment")).toBe("true");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a refusal belongs to the mark it answered: a newer anchor leaves it behind", () => {
+  function Host(): ReactNode {
+    const [markId, setMarkId] = useState("m-1");
+    return (
+      <>
+        <button onClick={() => setMarkId("m-2")} type="button">
+          Replace mark
+        </button>
+        <MentionComposer
+          anchor={{ artifact: "artifact-1", mark_id: markId, quote: "brown" }}
+          onClose={() => {}}
+          onKindChange={() => "Not this one."}
+          onSent={() => {}}
+          owner={{ issueKey: "CORE-1", kind: "issue" }}
+        />
+      </>
+    );
+  }
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <Host />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const kinds = screen.getByRole("group", { name: "Kind" });
+    fireEvent.click(within(kinds).getByRole("button", { name: "Suggest" }));
+    expect(screen.getByRole("status").textContent).toBe("Not this one.");
+    fireEvent.click(screen.getByRole("button", { name: "Replace mark" }));
+    expect(screen.queryByRole("status")).toBeNull();
   } finally {
     view.unmount();
   }
