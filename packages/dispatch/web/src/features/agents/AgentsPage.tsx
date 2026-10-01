@@ -27,6 +27,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
@@ -41,10 +42,6 @@ import {
   linkText,
   liveDotBg,
   offlineDotBg,
-  primaryButtonAriaDisabled,
-  primaryButtonAvailableHoverBg,
-  primaryButtonBg,
-  primaryButtonDisabled,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
@@ -1313,7 +1310,6 @@ function BroadcastComposer({
   const overLimit = recipients.length > MAX_BROADCAST_RECIPIENTS;
   const sendState = broadcastSendState(plan, delivery, body);
   const noticeId = useId();
-  const reasonId = useId();
   const send = useMutation({
     mutationFn: () =>
       api.createBroadcast({
@@ -1347,11 +1343,8 @@ function BroadcastComposer({
         ? "excluded"
         : null;
   // The limit and the exclusions give Send's reason on the notice line; an empty message has no
-  // line of its own, so its reason is read from a hidden one.
-  const hiddenReason = overLimit || recipients.length === 0 ? null : sendState.reason;
-  const describedBy = [hiddenReason === null ? null : reasonId, notice === null ? null : noticeId]
-    .filter((id) => id !== null)
-    .join(" ");
+  // line of its own, so Send carries its reason on a hidden one.
+  const refusalShownBy = overLimit || recipients.length === 0 ? noticeId : undefined;
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
   // so it takes about a third of a phone screen: the heading on one line, the recipients in one
@@ -1434,28 +1427,15 @@ function BroadcastComposer({
           {sendState.hint === null ? null : ` ${sendState.hint}`}
         </p>
       ) : null}
-      {hiddenReason === null ? null : (
-        <span className="sr-only" id={reasonId}>
-          {hiddenReason}
-        </span>
-      )}
-      {/* Refused with `aria-disabled` rather than `disabled`, so the button stays in the tab order
-          and its reason - `title`, and what it is described by - reaches a keyboard. Only a send
-          in flight disables it outright, and its label says so. */}
-      <button
-        aria-describedby={describedBy === "" ? undefined : describedBy}
-        aria-disabled={sendState.reason === null ? undefined : true}
-        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonAvailableHoverBg} ${primaryButtonDisabled} ${primaryButtonAriaDisabled}`}
-        disabled={send.isPending}
-        onClick={() => {
-          if (sendState.reason === null) send.mutate();
-        }}
-        title={sendState.reason ?? undefined}
-        type="button"
+      <RefusableButton
+        busy={send.isPending ? "Sending…" : undefined}
+        className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
+        describedBy={notice === null || refusalShownBy !== undefined ? undefined : noticeId}
+        onPress={() => send.mutate()}
+        refusal={sendState.reason}
+        refusalShownBy={refusalShownBy}
       >
-        {send.isPending ? (
-          "Sending…"
-        ) : sendState.compactLabel === sendState.label ? (
+        {sendState.compactLabel === sendState.label ? (
           sendState.label
         ) : (
           <>
@@ -1463,7 +1443,7 @@ function BroadcastComposer({
             <span className="hidden narrow-or-short:inline">{sendState.compactLabel}</span>
           </>
         )}
-      </button>
+      </RefusableButton>
     </section>
   );
 }

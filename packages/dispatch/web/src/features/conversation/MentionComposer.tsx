@@ -7,7 +7,6 @@ import {
   type ReactNode,
   type SyntheticEvent,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -24,6 +23,7 @@ import type {
 } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -46,10 +46,7 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
-  primaryButtonAriaDisabled,
-  primaryButtonAvailableHoverBg,
   primaryButtonBg,
-  primaryButtonDisabled,
   quoteAccentBorder,
   quoteBodyText,
   referencePillBorder,
@@ -919,7 +916,6 @@ export function MentionComposer({
           : undefined;
   const outbound = deliveryPlan(body, inheritedDelivery);
   const submitReason = draftRefusal(kind, body, replacement, outbound);
-  const submitReasonId = useId();
   const canSubmit =
     canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads) &&
     submitReason === undefined;
@@ -1317,25 +1313,13 @@ export function MentionComposer({
           retrying={save.isPending}
         />
       ) : null}
-      {/* A draft Send refuses leaves it `aria-disabled` rather than `disabled`, so it stays in the
-          tab order and its reason reaches a keyboard and a screen reader; only a save or an
-          upload in flight disables it outright, and its label says which. The submit handler
-          checks `canSubmit` either way. */}
-      <button
-        aria-describedby={submitReason === undefined ? undefined : submitReasonId}
-        aria-disabled={submitReason === undefined ? undefined : true}
-        className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonAvailableHoverBg} ${primaryButtonDisabled} ${primaryButtonAriaDisabled}`}
-        disabled={save.isPending || pendingUploads > 0}
-        title={submitReason}
+      <RefusableButton
+        busy={save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : undefined}
+        refusal={submitReason ?? null}
         type="submit"
       >
-        {save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : title}
-      </button>
-      {submitReason === undefined ? null : (
-        <span className="sr-only" id={submitReasonId}>
-          {submitReason}
-        </span>
-      )}
+        {title}
+      </RefusableButton>
       <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
         Ctrl/Cmd+Enter to send · Enter for a new line
       </p>

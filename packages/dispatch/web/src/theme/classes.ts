@@ -552,16 +552,16 @@ export const primaryButtonBg = "bg-sky-700 text-white";
 export const primaryButtonHoverBg = "hover:bg-sky-800";
 export const primaryButtonEnabledHoverBg = "enabled:hover:bg-sky-800";
 export const PRIMARY_BUTTON_DISABLED_BG = pair(P.SLATE_300, P.SLATE_700);
+/** A primary button that cannot be pressed: slate-700 on slate-300 (slate-300 on slate-700 in
+ * dark), 6.97:1 either way, since its label may be the only thing on screen saying why. */
 export const primaryButtonDisabled =
-  "disabled:cursor-not-allowed disabled:bg-slate-300 dark:disabled:bg-slate-700 dark:disabled:text-slate-400";
-/** `primaryButtonDisabled`'s look for a button refused with `aria-disabled` rather than
- * `disabled`: it stays focusable, so the reason it carries in `title` and `aria-describedby` is
- * reachable from the keyboard, where a `disabled` button is skipped. `enabled:` still matches
- * such a button, so it takes `primaryButtonAvailableHoverBg` in place of
- * `primaryButtonEnabledHoverBg`, whose hover would paint over the refusal. */
-export const primaryButtonAriaDisabled =
-  "aria-disabled:cursor-not-allowed aria-disabled:bg-slate-300 dark:aria-disabled:bg-slate-700 dark:aria-disabled:text-slate-400";
-export const primaryButtonAvailableHoverBg = "enabled:not-aria-disabled:hover:bg-sky-800";
+  "disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-700 dark:disabled:bg-slate-700 dark:disabled:text-slate-300";
+/** Everything `components/RefusableButton.tsx` paints over `primaryButtonBg`, in one string so
+ * the halves cannot be split: the refused look for `aria-disabled` as well as `disabled` (a
+ * refused button stays focusable, so its reason reaches a keyboard), and a hover that skips a
+ * refused button - `enabled:` still matches one, so `primaryButtonEnabledHoverBg` would paint
+ * over the refusal. */
+export const primaryButtonRefusal = `enabled:not-aria-disabled:hover:bg-sky-800 ${primaryButtonDisabled} aria-disabled:cursor-not-allowed aria-disabled:bg-slate-300 aria-disabled:text-slate-700 dark:aria-disabled:bg-slate-700 dark:aria-disabled:text-slate-300`;
 
 registerText(
   "primary button text (resting)",
@@ -572,6 +572,11 @@ registerText(
   "primary button text (hover)",
   { dark: P.WHITE, light: P.WHITE },
   { dark: P.SKY_800, light: P.SKY_800 }
+);
+registerText(
+  "primary button text (disabled or refused)",
+  pair(P.SLATE_700, P.SLATE_300),
+  PRIMARY_BUTTON_DISABLED_BG
 );
 
 export const secondaryButtonText = "text-slate-700 dark:text-slate-300";
