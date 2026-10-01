@@ -5,7 +5,9 @@
 // under locks that production's reads and writes queue behind. Load refuses a set either runner
 // would apply other than as written, before the runner opens a transaction; Exec applies each
 // migration with its lock waits bounded by LockTimeout, and names the lock a migration gave up on
-// and the sessions that held it.
+// and the sessions that held it; Census reads, before a deployment applies the migrations a
+// database has not, what they would lock and the rows their own censuses count, and writes
+// nothing.
 package pgmigrate
 
 import (
