@@ -21,6 +21,7 @@ import {
   expectsLaneReceipt,
   inboundTimestamp,
   postDeliveryReply,
+  type RenderInboundResult,
   rememberBounded,
   renderInbound,
   senderLabel,
@@ -62,6 +63,17 @@ import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { AgentStreamPublisher } from "../src/agent-stream";
 import { withDispatchFirst } from "../src/dispatch-first";
+import {
+  type AcceptedUserTurn,
+  endInjectedUserTurns,
+  HANDLED_ATTEMPT_ENTRY,
+  handledAttemptKey,
+  handledAttempts,
+  isUserTurnCandidate,
+  matchInjectedUserTurn,
+  noteInjectedUserTurn,
+  turnFromAccept,
+} from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
@@ -108,6 +120,13 @@ const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABIL
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 
 const OPEN_ASKS_TIMEOUT_MS = 3_000;
+
+/**
+ * How long a person's direct message waits on Dispatch's acceptance before it arrives as a card
+ * instead: the frames on the agent subject are delivered one at a time, so a hung Dispatch must
+ * not hold every message behind this one for the client's own minute.
+ */
+const USER_TURN_ACCEPT_TIMEOUT_MS = 10_000;
 
 /**
  * Transcript entry marking a session Legion drives. The process-wide bridge knows the same
@@ -209,7 +228,7 @@ const ASK_SELF_CHECK_TIMEOUT_MS = 60_000;
 const ASK_CHECKS_PER_PERIOD = 5;
 
 const UNASKED_WAIT_REMINDER =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask, naming exactly what you need and from whom.";
 
 /** Tools whose success means the agent opened the ask itself, so the nudge has nothing to say. */
 const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];
@@ -415,6 +434,10 @@ export default function envoyExtension(pi: PiApi): void {
   /** The bridge set is the process-local record; the transcript is what a fresh process reads. */
   const legionManaged = (id: string): boolean =>
     legionManagedTranscript || legionRoleClaimBridge().managedSessions.has(id);
+  // The attempts of a person's direct message this session delivered, as a card or as a turn
+  // (`HANDLED_ATTEMPT_ENTRY`): read from every entry of the session file, so a resume, a switch to
+  // another branch of the tree, or both keep a delivered attempt from being accepted again.
+  let handledDispatchAttempts = new Set<string>();
 
   const availabilityWarningSessionIDs = new Set<string>();
 
@@ -500,6 +523,7 @@ export default function envoyExtension(pi: PiApi): void {
       awarenessGeneration++;
     }
     legionManagedTranscript = branch.some(isLegionManagedEntry);
+    handledDispatchAttempts = handledAttempts(context.sessionManager.getEntries());
   };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -525,6 +549,62 @@ export default function envoyExtension(pi: PiApi): void {
     result: { readonly body?: string; readonly error?: string }
   ): Promise<void> => {
     await postDeliveryReply(currentDispatchConfig(), sessionID, delivery, result);
+  };
+
+  // The user turn a person's direct Send or Aside becomes (`src/dispatch-user-turn.ts`): only one
+  // whose acceptance by this session Dispatch records, as the body and mode Dispatch answers. The
+  // attempt is recorded as handled before Dispatch is asked, so whatever this frame becomes - a
+  // turn, or the card every refusal, error and timeout keeps, a broken Dispatch configuration
+  // included - no later frame naming the attempt is accepted: a replay, or one forged inside the
+  // accept's minute for a Send that arrived as a card. Undefined for every frame that is not a
+  // turn; the caller then delivers today's card, which is the delivery, and posts nothing.
+  //
+  // A forged frame can name an attempt before Dispatch's frame does and so spend it; what that
+  // costs is `packages/pi-envoy/AGENTS.md`'s (the record's limit). Do not skip the record when
+  // the accept answers 404: the route answers 404 for a transient database error too, and a frame
+  // another subscription's pump carded while that accept was in flight would be forgotten, so a
+  // Send that arrived as a card could become a turn on a later forged frame.
+  const acceptedUserTurn = async (
+    rendered: RenderInboundResult
+  ): Promise<AcceptedUserTurn | undefined> => {
+    if (!isUserTurnCandidate(rendered)) return undefined;
+    const { delivery } = rendered;
+    const key = handledAttemptKey(delivery.id, delivery.attempt);
+    if (handledDispatchAttempts.has(key)) {
+      logger.warn(
+        "envoy: a frame names a Dispatch attempt this session already delivered; it arrives as a card",
+        { attempt: delivery.attempt, messageID: delivery.id }
+      );
+      return undefined;
+    }
+    handledDispatchAttempts.add(key);
+    pi.appendEntry(HANDLED_ATTEMPT_ENTRY, { attempt: delivery.attempt, message_id: delivery.id });
+    try {
+      const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+      if (config === null) return undefined;
+      const accepted = await new DispatchClient(
+        config.url,
+        config.token,
+        fetch,
+        AbortSignal.timeout(USER_TURN_ACCEPT_TIMEOUT_MS)
+      ).acceptMessageDelivery(delivery.id, delivery.attempt, {
+        actor: { id: sessionID, kind: "session" },
+      });
+      const turn = turnFromAccept(accepted);
+      if (turn === undefined) {
+        logger.warn(
+          "envoy: Dispatch accepted a direct message without the stored body and mode to inject; it arrives as a card",
+          { attempt: delivery.attempt, messageID: delivery.id }
+        );
+      }
+      return turn;
+    } catch (error) {
+      logger.warn(
+        "envoy: Dispatch did not accept a direct message as this session's turn; it arrives as a card",
+        { attempt: delivery.attempt, messageID: delivery.id, error: messageFor(error) }
+      );
+      return undefined;
+    }
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
@@ -609,13 +689,23 @@ export default function envoyExtension(pi: PiApi): void {
             }
           }
         } else {
-          pi.sendMessage(
-            { customType: "envoy-message", content: rendered.content, display: true },
-            {
-              deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
-              triggerTurn: true,
-            }
-          );
+          const turn = await acceptedUserTurn(rendered);
+          if (turn === undefined) {
+            pi.sendMessage(
+              { customType: "envoy-message", content: rendered.content, display: true },
+              {
+                deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
+                triggerTurn: true,
+              }
+            );
+          } else {
+            // Sent exactly as Enter, or an aside, at the terminal sends it.
+            noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
+            pi.sendUserMessage(
+              turn.body,
+              turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+            );
+          }
         }
       } catch (error) {
         console.warn(
@@ -792,12 +882,18 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpAgentStreamControl(subscription, session);
   };
 
-  /** One of this session's messages, on its way to whoever has the session open. Only the
-   *  top-level instance publishes: a `task` subagent's instance never learns a session id, and
-   *  its work reaches the viewer as the parent's tool call anyway. */
+  /** One of this session's messages, on its way to whoever has the session open, tagged with the
+   *  Dispatch message a user message delivered when it matches a person's turn this extension sent
+   *  in. Only the top-level instance publishes: a `task` subagent's instance never learns a session
+   *  id, and its work reaches the viewer as the parent's tool call anyway. */
   const recordAgentStreamMessage = (message: unknown, streaming: boolean): void => {
     if (sessionID === "") return;
-    agentStream.record(agentStreamFramesSubject(sessionID), message, streaming);
+    agentStream.record(
+      agentStreamFramesSubject(sessionID),
+      message,
+      streaming,
+      matchInjectedUserTurn(sessionID, message)
+    );
   };
 
   pi.on("message_start", async (event) => {
@@ -1429,8 +1525,8 @@ export default function envoyExtension(pi: PiApi): void {
     // the coercion pass delete an unknown key beside valid required fields and validation then
     // "succeeds" with silently narrowed args, while the non-strict schema preserves unknown
     // root fields so they reach `executeDispatchTool`, whose own always-strict parse names the
-    // field the caller invented. Verified against the live agent loop on 18.2.2 (legion #1242
-    // review); the xd:// write path's half of this contract is can1357/oh-my-pi#12871.
+    // field the caller invented. The xd:// write path's half of this contract is
+    // can1357/oh-my-pi#12871.
     for (const spec of dispatchToolSpecs) {
       pi.registerTool({
         name: spec.name,
@@ -1547,6 +1643,11 @@ export default function envoyExtension(pi: PiApi): void {
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
     const id = context.sessionManager.getSessionId();
+    // A person's direct message not yet seen as a user message by the end of the run is not
+    // looked for again (`src/dispatch-user-turn.ts`). The record is kept under this instance's own
+    // `sessionID`, where `deliver` notes a turn and the stream recorder matches it, and not under
+    // the host's live id, which a fresh terminal's differs from until the heartbeat heals it.
+    endInjectedUserTurns(sessionID);
     // Only a run that settled normally is nudged: steering an interrupt (`aborted`), a provider
     // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
     // or a failure, with a turn nobody asked for.

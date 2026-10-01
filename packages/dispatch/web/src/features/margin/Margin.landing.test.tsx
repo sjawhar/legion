@@ -129,7 +129,7 @@ test("a phone comment deep link highlights its card without expanding it or open
   // The link's destination on a phone is the Conversation turn. The margin marks the card so the
   // reader finds it when they open the review panel, but a thread on a phone opens only in the
   // Thread dialog: an inline expansion left behind here would strand a Reply composer whose Cancel
-  // opens the fullscreen thread (found in review of #1239).
+  // opens the fullscreen thread (#1239).
   const restoreMatchMedia = stubMatchMedia(true);
   const view = render(
     <MemoryRouter
@@ -214,8 +214,8 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
 
 test("a reader who lands on a comment link can still select another card", async () => {
   // The URL keeps naming its item for the whole visit, so reading it ahead of the reader's own
-  // selection - or re-applying it on every render - pinned the linked card as the selected one
-  // and left every later click with nothing to show for it.
+  // selection - or re-applying it on every render - would pin the linked card as the selected one
+  // and leave every later click with nothing to show for it.
   const restoreMatchMedia = stubMatchMedia(false);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
   const view = renderCommentLinkLanding([comment, secondComment], [anchoredAsk]);

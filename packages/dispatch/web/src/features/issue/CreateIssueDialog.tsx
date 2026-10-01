@@ -23,7 +23,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { buildIssuePath, parseIssuePath, parseProjectPath } from "../refs/routes";
+import { buildIssuePath, routeProjectOf } from "../refs/routes";
 import { useDialog } from "../shell/useDialog";
 
 const createIssue = (input: CreateIssueInput): Promise<Issue> => api.createIssue(input);
@@ -49,10 +49,7 @@ export function CreateIssueDialog({
   const titleRef = useRef<HTMLInputElement>(null);
   const dialog = useDialog<HTMLFormElement>({ initialFocusRef: titleRef, onClose, open: true });
   const projects = useQuery(projectsQuery());
-  // An issue key is `<PROJECT>-<n>` (routes.ts `issueKeyPattern`), so its project is the prefix.
-  const routeProject =
-    parseProjectPath(location.pathname)?.project ??
-    parseIssuePath(location.pathname)?.key.replace(/-\d+$/, "");
+  const routeProject = routeProjectOf(location.pathname);
   const [project, setProject] = useState<string | undefined>(undefined);
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");

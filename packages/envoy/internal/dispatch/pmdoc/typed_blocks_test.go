@@ -212,7 +212,7 @@ func TestTypedStringArrayAttributesRoundTripThroughYjs(t *testing.T) {
 		t.Fatalf("write ask to Yjs: %v", err)
 	}
 	// Encode and reload: attribute values only reach ygo's wire encoder when an update is
-	// produced, which is where a Go []string used to panic mid-transaction.
+	// produced, which is where a Go []string would panic mid-transaction.
 	reloaded := crdt.New()
 	if err := crdt.ApplyUpdateV1(reloaded, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
 		t.Fatalf("reload ask update: %v", err)

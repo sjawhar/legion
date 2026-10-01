@@ -202,8 +202,8 @@ func guardedDocumentEdit(t *testing.T, handler http.Handler, artifactID, find, w
 }
 
 // A chain of guarded edits reads the document once: each edit returns the token of the tree its
-// own transaction wrote, which is the next edit's precondition. AGENTC-393 paid for eleven spec
-// edits with six full re-reads of a 30 KB document to learn tokens the edits had just minted.
+// own transaction wrote, which is the next edit's precondition, so no edit re-reads the document
+// to learn a token the edit before it just minted.
 func TestDocumentEditReturnsTheTokenItProduced(t *testing.T) {
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Chained document edits", "before")

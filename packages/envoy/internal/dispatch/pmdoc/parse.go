@@ -867,7 +867,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				} else {
 					// The browser editor's parser reads the spaces and tabs a line ends with, which
 					// trimLineSuffixes took off, as a hard break only where they are two spaces
-					// or more and no tab; goldmark broke hard at any two spaces ending the line.
+					// or more and no tab; goldmark breaks hard at any two spaces ending the line.
 					value = strings.TrimSuffix(value, "\n")
 					hard = len(run) >= 2 && !strings.Contains(run, "\t")
 					soft = !hard

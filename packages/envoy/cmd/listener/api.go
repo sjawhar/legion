@@ -80,10 +80,12 @@ type messageBody struct {
 }
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
-// this message, so nothing new reached the agent's subject; it can only be true for a send whose
-// dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and
-// Dispatch is the one sender that uses it. Absent means false, which is what an older listener's
-// answer reads as.
+// this message, so the stream stored nothing new; the publish still reached the agent's subject.
+// What recognises that repeat, and for how long, is stated on DELIVERY_DUPLICATE_WINDOW_MS in
+// @legion/contracts (contracts.DeliveryDuplicateWindow here). It can only be true for a send whose
+// dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch is
+// the one sender that uses it. Absent means false, which is what an older listener's answer reads
+// as.
 type sendResponse struct {
 	contracts.Envelope
 	Recipient string `json:"recipient"`
@@ -126,7 +128,7 @@ func hasCapability(capabilities []string, value string) bool {
 // (packages/envoy-client/src/delivery.ts's parseDispatchFrame) gets there via JSON.parse plus
 // plain object property access, which is exact and case-sensitive in JavaScript; the wire key
 // is fixed lower-case ("delivery") in packages/contracts/src/dispatch-api.ts. Decoding straight
-// into a Go struct, as this used to do, is a *second, more lenient* reader of the same bytes:
+// into a Go struct would be a *second, more lenient* reader of the same bytes:
 // encoding/json matches JSON object keys case-insensitively when no exact match exists, so a
 // payload carrying both the receiver's exact "delivery" key and a same-key-different-case
 // sibling like "Delivery" could make that lenient decode read the sibling's mode while the
@@ -150,9 +152,9 @@ func hasCapability(capabilities []string, value string) bool {
 //   - "delivery" is present and its mode reads unambiguously as one of the three delivery
 //     modes: mode=<that string>, err=nil.
 //   - "delivery" is present and its mode reads unambiguously as something else: mode="",
-//     err!=nil, refused like any other unreadable claim. This used to be waved through on the
-//     grounds that the capability check behind it would refuse a mode no session advertises -
-//     but `capabilities` is an open list from the registry, so a session that advertises a
+//     err!=nil, refused like any other unreadable claim. Waving it through on the grounds that
+//     the capability check behind it would refuse a mode no session advertises does not hold:
+//     `capabilities` is an open list from the registry, so a session that advertises a
 //     bogus string is exactly what makes that argument fail. The Dispatch server's
 //     `validDelivery` already refuses the same set at its own boundary; this is the listener's.
 func frameDeliveryMode(payload *string) (mode string, err error) {

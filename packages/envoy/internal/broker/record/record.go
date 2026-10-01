@@ -1,6 +1,6 @@
 // Package record implements the credential-request record: its canonical body and content-addressed
-// id, the domain-separated challenges the broker asks approvers to sign, and verification of the
-// requester's signed request object (AGENTC-393 design v4, contract v9).
+// id, who may decide it, and verification of the requester's signed request object (AGENTC-393
+// design v4, contract v9).
 package record
 
 import (
@@ -41,8 +41,7 @@ var (
 )
 
 // CanonicalLogin lowercases and trims a GitHub login. Every login comparison in the module goes
-// through this form on both sides. Moved here verbatim from the deleted internal/broker/dispatch
-// package's client.go (AGENTC-393 v9: the broker holds no Dispatch credential).
+// through this form on both sides.
 func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
@@ -336,29 +335,21 @@ func ParseBody(canonical string) (Body, error) {
 	return b, nil
 }
 
-// ApproveChallenge is the domain-separated challenge an approver signs to approve a record.
-func ApproveChallenge(recordID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/approve/v1\n" + recordID))
+// ApproverLogin canonicalizes login and returns it when it is the approver this record names, and
+// ErrNotApprover otherwise. A record's approver is resolved when it is created — an approval
+// rule's login:<name>, the requesting enrollment's operator for approver: operator, or a machine
+// login's login_hint — so this one comparison is every decision's and every chain re-check's
+// approver rule, and the login it returns is the one a decision records.
+func (b Body) ApproverLogin(login string) (string, error) {
+	login = CanonicalLogin(login)
+	if login == "" || login != CanonicalLogin(b.Approver) {
+		return "", ErrNotApprover
+	}
+	return login, nil
 }
 
-// DenyChallenge is the domain-separated challenge an approver signs to deny a record.
-func DenyChallenge(recordID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/deny/v1\n" + recordID))
-}
-
-// RevokeChallenge is the domain-separated challenge an approver or operator signs to revoke a
-// grant.
-func RevokeChallenge(grantID string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/revoke/v1\n" + grantID))
-}
-
-// EndorseChallenge is the domain-separated challenge an already-persisted key signs to endorse a
-// new key for the same login.
-func EndorseChallenge(login, keyHashHex string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/endorse/v1\n" + login + "\n" + keyHashHex))
-}
-
-// RegisterChallenge is the domain-separated challenge a new key signs during registration.
-func RegisterChallenge(login, nonceHex string) [32]byte {
-	return sha256.Sum256([]byte("agent-secrets/register/v1\n" + login + "\n" + nonceHex))
+// isApprover reports whether login is the approver this record names, by ApproverLogin's rule.
+func (b Body) isApprover(login string) bool {
+	_, err := b.ApproverLogin(login)
+	return err == nil
 }

@@ -427,7 +427,7 @@ func TestExecFormDoesNotLetInheritedEnvShadowAGrantedValue(t *testing.T) {
 
 // TestExecFormSecondInvocationReusesGrantTransparently proves cmd/agent-secrets needs no
 // client-side change to benefit from Machine.Create's server-side grant reuse (the review's
-// Critical finding, fixed in requests/machine.go): running the exec form twice for the same
+// Critical finding; requests/machine.go): running the exec form twice for the same
 // already-granted secret name must both times grant immediately, and — critically — must never
 // poll GET /v1/requests/{id} (proof that neither invocation ever entered the pending-wait loop,
 // whether the broker minted the grant fresh or handed back a reused one).

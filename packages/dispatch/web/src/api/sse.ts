@@ -59,6 +59,7 @@ const knownEventTypes: Record<EventType, true> = {
   "suggestion.rejected": true,
   "message.created": true,
   "message.delivery": true,
+  "message.accepted": true,
   "message.answered": true,
   "child.status": true,
   "child.added": true,
@@ -199,6 +200,7 @@ function isMessageEvent(event: Event): boolean {
   return (
     event.type === "message.created" ||
     event.type === "message.delivery" ||
+    event.type === "message.accepted" ||
     event.type === "message.answered"
   );
 }

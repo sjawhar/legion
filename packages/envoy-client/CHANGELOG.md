@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
+  sends `summary` and quotes the question the server returned in its result (LEGION-387).
+- `dispatch_request_approval` is refused, with no request sent, while the version it would name
+  (the document's latest) holds a decision block open (LEGION-387): answering the block would
+  write a new version and retract the request. A block is judged by its state in that version, so
+  an answer not yet folded into a version still counts, and so does a block with no ask yet; every
+  line that opens the block counts, so one quoting its opener (in code, say) can add an open block
+  but never hide one. The refusal names each block and its ask, and tells the agent to ask the
+  human to answer or waive it. It reads `GET /artifacts/{id}/blocks` first, then, only when an
+  `ask` block is present, the owner's asks and that version's markdown; an approved document skips
+  the reads.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` by block id would
+  take a decision block out of the document while its ask is open, even in a batch that inserts
+  markdown carrying its id (LEGION-387). The edit would write its version at once and settlement
+  would retract the ask without another, so the question would leave the human's Inbox
+  unanswered and an approval request sent next would find no open block. The refusal names
+  `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. It covers `dispatch_doc_edit` only: a
+  whole-document replace through `dispatch_artifact` is sent with no reads and can still remove an
+  open block. An edit with no `delete` or `retype` by block id reads nothing more; one with reads
+  `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
+
 ### Added
 
 - Added the shared nine-tool native Dispatch client, typed results, and per-issue event subscription details.
@@ -11,6 +34,11 @@
 - `activeDispatchConfig` is the one "is Dispatch configured" check every host shares: the resolved
   URL and token, null when none is configured, and a `dispatch config: <reason>` throw on a broken
   configuration.
+- `DispatchClient.acceptMessageDelivery(id, attempt, {actor})` calls
+  `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` and returns the accepted attempt with
+  the message's stored `body` (`AcceptedMessageDelivery`); a refusal throws a
+  `DispatchServiceError` naming Dispatch's check. A rendered Dispatch message delivery carries the
+  frame's `broadcast_id` as `DispatchDelivery.broadcastId` (LEGION-394).
 
 ### Changed
 

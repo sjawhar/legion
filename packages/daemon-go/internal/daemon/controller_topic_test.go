@@ -51,7 +51,7 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 	if err != nil {
 		t.Fatal(err)
 	}
-	architectTopic, controllerTopic := roleTopicPrefix+string(architect), notify.ControllerTopic(token)
+	architectTopic, controllerTopic := notify.RoleTopicPrefix+string(architect), notify.ControllerTopic(token)
 	listener.refuseFirst(controllerTopic, 2)
 	pool, err := pgxpool.New(context.Background(), cfg.PostgresDSN)
 	if err != nil {

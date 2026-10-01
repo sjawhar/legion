@@ -459,8 +459,8 @@ func dedent(lines string, limit int) string {
 
 // blockStart reports whether offset opens its own line: everything back to lineStart is
 // indentation the parser skips, up to three spaces or a run of tabs. A marker one space in is
-// still the marker — AGENTC-193's own payload was indented — and a line that began in an earlier
-// text node (lineStart < 0) is never a block start here.
+// still the marker, and a line that began in an earlier text node (lineStart < 0) is never a block
+// start here.
 func blockStart(value string, lineStart, offset int) bool {
 	if lineStart < 0 || lineStart > offset {
 		return false

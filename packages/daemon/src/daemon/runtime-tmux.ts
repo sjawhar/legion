@@ -40,6 +40,26 @@ const TMUX_OWN_GLOBALS: Record<string, true> = { PWD: true, SHLVL: true };
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 
+/** `codegraph status --json`'s `initialized` field (AGENTC-1305 §7): `codegraph status` exits 0
+ * whether or not the project has ever been indexed, so only the parsed body tells the two apart.
+ * Anything that fails to parse as that shape — a missing CLI's empty output, a version whose
+ * JSON differs — is treated as not initialized, so `ensureCodegraphIndex` falls through to
+ * `codegraph init` rather than silently skipping it. */
+function isCodegraphInitialized(stdout: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return false;
+  }
+  return (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    "initialized" in parsed &&
+    parsed.initialized === true
+  );
+}
+
 function treeName(issue: IssueKey): string {
   const fullName = issue.toLowerCase();
   if (fullName.length <= MAX_TMUX_WINDOW_NAME_LENGTH) return fullName;
@@ -452,6 +472,56 @@ export class TmuxRuntime implements Runtime {
     );
   }
 
+  /** Warms `@bopstack/pi-codegraph`'s index for the issue's working copy (research report
+   * AGENTC-1305 §7): the tester's `affected` and the reviewer's `impact`/`callers` queries need
+   * one already built, not one built on first use. Runs after `provisionWorkspace` releases the
+   * per-repository provisioning lock (`this.provisionQueue`): indexing reads the issue's own
+   * workspace directory, not the shared clone that lock protects, so holding it across indexing
+   * would serialize every other issue of the repository behind one potentially slow index build
+   * for no correctness reason. `codegraph status` is a fast no-op on an already-indexed
+   * directory, so provisioning the same workspace again for a later phase worker of the same
+   * issue costs one quick check, not a re-index. A missing CLI or a failed build is logged
+   * loudly — never silently swallowed — but never fails the provision: a worker without an index
+   * falls back to grep, per its role prompt, rather than being wedged by an optional tool. */
+  private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
+    // createDaemonRunner merges `{ ...environment.paneEnv, ...options?.env }`, so an `env` option
+    // here can only add variables, never remove the ones paneEnv already carries (which may
+    // include a one-shot GitHub token or other secrets); `process.env` is also wrong here — the
+    // runtime's command contract is the runner's resolved environment (`environment.paneEnv`,
+    // the mise-resolved env workers inherit), not this process's own. So this runs through a
+    // shell that inherits the runner-merged env — giving it genuine PATH/HOME — then execs
+    // `env -i` from inside that shell, which drops every other variable regardless of what
+    // environment the shell itself received: `codegraph` gets only PATH, HOME, and
+    // DO_NOT_TRACK=1, never a one-shot GitHub token or any other secret the merged env carries.
+    // DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its docs rank
+    // DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on) — an
+    // automatic, non-opt-in warm-up must never phone home.
+    const codegraphShell = 'exec env -i PATH="$PATH" HOME="$HOME" DO_NOT_TRACK=1 codegraph "$@"';
+    try {
+      const status = await this.deps.run(
+        ["sh", "-c", codegraphShell, "codegraph", "status", "--json"],
+        {
+          cwd: workspaceDir,
+          timeoutMs: this.deps.slowCommandTimeoutMs,
+        }
+      );
+      if (status.exitCode === 0 && isCodegraphInitialized(status.stdout)) return;
+      const result = await this.deps.run(["sh", "-c", codegraphShell, "codegraph", "init"], {
+        cwd: workspaceDir,
+        timeoutMs: this.deps.slowCommandTimeoutMs,
+      });
+      if (result.exitCode !== 0) {
+        console.error(
+          `[legion] codegraph init failed for ${workspaceDir} (exit ${result.exitCode}): ${result.stderr ?? ""}`
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[legion] codegraph init could not run for ${workspaceDir}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   /** `deps.run` as `@legion/workspace` expects it: the daemon's runner may omit `stderr`
    * (`CommandResult.stderr` is optional on a killed command); the workspace contract requires
    * it, since `commandFailure` quotes it. */
@@ -493,8 +563,10 @@ export class TmuxRuntime implements Runtime {
     secrets: Array<[string, string]>
   ): Promise<TmuxLocator> {
     // Today's order, kept: provision, then the prompt stat and session-file stat inside the
-    // command assembly, then the socket, secret file, and tmux argv.
+    // command assembly, then the socket, secret file, and tmux argv. Codegraph indexing runs
+    // after provisioning releases the per-repository lock (see `ensureCodegraphIndex`'s doc).
     const workspace = await this.provisionWorkspace(issue);
+    await this.ensureCodegraphIndex(workspace.workspaceDir);
     const innerCommand = await this.issueInnerCommand(
       issue,
       spec.launch,

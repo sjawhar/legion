@@ -238,8 +238,8 @@ type PendingSummary struct {
 func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]PendingSummary, error) {
 	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
 		where cr.approver=$1 and not exists (
-			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event in ('approved','denied','expired','cancelled')
-		) order by cr.created_at desc`, record.CanonicalLogin(approver))
+			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event = any($2)
+		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.TerminalEventNames())
 	if err != nil {
 		return nil, err
 	}
@@ -298,8 +298,8 @@ type RecordDetail struct {
 }
 
 // ReadRecord reads a credential-request record's full detail by id, for GET
-// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup (which adds
-// its own challenges on top). pgx.ErrNoRows means no such record.
+// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
+// pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
 	var canonical, approver, kind string
 	var createdAt, expiresAt time.Time
@@ -336,7 +336,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	var event, credID string
 	var decidedAt time.Time
 	err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
-		where record_id=$1 and event in ('approved','denied','expired','cancelled')`, recordID).Scan(&event, &decidedAt, &credID)
+		where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return detail, nil
@@ -358,12 +358,14 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 }
 
 // ApproverGrant is one live, approval-granted grant an approver (or its enrollment's operator) may
-// revoke, for GET /v1/grants?approver=<login>.
+// revoke, for GET /v1/grants?approver=<login>. Approver is the login that approved it, which for an
+// operator's own list can be another login.
 type ApproverGrant struct {
 	GrantID    string
 	RecordID   *string
 	Enrollment record.Enrollment
 	Names      []string
+	Approver   string
 	ExpiresAt  time.Time
 	CreatedAt  time.Time
 }
@@ -373,7 +375,7 @@ type ApproverGrant struct {
 // appears here — newest first.
 func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
 	login := record.CanonicalLogin(approver)
-	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), g.expires_at, g.created_at,
+	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), g.approver, g.expires_at, g.created_at,
 		coalesce((select array_agg(rs.name order by rs.name) from request_secrets rs where rs.request_id=r.id and rs.decision<>'deny'), '{}')
 		from grants g
 		join requests r on r.id=g.request_id
@@ -388,7 +390,7 @@ func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]App
 	var out []ApproverGrant
 	for rows.Next() {
 		var g ApproverGrant
-		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
+		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.Approver, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
 			return nil, err
 		}
 		out = append(out, g)

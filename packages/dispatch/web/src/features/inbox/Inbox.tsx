@@ -521,11 +521,20 @@ export function Inbox(): ReactNode {
   const pickerOrigin = useRef<string | null>(null);
   useKeymapScope("inbox");
   useKeymap("inbox", [
-    { id: "next", keys: "j", label: "Next ask", run: () => step(1), when: () => rows().length > 0 },
+    // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
+    {
+      id: "next",
+      keys: "j",
+      label: "Next ask",
+      palette: false,
+      run: () => step(1),
+      when: () => rows().length > 0,
+    },
     {
       id: "previous",
       keys: "k",
       label: "Previous ask",
+      palette: false,
       run: () => step(-1),
       when: () => rows().length > 0,
     },
@@ -583,9 +592,11 @@ export function Inbox(): ReactNode {
       when: () => rowAround(document.activeElement) !== null,
     },
     {
+      // Marking walks the list with the row in hand, as `j`/`k` do, so it is no palette row.
       id: "select",
       keys: "x",
       label: "Select or deselect the focused ask",
+      palette: false,
       run: () => {
         const askId = focusedRow()?.dataset.inboxRow;
         if (askId !== undefined) onMark(askId);
@@ -635,8 +646,11 @@ export function Inbox(): ReactNode {
       // Escape is one level out, and the selection is the outermost thing a row press made:
       // `back` takes the reader off the row first, and this clears what they marked. It is
       // offered exactly while the bar's Clear is, a pick in flight and a refusal the reader has
-      // since unticked the rows of included - the keyboard that raised them dismisses them.
+      // since unticked the rows of included - the keyboard that raised them dismisses them. Not a
+      // palette row: in the palette Escape closes the palette, so the row would name a key that
+      // does something else there.
       label: "Clear the selection",
+      palette: false,
       run: clearSelection,
       when: () => focusedRow() === null && bulkBarShown,
     },

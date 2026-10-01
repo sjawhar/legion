@@ -4,7 +4,7 @@
 // Verifies critical endpoints work end-to-end with a real NATS server via testcontainers.
 //
 // ENVOY_SMOKE_IMAGE names the already-built listener image to run. This test never builds one:
-// a build inside `go test` spends the test's deadline, which is what LEGION-361 removed. Unset,
+// a build inside `go test` spends the test's deadline (LEGION-361). Unset,
 // the test fails immediately and prints the build command, so a lane that loses its build step
 // — a rename, a typo, a new workflow — goes red instead of quietly building again.
 package smoke

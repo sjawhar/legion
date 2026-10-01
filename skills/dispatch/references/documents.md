@@ -1,9 +1,9 @@
 # Documents: typed blocks, comments, suggestions, and artifacts
 
 `skill://dispatch` sends you here when you write a typed block (an `:::ask` or a callout), comment on
-or suggest a change to a document, upload an artifact, or get `DOC_SCHEMA`, `INVALID_ASK_BLOCK` or
-`DOC_SERVICE_UNAVAILABLE` back. Changing a document's text, tables included, is
-[Editing a document](skill://dispatch/references/document-edits.md).
+or suggest a change to a document, upload an artifact, request a document's approval, or get
+`DOC_SCHEMA`, `INVALID_ASK_BLOCK` or `DOC_SERVICE_UNAVAILABLE` back. Changing a document's text,
+tables included, is [Editing a document](skill://dispatch/references/document-edits.md).
 
 ## Typed blocks
 
@@ -23,7 +23,10 @@ names one block, so an insert, upload or suggestion whose markdown names an id t
 outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
 `INVALID_MARKDOWN` for any other write. To rewrite such a block whole, `delete` it and then
 `insert` the new one carrying its id, anchored on the block before or after it, in that order and
-in one batch: an insert carrying an id the document still holds is refused.
+in one batch: an insert carrying an id the document still holds is refused. An `ask` block whose ask
+is still open cannot be rewritten that way: the tools refuse the `delete`, so reword it with
+`replace`, relocate it with `move`, or change its question, options, urgency or `multiple` with
+`dispatch_edit_ask` if you asked it ([Editing a document](skill://dispatch/references/document-edits.md)).
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf
@@ -140,6 +143,26 @@ row: write a `|` inside a cell as `\|`, or, where the row really has more cells,
 delimiter rows as many. Blank cells past the width are dropped, on every path. A spec, an upload or
 a version answers `INVALID_MARKDOWN`, an insert of blocks `INVALID_OP` on `markdown`, and an insert
 of bare table rows `TABLE_WIDTH`, which names the cell counts only.
+
+## Approval requests
+
+```
+dispatch_request_approval({ issue?, project?, artifact?, summary })
+```
+
+The call opens an approval ask with the options `Approve` and `Request changes`, its question
+"Approve spec.md (version N)?" followed by `summary`, where N is the document's latest version. It
+is refused, with nothing sent, while that version holds a decision block open, and the refusal
+names each block and its ask. An answer or a `dispatch_resolve_ask` closes the ask at once but
+reaches a version only when the document settles, about two seconds later, or with your next
+`dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
+in) and then request. A block written in the last few seconds counts as open before Dispatch has
+opened its ask. A repeat at the same version returns the open request unchanged. A new version
+retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
+the new version once its blocks are settled. The answer reaches you as `artifact.approved` or
+`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
+which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show the document's
+approval state; `stale` means it was approved and then edited.
 
 ## A document that is reloading
 

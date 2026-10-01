@@ -271,11 +271,11 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
   }
 });
 
-// An anchor inside a sentence is part of the sentence. The compact touch-target rule gave every
-// anchor a 44px box, so a reply's `view` and a `dispatch://` reference inside a body became
-// 44px-tall inline-flex boxes with blank space around them in the middle of a line. The fix is
-// vertical padding, not an overlay: padding on an inline element grows the hit box without
-// moving the line, and without covering whatever happens to sit within 44px of the link.
+// An anchor inside a sentence is part of the sentence. A 44px touch-target box on every anchor
+// would make a reply's `view` and a `dispatch://` reference inside a body 44px-tall inline-flex
+// boxes with blank space around them in the middle of a line, so the hit box grows by vertical
+// padding, not an overlay: padding on an inline element grows the hit box without moving the
+// line, and without covering whatever happens to sit within 44px of the link.
 test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
   browser,
 }, testInfo) => {

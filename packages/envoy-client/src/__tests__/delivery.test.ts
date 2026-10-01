@@ -519,6 +519,39 @@ describe("renderInbound dispatch events", () => {
     });
   });
 
+  test("marks only the matching shared-prefix session as an issue-less message recipient", () => {
+    const otherSession = "01a02222-3333-7444-8555-666666666666";
+    const frame = JSON.parse(targetedDispatchPayload) as {
+      event: { issue_key: string | null; payload: { issue_key: string | null; target: string } };
+    };
+    frame.event.issue_key = null;
+    frame.event.payload.issue_key = null;
+    frame.event.payload.target = `session:${reader}`;
+    const raw = JSON.stringify(
+      envelope({
+        source: "dispatch",
+        topic: `notifications.agent.${reader}`,
+        payload: JSON.stringify(frame),
+      })
+    );
+
+    const intended = decode(
+      renderInbound(raw, reader, `notifications.agent.${reader}`).content
+    ) as { envoy: { to?: string; dispatch: { payload: { target: string } } } };
+    const other = decode(
+      renderInbound(raw, otherSession, `notifications.agent.${reader}`).content
+    ) as { envoy: { to?: string; dispatch: { payload: { target: string } } } };
+
+    expect(intended.envoy.to).toBe("you (01a01111-2222-7333-4444-555555555555)");
+    expect(intended.envoy.dispatch.payload.target).toBe(
+      "you (session:01a01111-2222-7333-4444-555555555555)"
+    );
+    expect(other.envoy.to).toBeUndefined();
+    expect(other.envoy.dispatch.payload.target).toBe(
+      "session:01a01111-2222-7333-4444-555555555555"
+    );
+  });
+
   test("keeps rendering a targeted Dispatch message when its payload grows", () => {
     const extendedPayload = JSON.parse(targetedDispatchPayload) as {
       event: { payload: Record<string, unknown> };
@@ -1306,7 +1339,7 @@ describe("renderInbound non-dispatch envelopes", () => {
     expect(rendered.content).toBe(
       [
         "envoy:",
-        "  to: you (01a0…)",
+        "  to: you (01a01111-2222-7333-4444-555555555555)",
         `  from: ${sender} (Reviewer)`,
         '  at: "2026-09-07T04:41:12Z"',
         "  id: agent-message-2",

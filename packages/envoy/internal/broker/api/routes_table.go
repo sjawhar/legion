@@ -17,9 +17,9 @@ const (
 
 // caller is who server.authenticate proved a request came from. Which field is set follows from
 // the route's authentication, and only the adapter for that authentication reads it. UI routes
-// carry no caller identity at all — the shared bearer authenticates which service is relaying
-// (Dispatch's server), never who approves; every UI handler takes its subject (an approver's
-// login, a record id) from the path or body instead.
+// carry no caller identity of their own — the shared bearer authenticates Dispatch's server, and
+// every UI handler takes its subject (an approver's login, a record id) from the path or body
+// Dispatch sends.
 type caller struct {
 	launcher   enroll.Credential
 	enrollment string
@@ -54,8 +54,10 @@ func sessionAuth(h func(*server, http.ResponseWriter, *http.Request, string)) ro
 }
 
 // uiAuth is a route for Dispatch's server, authenticated with the shared UI bearer token
-// (constant-time compare against Deps.UIToken). It never proves who approves — the WebAuthn
-// assertion each of these handlers verifies is the only authorization signal.
+// (constant-time compare against Deps.UIToken). The bearer vouches for the approver login in each
+// decision and revoke body: Dispatch's server sets it from the login its own session resolved,
+// never from anything the browser sent, so the UI token is an approval credential and only
+// Dispatch holds it.
 func uiAuth(h func(*server, http.ResponseWriter, *http.Request)) routeHandler {
 	return routeHandler{auth: authUI, serve: func(s *server, w http.ResponseWriter, r *http.Request, _ caller) { h(s, w, r) }}
 }
@@ -86,11 +88,6 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/credential-requests/{record}/approve", uiAuth((*server).approveRecord)},
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
-		{http.MethodGet, "/v1/approvers/{login}/keys", uiAuth((*server).listKeys)},
-		{http.MethodPost, "/v1/approvers/{login}/keys/register/begin", uiAuth((*server).beginRegister)},
-		{http.MethodPost, "/v1/approvers/{login}/keys/register/finish", uiAuth((*server).finishRegister)},
-		{http.MethodPost, "/v1/approvers/{login}/keys/endorse/begin", uiAuth((*server).beginEndorse)},
-		{http.MethodPost, "/v1/approvers/{login}/keys/endorse/finish", uiAuth((*server).finishEndorse)},
 		{http.MethodGet, "/v1/grants", uiAuth((*server).listGrantsForApprover)},
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
 		{http.MethodGet, "/healthz", public((*server).healthz)},

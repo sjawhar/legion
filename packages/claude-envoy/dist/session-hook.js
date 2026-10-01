@@ -13873,6 +13873,7 @@ var DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
   body: exports_external.string(),
   target: exports_external.string(),
   in_reply_to: exports_external.string().nullable(),
+  broadcast_id: exports_external.string().nullish(),
   deliveries: exports_external.array(exports_external.unknown()),
   created_at: exports_external.string()
 });
@@ -14119,17 +14120,7 @@ function componentsArgument(z2) {
     reason: z2.string({ min: 1 }).describe("For mode none: why this issue is not architectural (process, hiring, ops).").optional()
   }).describe("Attach the issue to architecture components. Attach the root before decomposing it; children inherit unless they choose.");
 }
-var SPEC_SECTIONS = [
-  "Summary",
-  "New since we talked",
-  "Acceptance",
-  "Requirements",
-  "Design",
-  "Errors",
-  "Testing",
-  "Rejected"
-];
-var SPEC_WRITING_GUIDANCE = `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` + "Write for a reader who has not seen the code: plain sentences, every identifier expanded on " + "first use, no coined shorthand; see skills/dispatch Writing for the human and Writing a spec.";
+var SPEC_WRITING_POINTER = 'Write a spec as the "Writing a spec" section of skill://dispatch says.';
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var SEARCH_QUERY_MAX = 1000;
@@ -14167,7 +14158,7 @@ var dispatchToolSpecs = [
       parent: z2.string().describe("Optional parent issue.").optional(),
       external: z2.string().describe("Optional external issue reference.").optional(),
       force: z2.boolean().describe("Create even though POSSIBLE_DUPLICATE listed similar issues; pass it only after reading them.").optional(),
-      spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_GUIDANCE}`).optional(),
+      spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Optional initial labels, at most 20 labels of up to 40 characters.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).describe("Optional coarse priority: P0 is highest and P3 is lowest.").optional(),
       assignee: z2.string().describe("GitHub login of the human who answers this issue's asks; defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
@@ -14354,7 +14345,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14399,12 +14390,13 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1" },
-    description: "Ask a human to approve a document at its current version - the exception path for a spec " + "that departs from what was settled or proposes children, not a step for every issue. Opens an " + "approval ask (Approve / Request changes) in the human's Inbox; the answer pins a review to the " + "document version and arrives as artifact.approved or artifact.changes_requested. A later edit " + "makes an approval stale; request again for the new version. Idempotent while a request is open. " + OWNER_REFERENCE,
+    example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " + "and writing it retracts an open request for an older version; request again for the new " + "one. A repeat at the version an open request names returns that request unchanged. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
-      artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional()
+      artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
+      summary: z2.string({ min: 1 }).describe("The proposals in this version the human hasn't already agreed to, in one to three sentences.")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -14544,6 +14536,8 @@ var EnvelopeSchema = exports_external.object({
 // ../contracts/src/handoff-schema.ts
 var HANDOFF_SCHEMA_VERSION = 1;
 var HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"];
+var PLAN_REVIEW_MAX_ROUNDS = 3;
+var PLAN_REVIEW_VERDICTS = ["approved", "rejected", "failed"];
 var isoTimestamp = exports_external.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
 var handoffPhase = exports_external.enum(HANDOFF_PHASES);
 var nonEmpty = exports_external.string().trim().min(1);
@@ -14580,6 +14574,16 @@ var requiredSkillsSchema = exports_external.object({
   test: exports_external.array(exports_external.string()).optional(),
   review: exports_external.array(exports_external.string()).optional()
 }).passthrough().optional();
+var gapAnalysisSchema = exports_external.object({
+  findings: exports_external.array(exports_external.object({ finding: exports_external.string(), answer: exports_external.string() }).passthrough()).optional(),
+  error: exports_external.string().optional()
+}).passthrough().optional();
+var planReviewSchema = exports_external.object({
+  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
+  rounds: exports_external.number(),
+  remainingIssues: exports_external.array(exports_external.object({ issue: exports_external.string(), evidence: exports_external.string() }).passthrough()).optional(),
+  error: exports_external.string().optional()
+}).passthrough().optional();
 var planSchema = baseHandoffSchema.extend({
   phase: exports_external.literal("plan"),
   taskCount: exports_external.number().optional(),
@@ -14587,7 +14591,9 @@ var planSchema = baseHandoffSchema.extend({
   routingHints: routingHintsSchema,
   concerns: exports_external.array(exports_external.string()).optional(),
   workflowRecommendation: exports_external.string().optional(),
-  requiredSkills: requiredSkillsSchema
+  requiredSkills: requiredSkillsSchema,
+  gapAnalysis: gapAnalysisSchema,
+  planReview: planReviewSchema
 });
 var implementSchema = baseHandoffSchema.extend({
   phase: exports_external.literal("implement"),
@@ -14627,13 +14633,60 @@ var reviewSchema = baseHandoffSchema.extend({
   verdict: exports_external.enum(["approved", "changes_requested"]).optional(),
   keyFindings: exports_external.array(exports_external.object({ severity: exports_external.string(), file: exports_external.string(), description: exports_external.string() }).passthrough()).optional()
 });
-var nonEmptySkillList = exports_external.array(exports_external.string().trim().min(1)).min(1);
+var nonEmptySkillList = exports_external.array(nonEmpty).min(1);
+var recorded = (shape, whatToRecord) => exports_external.object(shape, {
+  error: (issue2) => issue2.input === undefined ? `missing \u2014 record ${whatToRecord}` : undefined
+}).passthrough();
+var gapAnalysisWriteSchema = recorded({
+  findings: exports_external.array(exports_external.object({ finding: nonEmpty, answer: nonEmpty }).passthrough()).optional(),
+  error: nonEmpty.optional()
+}, "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`").refine((analysis) => analysis.findings === undefined !== (analysis.error === undefined), {
+  message: "record exactly one of `findings` or the failed call's `error`"
+});
+var planReviewWriteSchema = recorded({
+  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
+  rounds: exports_external.number().int().min(1).max(PLAN_REVIEW_MAX_ROUNDS),
+  remainingIssues: exports_external.array(exports_external.object({ issue: nonEmpty, evidence: nonEmpty }).passthrough()).optional(),
+  error: nonEmpty.optional()
+}, "the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed").superRefine((review, ctx) => {
+  const remaining = review.remainingIssues?.length ?? 0;
+  if (review.verdict === "rejected" && remaining === 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["remainingIssues"],
+      message: "a rejected review records the blocking issues its last round named"
+    });
+  }
+  if (review.verdict === "rejected" && review.rounds < PLAN_REVIEW_MAX_ROUNDS) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["rounds"],
+      message: `a review still rejecting after ${review.rounds} of ${PLAN_REVIEW_MAX_ROUNDS} rounds is revised and reviewed again, not recorded`
+    });
+  }
+  if (review.verdict === "approved" && remaining > 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["remainingIssues"],
+      message: "an approved review leaves no blocking issue standing"
+    });
+  }
+  if (review.verdict === "failed" !== (review.error !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["error"],
+      message: "a failed review records its call's error, and only a failed review does"
+    });
+  }
+});
 var planWriteSchema = planSchema.extend({
   requiredSkills: exports_external.object({
     implement: nonEmptySkillList,
     test: nonEmptySkillList,
     review: nonEmptySkillList
-  }).passthrough()
+  }).passthrough(),
+  gapAnalysis: gapAnalysisWriteSchema,
+  planReview: planReviewWriteSchema
 });
 var phaseHandoffSchema = exports_external.discriminatedUnion("phase", [
   architectSchema,
@@ -15294,6 +15347,9 @@ class DispatchClient {
   }
   async getMessageThread(id, session) {
     return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+  async acceptMessageDelivery(id, attempt, input) {
+    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
   }
   async artifact(issue2, input) {
     const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"];
@@ -16546,6 +16602,84 @@ async function openArtifactMarks(client, resolved) {
     ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
   ];
 }
+async function blockAsks(client, resolved, state) {
+  const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
+  return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
+}
+async function refuseOpenDecisionBlocks(client, tool, resolved) {
+  const artifact = resolved.artifact;
+  const latest = artifact.approval?.latest_version;
+  if (latest === undefined || latest < 1 || artifact.approval?.state === "approved")
+    return;
+  const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
+  if (blocks.length === 0)
+    return;
+  const [documentAsks, version2] = await Promise.all([
+    blockAsks(client, resolved),
+    client.docRead(artifact.id, latest)
+  ]);
+  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
+  const lines = version2.markdown.split(`
+`);
+  const open = blocks.flatMap((block) => {
+    const ask = asks.get(block.id);
+    const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
+    const states = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)).map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
+    if (states.length === 0)
+      return [`${named}, which version ${latest} does not hold yet`];
+    if (!states.includes("open") && states.some((state) => state !== undefined))
+      return [];
+    if (ask === undefined)
+      return [`${named}, whose ask Dispatch has not opened yet`];
+    if (ask.state === "open")
+      return [named];
+    const next = ask.state === "answered" ? "fold the answer into the text" : "write the decision into the text";
+    return [
+      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`
+    ];
+  });
+  if (open.length === 0)
+    return;
+  const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
+  throw new Error([
+    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+    ...open.map((line) => `- ${line}`),
+    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again."
+  ].join(`
+`));
+}
+async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
+  const removing = ops.filter((operation) => operation.block !== undefined && (operation.op === "delete" || operation.op === "retype" && operation.type !== "ask"));
+  if (removing.length === 0)
+    return;
+  const artifact = resolved.artifact;
+  const blocks = await client.artifactBlocks(artifact.id);
+  const askBlocks = blocks.filter((block) => block.type === "ask");
+  const removed = new Set;
+  for (const operation of removing) {
+    const target = blocks.find((block) => block.id === operation.block);
+    if (target === undefined)
+      continue;
+    for (const block of askBlocks) {
+      if (block.id === target.id || operation.op === "delete" && block.from >= target.from && block.to <= target.to) {
+        removed.add(block.id);
+      }
+    }
+  }
+  if (removed.size === 0)
+    return;
+  const asks = await blockAsks(client, resolved, "open");
+  const open = asks.filter((ask) => removed.has(ask.block_id));
+  if (open.length === 0)
+    return;
+  const [what, question] = open.length === 1 ? ["a decision block whose ask is", "question"] : [`${open.length} decision blocks whose asks are`, "questions"];
+  throw new Error([
+    `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+    ...open.map((ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`),
+    "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it."
+  ].join(`
+`));
+}
 function refusalWithCode(error48, suffix = "") {
   if (!(error48 instanceof DispatchServiceError))
     return error48;
@@ -17106,6 +17240,7 @@ ${followsAsk(askOwner)}`,
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
       const precondition = rawPrecondition;
+      await refuseRemovingOpenDecisionBlocks(client, input.tool, resolved, ops);
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,
         ...summary === undefined ? {} : { summary },
@@ -17173,7 +17308,11 @@ ${trailer.join(`
     case "dispatch_request_approval": {
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
-      const result = await client.requestApproval(resolved.artifact.id, { actor });
+      await refuseOpenDecisionBlocks(client, input.tool, resolved);
+      const result = await client.requestApproval(resolved.artifact.id, {
+        actor,
+        summary: stringArg(args, "summary")
+      });
       if (result.ask === null) {
         return {
           text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
@@ -17186,7 +17325,7 @@ ${trailer.join(`
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version }
       };
     }

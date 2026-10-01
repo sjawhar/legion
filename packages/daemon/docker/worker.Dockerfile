@@ -11,8 +11,9 @@
 # checkout at /opt/legion/go/bin/legion, off PATH, until the Go daemon replaces the TypeScript one; the
 # pinned OMP fork build the daemon's default `omp_invocation` names, resolved with mise's github backend
 # exactly as the daemon resolves it; @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy
-# and linked into the isolated OMP profile `legion`; the role prompts (packages/pi-envoy/roles) at
-# /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
+# and @bopstack/pi-codegraph (from npm, pinned) linked into the isolated OMP profile `legion`, backed by
+# the CodeGraph CLI (@colbymchenry/codegraph, pinned) at /opt/codegraph/bin; the role prompts
+# (packages/pi-envoy/roles) at /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
 # pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last three RUNs gate the
@@ -53,6 +54,10 @@ ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6f
 # apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
 # archive serves only a suite's current version of a package, so a pinned version stops resolving at
 # the suite's next update. The base image's suite is the pin.
+# CodeGraph CLI (research report AGENTC-1305 §7) and the Oh My Pi tool that wraps it, pinned to the
+# versions the devbox runs (`@colbymchenry/codegraph --version`, `omp/plugins/package.json`).
+ARG CODEGRAPH_VERSION=1.5.0
+ARG PI_CODEGRAPH_VERSION=0.1.1
 
 # ------------------------------------------------------------------------------------------------
 # cli: workspace install, the compiled legion CLI, the OMP pin, and the packed plugin.
@@ -63,6 +68,20 @@ WORKDIR /repo
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
+ARG CODEGRAPH_VERSION
+# CodeGraph CLI (@colbymchenry/codegraph): `bin.codegraph` in the main npm package is a thin
+# `#!/usr/bin/env node` launcher shim that locates and execs the per-platform optionalDependency
+# (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no system `node` (only
+# bun's own fallback shim, which the final runtime stage does not copy over), so the shim itself
+# cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh` wrapper that execs a
+# *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
+# anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
+# Installed before any application-source COPY: it depends on nothing this checkout builds, so an
+# unrelated daemon/workspace/pi-envoy source change never invalidates this layer.
+RUN mkdir -p /out \
+    && bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
+    && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
+    && /out/codegraph/bin/codegraph --version
 COPY package.json bun.lock ./
 COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -86,6 +105,7 @@ RUN mkdir -p /out \
     && bun build --compile --target=bun-linux-x64 packages/daemon/src/cli/index.ts --outfile /out/legion \
     && bun packages/daemon/src/daemon/omp-pin.ts > /out/omp-pin \
     && test -s /out/omp-pin
+
 # The plugin ships from this checkout with the steps release.yaml's pi_envoy job runs before
 # `bun pm pack` (prepack.sh refuses to pack with the source manifest). The tarball is unpacked into a
 # directory: `omp plugin install` links a directory and rejects a tarball path (ENOTDIR).
@@ -193,6 +213,7 @@ RUN set -eu; \
 # fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
 FROM debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
+ARG PI_CODEGRAPH_VERSION
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
@@ -207,6 +228,9 @@ COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 COPY --from=cli /out/legion /opt/legion/bin/legion
 COPY --from=cli --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion-envoy
+# CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
+# Node runtime + app), never the npm package's own launcher shim — see the cli stage's comment.
+COPY --from=cli /out/codegraph /opt/codegraph
 # The role prompt parts (`packages/pi-envoy/roles/core/*.md`, `mechanics/*.md`, and per-role
 # residues — not part of the packed plugin, whose `files` is `dist`): the in-cluster daemon reads the
 # configured parts for each process and concatenates them into its pod command. A daemon run from source
@@ -218,12 +242,16 @@ COPY --from=cli /repo/packages/pi-envoy/roles /opt/legion/roles
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
 # — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
-# because OMP's DirResolver derives the profile root from it.
+# because OMP's DirResolver derives the profile root from it. DO_NOT_TRACK=1: CodeGraph's telemetry
+# and update-check opt-out (ranked above CODEGRAPH_TELEMETRY, above stored config, above
+# default-on) — every worker's own `codegraph` call, and the warm-up the tmux daemon runs outside
+# this image, must never phone home for an automatic, non-opt-in tool.
 ENV OMP_PROFILE=legion \
     LEGION_OMP_PATH=/opt/omp/bin/omp \
     LEGION_ROLE_PROMPTS_DIR=/opt/legion/roles \
     HOME=/home/legion \
-    PATH=/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin
+    DO_NOT_TRACK=1 \
+    PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin
 # Numeric uid:gid (user `legion`, created above) so Kubernetes `runAsNonRoot` can verify it from the
 # image alone.
 USER 1000:1000
@@ -235,9 +263,10 @@ WORKDIR /home/legion
 #    container, with no network. A git older than 2.42 fails it (`Git does not recognize required
 #    option: porcelain`), which is how bookworm's 2.39.5 shipped in an image that passed every probe:
 #    `legion probe-image` never runs jj, and the daemon host's own git is newer.
-# 3. Link the packed plugin into the legion profile (omp-plugins.lock.json records it enabled). This is
-#    OMP's first run in the image, so it also downloads OMP's native modules (~345 MB) into
-#    /home/legion/.omp/natives/<version>/; this layer ships them and a pod never fetches them.
+# 3. Link the packed plugin, and the CodeGraph plugin from npm, into the legion profile
+#    (omp-plugins.lock.json records both enabled). This is OMP's first run in the image, so it
+#    also downloads OMP's native modules (~345 MB) into /home/legion/.omp/natives/<version>/;
+#    this layer ships them and a pod never fetches them.
 # 4. Run the three launch probes: the daemon's two (pi.agents, the plugin load) plus the session-storage
 #    setting probe, which only the image runs — so no image ships an OMP that would silently keep a `sql`
 #    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
@@ -245,12 +274,13 @@ WORKDIR /home/legion
 #    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
-    bun --version; omp --version; jj --version; gh --version; git --version; \
+    bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
     scratch="$(mktemp -d)"; \
     git init --quiet --bare "$scratch/origin.git"; \
     jj git clone "$scratch/origin.git" "$scratch/clone"; \
     rm -rf "$scratch"; \
     omp plugin install /opt/legion/pi-legion-envoy; \
+    omp plugin install "@bopstack/pi-codegraph@${PI_CODEGRAPH_VERSION}"; \
     legion probe-image; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its

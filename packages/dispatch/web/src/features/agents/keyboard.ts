@@ -69,10 +69,13 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
   };
   useKeymapScope("agents");
   useKeymap("agents", [
+    // Movement and marking walk the list with the row in hand; a palette row for either helps
+    // nobody.
     {
       id: "next",
       keys: "j",
       label: "Next agent",
+      palette: false,
       run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), 1),
       when: () => rows().length > 0,
     },
@@ -80,6 +83,7 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       id: "previous",
       keys: "k",
       label: "Previous agent",
+      palette: false,
       run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), -1),
       when: () => rows().length > 0,
     },
@@ -114,6 +118,7 @@ export function useAgentsKeymap(listRef: RefObject<HTMLElement | null>): void {
       id: "select",
       keys: "x",
       label: "Select or deselect the focused agent",
+      palette: false,
       run: () => focusedAgentRow()?.querySelector<HTMLElement>("[data-agent-select]")?.click(),
       when: () => focusedAgentRow() !== null,
     },

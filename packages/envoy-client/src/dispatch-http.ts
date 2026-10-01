@@ -1,4 +1,5 @@
 import type {
+  AcceptedMessageDelivery,
   Actor,
   Advised,
   Agent,
@@ -316,12 +317,14 @@ export class DispatchClient {
   }
 
   /**
-   * Opens (or returns the open) approval ask for a document at its latest version. When that
-   * version is already approved, `ask` is null and `approval` carries the standing approval.
+   * Opens an approval ask for a document at its latest version, its question the document, the
+   * version and `summary`. An open ask at that version is returned unchanged; one naming an older
+   * version is retracted and replaced. When that version is already approved, `ask` is null and
+   * `approval` carries the standing approval.
    */
   async requestApproval(
     artifactID: string,
-    input: { actor: Actor }
+    input: { actor: Actor; summary: string }
   ): Promise<{
     ask: Ask | null;
     artifact_id: string;
@@ -452,6 +455,24 @@ export class DispatchClient {
    *  threads a session may read is the route's rule (`GET /api/v1` describes it). */
   async getMessageThread(id: string, session: string): Promise<MessageRead> {
     return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+
+  /** `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: this session records that it took
+   *  that attempt of the message as its user's own turn, and gets back the attempt with the
+   *  message's stored body, which is what it injects. Dispatch allows one acceptance per message,
+   *  of a person's own direct Send or Aside to this session (no issue, no broadcast), of its
+   *  latest attempt, which a person asked for within the last minute and which did not fail; any
+   *  refusal throws a `DispatchServiceError` naming the check. */
+  async acceptMessageDelivery(
+    id: string,
+    attempt: number,
+    input: { readonly actor: Actor }
+  ): Promise<AcceptedMessageDelivery> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"],
+      input
+    );
   }
 
   async artifact(
