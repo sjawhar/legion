@@ -15,6 +15,11 @@
 
 ### Added
 
+- `DISPATCH_TEXT_REFERENCES`: markdown bodies with the `dispatch://` references each one cites,
+  read against `https://dispatch.test` or the row's `origin`. The dashboard's
+  `composerReferences` and the Go reader `text.Extract`, through its JSON copy, are both tested
+  against it, so neither where a reference ends nor what it names changes on one side only
+  (LEGION-463).
 - `CreateBroadcastInput.idempotency_key` (required): names one send, so the server answers a
   repeat of it with the broadcast the first request made and refuses the key's reuse for a
   different request with `409 BROADCAST_KEY_REUSED` (LEGION-446).

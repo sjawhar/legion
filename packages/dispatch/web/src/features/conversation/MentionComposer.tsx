@@ -63,14 +63,7 @@ import {
 import { uploadErrorMessage, uploadFile } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
-import {
-  buildDispatchReference,
-  buildIssuePath,
-  buildProjectPath,
-  type DispatchReferenceRoute,
-  isProjectRoute,
-  referenceRouteFromHref,
-} from "../refs/routes";
+import { buildDispatchReference, composerReferences } from "../refs/routes";
 import { MODE_LABELS } from "./delivery";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { useAgents } from "./useAgents";
@@ -200,79 +193,6 @@ export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
 
 function appendReference(body: string, reference: string): string {
   return `${body}${body.length === 0 || /\s$/.test(body) ? "" : " "}${reference}`;
-}
-
-export interface ComposerReference {
-  href?: string;
-  reference: string;
-}
-
-/**
- * The reference-shaped spans in text: `dispatch://` references and `http(s)://` URLs, each ending
- * at whitespace (Unicode space separators included), an angle or square bracket, a quote or a
- * backtick, then trimmed by `trimReference`. It is the rule the server's `text.ExtractAt` indexes
- * mentions by, and `DISPATCH_TEXT_REFERENCES` in `@legion/contracts` is the table both are tested
- * against.
- */
-const referencePattern = /(?:dispatch|https?):\/\/[^\t\n\f\r \p{Z}<>"'`[\]]+/gu;
-
-export function referenceSpans(text: string): { start: number; value: string }[] {
-  return Array.from(text.matchAll(referencePattern), (match) => ({
-    start: match.index,
-    value: trimReference(match[0]),
-  }));
-}
-
-/**
- * Drops what trails a reference in prose: sentence punctuation, the `*`, `_` and `~` that close
- * emphasis and strikethrough around it (GFM's autolinks drop the same characters, keeping them
- * inside a link), and a closing parenthesis that opens nowhere in the reference. It counts the
- * parentheses once and walks back from the end, so a run of closers costs one pass.
- */
-function trimReference(value: string): string {
-  let opened = 0;
-  let closed = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value.charAt(index);
-    if (char === "(") opened += 1;
-    else if (char === ")") closed += 1;
-  }
-  let end = value.length;
-  for (; end > 0; end -= 1) {
-    const char = value.charAt(end - 1);
-    if (char === ")") {
-      if (opened >= closed) break;
-      closed -= 1;
-    } else if (!".,;:!?*_~".includes(char)) {
-      break;
-    }
-  }
-  return value.slice(0, end);
-}
-
-function composerReference(route: DispatchReferenceRoute): ComposerReference {
-  return {
-    href: isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route),
-    reference: buildDispatchReference(route),
-  };
-}
-
-export function composerReferences(
-  body: string,
-  appOrigin = window.location.origin
-): ComposerReference[] {
-  const references: ComposerReference[] = [];
-  for (const { value } of referenceSpans(body)) {
-    const route = referenceRouteFromHref(value, appOrigin);
-    const reference = route === undefined ? undefined : composerReference(route);
-    if (
-      reference !== undefined &&
-      !references.some((item) => item.reference === reference.reference)
-    ) {
-      references.push(reference);
-    }
-  }
-  return references;
 }
 
 /** Reconcile accepted mentions against the actual textarea edit range. */

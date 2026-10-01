@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts";
 
-import { composerReferences } from "./MentionComposer";
+import { composerReferences } from "./routes";
 
 const origin = "https://dispatch.test";
 
@@ -9,9 +9,9 @@ const origin = "https://dispatch.test";
 // cite exactly what the server's `text.Extract` indexes for the same body, so the dashboard and
 // the reference graph never disagree about what a text cites. The Go reader walks the same rows.
 test.each(
-  DISPATCH_TEXT_REFERENCES.map((row) => [row.body, row.refs] as const)
-)("%s cites %p", (body, refs) => {
-  expect(composerReferences(body, origin).map((item) => item.reference)).toEqual([...refs]);
+  DISPATCH_TEXT_REFERENCES.map((row) => [row.body, row.origin ?? origin, row.refs] as const)
+)("%s cites, read against %s, %p", (body, server, refs) => {
+  expect(composerReferences(body, server).map((item) => item.reference)).toEqual([...refs]);
 });
 
 // A body near the server's 1 MiB request cap that trails a reference with a run of closing

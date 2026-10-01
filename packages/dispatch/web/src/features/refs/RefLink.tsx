@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 
-import { referenceSpans } from "../conversation/MentionComposer";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -8,6 +7,7 @@ import {
   isProjectRoute,
   parseDispatchReference,
   referenceRouteFromHref,
+  referenceSpans,
 } from "./routes";
 import { useReferenceTarget } from "./Unfurl";
 
@@ -94,7 +94,7 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
     const fragment = document.createDocumentFragment();
     let lastIndex = 0;
     let replaced = false;
-    for (const { start, value: raw } of referenceSpans(value)) {
+    for (const { start, value: raw } of referenceSpans(value, "dispatch://")) {
       if (parseDispatchReference(raw) === undefined) {
         continue;
       }

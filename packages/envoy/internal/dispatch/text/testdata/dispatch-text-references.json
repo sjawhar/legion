@@ -84,6 +84,18 @@
     ]
   },
   {
+    "body": "Neither a vertical tab nor a BOM ends one: dispatch://CORE-18\u000b dispatch://CORE-19﻿.",
+    "refs": []
+  },
+  {
+    "body": "See http://[::1]:8766/issues/CORE-20 and [http://[::1]:8766/issues/CORE-21/spec](http://[::1]:8766/issues/CORE-21/spec).",
+    "origin": "http://[::1]:8766",
+    "refs": [
+      "dispatch://CORE-20",
+      "dispatch://CORE-21/spec"
+    ]
+  },
+  {
     "body": "~~dispatch://CORE/artifact/handbook-md~~ and **dispatch://CORE-17/artifact/design-md@v3**",
     "refs": [
       "dispatch://CORE/artifact/handbook-md",
@@ -95,6 +107,20 @@
     "refs": [
       "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444"
     ]
+  },
+  {
+    "body": "Pairs part at & alone: https://dispatch.test/issues/CORE-1/spec?comment=c1;c2, https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2;3 and https://dispatch.test/issues/CORE-2/spec?ask=a1;x&comment=c1.",
+    "refs": [
+      "dispatch://CORE-1/comment/c1%3Bc2"
+    ]
+  },
+  {
+    "body": "A control character or a BOM after a slug or an id: dispatch://CORE-1/artifact/notes-md\u000b dispatch://CORE-1/comment/c1\u0001 dispatch://CORE/artifact/handbook-md https://dispatch.test/issues/CORE-1/asks/a1 dispatch://CORE-1/ask/a1﻿",
+    "refs": []
+  },
+  {
+    "body": "A slug is all of its segment and a version has no leading zero: dispatch://CORE-1/artifact/notes-md!x, dispatch://CORE/artifact/Notes-md, https://dispatch.test/issues/CORE-1/artifacts/notes_md and dispatch://CORE-1/artifact/notes-md@v03",
+    "refs": []
   },
   {
     "body": "*https://example.com/~ops/snake_case_path?glob=*.md* and https://dispatch.test/issues/CORE-16_",

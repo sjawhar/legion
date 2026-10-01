@@ -101,15 +101,14 @@ func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
 // `@legion/contracts`, which `packages/contracts/src/dispatch-text-references.test.ts` holds this
 // file to; the composer walks the same rows.
 func TestExtractMatchesTheSharedTextTable(t *testing.T) {
-	const server = "https://dispatch.test"
-
 	raw, err := os.ReadFile("testdata/dispatch-text-references.json")
 	if err != nil {
 		t.Fatalf("read table: %v", err)
 	}
 	var rows []struct {
-		Body string   `json:"body"`
-		Refs []string `json:"refs"`
+		Body   string   `json:"body"`
+		Origin string   `json:"origin"`
+		Refs   []string `json:"refs"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("parse table: %v", err)
@@ -120,6 +119,10 @@ func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 
 	for _, row := range rows {
 		t.Run(row.Body, func(t *testing.T) {
+			server := row.Origin
+			if server == "" {
+				server = "https://dispatch.test"
+			}
 			want := []Ref{}
 			for _, ref := range row.Refs {
 				parsed := Extract(ref, server)

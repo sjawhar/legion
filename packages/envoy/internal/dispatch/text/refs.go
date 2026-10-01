@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // referenceEnd is every character that ends a reference: whitespace (the Unicode space separators
@@ -12,15 +14,22 @@ import (
 // backtick. No Dispatch reference holds one, so a reference in a code span ends at its closing
 // backtick, and the link a document stores for the autolink `<dispatch://CORE-1>`,
 // `[dispatch://CORE-1](dispatch://CORE-1)`, is two references to CORE-1 rather than one
-// unparseable one. The dashboard composer reads text by the same rule, and
-// `testdata/dispatch-text-references.json` is the table both are tested against.
+// unparseable one. The whitespace is spelled out rather than written `\s`, which means another set
+// in each language: JavaScript's also matches a vertical tab and U+FEFF. The dashboard composer
+// reads text by the same rule, and `testdata/dispatch-text-references.json` is the table both are
+// tested against.
 const referenceEnd = `\t\n\f\r \p{Z}<>"'` + "`" + `\[\]`
 
-var referencePattern = regexp.MustCompile(`(?:dispatch|https?)://[^` + referenceEnd + `]+`)
+// referencePattern is a reference span. The one bracket a span may hold is a bracketed IPv6 host
+// right after `http(s)://`, so a server at an IPv6 literal keeps its dashboard URLs as references.
+var referencePattern = regexp.MustCompile(`(?:dispatch://|https?://(?:\[[0-9A-Fa-f:.]+\])?)[^` + referenceEnd + `]+`)
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$`)
 var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
-var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
 var artifactSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+// versionPattern is a document version as a reference writes one: a positive decimal, with no sign
+// and no leading zero.
+var versionPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
 
 // ComponentIDPattern is the component id charset (a lowercase slug), the regexp
 // IsComponentID matches; the architecture importer quotes it in its file-name error.
@@ -109,7 +118,13 @@ func trimReference(raw string) string {
 	return ""
 }
 
+// parseDispatch reads a `dispatch://` reference, without its scheme, by the grammar the dashboard's
+// `parseDispatchReference` reads: a slug as written, an `@v` version, and an item id decoded as
+// `itemSegment` decodes it. A reference holding a control character names nothing.
 func parseDispatch(value string) (Ref, bool) {
+	if strings.ContainsFunc(value, unicode.IsControl) {
+		return Ref{}, false
+	}
 	key, tail, found := strings.Cut(value, "/")
 	if issueKeyPattern.MatchString(key) {
 		if !found || tail == "" {
@@ -119,20 +134,16 @@ func parseDispatch(value string) (Ref, bool) {
 			return Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, true
 		}
 		if artifact, ok := strings.CutPrefix(tail, "artifact/"); ok {
-			slug, ok := parseArtifactSlug(artifact)
-			if ok {
+			if slug, ok := parseArtifactSlug(artifact); ok {
 				return Ref{Kind: "artifact", IssueKey: key, ID: slug}, true
 			}
 			return Ref{}, false
 		}
-		if id, ok := strings.CutPrefix(tail, "ask/"); ok && validItemID(id) {
-			return Ref{Kind: "ask", IssueKey: key, ID: id}, true
-		}
-		if id, ok := strings.CutPrefix(tail, "comment/"); ok && validItemID(id) {
-			return Ref{Kind: "comment", IssueKey: key, ID: id}, true
-		}
-		if id, ok := strings.CutPrefix(tail, "message/"); ok && validItemID(id) {
-			return Ref{Kind: "message", IssueKey: key, ID: id}, true
+		kind, segment, _ := strings.Cut(tail, "/")
+		if kind == "ask" || kind == "comment" || kind == "message" {
+			if id, ok := itemSegment(segment); ok {
+				return Ref{Kind: kind, IssueKey: key, ID: id}, true
+			}
 		}
 		return Ref{}, false
 	}
@@ -150,71 +161,64 @@ func parseDispatch(value string) (Ref, bool) {
 		return Ref{}, false
 	}
 	parts := strings.Split(artifact, "/")
-	if len(parts) == 1 {
-		slug, ok := parseArtifactSlug(parts[0])
-		if !ok {
-			return Ref{}, false
-		}
+	slug, ok := parseArtifactSlug(parts[0])
+	switch {
+	case !ok:
+	case len(parts) == 1:
 		return Ref{Kind: "artifact", Project: key, ID: slug}, true
-	}
-	if len(parts) == 3 && validItemID(parts[2]) {
-		if _, ok := parseArtifactSlug(parts[0]); ok {
-			switch parts[1] {
-			case "ask":
-				return Ref{Kind: "ask", Project: key, ID: parts[2]}, true
-			case "comment":
-				return Ref{Kind: "comment", Project: key, ID: parts[2]}, true
-			}
+	case len(parts) == 3 && (parts[1] == "ask" || parts[1] == "comment"):
+		if id, ok := itemSegment(parts[2]); ok {
+			return Ref{Kind: parts[1], Project: key, ID: id}, true
 		}
 	}
 	return Ref{}, false
 }
 
+// parseArtifactSlug reads a slug as a reference writes it, whole, with an optional `@v` version.
 func parseArtifactSlug(value string) (string, bool) {
-	slug, version, hasVersion := strings.Cut(value, "@")
-	if hasVersion {
-		number, err := strconv.Atoi(strings.TrimPrefix(version, "v"))
-		if !strings.HasPrefix(version, "v") || err != nil || number < 1 {
+	slug, version, versioned := strings.Cut(value, "@")
+	if versioned {
+		number, ok := strings.CutPrefix(version, "v")
+		if !ok || !versionPattern.MatchString(number) {
 			return "", false
 		}
 	}
-	if strings.Contains(slug, "/") {
-		return "", false
-	}
-	slug = artifactSlugPrefixPattern.FindString(slug)
 	if !artifactSlugPattern.MatchString(slug) {
 		return "", false
 	}
 	return slug, true
 }
 
-func validItemID(value string) bool {
-	return value != "" && !strings.Contains(value, "/")
+// itemSegment is an item id as a reference writes it, decoded, as the dashboard reads one: written
+// without a `/`, `?`, `#` or whitespace (JavaScript's `\s`, which adds U+FEFF to the Unicode space
+// separators; its ASCII whitespace is control characters, which no reference holds), then decoded
+// by `decodeURIComponent`.
+func itemSegment(raw string) (string, bool) {
+	if raw == "" || strings.ContainsFunc(raw, func(r rune) bool {
+		return r == '/' || r == '?' || r == '#' || r == '\ufeff' || unicode.Is(unicode.Z, r)
+	}) {
+		return "", false
+	}
+	return decodeURIComponent(raw)
 }
 
-// itemFromQuery is the one link rule every Dispatch URL parser applies: `?comment=` or `?ask=`
-// on a document path names that item, not the document. `named` reports whether the query names
-// one; `ok` is false for a query Dispatch never emits - both parameters at once, or an id that
-// is not a segment - which the caller refuses rather than guessing at. The same rule is
-// `itemFromSearch` in `@legion/contracts` for the SPA and the agent client, and
-// `testdata/dispatch-href-references.json` is the one table all three are tested against.
-func itemFromQuery(query url.Values) (kind string, id string, named bool, ok bool) {
-	hasAsk, hasComment := query.Has("ask"), query.Has("comment")
-	if !hasAsk && !hasComment {
-		return "", "", false, true
-	}
-	if hasAsk && hasComment {
-		return "", "", false, false
-	}
-	if hasAsk {
-		return "ask", query.Get("ask"), true, validItemID(query.Get("ask"))
-	}
-	return "comment", query.Get("comment"), true, validItemID(query.Get("comment"))
+// decodeURIComponent decodes value as JavaScript's decodeURIComponent does, refusing a `%` that
+// two hex digits do not follow and escapes that do not decode to UTF-8.
+func decodeURIComponent(value string) (string, bool) {
+	decoded, err := url.PathUnescape(value)
+	return decoded, err == nil && utf8.ValidString(decoded)
 }
 
+// parseServer reads a dashboard URL of serverURL as the dashboard's `referenceRouteFromHref` reads
+// it: the key and the path's item id as written, the query as `searchParams` reads it, a version a
+// positive decimal. A URL holding a control character names nothing; net/url refuses only the
+// ASCII ones.
 func parseServer(raw, serverURL string) (Ref, bool) {
 	base, err := url.Parse(serverURL)
 	if err != nil || base.Scheme == "" || base.Host == "" {
+		return Ref{}, false
+	}
+	if strings.ContainsFunc(raw, unicode.IsControl) {
 		return Ref{}, false
 	}
 	value, err := url.Parse(raw)
@@ -229,77 +233,156 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 		}
 		path = strings.TrimPrefix(path, basePath)
 	}
+	query := searchParams(value.RawQuery)
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if len(parts) >= 2 && parts[0] == "issues" {
-		key, err := url.PathUnescape(parts[1])
-		if err != nil || !issueKeyPattern.MatchString(key) {
+		key := parts[1]
+		if !issueKeyPattern.MatchString(key) {
 			return Ref{}, false
 		}
-		if len(parts) == 2 {
+		switch {
+		case len(parts) == 2:
 			return Ref{Kind: "issue", IssueKey: key, ID: key}, true
-		}
-		// A document page of the issue, which `dispatch_search` links to with the item in its
-		// query for an anchored comment or ask.
-		if (len(parts) == 3 && parts[2] == "spec") ||
-			(len(parts) == 4 && parts[2] == "artifacts") {
-			kind, id, named, ok := itemFromQuery(value.Query())
-			if !ok {
+		// A document page of the issue, which `dispatch_search` links to with the item in its query
+		// for an anchored comment or ask.
+		case len(parts) == 3 && parts[2] == "spec":
+			return documentItem(Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, query)
+		case len(parts) == 4 && parts[2] == "artifacts":
+			slug, err := url.PathUnescape(parts[3])
+			if err != nil || !artifactSlugPattern.MatchString(slug) {
 				return Ref{}, false
 			}
-			if named {
-				return Ref{Kind: kind, IssueKey: key, ID: id}, true
+			if version := query.Get("v"); version != "" && !versionPattern.MatchString(version) {
+				return Ref{}, false
 			}
-		}
-		if len(parts) == 3 && parts[2] == "spec" {
-			return Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, true
-		}
-		if len(parts) == 4 && parts[2] == "artifacts" {
-			slug, err := url.PathUnescape(parts[3])
-			if err == nil && artifactSlugPattern.MatchString(slug) {
-				if rawVersion := value.Query().Get("v"); rawVersion != "" {
-					number, err := strconv.Atoi(rawVersion)
-					if err != nil || number < 1 {
-						return Ref{}, false
-					}
-				}
-				return Ref{Kind: "artifact", IssueKey: key, ID: slug}, true
+			return documentItem(Ref{Kind: "artifact", IssueKey: key, ID: slug}, query)
+		case len(parts) == 4 && (parts[2] == "asks" || parts[2] == "comments" || parts[2] == "messages"):
+			if id, ok := itemSegment(parts[3]); ok {
+				return Ref{Kind: strings.TrimSuffix(parts[2], "s"), IssueKey: key, ID: id}, true
 			}
-		}
-		if len(parts) == 4 && parts[2] == "asks" && validItemID(parts[3]) {
-			return Ref{Kind: "ask", IssueKey: key, ID: parts[3]}, true
-		}
-		if len(parts) == 4 && parts[2] == "comments" && validItemID(parts[3]) {
-			return Ref{Kind: "comment", IssueKey: key, ID: parts[3]}, true
-		}
-		if len(parts) == 4 && parts[2] == "messages" && validItemID(parts[3]) {
-			return Ref{Kind: "message", IssueKey: key, ID: parts[3]}, true
 		}
 		return Ref{}, false
 	}
-	if len(parts) != 4 || parts[0] != "projects" || parts[2] != "documents" {
-		return Ref{}, false
-	}
-	project, err := url.PathUnescape(parts[1])
-	if err != nil || !projectKeyPattern.MatchString(project) {
+	if len(parts) != 4 || parts[0] != "projects" || parts[2] != "documents" ||
+		!projectKeyPattern.MatchString(parts[1]) {
 		return Ref{}, false
 	}
 	slug, err := url.PathUnescape(parts[3])
 	if err != nil || !artifactSlugPattern.MatchString(slug) {
 		return Ref{}, false
 	}
-	query := value.Query()
-	if rawVersion := query.Get("version"); rawVersion != "" {
-		number, err := strconv.Atoi(rawVersion)
-		if err != nil || number < 1 {
-			return Ref{}, false
-		}
+	if version := query.Get("version"); version != "" && !versionPattern.MatchString(version) {
+		return Ref{}, false
 	}
-	kind, id, named, ok := itemFromQuery(query)
+	return documentItem(Ref{Kind: "artifact", Project: parts[1], ID: slug}, query)
+}
+
+// documentItem is the one link rule every Dispatch URL parser applies: `?comment=` or `?ask=` on a
+// document path names that item, not the document. A query Dispatch never emits - both parameters
+// at once, or an id that is empty, holds a `/` or does not decode - names nothing rather than a
+// guess. The same rule is `itemFromSearch` in `@legion/contracts` for the SPA and the agent
+// client, and `testdata/dispatch-href-references.json` is the one table all three are tested
+// against.
+func documentItem(document Ref, query url.Values) (Ref, bool) {
+	hasAsk, hasComment := query.Has("ask"), query.Has("comment")
+	if !hasAsk && !hasComment {
+		return document, true
+	}
+	if hasAsk && hasComment {
+		return Ref{}, false
+	}
+	kind := "comment"
+	if hasAsk {
+		kind = "ask"
+	}
+	raw := query.Get(kind)
+	if raw == "" || strings.Contains(raw, "/") {
+		return Ref{}, false
+	}
+	id, ok := decodeURIComponent(raw)
 	if !ok {
 		return Ref{}, false
 	}
-	if named {
-		return Ref{Kind: kind, Project: project, ID: id}, true
+	return Ref{Kind: kind, IssueKey: document.IssueKey, Project: document.Project, ID: id}, true
+}
+
+// searchParams reads a query as the browser's URLSearchParams does, which is how the dashboard
+// reads one: pairs split on `&` alone, `+` a space, `%` and two hex digits a byte and any other
+// `%` itself, and the bytes UTF-8 (`decodeUTF8`). net/url's ParseQuery is not that reading: it
+// also splits on `;`, and drops a pair holding one or holding a bad escape, so it names the
+// document where the dashboard names the item, or a version the dashboard refuses.
+func searchParams(rawQuery string) url.Values {
+	params := url.Values{}
+	for pair := range strings.SplitSeq(rawQuery, "&") {
+		if pair != "" {
+			name, value, _ := strings.Cut(pair, "=")
+			params.Add(formDecode(name), formDecode(value))
+		}
 	}
-	return Ref{Kind: "artifact", Project: project, ID: slug}, true
+	return params
+}
+
+func formDecode(value string) string {
+	decoded := make([]byte, 0, len(value))
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if char == '%' && index+2 < len(value) {
+			if escaped, err := strconv.ParseUint(value[index+1:index+3], 16, 8); err == nil {
+				decoded = append(decoded, byte(escaped))
+				index += 2
+				continue
+			}
+		}
+		if char == '+' {
+			char = ' '
+		}
+		decoded = append(decoded, char)
+	}
+	return decodeUTF8(decoded)
+}
+
+// decodeUTF8 reads bytes as the WHATWG UTF-8 decoder does, each maximal prefix of a sequence that
+// does not complete read as one U+FFFD; strings.ToValidUTF8 reads a whole run of them as one.
+func decodeUTF8(bytes []byte) string {
+	var decoded strings.Builder
+	for len(bytes) > 0 {
+		r, size := utf8.DecodeRune(bytes)
+		if r != utf8.RuneError || size > 1 {
+			decoded.Write(bytes[:size])
+			bytes = bytes[size:]
+			continue
+		}
+		decoded.WriteRune(utf8.RuneError)
+		bytes = bytes[incompleteSequence(bytes):]
+	}
+	return decoded.String()
+}
+
+// incompleteSequence is how many bytes from the start of bytes, which holds no valid UTF-8
+// sequence there, belong to one replacement: the byte that leads a sequence and each continuation
+// byte it can still take, with the narrower second-byte ranges that rule out overlong encodings,
+// surrogates and code points past U+10FFFF.
+func incompleteSequence(bytes []byte) int {
+	needed, lower, upper := 0, byte(0x80), byte(0xBF)
+	switch lead := bytes[0]; {
+	case lead >= 0xC2 && lead <= 0xDF:
+		needed = 1
+	case lead == 0xE0:
+		needed, lower = 2, 0xA0
+	case lead == 0xED:
+		needed, upper = 2, 0x9F
+	case lead >= 0xE1 && lead <= 0xEF:
+		needed = 2
+	case lead == 0xF0:
+		needed, lower = 3, 0x90
+	case lead == 0xF4:
+		needed, upper = 3, 0x8F
+	case lead >= 0xF1 && lead <= 0xF3:
+		needed = 3
+	}
+	length := 1
+	for length <= needed && length < len(bytes) && bytes[length] >= lower && bytes[length] <= upper {
+		length, lower, upper = length+1, 0x80, 0xBF
+	}
+	return length
 }

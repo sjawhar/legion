@@ -51,6 +51,15 @@ const issueKeyOnlyPattern = new RegExp(`^${issueKeyPattern}$`);
 const projectKeyOnlyPattern = new RegExp(`^${projectKeyPattern}$`);
 const issuePathPattern = new RegExp(`^/issues/(${issueKeyPattern})(?:/(.*))?$`);
 const projectPathPattern = new RegExp(`^/projects/(${projectKeyPattern})(?:/(.*))?$`);
+/** The slug Dispatch gives a document, the one a reference can name. */
+const artifactSlugPattern = "[a-z0-9]+(?:-[a-z0-9]+)*";
+const artifactSlugOnlyPattern = new RegExp(`^${artifactSlugPattern}$`);
+const issueArtifactReferencePattern = new RegExp(
+  `^artifact/(${artifactSlugPattern})(?:@v([1-9]\\d*))?$`
+);
+const projectArtifactReferencePattern = new RegExp(
+  `^artifact/(${artifactSlugPattern})(?:@v([1-9]\\d*))?(?:/(ask|comment)/([^/?#\\s]+))?$`
+);
 
 /** Agents reference the conversation as `dispatch://KEY/log`; the browser path is `/conversation`. */
 const legacyLogReferencePattern = /^log$/;
@@ -158,7 +167,7 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   if (target === "artifacts") {
     return { key, kind: "artifacts" };
   }
-  const artifact = target.match(/^artifact\/([^@/?#\s]+)(?:@v([1-9]\d*))?$/);
+  const artifact = target.match(issueArtifactReferencePattern);
   if (artifact !== null) {
     return artifactRoute(key, artifact[1] ?? "", artifact[2]);
   }
@@ -174,7 +183,12 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   };
 }
 
+/** A `dispatch://` reference's route. One holding a control character names nothing, as the
+ * server's `text.Extract` reads it. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
+  if (/\p{Cc}/u.test(value)) {
+    return undefined;
+  }
   const match = value.match(/^dispatch:\/\/([^/]+)(?:\/(.*))?$/);
   if (match === null) {
     return undefined;
@@ -190,9 +204,7 @@ export function parseDispatchReference(value: string): DispatchReferenceRoute | 
   if (!projectKeyOnlyPattern.test(key) || target === undefined) {
     return undefined;
   }
-  const document = target.match(
-    /^artifact\/([^@/?#\s]+)(?:@v([1-9]\d*))?(?:\/(ask|comment)\/([^/?#\s]+))?$/
-  );
+  const document = target.match(projectArtifactReferencePattern);
   const itemID = document?.[4] === undefined ? undefined : decodedSegment(document[4]);
   if (document === null || (document[3] !== undefined && itemID === undefined)) {
     return undefined;
@@ -294,13 +306,18 @@ export function routeProjectOf(pathname: string): string | undefined {
 }
 
 /** The reference a `dispatch://` URL or a same-origin dashboard path names; undefined for an
- * external link or a dashboard path that is not an issue/document reference. */
+ * external link or a dashboard path that is not an issue/document reference. A reference holding a
+ * control character, or naming a slug Dispatch never gives a document, names nothing, as the
+ * server's `text.Extract` reads it. */
 export function referenceRouteFromHref(
   href: string,
   appOrigin: string = window.location.origin
 ): DispatchReferenceRoute | undefined {
   if (href.startsWith("dispatch://")) {
     return parseDispatchReference(href);
+  }
+  if (/\p{Cc}/u.test(href)) {
+    return undefined;
   }
   let url: URL;
   try {
@@ -316,6 +333,9 @@ export function referenceRouteFromHref(
   if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
     return undefined;
   }
+  if ("slug" in route && !artifactSlugOnlyPattern.test(route.slug)) {
+    return undefined;
+  }
   // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
   // `parseProjectPath` already applies to a project document. Without it a search hit's hover
   // card previewed the document instead of the comment the reader is about to open.
@@ -329,6 +349,95 @@ export function referenceRouteFromHref(
     }
   }
   return route;
+}
+
+export interface ReferenceSpan {
+  start: number;
+  value: string;
+}
+
+/**
+ * The reference-shaped spans in text: `dispatch://` references and `http(s)://` URLs, each ending
+ * at whitespace (Unicode space separators included), an angle or square bracket, a quote or a
+ * backtick, then trimmed by `trimReference`. The one bracket a span may hold is a bracketed IPv6
+ * host right after `http(s)://`, so a server at an IPv6 literal keeps its dashboard URLs as
+ * references. The whitespace is spelled out rather than written `\s`, which in JavaScript also
+ * matches a vertical tab and U+FEFF, where Go's `\s` matches neither. It is the rule the server's
+ * `text.ExtractAt` indexes mentions by, and `DISPATCH_TEXT_REFERENCES` in `@legion/contracts` is
+ * the table both are tested against.
+ */
+const referencePattern =
+  /(?:dispatch:\/\/|https?:\/\/(?:\[[0-9A-Fa-f:.]+\])?)[^\t\n\f\r \p{Z}<>"'`[\]]+/gu;
+
+/**
+ * Every reference span in text that starts with `prefix`, trimmed; a span starting otherwise is
+ * skipped untrimmed. The spans are the same whatever the prefix, so a `dispatch://` inside a URL
+ * is never a span of its own, as the server reads it.
+ */
+export function referenceSpans(text: string, prefix = ""): ReferenceSpan[] {
+  const spans: ReferenceSpan[] = [];
+  for (const match of text.matchAll(referencePattern)) {
+    if (match[0].startsWith(prefix)) {
+      spans.push({ start: match.index, value: trimReference(match[0]) });
+    }
+  }
+  return spans;
+}
+
+/**
+ * Drops what trails a reference in prose: sentence punctuation, the `*`, `_` and `~` that close
+ * emphasis and strikethrough around it (GFM's autolinks drop the same characters, keeping them
+ * inside a link), and a closing parenthesis that opens nowhere in the reference. It counts the
+ * parentheses once and walks back from the end, so a run of closers costs one pass.
+ */
+function trimReference(value: string): string {
+  let opened = 0;
+  let closed = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value.charAt(index);
+    if (char === "(") opened += 1;
+    else if (char === ")") closed += 1;
+  }
+  let end = value.length;
+  for (; end > 0; end -= 1) {
+    const char = value.charAt(end - 1);
+    if (char === ")") {
+      if (opened >= closed) break;
+      closed -= 1;
+    } else if (!".,;:!?*_~".includes(char)) {
+      break;
+    }
+  }
+  return value.slice(0, end);
+}
+
+/** A reference a text cites: the `dispatch://` form and the dashboard path it opens. */
+export interface ComposerReference {
+  href?: string;
+  reference: string;
+}
+
+/**
+ * The references body cites, in order of first appearance: every `dispatch://` reference and
+ * dashboard URL of `appOrigin` that names an issue, a document or an item. The composer's
+ * reference pills and the unfurl cards read text through it.
+ */
+export function composerReferences(
+  body: string,
+  appOrigin = window.location.origin
+): ComposerReference[] {
+  const references: ComposerReference[] = [];
+  for (const { value } of referenceSpans(body)) {
+    const route = referenceRouteFromHref(value, appOrigin);
+    if (route === undefined) {
+      continue;
+    }
+    const reference = buildDispatchReference(route);
+    if (!references.some((item) => item.reference === reference)) {
+      references.push({ href: buildReferencePath(route), reference });
+    }
+  }
+  return references;
 }
 
 export function buildDispatchReference(route: DispatchReferenceRoute): string {

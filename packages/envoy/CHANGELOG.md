@@ -102,6 +102,21 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+- Dispatch indexes a mention written in markdown (LEGION-463): `**dispatch://KEY**`,
+  `` `dispatch://KEY` ``, `_dispatch://KEY_`, `~~dispatch://KEY~~`,
+  `[dispatch://KEY](dispatch://KEY)` (how a document stores `<dispatch://KEY>`), a bracketed
+  dashboard URL, and a reference followed by a no-break or ideographic space each write their
+  `mentions` edge. A reference ends at whitespace, an angle or square bracket, a quote or a
+  backtick, except the bracketed host of an IPv6 dashboard URL, and the sentence punctuation,
+  emphasis delimiters and unbalanced `)` after it are dropped in one pass, where a spec of one
+  reference and 900,000 `)` took 21 s to save. The server parses a reference as the dashboard
+  does: a query's pairs split on `&` alone, an item id decoded, a slug only whole, a version
+  without a leading zero, and nothing from a reference holding a control character. The
+  dashboard's composer pills, unfurl cards and linked text read text by the same rule. Text
+  stored before the deploy gets its edges from `envoy-dispatch rebuild-refs`.
+- The dashboard no longer hangs on a comment or an ask question made of repeated `http://`. The
+  check that shows an unfurl card only for a body of nothing but references tried every way to
+  split the body into references, which in Chromium ran for minutes on a 2,000-character comment.
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
