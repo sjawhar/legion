@@ -50,21 +50,6 @@ func TestCanonicalBodyIsByteExactAndIDIsItsSHA256(t *testing.T) {
 	}
 }
 
-func TestChallengesAreDomainSeparated(t *testing.T) {
-	id := strings.Repeat("ab", 32)
-	approve, deny := ApproveChallenge(id), DenyChallenge(id)
-	if approve == deny {
-		t.Fatal("approve and deny hash the same bytes")
-	}
-	want := sha256.Sum256([]byte("agent-secrets/approve/v1\n" + id))
-	if approve != want {
-		t.Fatalf("approve challenge = %x, want %x", approve, want)
-	}
-	if EndorseChallenge("sjawhar", id) != sha256.Sum256([]byte("agent-secrets/endorse/v1\nsjawhar\n"+id)) {
-		t.Fatal("endorse construction")
-	}
-}
-
 func TestVerifyRequestObjectAcceptsItsOwnSignAndRefusesTheProofTyp(t *testing.T) {
 	key, _ := proof.NewKey()
 	now := time.Now()

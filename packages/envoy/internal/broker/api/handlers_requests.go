@@ -180,8 +180,8 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 }
 
 // revokeGrant ends a grant for the session that holds it — session proof only, per contract v9
-// (human revocation moved to the UI's revoke-by-approver route, authenticated by a WebAuthn
-// assertion instead of a Dispatch bearer).
+// (human revocation is the UI's revoke-by-approver route, which Dispatch's server calls with the
+// human's login).
 func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request, enrollmentID string) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {

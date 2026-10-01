@@ -1428,21 +1428,22 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere: every human decision —
-approving or denying a secret request, approving or denying a machine login, revoking a grant,
-registering or endorsing an approver key — is a WebAuthn assertion the broker verifies itself
-against its own persisted, attested key set (`internal/broker/approvers`) over a domain-separated
-challenge (`internal/broker/record`). Dispatch's server relays that assertion from a browser page on
-Dispatch's own origin to the broker's UI routes; it never decides anything (contract v9, "The
-approval signal is a WebAuthn assertion..."). `internal/broker/enroll` turns a launcher credential
-into a leased enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a
-projected service-account token); `internal/broker/rules` evaluates `agent-secret-rules.yaml`
-policy per request (the AGENTC-393 overview document, contract v9, is its contract) and also owns
-that file's `approvers:` section (origin, AAGUID allowlist, per-login attested key material);
-`internal/broker/proof` authenticates a session's or a launcher's signed request against its live
-enrollment or credential; `internal/broker/machine` decides typed-code machine logins and mints the
-launcher credentials they approve; and `internal/broker/secrets` reads the granted value from AWS
-Secrets Manager, or a fake local file for development.
+its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
+human decision — approving or denying a secret request, approving or denying a machine login,
+revoking a grant — reaches the broker's UI routes from Dispatch's server, carrying the UI bearer
+and the deciding human's Dispatch login in the body's `approver` field. The bearer vouches for
+that login: Dispatch fills it from its own signed-in session, never from the browser, and the
+broker checks it against the record's approver and records it on the decision event. The UI
+bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
+agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
+enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
+service-account token); `internal/broker/rules` evaluates `agent-secret-rules.yaml` policy per
+request (the AGENTC-393 overview document, contract v9, is its contract; a file that still has an
+`approvers:` section is refused, naming the removal); `internal/broker/proof` authenticates a
+session's or a launcher's signed request against its live enrollment or credential;
+`internal/broker/machine` decides typed-code machine logins and mints the launcher credentials
+they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets Manager, or a
+fake local file for development.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1501,11 +1502,9 @@ is logged in.
 `BROKER_DATABASE_PASSWORD` — naming the placeholder without the variable, or the variable without
 the placeholder, is refused naming both), `BROKER_PUBLIC_URL` (required; absolute URL, no path —
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
-`BROKER_UI_ORIGIN` (required; absolute URL, no path — Dispatch's origin, the WebAuthn rpId every
-registration and assertion is checked against, and the value the rules file's `approvers.origin`
-must equal or the broker refuses the reload), `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte
-bearer shared with exactly Dispatch's server; it proves which service is relaying, never who
-approves), `BROKER_RULES_FILE` / `BROKER_RULES_S3_URI` (exactly one; the latter `s3://<bucket>/<key>`),
+`BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
+proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
+`BROKER_RULES_FILE` / `BROKER_RULES_S3_URI` (exactly one; the latter `s3://<bucket>/<key>`),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
@@ -1525,31 +1524,31 @@ everyone unless this variable is set). `BROKER_UI_TOKEN` and `BROKER_ENVOY_TOKEN
 broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
-an unset value. `config.Load` refuses to start naming a stale AGENTC-393 v9 removal —
-`BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`, `BROKER_DISPATCH_PROJECT`,
-`BROKER_ASK_POLL_SECONDS` — still set in the environment: the broker holds no Dispatch credential
-and asks/issues nothing, so a stale deployment carrying one of these must fail loudly rather than
-silently running with a dependency it no longer has. It also refuses: a missing required variable;
-a `BROKER_PUBLIC_URL` or `BROKER_UI_ORIGIN` that isn't an absolute URL with no path; both or
-neither of `BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; a `BROKER_RULES_S3_URI` without an
-`s3://` prefix; exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a
-`_SECONDS` variable that isn't a whole number between 1 and its max (non-numeric fails the same
-check as out of range). `cmd/broker/main.go` reads two things `config.Load` does not: when
-`BROKER_RULES_FILE` selects local rules (rather than `BROKER_RULES_S3_URI`, which pairs with AWS
-Secrets Manager for secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start
-without it — a local-dev-only path; and `-dev-attestation-root <pem-path>` trusts exactly that one
-PEM as the sole approver attestation root instead of the three embedded Yubico roots
-(`internal/broker/approvers/roots`), refused whenever paired with `BROKER_RULES_S3_URI` (ruling 10:
-production's rules source), so no test attestation root can ever reach a production wiring.
+an unset value. `config.Load` refuses to start naming a stale removal still set in the
+environment — AGENTC-393 v9's `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
+`BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
+and asks/issues nothing), and `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
+checks no WebAuthn origin) — so a stale deployment fails loudly rather than silently running on
+configuration that means nothing any more. It also refuses: a missing required variable; a
+`BROKER_PUBLIC_URL` that isn't an absolute URL with no path; both or neither of
+`BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; a `BROKER_RULES_S3_URI` without an `s3://` prefix;
+exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable
+that isn't a whole number between 1 and its max (non-numeric fails the same check as out of
+range). `cmd/broker/main.go` reads one thing `config.Load` does not: when `BROKER_RULES_FILE`
+selects local rules (rather than `BROKER_RULES_S3_URI`, which pairs with AWS Secrets Manager for
+secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a
+local-dev-only path. The broker takes no flags, and refuses any flag it is given.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 24 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the AGENTC-393 overview document (contract v9). Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
-proves only which service is relaying, never who approves, so every UI handler takes its subject
-from the path or body instead), so a handler cannot be wired to the wrong kind of caller. A bad
+proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
+decision or a revoke names the deciding human in `approver`, which Dispatch filled from its own
+session, and an empty one is `400 APPROVER_REQUIRED`), so a handler cannot be wired to the wrong
+kind of caller. A bad
 credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a store that cannot
 answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
@@ -1574,50 +1573,25 @@ requester's signed request object end to end (single ES256 JWS, `typ` `agent-sec
 `iat`/`exp` within skew and a 600-second cap, a `reason` of at most 400 runes with bidi/zero-width
 categories refused, and `authorization_details` either every entry `agent_secret` or exactly one
 `launcher_credential` entry naming a valid hostname and an optional `[a-z0-9-]{1,64}` service).
-`ApproveChallenge`, `DenyChallenge`, `RevokeChallenge`, `EndorseChallenge`, and `RegisterChallenge`
-are the module's only constructors for the five domain-separated challenges (each string literal
-appears nowhere else in production code); every assertion the broker verifies is checked against
-exactly the one the action names. `record.ChainVerifier` (`chain.go`) is what "every release
-re-verifies the whole chain" means in code: given a record id it re-fetches the stored body,
-confirms it still reproduces its own id, re-verifies the embedded request object as of the record's
-own creation time (not now — a request object's ~10-minute `exp` is long past by the time anything
-built from it is used again; this proves provenance, not freshness), and re-verifies the decisive
-`approved` event's stored assertion against the approver's currently live keys inside a transaction
-it always rolls back (a re-check's own pass through `approvers.Service.VerifyAssertion` legitimately
-trips that key's counter-monotonicity check on its own, since the original decision already
-advanced the same authenticator's counter for real — `ChainVerifier` treats that one error,
-`approvers.ErrCounterReplay`, as success and every other verification failure as a broken chain). It
-is called on every secret-value release (`requests.Machine.Values` and `reuseLiveGrant`, via
-`VerifyChain`) and on every launcher-credential authentication
-(`enroll.Service.AuthenticateLauncher`), so a `credential_requests` or `launcher_credentials` row
-written by anyone but the broker itself releases nothing.
-
-`internal/broker/approvers.Service` is the persisted approver key set: `Reconcile` applies a
-freshly parsed rules file's `approvers:` section to it on every reload (`cmd/broker/main.go`'s
-`onReload` hook, run before the new rules are adopted, and refused — keeping the previous rules —
-when the file's declared `origin` no longer matches `BROKER_UI_ORIGIN`) per contract v9's reload
-reconciliation: a file key already persisted by credential id is kept, its registration compared
-semantically (not byte-for-byte — Postgres's `jsonb` reformats whitespace) and refused if it
-changed; a new file key is accepted only with a valid endorsement by a *live* persisted key of that
-login (a login with zero live keys accepts no endorsed adds) or a `seed: true` line matching an
-`approver_key_seeds` row an SSO AdministratorAccess human inserted directly (the break-glass
-bootstrap — the only way a login's very first key ever enters, since no HTTP route creates one); a
-persisted key absent from the file is tombstoned (assertions refused, its own past endorsements
-stay valid history, but it can endorse nothing new) and revived if it reappears; every change writes
-an audit row and a structured "approver key set changed" log line. `VerifyAssertion` checks one
-action's `AuthenticationResponseJSON` per contract v9's "Assertion verification" section — origin,
-rpIdHash, flags, a non-decreasing signature counter, and that the asserting credential belongs to
-the required login — and bumps that key's `sign_count`/`last_used_at` in the same transaction that
-decides the action; `RevokeKey` tombstones a key as formally `revoked` and cascades to every key it
-ever endorsed, recursively. `BeginRegister`/`FinishRegister` and `BeginEndorse`/`FinishEndorse` drive
-the two WebAuthn ceremonies Dispatch's key pages open (`webauthn_ceremonies`, a 10-minute row each,
-swept by `SweepExpiredCeremonies`): both verify the response as a sanity check and hand back a
-pasteable rules-file YAML fragment — nothing is persisted about the key itself until a human pastes
-that fragment into the rules file and it survives the next `Reconcile`. Registration requires
-format `packed` with basic attestation chaining to a pinned root (the embedded Yubico PEMs, or
-`-dev-attestation-root`'s single PEM in dev), a non-zero allowlisted AAGUID matching the
-certificate's own AAGUID extension, `BE=0`/`BS=0`, and `webauthn.create` at exactly
-`BROKER_UI_ORIGIN`; format `none` and self attestation are refused explicitly.
+`Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
+the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
+`approver: operator`, or a machine login's `login_hint`), and every decision and every chain
+re-check compares the canonical lowercase login against it, a decision recording the canonical
+login it returns. `record.ChainVerifier` (`chain.go`, built per record kind by
+`store.Store.ChainVerifier`, so a record of one kind never backs the other's credential) is
+what "every release re-verifies the whole chain" means in code: given a record id it re-fetches
+the stored body, confirms it still reproduces its own id, re-verifies the embedded request object
+as of the record's own creation time (not now — a request object's ~10-minute `exp` is long past
+by the time anything built from it is used again; this proves provenance, not freshness), and
+requires exactly one terminal decision event, an `approved` one whose login is the record's
+approver (the broker writes at most one; `credential_request_decision`'s partial unique index holds
+it to that). It is called on every secret-value release (`requests.Machine.Values` and
+`reuseLiveGrant`, via `VerifyChain`) and on every launcher-credential authentication
+(`enroll.Service.AuthenticateLauncher`), so a grant or launcher-credential row with no approved
+record behind it releases nothing. The approval itself proves who approved, as Dispatch reported
+them: there is no approval signature to re-check, so a principal that can write the broker's
+database can also write a passing record and event. That boundary is the database's own access
+control, as it already was for grant rows.
 
 `internal/broker/requests.Machine` is the `agent_secret` request state machine. `Create` verifies
 the caller's signed request object (`iss` must be the requesting enrollment's own key, no
@@ -1634,23 +1608,27 @@ nothing pending, the request and, if granted, its grant are written with no reco
 needing approval writes the request row and a `credential_requests` record together, in one
 transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
 identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
-a second one. `ApplyDecision` decides a pending record on a verified assertion — approve mints the
-grant while the requesting enrollment is still live, deny (or an assertion over the deny challenge)
-denies it — re-deriving the record's id and re-verifying its embedded request object before
-checking the assertion, all inside the one transaction that also bumps the approver key's counter
-and writes the audit row; a non-pending record is `409` (a duplicate or late decision changes
-nothing). `Values` releases a live grant's inject-delivery values, re-checking the enrollment, the
+a second one. `ApplyDecision` decides a pending record on the deciding human's login — approve
+mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
+record's id, refusing any login but the record's approver whatever the record's state
+(`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
+writing the decision event (which records the deciding login), the request transition and the
+audit row in one transaction; a non-pending record, and one past its expiry that the sweeper has
+not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
+nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
+answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
+that it was decided. `Values` releases a
+live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
 longer carry, deny, or now want approved that was granted automatically, all refuse); a name is
 released only when both its delivery frozen at grant time and its current delivery are `inject`,
 else withheld in `proxy_only`; a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's WebAuthn assertion over its revoke challenge, authorized only to a key belonging to the
-grant's approver or its enrollment's operator (`403 NOT_APPROVER`) — the same trust boundary the
-pre-record human revocation path enforced, now authenticated by an assertion instead of a Dispatch
-login; revoking an already-revoked grant is a no-op, writing no second audit row. Audit rows never
-carry secret values: `audit()` takes only `kind`, `enrollment_id`, `request_id`, an optional
+on a human's Dispatch login, allowed only when that login is the grant's approver or its
+enrollment's operator (`mayRevoke`, else `403 NOT_APPROVER`); revoking an already-revoked grant is
+a no-op, writing no second audit row. Audit rows never carry secret values: `audit()` takes only
+`kind`, `enrollment_id`, `request_id`, an optional
 `grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
 `broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from
 `secrets.Reader` on release and never persisted.
@@ -1662,14 +1640,24 @@ eight-symbol confirmation code (`XXXX-XXXX`, the pre-v9 alphabet unchanged) and 
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
 pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
-— never the machine's opaque pending id — and this is the *only* route that hands out a machine
-record's approve/deny challenges (ruling 13: a direct link can never approve a machine login, only
-the typed code selects it), so `code` is required and checked again on the decision itself
-(`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` verifies the assertion against the
-record's own approver and, on approval, mints the launcher credential in the same transaction:
-bound to the request object's own key (its thumbprint and embedded JWK, never a bearer token), with
-lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted from the decision, so a crash between minting
-and recording the decision never orphans a credential no decision names. `Read` (the machine's own
+— never the machine's opaque pending id — and this is the *only* route that selects a machine
+record (ruling 13: a direct link can never approve a machine login, only the typed code selects
+it), so `code` is required and checked again on the decision itself, before the approver
+(`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
+update`, which an event insert's foreign-key check does not wait on), refuses any login but the
+record's own approver (`403 NOT_APPROVER`) whatever the record's state, answers a record that
+already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
+expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
+answers, so a second click, a concurrent one and a late one all get it — but a record past its
+expiry, whether recorded expired by the sweeper or not, answers with a message saying it expired
+before its approver acted (`machine.ErrLoginExpired`), never that it was decided, and, on
+approval, mints the launcher
+credential in the same transaction: bound to the request object's own key (its thumbprint and
+embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
+from the decision, so a crash between minting and recording the decision never orphans a
+credential no decision names. Approving a login whose key already holds a live launcher credential
+under another record (a machine that signed two logins with one key) is `409
+KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
 poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
 the minted credential's id — no token is ever returned; the credential is usable only with proofs
 signed by the key the request object embedded.
@@ -1682,35 +1670,36 @@ behind it never authenticates. `proof.Verifier.Verify` distinguishes a session p
 carries `eid`) from a launcher proof (payload carries `lid`, never both or neither) but otherwise
 checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint matching the stored one,
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
-thing that moves pending state, since every decision comes from a WebAuthn assertion rather than
-a Dispatch ask: every `BROKER_SWEEP_SECONDS` tick it expires overdue pending `agent_secret`
-requests (waking each one's owner through the Envoy wake seam), overdue pending machine logins,
-and abandoned WebAuthn registration/endorsement ceremonies, reading fresh from Postgres every time
-so a restart resumes exactly where the rows are.
+thing that moves pending state without a human: every `BROKER_SWEEP_SECONDS` tick it expires
+overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and
+overdue pending machine logins, reading fresh from Postgres every time so a restart resumes
+exactly where the rows are.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
-./cmd/agent-secrets/...`. The Postgres-backed tests skip, rather than fail, when
-`BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
+./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather
+than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
 CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
 `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`. Every client-facing
 lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services)
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
-`internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devkey/main_test.go` all wire real
-`enroll.Service`/`approvers.Service`/`requests.Machine`/`machine.Service` behind an
-`httptest.Server`; `cmd/agent-secrets/main_test.go`'s own hand-rolled `fakeBroker` is the one
-sanctioned exception, since it exists to test the CLI binary's own request-building and
-response-parsing logic, not broker behavior. `packages/envoy/scripts/dev-broker.sh` and
-`cmd/agent-secrets-devkey` (a software-key driver standing in for a real WebAuthn authenticator) run
-a whole local broker stack by hand for manual smoke testing; neither ships in `docker/Dockerfile`,
-which builds exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`. Each
+`internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
+`enroll.Service`/`requests.Machine`/`machine.Service` behind an `httptest.Server`;
+`cmd/agent-secrets/main_test.go`'s own hand-rolled `fakeBroker` is the one sanctioned exception,
+since it exists to test the CLI binary's own request-building and response-parsing logic, not
+broker behavior. `packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
+for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login, as Dispatch does
+when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
+testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
+`envoy-dispatch`, `envoy-broker`, and `agent-secrets`. `dev-broker.sh` prints the exports a second
+shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`). Each
 `dev-broker.sh` run creates and drops its own isolated database on the shared `dispatch-pg`
-container, so concurrent instances never evict each other's approver keys via `Reconcile`'s
-tombstone-on-absence behavior, and listens on the port its own `cmd/broker` binds and logs
-(`BROKER_LISTEN_ADDR=127.0.0.1:0`; AGENTC-833), so concurrent instances can never collide on a
-shared port either. `dev-broker.test.sh` proves both kinds of isolation with fakes (no real
-Postgres or network) and runs in CI's `envoy-go` job.
+container, so concurrent instances never see each other's enrollments, requests or grants, and
+listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`;
+AGENTC-833), so concurrent instances can never collide on a shared port either.
+`dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
+runs in CI's `envoy-go` job.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of

@@ -3,9 +3,9 @@
 // automated service like the Legion daemon) signs a credential-request object naming the
 // operator it logs in as (login_hint) and a single launcher_credential authorization detail, and
 // polls Login's pendingID for a human to approve the confirmation code Login also mints.
-// Machine-login records are decided here, not in requests.Machine: ApplyDecision verifies the
-// human's WebAuthn assertion itself and, on approval, mints the credential directly — there is
-// no Dispatch ask anywhere in this flow, and no bearer token in any response.
+// Machine-login records are decided here, not in requests.Machine: ApplyDecision takes the
+// deciding human's Dispatch login and the typed code and, on approval, mints the credential
+// directly — there is no Dispatch ask anywhere in this flow, and no bearer token in any response.
 package machine
 
 import (
@@ -20,9 +20,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/rules"
@@ -35,18 +33,24 @@ var (
 	ErrNotFound = errors.New("machine login not found")
 	// ErrCodeMismatch is ApplyDecision's refusal when the caller's code does not match the
 	// record's own: the human is deciding a different login than the one their terminal or
-	// dashboard actually shows, refused before the assertion is even checked.
+	// dashboard actually shows, refused before the approver is even checked.
 	ErrCodeMismatch = errors.New("confirmation code does not match")
-	// ErrAlreadyDecided is ApplyDecision's refusal when a concurrent decision already recorded
-	// the record's one terminal event first.
+	// ErrAlreadyDecided is ApplyDecision's refusal for a record that already carries its one
+	// decision: a second approve or deny, or one that lost the race to a concurrent one.
 	ErrAlreadyDecided = errors.New("this machine login has already been decided")
+	// ErrLoginExpired is ApplyDecision's refusal for a login that expired undecided: the sweeper
+	// recorded it expired, or its expires_at has passed before the sweeper got to it.
+	ErrLoginExpired = errors.New("this machine login expired before its approver acted on it")
+	// ErrKeyHoldsLiveCredential is ApplyDecision's refusal to approve a pending login whose key
+	// already holds a live launcher credential under another record: a machine signed two logins
+	// with one key and the first was approved. The record stays pending.
+	ErrKeyHoldsLiveCredential = errors.New("this machine login's key already holds a live launcher credential")
 )
 
 type Service struct {
-	Store     *store.Store
-	Enroll    *enroll.Service
-	Approvers *approvers.Service
-	Rules     *rules.Current
+	Store  *store.Store
+	Enroll *enroll.Service
+	Rules  *rules.Current
 
 	Audience           string
 	Skew               time.Duration
@@ -121,8 +125,8 @@ func deref(s *string) string {
 }
 
 // Login verifies a signed machine credential-request object and opens a pending record for a
-// human to approve or deny: login_hint is required (it names the operator whose approver key
-// must decide it) and authorization_details must carry exactly one launcher_credential entry.
+// human to approve or deny: login_hint is required (it names the operator who must decide it)
+// and authorization_details must carry exactly one launcher_credential entry.
 // Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
 // limiting this unauthenticated route is the api layer's job, not this one's.
 func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
@@ -185,23 +189,41 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 
 // ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
 // means the human is looking at a different login than the one they're deciding, refused before
-// the assertion is even checked (CODE_MISMATCH). assertion must verify against
-// ApproveChallenge(recordID) to approve or DenyChallenge(recordID) to deny, signed by the
-// record's own approver. Approval mints the credential — bound to the request object's own key
-// (thumbprint and embedded JWK), with lifetime CredentialLifetime counted from the decision — in
-// the same transaction that records the decision, so a crash between the two never orphans a
-// credential no decision names.
-func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bool, assertion json.RawMessage, code string) (state, credentialID string, err error) {
+// anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be
+// the record's own approver (record.ErrNotApprover), checked next, so another login is refused the
+// same way whatever the record's state. A record that already carries a decision is
+// ErrAlreadyDecided, and one that expired undecided — recorded expired by the sweeper, or past its
+// expires_at before the sweeper got to it — is ErrLoginExpired, both checked under the record's
+// row lock before anything is minted, so a second decision, one racing the first and one after
+// expiry all answer the same way. Approval mints the
+// credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
+// CredentialLifetime counted from the decision — in the same transaction that records the
+// decision, so a crash between the two never orphans a credential no decision names. A key that
+// already holds a live credential under another record is ErrKeyHoldsLiveCredential, and the
+// record stays pending.
+func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bool, login, code string) (state, credentialID string, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return "", "", err
 	}
 	defer tx.Rollback(ctx)
 
-	var canonical, approver, storedCode string
+	// The row lock serializes every decision of this record; a lock fires no update trigger, so
+	// the append-only record allows it. It is `for no key update`, not `for update`: the foreign
+	// key check of another transaction's event insert (the sweeper's 'expired') takes `for key
+	// share` on this row, which `for update` would block while this transaction then waited on
+	// that insert's unique-index entry, a deadlock; the weaker lock lets that insert commit, and
+	// this decision's own insert then hits that same unique index. Decisions of one record
+	// serialize on this lock, so the only other writer that can win that index while this
+	// transaction holds it is the sweeper's ExpirePending — a concurrent decision never reaches
+	// the insert at all; it queues on this same lock and reads the sweeper's event from the
+	// switch below instead. So that collision always means the login expired while this decision
+	// was in flight, and the insert answers ErrLoginExpired, never ErrAlreadyDecided.
+	var canonical, storedCode string
 	var createdAt time.Time
-	err = tx.QueryRow(ctx, `select body, approver, code, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).
-		Scan(&canonical, &approver, &storedCode, &createdAt)
+	var expired bool
+	err = tx.QueryRow(ctx, `select body, code, created_at, expires_at <= now() from credential_requests where id=$1 and kind='launcher_credential' for no key update`, recordID).
+		Scan(&canonical, &storedCode, &createdAt, &expired)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
@@ -220,12 +242,24 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", err
 	}
 
-	event, challenge := "denied", record.DenyChallenge(recordID)
-	if approve {
-		event, challenge = "approved", record.ApproveChallenge(recordID)
-	}
-	if _, err := s.Approvers.VerifyAssertion(ctx, tx, approver, challenge, assertion); err != nil {
+	login, err = body.ApproverLogin(login)
+	if err != nil {
 		return "", "", err
+	}
+	var decided string
+	if err := tx.QueryRow(ctx, `select coalesce((select event from credential_request_events where record_id=$1 and event = any($2)), '')`, recordID, record.TerminalEventNames()).
+		Scan(&decided); err != nil {
+		return "", "", err
+	}
+	switch {
+	case decided == "expired" || decided == "" && expired:
+		return "", "", ErrLoginExpired
+	case decided != "":
+		return "", "", ErrAlreadyDecided
+	}
+	event := "denied"
+	if approve {
+		event = "approved"
 	}
 
 	var credID *string
@@ -243,11 +277,14 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		if detail.Service != "" {
 			service = &detail.Service
 		} else {
-			op := approver
+			op := login
 			operator = &op
 		}
 		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
 			time.Now().Add(time.Duration(body.LifetimeSeconds)*time.Second))
+		if store.IsUniqueViolation(err) {
+			return "", "", ErrKeyHoldsLiveCredential
+		}
 		if err != nil {
 			return "", "", err
 		}
@@ -255,12 +292,11 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		credID = &idStr
 	}
 
-	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, assertion, credential_id, actor) values ($1,$2,$3,$4,$5)`,
-		recordID, event, []byte(assertion), credID, approver); err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return "", "", ErrAlreadyDecided
-		}
+	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, credential_id, actor) values ($1,$2,$3,$4,$5)`,
+		recordID, event, login, credID, "human:"+login); store.IsUniqueViolation(err) {
+		// Only ExpirePending can win this race: see the row-lock comment above.
+		return "", "", ErrLoginExpired
+	} else if err != nil {
 		return "", "", err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -291,7 +327,7 @@ func (s *Service) Read(ctx context.Context, pendingID string) (state, credential
 func (s *Service) recordState(ctx context.Context, recordID string) (state, credentialID string, err error) {
 	var event string
 	var credID *string
-	err = s.Store.Pool.QueryRow(ctx, `select event, credential_id from credential_request_events where record_id=$1 and event in ('approved','denied','expired','cancelled')`, recordID).
+	err = s.Store.Pool.QueryRow(ctx, `select event, credential_id from credential_request_events where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).
 		Scan(&event, &credID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "pending", "", nil
@@ -306,19 +342,16 @@ func (s *Service) recordState(ctx context.Context, recordID string) (state, cred
 }
 
 // RecordView is a machine login record as the operator's UI sees it, resolved by its
-// human-readable confirmation code: enough to show what is being decided and to build the
-// WebAuthn assertion request an Approve or Deny button signs.
+// human-readable confirmation code: enough to show what is being decided.
 type RecordView struct {
-	RecordID         string
-	Host             string
-	Service          string // "" for a personal (non-service) login
-	Approver         string
-	State            string
-	CredentialID     string
-	CreatedAt        time.Time
-	ExpiresAt        time.Time
-	ApproveChallenge []byte
-	DenyChallenge    []byte
+	RecordID     string
+	Host         string
+	Service      string // "" for a personal (non-service) login
+	Approver     string
+	State        string
+	CredentialID string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 }
 
 // LookupByCode resolves a pending machine login by its confirmation code, for the operator's own
@@ -349,12 +382,9 @@ func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, er
 	if err != nil {
 		return RecordView{}, err
 	}
-	approveCh := record.ApproveChallenge(id)
-	denyCh := record.DenyChallenge(id)
 	return RecordView{
 		RecordID: id, Host: detail.Identifier, Service: detail.Service, Approver: approver,
 		State: state, CredentialID: credentialID, CreatedAt: createdAt, ExpiresAt: expiresAt,
-		ApproveChallenge: approveCh[:], DenyChallenge: denyCh[:],
 	}, nil
 }
 
@@ -362,7 +392,9 @@ func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, er
 // expires_at has passed now and that has no terminal event yet. The insert's own ON CONFLICT
 // target is credential_request_events' partial unique index on (record_id) where event names a
 // decision, so a record a concurrent ApplyDecision just decided is silently left alone rather
-// than raising a constraint violation.
+// than raising a constraint violation. That target spells the index's own predicate literally,
+// not record.TerminalEventNames(): Postgres infers a partial index only from a predicate it can
+// prove implies the index's, and a bound parameter proves nothing.
 func (s *Service) ExpirePending(ctx context.Context, now time.Time) error {
 	_, err := s.Store.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, actor)
 		select id, 'expired', 'broker' from credential_requests

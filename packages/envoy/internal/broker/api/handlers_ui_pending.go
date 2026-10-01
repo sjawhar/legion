@@ -17,8 +17,7 @@ type pendingEntry struct {
 
 func (s *server) listPending(w http.ResponseWriter, r *http.Request) {
 	approver := r.URL.Query().Get("approver")
-	if approver == "" {
-		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+	if !requireApprover(w, approver) {
 		return
 	}
 	rows, err := s.deps.Machine.PendingForApprover(r.Context(), approver)

@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -30,10 +33,52 @@ func TestMigrateIsIdempotentAndCreatesTables(t *testing.T) {
 	var n int
 	err = s.Pool.QueryRow(ctx, `select count(*) from information_schema.tables where table_schema='public' and table_name in
 		('launcher_credentials','enrollments','requests','request_secrets','grants','proof_jtis','audit',
-		 'credential_requests','credential_request_events','approver_keys','approver_key_seeds',
-		 'webauthn_ceremonies','machine_login_polls')`).Scan(&n)
-	if err != nil || n != 13 {
-		t.Fatalf("expected 13 tables, got %d (%v)", n, err)
+		 'credential_requests','credential_request_events','machine_login_polls')`).Scan(&n)
+	if err != nil || n != 10 {
+		t.Fatalf("expected 10 tables, got %d (%v)", n, err)
+	}
+	// Migration 0006: approval by Dispatch login keeps no approver keys, seeds or ceremonies.
+	err = s.Pool.QueryRow(ctx, `select count(*) from information_schema.tables where table_schema='public' and table_name in
+		('approver_keys','approver_key_seeds','webauthn_ceremonies')`).Scan(&n)
+	if err != nil || n != 0 {
+		t.Fatalf("expected the approver key tables dropped, found %d (%v)", n, err)
+	}
+}
+
+// TestTerminalEventNamesMatchTheDecisionIndex pins record.TerminalEventNames to the predicate of
+// credential_request_decision, the partial unique index that holds a record to one terminal
+// event, so the Go list and the index cannot drift apart. It compares the whole deparsed
+// predicate Postgres reports, built fresh from the Go list, rather than extracting the quoted
+// literals out of it: a predicate reshaped around the same literals (`event not in (...)`, or one
+// naming an unrelated column such as `actor in (...)`) must fail this test on its own, not only
+// the sweeper and lock tests that happen to depend on the real predicate.
+func TestTerminalEventNamesMatchTheDecisionIndex(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, testDatabaseURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var definition string
+	if err := s.Pool.QueryRow(ctx, `select indexdef from pg_indexes where schemaname='public' and indexname='credential_request_decision'`).
+		Scan(&definition); err != nil {
+		t.Fatalf("read credential_request_decision: %v", err)
+	}
+	_, predicate, found := strings.Cut(definition, " WHERE ")
+	if !found {
+		t.Fatalf("credential_request_decision = %q, want a partial index", definition)
+	}
+	names := record.TerminalEventNames()
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = fmt.Sprintf("'%s'::text", name)
+	}
+	want := fmt.Sprintf("(event = ANY (ARRAY[%s]))", strings.Join(quoted, ", "))
+	if predicate != want {
+		t.Fatalf("credential_request_decision's predicate = %q, want %q (from record.TerminalEventNames() = %v)", predicate, want, names)
 	}
 }
 

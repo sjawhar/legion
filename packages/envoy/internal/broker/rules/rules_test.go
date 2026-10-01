@@ -1,18 +1,9 @@
 package rules
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/google/uuid"
-
-	"github.com/sjawhar/envoy/internal/broker/record"
-	"github.com/sjawhar/envoy/internal/broker/webauthntest"
 )
 
 func TestValidFileEvaluates(t *testing.T) {
@@ -50,7 +41,6 @@ secrets:
       - {kind: box, operator: sjawhar, decision: approval, approver: operator}
       - {kind: box, operator: sjawhar, decision: automatic}
 `)
-	data = withApprovers(data, "sjawhar")
 	_, err := Parse(data)
 	if err == nil || !strings.Contains(err.Error(), "ambiguous requester") {
 		t.Fatalf("expected ambiguous requester refusal, got %v", err)
@@ -96,24 +86,6 @@ secrets:
 	}
 }
 
-// TestApprovalDeniesWhenApproverHasNoLiveKeys pins the fail-closed rule Parse's cross-checks
-// exist to make safe: approver: login:<name> is accepted at parse time with zero declared keys
-// (a login can be named in the approvers section before its first key is registered), but
-// Evaluate then refuses the approval outright rather than resolving to an approver nobody can
-// ever assert as — an "approval with nobody to approve".
-func TestApprovalDeniesWhenApproverHasNoLiveKeys(t *testing.T) {
-	data := withApprovers(oneSecret("{kind: pod, decision: approval, approver: 'login:bob'}"))
-	data = append(data, []byte("    bob: {}\n")...)
-	set, err := Parse(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, err := set.Evaluate("X", Requester{Kind: "pod"})
-	if err != nil || d.Outcome != "deny" {
-		t.Fatalf("approval for a login with zero declared keys must deny fail-closed: %+v %v", d, err)
-	}
-}
-
 const singleDocBase = "version: 1\nsecrets:\n  X:\n    source: s\n    owner: o\n    delivery: inject\n    max_lifetime_seconds: 60\n    requesters: []\n"
 
 func TestSingleDocumentAccepted(t *testing.T) {
@@ -154,32 +126,29 @@ func oneSecret(entries ...string) []byte {
 	return []byte(doc)
 }
 
-// testAAGUID is a fixed, otherwise-meaningless AAGUID used everywhere a test needs a
-// structurally valid (but never cryptographically verified — see rules.go's package doc comment
-// on the shape/crypto split) approvers.aaguids entry.
-const testAAGUID = "ee882879-721c-4913-9775-3dfcce97072a"
-
-// withApprovers appends a minimal, structurally-valid approvers: section to a rules YAML
-// document, declaring one fake seeded key per named login — enough to satisfy the
-// login:/operator: cross-check and to give Evaluate a non-empty key count, without any real
-// WebAuthn material (Parse never verifies attestation; see TestApproversSectionParses for a
-// fixture built from a real registration).
-func withApprovers(doc []byte, logins ...string) []byte {
-	nonce := strings.Repeat("a", 64)
-	s := string(doc) + "approvers:\n  origin: https://dispatch.test\n  aaguids: [\"" + testAAGUID + "\"]\n  logins:\n"
-	for _, login := range logins {
-		s += "    " + login + ":\n      keys:\n        - credential_id: \"" + login + "-cred\"\n" +
-			"          registration:\n            challenge_nonce: \"" + nonce + "\"\n" +
-			"            response: {id: \"x\"}\n          seed: true\n"
+// TestApproversSectionIsRefused pins the removal of the approvers: section: approval is by
+// Dispatch login, so a rules file still carrying WebAuthn key material (the shape the deployment
+// repository's file had) must fail to load with an error naming the removal, never parse with the
+// section ignored.
+func TestApproversSectionIsRefused(t *testing.T) {
+	for name, section := range map[string]string{
+		"with keys": "approvers:\n  origin: https://dispatch.test\n  aaguids: [\"ee882879-721c-4913-9775-3dfcce97072a\"]\n" +
+			"  logins:\n    sjawhar:\n      keys:\n        - credential_id: \"cred\"\n          seed: true\n",
+		"empty": "approvers: {}\n",
+		"null":  "approvers:\n",
+	} {
+		_, err := Parse([]byte(singleDocBase + section))
+		if err == nil || !strings.Contains(err.Error(), "approvers: section is removed") {
+			t.Errorf("%s: Parse = %v, want a refusal naming the removed approvers: section", name, err)
+		}
 	}
-	return []byte(s)
 }
 
 // TestLoginsCompareCaseInsensitively pins that a rules author's casing of a GitHub login never
 // makes a rule unsatisfiable: operators and login: approvers are compared the way Dispatch
 // compares logins, trimmed and lowercased.
 func TestLoginsCompareCaseInsensitively(t *testing.T) {
-	data := withApprovers(oneSecret("{kind: box, operator: SJawhar, decision: approval, approver: 'login:Xodarap'}"), "xodarap")
+	data := oneSecret("{kind: box, operator: SJawhar, decision: approval, approver: 'login:Xodarap'}")
 	set, err := Parse(data)
 	if err != nil {
 		t.Fatal(err)
@@ -211,10 +180,10 @@ func TestUnsatisfiableEntriesRefused(t *testing.T) {
 // pods whose verified subject is that account, two entries may name two accounts, and an entry
 // with no service_account (which matches every pod) cannot sit beside another pod entry.
 func TestPodEntriesScopeToServiceAccounts(t *testing.T) {
-	data := withApprovers(oneSecret(
+	data := oneSecret(
 		"{kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: automatic}",
 		"{kind: pod, service_account: 'system:serviceaccount:legion:reviewer', decision: approval, approver: 'login:alice'}",
-	), "alice")
+	)
 	set, err := Parse(data)
 	if err != nil {
 		t.Fatal(err)
@@ -246,8 +215,8 @@ func TestPodEntriesScopeToServiceAccounts(t *testing.T) {
 }
 
 // TestIssueAssigneeIsRefused pins that approver: issue_assignee is refused for every requester
-// kind: approvals now resolve to a WebAuthn-attested login (the approvers section), never a
-// Dispatch issue's assignee, so the only valid approver values are operator and login:<name>.
+// kind: an approval names a login, never a Dispatch issue's assignee, so the only valid approver
+// values are operator and login:<name>.
 func TestIssueAssigneeIsRefused(t *testing.T) {
 	for name, entry := range map[string]string{
 		"box":  "{kind: box, operator: sjawhar, decision: approval, approver: issue_assignee}",
@@ -258,100 +227,5 @@ func TestIssueAssigneeIsRefused(t *testing.T) {
 			!strings.Contains(err.Error(), "approver must be operator or login:") {
 			t.Errorf("%s + issue_assignee: Parse = %v, want a refusal naming \"approver must be operator or login:\"", name, err)
 		}
-	}
-}
-
-// TestLoginApproverNeedsAKeyEntry pins that approver: login:<name> is refused at parse time
-// unless approvers.logins has an entry for <name> at all — zero keys is a valid entry (denies at
-// evaluation time instead, see TestApprovalDeniesWhenApproverHasNoLiveKeys); no entry whatsoever
-// is an authoring error caught immediately.
-func TestLoginApproverNeedsAKeyEntry(t *testing.T) {
-	entry := "{kind: pod, decision: approval, approver: 'login:bob'}"
-	if _, err := Parse(oneSecret(entry)); err == nil || !strings.Contains(err.Error(), "login:bob has no approvers entry") {
-		t.Fatalf("login:bob with no approvers section at all: Parse = %v, want a refusal naming \"login:bob has no approvers entry\"", err)
-	}
-	data := oneSecret(entry)
-	data = append(data, []byte("approvers:\n  origin: https://dispatch.test\n  aaguids: [\""+testAAGUID+"\"]\n  logins:\n    bob: {}\n")...)
-	if _, err := Parse(data); err != nil {
-		t.Fatalf("login:bob with a zero-key approvers entry must still parse: %v", err)
-	}
-}
-
-// TestOperatorApproverNeedsTheOperatorsLogin pins that approver: operator is refused at parse
-// time unless approvers.logins has an entry for the matching entry's own operator.
-func TestOperatorApproverNeedsTheOperatorsLogin(t *testing.T) {
-	entry := "{kind: box, operator: sjawhar, decision: approval, approver: operator}"
-	if _, err := Parse(oneSecret(entry)); err == nil || !strings.Contains(err.Error(), "operator sjawhar has no approvers entry") {
-		t.Fatalf("operator sjawhar with no approvers section at all: Parse = %v, want a refusal naming \"operator sjawhar has no approvers entry\"", err)
-	}
-	data := oneSecret(entry)
-	data = append(data, []byte("approvers:\n  origin: https://dispatch.test\n  aaguids: [\""+testAAGUID+"\"]\n  logins:\n    sjawhar: {}\n")...)
-	if _, err := Parse(data); err != nil {
-		t.Fatalf("operator sjawhar with a zero-key approvers entry must still parse: %v", err)
-	}
-}
-
-// TestOriginMustBeAbsoluteHTTPSWithoutPath pins the approvers.origin loader rule.
-func TestOriginMustBeAbsoluteHTTPSWithoutPath(t *testing.T) {
-	base := "version: 1\nsecrets: {}\napprovers:\n  origin: %s\n  aaguids: [\"" + testAAGUID + "\"]\n  logins: {}\n"
-	for name, origin := range map[string]string{
-		"no scheme":         "dispatch.test",
-		"http, not https":   "http://dispatch.test",
-		"has a path":        "https://dispatch.test/",
-		"has a nested path": "https://dispatch.test/api",
-	} {
-		if _, err := Parse([]byte(fmt.Sprintf(base, origin))); err == nil {
-			t.Errorf("%s: origin %q must be refused", name, origin)
-		}
-	}
-	if _, err := Parse([]byte(fmt.Sprintf(base, "https://dispatch.test"))); err != nil {
-		t.Fatalf("a valid absolute https origin with no path must parse: %v", err)
-	}
-}
-
-// TestApproversSectionParses builds a real registration (webauthntest, the same software
-// authenticator Task 4's approvers package tests against) for one seeded key and confirms Parse
-// carries the section's origin, AAGUIDs, and every KeyEntry field through unchanged.
-func TestApproversSectionParses(t *testing.T) {
-	ca := webauthntest.NewCA(t)
-	aaguid := uuid.MustParse(testAAGUID)
-	auth := ca.NewAuthenticator(t, aaguid)
-	nonce := strings.Repeat("a", 64)
-	challenge := record.RegisterChallenge("sjawhar", nonce)
-	registration := auth.Register(t, "dispatch.test", "https://dispatch.test", challenge[:])
-	credentialID := base64.RawURLEncoding.EncodeToString(auth.CredentialID)
-
-	data := []byte("version: 1\nsecrets: {}\napprovers:\n  origin: https://dispatch.test\n  aaguids: [\"" + testAAGUID + "\"]\n  logins:\n" +
-		"    sjawhar:\n      keys:\n        - credential_id: \"" + credentialID + "\"\n" +
-		"          registration:\n            challenge_nonce: \"" + nonce + "\"\n" +
-		"            response: " + string(registration) + "\n          seed: true\n")
-
-	set, err := Parse(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if set.Approvers.Origin != "https://dispatch.test" {
-		t.Fatalf("origin = %q", set.Approvers.Origin)
-	}
-	if len(set.Approvers.AAGUIDs) != 1 || set.Approvers.AAGUIDs[0] != aaguid {
-		t.Fatalf("aaguids = %v, want [%s]", set.Approvers.AAGUIDs, aaguid)
-	}
-	keys := set.Approvers.Logins["sjawhar"]
-	if len(keys) != 1 {
-		t.Fatalf("logins[sjawhar] = %+v, want one key", keys)
-	}
-	k := keys[0]
-	if k.CredentialID != credentialID || k.ChallengeNonce != nonce || !k.Seed || k.Endorsement != nil {
-		t.Fatalf("parsed key entry = %+v", k)
-	}
-	var got, want any
-	if err := json.Unmarshal(k.Registration, &got); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(registration, &want); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("registration round-trip = %v, want %v", got, want)
 	}
 }
