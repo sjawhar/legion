@@ -4,7 +4,7 @@
 
 Verify as forge facts, never from reports: checks green at the current head, zero unresolved non-Minor threads, and both proof lines present, the implementer's own and the tester's. Each proof names a production-like surface, command or run id, observation, ancestor head, and negative control. Run the thermonuclear pair once at that head — the head the owner's `ce-simplify-code` pass left final — when the diff touches runtime code; a docs-only diff gets none. Submit one review per round carrying every inline comment.
 
-For each changed exported symbol, query the index for blast radius (`codegraph({ action: "impact", symbol: "…" })`, `codegraph({ action: "callers", symbol: "…" })`).
+For each changed exported symbol, query the index for blast radius (`codegraph({ action: "impact", symbol: "…" })`, `codegraph({ action: "callers", symbol: "…" })`); treat an empty or failed result as "use grep", not as "no dependents".
 
 Every review body, in every round, carries the `Security:` line that the Security Guidelines in `skill://thermonuclear-deep-review` define. Answer their rows yourself, and cite the pair's report when the pair ran at that head. An inline finding from those guidelines keeps its `Security[<tag>]:` prefix.
 

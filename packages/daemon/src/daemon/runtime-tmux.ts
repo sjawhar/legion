@@ -484,14 +484,21 @@ export class TmuxRuntime implements Runtime {
    * loudly — never silently swallowed — but never fails the provision: a worker without an index
    * falls back to grep, per its role prompt, rather than being wedged by an optional tool. */
   private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
+    // DO_NOT_TRACK=1 disables CodeGraph's telemetry and its update check (its docs rank
+    // DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on): an automatic,
+    // non-opt-in warm-up must never phone home. The worker image's own ENV carries it too, for a
+    // worker's own `codegraph` invocations this daemon does not run.
+    const codegraphEnv = { DO_NOT_TRACK: "1" };
     try {
       const status = await this.deps.run(["codegraph", "status", "--json"], {
         cwd: workspaceDir,
+        env: codegraphEnv,
         timeoutMs: this.deps.slowCommandTimeoutMs,
       });
       if (status.exitCode === 0 && isCodegraphInitialized(status.stdout)) return;
       const result = await this.deps.run(["codegraph", "init"], {
         cwd: workspaceDir,
+        env: codegraphEnv,
         timeoutMs: this.deps.slowCommandTimeoutMs,
       });
       if (result.exitCode !== 0) {

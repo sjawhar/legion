@@ -242,11 +242,15 @@ COPY --from=cli /repo/packages/pi-envoy/roles /opt/legion/roles
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
 # — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
-# because OMP's DirResolver derives the profile root from it.
+# because OMP's DirResolver derives the profile root from it. DO_NOT_TRACK=1: CodeGraph's telemetry
+# and update-check opt-out (ranked above CODEGRAPH_TELEMETRY, above stored config, above
+# default-on) — every worker's own `codegraph` call, and the warm-up the tmux daemon runs outside
+# this image, must never phone home for an automatic, non-opt-in tool.
 ENV OMP_PROFILE=legion \
     LEGION_OMP_PATH=/opt/omp/bin/omp \
     LEGION_ROLE_PROMPTS_DIR=/opt/legion/roles \
     HOME=/home/legion \
+    DO_NOT_TRACK=1 \
     PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin
 # Numeric uid:gid (user `legion`, created above) so Kubernetes `runAsNonRoot` can verify it from the
 # image alone.

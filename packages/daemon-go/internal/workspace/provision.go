@@ -78,6 +78,12 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := removeRepositoryIdentity(ctx, run, workspace.Clone); err != nil {
 		return Workspace{}, err
 	}
+	// Warms the CodeGraph index for the issue's workspace (AGENTC-1305 §7), mirroring the
+	// TypeScript daemon's ensureCodegraphIndex: both this function's callers — the pod init
+	// container (cmd/legion/workspace_init.go) and the Go daemon's host provisioning for tmux
+	// panes (internal/daemon/outbox.go) — want one already built, and neither may fail or block
+	// on it (see warmCodegraphIndex's doc).
+	warmCodegraphIndex(ctx, workspace.Dir, request.Log)
 	return workspace, nil
 }
 
