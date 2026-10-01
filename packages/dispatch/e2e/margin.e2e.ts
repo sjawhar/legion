@@ -21,8 +21,8 @@ import {
   documentTransport,
   marginCard,
   markSpan,
+  placeCaret,
   selectEditorText,
-  typeAtEnd,
 } from "./editor";
 import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
@@ -998,12 +998,17 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     // A mark alone writes no document version. A typed paragraph does, and the transaction that
     // writes the version also refreshes every open anchor from the document (writeVersionTx), so
     // once the version is there each anchor's quote is what the server reads in the document now.
+    // The caret goes after "fox" directly: typeAtEnd's click lands wherever the editor's centre
+    // is, which can be a highlight, and the Enter then replaces the selection still on "brown".
     const before = (await getArtifact(artifactId)).versions.length;
     await setSheet(alicePage, testInfo.project.name, false);
-    await typeAtEnd(alicePage, "jumps");
+    await placeCaret(alicePage, "after", "fox");
+    await alicePage.keyboard.press("Enter");
+    await alicePage.keyboard.type("jumps");
     await expect
       .poll(() => getArtifact(artifactId).then(({ versions }) => versions.length))
       .toBeGreaterThan(before);
+    expect((await getArtifactText(artifactId)).markdown).toBe("The quick brown fox\n\njumps\n");
     const bobAnchor = (await getComment(bobComment.id)).comment.anchor;
     expect({ quote: bobAnchor?.quote, orphaned: bobAnchor?.orphaned }).toEqual({
       quote: "quick brown",
