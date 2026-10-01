@@ -23,6 +23,8 @@ import (
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
+	// scan remembers where this text's closers were last found (forwardScan).
+	scan *forwardScan
 	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
 	footnoteLabels footnoteLabelSet
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
@@ -100,13 +102,13 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
 		return context.label == labelBracketsEscaped ||
-			context.label != labelBracketsWritten && (linkOpener(value, offset) || footnoteReferenceText(value, offset, context.footnoteLabels))
+			context.label != labelBracketsWritten && (linkOpener(value, offset, context.scan) || footnoteReferenceText(value, offset, context.footnoteLabels, context.scan))
 	case '(':
 		return offset > 0 && value[offset-1] == ']'
 	case ']':
 		return context.label == labelBracketsEscaped
 	case '<':
-		return angleConstruct(value, offset)
+		return angleConstruct(value, offset, context.scan)
 	case '&':
 		return entityReference(value, offset)
 	case '#':
@@ -569,21 +571,51 @@ func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 
 // footnoteReferenceText reports whether the text at offset, a `[`, is shaped like a reference to
 // one of labels, the document's defined footnote labels (footnoteLabelSet.refersTo): `[^label]`.
-func footnoteReferenceText(value string, offset int, labels footnoteLabelSet) bool {
+func footnoteReferenceText(value string, offset int, labels footnoteLabelSet, scan *forwardScan) bool {
 	if offset+1 >= len(value) || value[offset+1] != '^' {
 		return false
 	}
-	closing := strings.IndexByte(value[offset+2:], ']')
-	return closing > 0 && labels.refersTo(value[offset+2:offset+2+closing])
+	closing := scan.indexFrom(offset+2, ']')
+	return closing > offset+2 && labels.refersTo(value[offset+2:closing])
 }
 
-func linkOpener(value string, offset int) bool {
-	closing := strings.IndexByte(value[offset+1:], ']')
+func linkOpener(value string, offset int, scan *forwardScan) bool {
+	closing := scan.indexFrom(offset+1, ']')
 	if closing < 0 {
 		return false
 	}
-	closing += offset + 1
 	return linkCloser(value, closing)
+}
+
+// forwardScan answers where a byte next occurs at or after an offset of one text, remembering
+// the last answer: writeInlineText asks in offset order, so a text of many `[`, `<` or `&` and no
+// closer costs one pass over the text, not one per character (LEGION-465).
+type forwardScan struct {
+	value string
+	// next[b] is where b was last found at or after asked[b], or len(value) for nowhere; the
+	// answer holds for every offset from asked[b] to next[b]. seen[b] says b was looked for.
+	next, asked [256]int
+	seen        [256]bool
+}
+
+func newForwardScan(value string) *forwardScan {
+	return &forwardScan{value: value}
+}
+
+// indexFrom is the index of the first b at or after offset, or -1 when there is none.
+func (s *forwardScan) indexFrom(offset int, b byte) int {
+	if !s.seen[b] || offset < s.asked[b] || offset > s.next[b] {
+		s.seen[b], s.asked[b] = true, offset
+		if found := strings.IndexByte(s.value[offset:], b); found < 0 {
+			s.next[b] = len(s.value)
+		} else {
+			s.next[b] = offset + found
+		}
+	}
+	if s.next[b] == len(s.value) {
+		return -1
+	}
+	return s.next[b]
 }
 
 func linkCloser(value string, offset int) bool {
@@ -665,8 +697,9 @@ func linkLabel(nodes []*Node, index int, link Mark) string {
 		if nodeHasMark(node, "inlineCode") {
 			continue
 		}
+		scan := newForwardScan(node.Text)
 		for offset := 0; offset < len(node.Text); offset++ {
-			if node.Text[offset] == '[' && linkOpener(node.Text, offset) {
+			if node.Text[offset] == '[' && linkOpener(node.Text, offset, scan) {
 				label.WriteByte(paragraphEscapedBracket)
 				continue
 			}
@@ -676,24 +709,21 @@ func linkLabel(nodes []*Node, index int, link Mark) string {
 	return label.String()
 }
 
-func angleConstruct(value string, offset int) bool {
+func angleConstruct(value string, offset int, scan *forwardScan) bool {
 	if offset+1 >= len(value) || !isASCIIAlphaNumeric(value[offset+1]) && value[offset+1] != '/' && value[offset+1] != '!' && value[offset+1] != '?' {
 		return false
 	}
-	return strings.IndexByte(value[offset+1:], '>') >= 0
+	return scan.indexFrom(offset+1, '>') >= 0
 }
 
+// entityReference reports whether the `&` at offset opens `&name;` or `&#digits;`: letters, digits
+// and `#` up to a `;`. It reads that run alone, so a text of many `&` and no `;` costs one pass.
 func entityReference(value string, offset int) bool {
-	end := strings.IndexByte(value[offset+1:], ';')
-	if end < 0 {
-		return false
+	end := offset + 1
+	for end < len(value) && (isASCIIAlphaNumeric(value[end]) || value[end] == '#') {
+		end++
 	}
-	for _, char := range value[offset+1 : offset+end+1] {
-		if !isASCIIAlphaNumeric(byte(char)) && char != '#' {
-			return false
-		}
-	}
-	return true
+	return end < len(value) && value[end] == ';'
 }
 
 func urlSchemeColon(value string, offset int) bool {

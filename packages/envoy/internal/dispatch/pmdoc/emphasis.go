@@ -69,6 +69,15 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	if char == '_' {
 		canOpen, canClose = canOpen && (beforeIsSpace || beforeIsPunct || !canClose), canClose && (afterIsSpace || afterIsPunct || !canOpen)
 	}
+	if !canOpen && !canClose {
+		// A run that can neither open nor close pairs with nothing. goldmark's ProcessDelimiters
+		// walks every delimiter still on its list when a closer looks for its opener, and never
+		// takes such a run off it, so a paragraph of `a_b*a_b*…` cost time quadratic in its length
+		// (LEGION-465). It is read as the text it would have become; cmark pushes no such run.
+		text := ast.NewTextSegment(segment.WithStop(segment.Start + length))
+		block.Advance(length)
+		return text
+	}
 	node := parser.NewDelimiter(canOpen, canClose, length, char, emphasisDelimiters{})
 	node.Segment = segment.WithStop(segment.Start + node.OriginalLength)
 	block.Advance(node.OriginalLength)
