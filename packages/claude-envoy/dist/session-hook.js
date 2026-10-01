@@ -14424,7 +14424,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -16498,6 +16498,8 @@ function askSummary({ ask, replies }, graph) {
   ]);
   return [
     `Question: ${ask.question}`,
+    ...ask.anchor?.quote === undefined ? [] : [`> ${ask.anchor.quote}`],
+    ...ask.anchor_block === undefined ? [] : [`Position: ${positionText(ask.anchor_block)}`],
     "Options:",
     ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
     `State: ${ask.state}`,
@@ -16562,6 +16564,7 @@ function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
     ...comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`],
+    ...comment.anchor_block === undefined ? [] : [`Position: ${positionText(comment.anchor_block)}`],
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
@@ -16577,6 +16580,21 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function positionText(block) {
+  const table = block.table;
+  const tableAt = block.path.findIndex((entry) => entry.type === "table");
+  const placed = table === undefined || tableAt === -1 ? block.path : block.path.slice(0, tableAt + 1);
+  const segments = placed.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || tableAt === -1 || table.row === null)
+    return segments.join(" \u203A ");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column)).map((cell) => cell.trim()).filter((cell) => cell !== "" && !/^\d+$/.test(cell)).join(" \xB7 ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  if (table.column === null)
+    return [...segments, row].join(" \u203A ");
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [...segments, `${row}, column ${header}`].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
   const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
