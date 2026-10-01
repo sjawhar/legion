@@ -18,11 +18,11 @@ production build from `web/dist`.
   `features/agent-view/conversation.ts`), the view hides Dispatch's stored copy, only when the
   streamed text equals it, and still names its author when that is not the viewer. A turn the
   stream carries untagged shows twice, as the streamed message and the stored copy;
-  `packages/pi-envoy/AGENTS.md` says which turns the session leaves untagged. The live view's composer
-  offers the modes the session advertises in `MODE_ORDER` (Send, Aside, BTW), so it opens on Send
-  wherever the session takes a steer and on Aside otherwise. On `/agents`, only an attempt whose
-  `accepted_as` is `user_turn` reads `Delivered to <session>'s conversation` with no retry row,
-  even after a later `failed` (`takenAsUserTurn` in
+  `packages/pi-envoy/AGENTS.md` says which turns the session leaves untagged. The live view's
+  composer offers the modes the session advertises in `MODE_ORDER` (Send, Aside, BTW), so it opens
+  on Send wherever the session takes a steer and on Aside otherwise. On `/agents`, only an attempt
+  whose `accepted_as` is `user_turn` reads `Delivered to <session>'s conversation` with no retry
+  row, even after a later `failed` (`takenAsUserTurn` in
   `features/conversation/TargetedMessageCard.tsx`); every other attempt, a Claude Code session's
   or an older plugin's included, keeps today's states. The page refreshes on `message.accepted`.
 - Every label the dashboard composes for a delivery mode comes from one mapping, `MODE_LABELS` in
