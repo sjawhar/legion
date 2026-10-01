@@ -62,6 +62,19 @@
   extension inserts one. It is read once at load, so a package without
   `dist/skills/dispatch-first/SKILL.md` fails to load naming the file. A session without Dispatch
   configured gets nothing.
+- The reviewer's pair runs an explicit security pass. The `thermonuclear-deep-review` rubric gains
+  Security Guidelines: six tagged rows (`authz`, `secret`, `untrusted-input`, `prompt`,
+  `supply-chain`, `sandbox`), each answered with a file:line citation when the diff touches its
+  surface and summed up in one `Security:` line. Every security finding that states an exploit path
+  stands at its own priority, prefixed `Security[<tag>]:`, and only hardening is capped, at two
+  items. The rubric also gains a section on attacking the PR body's safety claims. The reviewer's
+  core role text has it write that `Security:` line into every review body, every round, and the
+  review body template carries it. The tester's core text makes the call made as the party a new
+  or moved authorization boundary must refuse that change's negative control. Both pair agents
+  declare their rubric in `autoloadSkills`, so the subagent starts with it rather than being told
+  to read it. Each still names it as `skill://<name>`, the form the Go daemon's boot gate
+  resolves, and `src/legion/shipped-agents.test.ts` fails an autoloaded name with no such token
+  (AGENTC-1305).
 - The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
   they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
   which runs that procedure and decides whether the push skips CI: a handoff push that a later push
