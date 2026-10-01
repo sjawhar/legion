@@ -66,6 +66,41 @@
 
 ### Fixed
 
+- A non-2xx answer whose body is not Dispatch's `{code, error}` JSON — a gateway's or proxy's HTML
+  page, an empty body, JSON of another shape — reached every `dispatch_*` tool as its raw body
+  (LEGION-457). `DispatchClient` now throws it as a `DispatchGatewayError` (a
+  `DispatchServiceError` whose `code` stays `HTTP_<status>` and whose `fromDispatch` is false)
+  reading `<METHOD> <url with query> answered <status> [<reason>] with <a body that is not
+  Dispatch's error JSON ("<excerpt>") | a body of <N> bytes and no readable text [in its first 64
+  KiB] | an empty body>, which looks like a proxy or gateway page rather than Dispatch's own
+  answer, so <advice>.` The advice fits the method and the status: a status that cannot clear gets
+  "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is
+  fixed"; a 5xx, 408 or 429 gets "a retry may succeed" on a GET; on a write, a 408 or 429 (the
+  gateway's own timeout or rate limit, sent before it forwards anything) gets "the write did not
+  reach Dispatch, and a retry may succeed", and a 5xx, which can come after Dispatch applied the
+  write, gets "the write may or may not have reached Dispatch: check whether it took effect before
+  retrying it". The error carries `answer` (the message without the advice), `advice`,
+  `transient` and `mayHaveReachedDispatch`. `dispatch_issue_update`'s close path reads one rule for
+  whether its reason's post or its close may have taken effect: only Dispatch's own 4xx or a
+  gateway's answer that never reached Dispatch proves it did not, while a 5xx (Dispatch's own
+  included, since it can fail after it committed), a timeout or a transport error says the reason,
+  or the close, may or may not have landed, in place of the client's advice; after an error
+  message that ends a sentence (`The operation timed out.`), that account starts one of its own. A
+  gateway's 408 or 429 on the close says the issue did not close and how to retry without posting
+  the reason twice, with nothing to fix. A status is read as Dispatch's meaning only from
+  Dispatch's own answer: a gateway's 404 page is reported as such, not as no issue linked to an
+  external reference (with the advice to create one), no such project document, no comments on a
+  document, or a reference section the server does not serve, and a gateway's 500 on
+  `external_links` gets no link-clash hint. The excerpt and the reason phrase are each one line of
+  at most 120 characters with scripts, styles and tags dropped, and with the value after
+  `Authorization:` or `Bearer` and every run of 8 or more of the client's own bearer's characters
+  (trimmed; a shorter bearer only whole) redacted first, so a copy cut short, split by markup or
+  overlapping another leaves no such piece. The excerpt reads at most the first 64 KiB of the body,
+  redacting the bearer within that slice and taking whole a piece that runs past its end, and every
+  pattern it runs is linear, so a body of any size or shape cannot hold the host's event loop. The
+  URL never carries the bearer, which travels in a header. Dispatch's own JSON errors render as
+  before: their `error` text under their `code`.
+
 - `createDeliveryDedupe` replaces `rememberBounded` as the one dedupe both core-NATS hosts keep: it
   recognises a re-send by its `dedupe_key`, and only for a key that names its event
   (`dedupeKeyNamesItsEvent` in `@legion/contracts`: every Dispatch key, a webhook key of its
