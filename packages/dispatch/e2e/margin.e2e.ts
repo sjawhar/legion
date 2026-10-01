@@ -19,6 +19,7 @@ import {
   deleteEditorText,
   documentEditor,
   documentTransport,
+  expectMark,
   marginCard,
   markSpan,
   placeCaret,
@@ -68,12 +69,6 @@ async function commentWithBody(issueKey: string, artifactId: string | undefined,
     throw new Error(`Comment with body ${body} was not created.`);
   }
   return comment;
-}
-
-async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
-  const mark = markSpan(page, markId);
-  await expect(mark).toBeVisible();
-  await expect(mark).toHaveText(quote);
 }
 
 test.beforeEach(async () => {

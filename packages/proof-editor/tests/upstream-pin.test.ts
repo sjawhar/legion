@@ -20,7 +20,6 @@ import type { Ctx } from "@milkdown/kit/ctx";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { EditorState, Plugin, type Transaction } from "@milkdown/kit/prose/state";
 import { EditorView } from "@milkdown/kit/prose/view";
-import { Window } from "happy-dom";
 import {
   applyRemoteMarks,
   comment,
@@ -31,6 +30,7 @@ import {
 } from "proof-sdk-upstream/src/editor/plugins/marks";
 import type { StoredMark } from "proof-sdk-upstream/src/formats/marks";
 import { createHeadlessProof } from "../src/lib-headless.js";
+import { withDomWindow } from "./dom-window";
 
 const upstreamSrc = join(import.meta.dir, "..", "node_modules", "proof-sdk-upstream", "src");
 
@@ -94,14 +94,7 @@ test("the pinned dependency redraws a replacement revised on a viewer's page", a
   const { schema } = await createHeadlessProof();
   const suggestion = schema.marks.proofSuggestion;
   if (suggestion === undefined) throw new Error("the editor schema has no proofSuggestion mark");
-  const window = new Window();
-  // Put back exactly what was there: a key Bun never defined is deleted, not left as undefined,
-  // because src/tests/headless-no-dom.test.ts asserts `!("document" in globalThis)`.
-  const previous = (["document", "window"] as const).map(
-    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const
-  );
-  Object.assign(globalThis, { document: window.document, window });
-  try {
+  await withDomWindow(async (window) => {
     // `$prose` hands the ProseMirror plugin back once its Milkdown wrapper has run; the marks
     // factory ignores its context, so one that answers `$prose`'s wait and update is enough.
     const proseContext = {
@@ -140,13 +133,7 @@ test("the pinned dependency redraws a replacement revised on a viewer's page", a
     applyRemoteMarks(view, replacement("slow blue"), { hydrateAnchors: false });
     expect(view.dom.querySelector(".mark-replace-insert")?.textContent).toBe("slow blue");
     view.destroy();
-  } finally {
-    for (const [key, descriptor] of previous) {
-      if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
-      else Object.defineProperty(globalThis, key, descriptor);
-    }
-    await window.happyDOM.close();
-  }
+  });
 });
 
 /** A state holding the marks plugin's metadata and the two members its actions read: the state,

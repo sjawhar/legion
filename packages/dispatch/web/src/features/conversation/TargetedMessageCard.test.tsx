@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { fireEvent, render, screen } from "@testing-library/react";
 
+import { answeredWithErrorGuidance, duplicateText, safeRetryGuidance } from "./delivery";
 import { type TargetedMessageAttempt, TargetedMessageCard } from "./TargetedMessageCard";
 
 function attempt(overrides: Partial<TargetedMessageAttempt> = {}): TargetedMessageAttempt {
@@ -18,6 +19,7 @@ function attempt(overrides: Partial<TargetedMessageAttempt> = {}): TargetedMessa
 function card(props: {
   attempts: readonly TargetedMessageAttempt[];
   capabilities?: readonly string[];
+  isClosed?: boolean;
   onRetry?: (delivery: "aside" | "btw" | "steer") => void;
 }) {
   const capabilities = props.capabilities ?? ["aside", "btw", "steer"];
@@ -30,7 +32,7 @@ function card(props: {
         canSteer={capabilities.includes("steer")}
         deliveries={props.attempts}
         header={null}
-        isClosed={false}
+        isClosed={props.isClosed ?? false}
         onRetry={props.onRetry ?? (() => {})}
         targetName="planner"
         turnID="turn-1"
@@ -108,9 +110,7 @@ test("a duplicate attempt says the listener already had the message", () => {
     card({ attempts: [attempt({ delivery: "steer", state: "sent", duplicate: true })] })
   );
   try {
-    expect(
-      screen.getByText("Delivered; the listener already had this message, so it wasn't sent again")
-    ).toBeTruthy();
+    expect(screen.getByText(duplicateText)).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -134,8 +134,11 @@ test("a failed attempt inside the duplicate window promises a safe retry and off
     // A cause with no trailing punctuation gets a separator, and a failure that never reached
     // the listener is not told a different mode would deliver it "again".
     expect(
-      screen.getByText("Failed: no live session s1. Retry won't deliver it twice.")
+      screen.getByText(
+        `Failed: no live session s1. ${safeRetryGuidance("card", "no live session s1")}`
+      )
     ).toBeTruthy();
+    expect(screen.queryByText(/sending in a different mode/)).toBeNull();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     view.unmount();
@@ -149,9 +152,10 @@ test("a receipt timeout is told what a mode change would do", () => {
   try {
     expect(
       screen.getByText(
-        `Failed: ${RECEIPT_TIMEOUT_CAUSE} Retry won't deliver it twice; sending in a different mode delivers it again.`
+        `Failed: ${RECEIPT_TIMEOUT_CAUSE} ${safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE)}`
       )
     ).toBeTruthy();
+    expect(screen.getByText(/sending in a different mode delivers it again/)).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -170,6 +174,34 @@ test("a failed attempt past the duplicate window makes no promise and offers no 
     expect(screen.getByRole("button", { name: "Use BTW instead" })).toBeTruthy();
   } finally {
     view.unmount();
+  }
+});
+
+// A Retry of an attempt the session answered with an error repeats the key the stream already
+// stored, so a session the listener pushes to from the stream is never handed it. The card
+// offers the mode change, a new key, and names it only while that row is on screen.
+test("an attempt the session answered with an error points at a mode change instead of Retry", () => {
+  const answered = attempt({
+    answeredWithError: true,
+    delivery: "btw",
+    error: "side turn failed",
+  });
+  const view = render(card({ attempts: [answered] }));
+  try {
+    expect(
+      screen.getByText(`Failed: side turn failed. ${answeredWithErrorGuidance("card")}`)
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Use Send instead" })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+  // A closed issue shows no retry row, so there is no mode change to point at.
+  const closed = render(card({ attempts: [answered], isClosed: true }));
+  try {
+    expect(screen.getByText("Failed: side turn failed")).toBeTruthy();
+  } finally {
+    closed.unmount();
   }
 });
 

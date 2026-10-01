@@ -106,6 +106,52 @@ users through `Identity.Login` and write identity errors with
 - `DISPATCH_IDENTITY=header:<Header-Name>` accepts only allowlisted logins from
   a trusted proxy header. When GitHub OAuth credentials are configured, it also
   requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
+- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>`
+  (`routes/devsignin.go`, which holds everything that can mint a cookie without
+  GitHub), which issues the cookie identity's own session cookie for an
+  allowlisted login through the callback's `issueSession`, with no GitHub
+  exchange. `devSignInFence` (`cmd/dispatch/main.go`, run by
+  `resolveBootConfig`) refuses it unless identity is cookie, the host of
+  `boot.ListenAddr` (the one address `main` binds) is a loopback IP literal
+  (`routes.LoopbackHostPort`, which the route's peer check also uses), every
+  `DATABASE_URL` host `pgx.ParseConfig` finds is loopback or a unix socket
+  (`routes.LoopbackName`), `DISPATCH_SIGNING_KEY` is unset,
+  `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, and a set
+  `DISPATCH_AGENT_SECRETS_URL` and `ENVOY_URL` (the listener mentions and
+  messages are delivered through) each name a loopback host
+  (`routes.LoopbackURL`, the one URL rule every fence item uses).
+  `devSignInLoadedFence` (run by `main` once it has read `envoy.json` and the
+  App, before anything connects) checks what the environment does not hold: the
+  dashboard origin must name `127.0.0.1`, `[::1]` or `localhost`
+  (`routes.DevSignInOrigin`), and a loaded App private key must come from
+  `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback
+  host. A key from `app.json`, where a developer keeps the real App's key, is
+  refused whatever the base, naming the file: a signed-in session can save an
+  architecture source, which has the App probe and import the repository the
+  caller names. The loopback check is on the host, not on what listens there,
+  and every App call hands a signed App JWT to whatever owns that port, so the
+  environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh`
+  generates one per run. The key is the credential that acts (`githubapp.New`
+  builds no client without it, and the App JWT names the client ID), so the App
+  ID is not fenced. This fence leaves the OAuth client pair alone too: an
+  exchange needs a code GitHub issues after a person signs in there, and the
+  pair's token refresh (`ProxyConfig.refresh`, `internal/dispatch/githubapi/proxy.go`)
+  needs a stored token pair, which only `requireUser`'s dev sign-in check
+  (`routes/router.go`) keeps from being read under the flag. A change to that
+  check unfences the pair.
+  `routes.BuildAppContext` also refuses a dashboard origin that is not
+  loopback and stores the origin's host in the unexported `devSignInHost`, the
+  only switch `New` reads, so no caller can mount the route without that check.
+  The signing key is then
+  `auth.NewSigningKey`, generated per process and never the data-dir file, so a
+  cookie it mints dies with the process. While it is on, the whole router
+  answers a request whose `Host` is not the dashboard origin's
+  `421 HOST_MISMATCH` (`requireHost`), the route serves only a loopback peer
+  with no forwarding header and logs every mint at WARN, and `requireUser`
+  answers `503 GITHUB_TOKEN_UNAVAILABLE` before it reads a stored token pair.
+  The key bounds the cookie only: a `dsp_` token a dev session mints, and the
+  session and token rows its sign-out changes, are rows every server on the
+  same database acts on, so a dev-sign-in server needs a database of its own.
 - GitHub OAuth credentials come from `DISPATCH_APP_CLIENT_ID` and
   `DISPATCH_APP_CLIENT_SECRET`, or the Dispatch app credentials file.
 - Agents normally authenticate as a `session` actor with a personal `dsp_` token
@@ -155,6 +201,7 @@ the table says human only.
 | `/auth/callback` | GET | OAuth state | Exchange an allowlisted GitHub login's token pair. |
 | `/auth/logout` | POST | identity | Remove the resolved user's tokens. |
 | `/auth/whoami` | GET | identity | Return the resolved human identity. |
+| `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Issue an allowlisted login's session cookie with no GitHub exchange and redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 LOGIN_NOT_ALLOWED`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
 | `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
 | `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured, plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
@@ -193,7 +240,7 @@ the table says human only.
 | `/api/v1/issues/{key}/messages` | POST | user or bearer | Post a short issue message. |
 | `/api/v1/messages/{id}?session=` | GET | user or bearer | Read the conversation a message belongs to, issue-less or not, by any message id in it: the thread root with its deliveries and every reply, oldest first. Who may read which thread is the route's description in `internal/dispatch/api/routes_table.go` and `packages/envoy/AGENTS.md` ("Targeted Dispatch messages"). |
 | `/api/v1/messages/{id}/deliveries/{attempt}/accept` | POST | bearer only | The attempt's session records that it took the message as its user's own turn, `{actor: {kind: "session", id}}`, and is answered the attempt with the message's stored `body` (`AcceptedMessageDelivery`); `403 ACCEPT_FORBIDDEN` for another session's attempt or a non-bearer. One compare-and-set under the message's row lock (`FOR NO KEY UPDATE`, which the session's reply's foreign-key `FOR KEY SHARE` does not wait for), after the event owner's lock. It succeeds only for a direct message to that session, on no issue, neither a broadcast's copy nor a reply in a broadcast's thread, in a thread whose root targets that session (`409 ACCEPT_NOT_DIRECT`); that a person wrote (`409 ACCEPT_NOT_WRITTEN_BY_PERSON`); sent as a Send or an Aside (`409 ACCEPT_NOT_ASIDE_OR_STEER` for a BTW); when no attempt of it was accepted before (`409 ACCEPT_ALREADY_ACCEPTED`); only the message's latest attempt (`409 ACCEPT_SUPERSEDED`), whose `requested_by` is a person (`409 ACCEPT_NOT_REQUESTED_BY_PERSON`; a row from before migration 0054 records nobody) and that person the message's author, logins compared case-insensitively (`409 ACCEPT_NOT_REQUESTED_BY_AUTHOR`: another person's retry), which Dispatch did not record as failed (`409 ACCEPT_FAILED`), created within the last minute by Postgres's clock (`409 ACCEPT_STALE`). A pending attempt may be accepted: the route writes only `accepted_at` and `accepted_as: "user_turn"`, never the state or claim the send settles, and appends `message.accepted` (`{message_id, attempt, session_id, accepted_as, target}`), never a second `message.delivery`; the event is issue-less, so the outbox never publishes it to NATS. The actor is the bearer's own claim, as on every session write. |
-| `/api/v1/broadcasts` | POST | human only | Send one message to many sessions: `{body, delivery, session_ids}`. Writes the broadcast and one issue-less targeted message per recipient in one transaction, answers 201, then delivers behind the request (four workers, each on its own tracking context derived from the server lifetime) through the ordinary targeted-message path, so a cut-off request cannot strand a recipient. Each recipient comes back with its first attempt pending. A selected session that is not live or does not advertise `delivery` is excluded and named in `excluded` (never switched to another mode); a selection with no reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. At most 100 recipients (`contracts.MaxBroadcastRecipients`, generated from `MAX_BROADCAST_RECIPIENTS` in `packages/contracts`, which the dashboard also reads), duplicates collapsed. |
+| `/api/v1/broadcasts` | POST | human only | Send one message to many sessions: `{body, delivery, session_ids, idempotency_key}`. Writes the broadcast, its key and one issue-less targeted message per recipient in one transaction, answers 201, then delivers behind the request (four workers, each on its own tracking context derived from the server lifetime) through the ordinary targeted-message path, so a cut-off request cannot strand a recipient. Each recipient comes back with its first attempt pending. A selected session that is not live or does not advertise `delivery` is excluded and named in `excluded` (never switched to another mode); a selection with no reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. At most 100 recipients (`contracts.MaxBroadcastRecipients`, generated from `MAX_BROADCAST_RECIPIENTS` in `packages/contracts`, which the dashboard also reads), duplicates collapsed. `idempotency_key` (required; letters, digits, `.`, `_`, `:` and `-`, at most 128) names one send and belongs to the sender's canonical login: a repeat with the same key and the same body, mode and `session_ids` answers `200` with the broadcast the key made, read as it stands, its `excluded` the requested sessions that broadcast has no recipient for (`excluded by the original send`); the same key with a different request is `409 BROADCAST_KEY_REUSED` naming that broadcast as `broadcast_id` and sends nothing; a missing or malformed key is `400 BROADCAST_INPUT`, a longer one `400 CAP_EXCEEDED`. The key is looked up before the listener is read, so a repeat is answered while the listener is down. |
 | `/api/v1/broadcasts` | GET | human only | List the 50 newest broadcasts with their recipient and reply counts. |
 | `/api/v1/broadcasts/{id}` | GET | human only | Read one broadcast with every recipient's message, delivery attempts and replies. Recipients come back in the order the send named them, after exclusions; a broadcast written before migration 0052, or by an older server during a rollout, has no stored order and falls back to `created_at, id`. Unknown or malformed id is `404 BROADCAST_NOT_FOUND`. |
 | `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List issue artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |

@@ -4,6 +4,7 @@
 
 ### Added
 
+- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>` on Dispatch, which signs an allowlisted login in with the same session cookie a GitHub sign-in issues, with no GitHub step, so a local instance can be driven signed-in. Boot refuses the flag unless identity is cookie, the listen address is a loopback IP literal, the dashboard origin names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set `DISPATCH_AGENT_SECRETS_URL` names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, since a signed-in session can have the App probe and import any repository it is installed on. A key in `app.json`, where a developer keeps the real App's key, is refused whatever the base, naming the file; the environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, because every App call hands a signed App JWT to whatever listens at that base. These refusals come before NATS or Postgres is dialled. The signing key is then generated per process, so a minted cookie is worthless on any other server and dies with the process. What a signed-in session writes to the database (a `dsp_` token it mints, the session and token rows its sign-out changes) is honoured by every server on that database, so a dev-sign-in server needs a database of its own. While the flag is on, every request must carry the dashboard origin as its `Host` (`421 HOST_MISMATCH`), the route serves only a loopback peer with no forwarding header (`403 DEV_SIGNIN_FORBIDDEN`) and logs every mint at WARN, and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` without reading a stored token pair. `DISPATCH_LISTEN_HOST` may now be an IPv6 literal with or without brackets: `::1` listened on `::1:8766` and failed with "too many colons", and now listens on `[::1]:8766`. A bad `DISPATCH_PORT` now refuses the boot before NATS and Postgres connect.
 - Every cache warm-up logs one line when its initial scan ends, `<cache> cache warm-up`, with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` (`completed`, or `timed out` at WARN when nats.go's idle timer gave up on the scan). The counts are disjoint, like the role restore line's: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them. The line goes through the logger the listener passes each cache (`store.WithLogger`, `session.WithSessionLogger`, the CI store's own), so it is a JSON record with `machine_id`, and so are the cache watchers' other lines (a failed first start, a recreated bucket, a watcher that stopped). A restart now names its own cost — measured on a listener with a seeded bucket: `{"msg":"interest registry cache warm-up","machine_id":"smoke374r2","bucket":"envoy_interests","elapsed_ms":5,"entries":3,"delete_markers":500,"outcome":"completed"}`. A timed-out scan is logged and never recorded as the watcher's terminal error, so a live watcher whose warm-up merely timed out is not a 503 or a rebuild.
 - A listener start logs one INFO line for the role-claim snapshot it restores, `restored role claims`, with two disjoint fields: `restored`, the claims whose revision the scan read and which therefore keep their holder's restart grace, and `delete_markers`, the tombstones the scan streamed past to find them (production on 2026-09-28: `restored=9 delete_markers=757`). They are separate on purpose — one total of both reads as claims the restart failed to restore. `internal/store`'s lines, this one and both reaper cycles, now go through the logger the listener passes it (`store.WithLogger`), so they are JSON records carrying `machine_id` like the rest of the listener's output. `internal/bus`'s lines and the stdlib `log` package's stay in Go's text format, which the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream subjects match on.
 - A CI record write that runs out of its two-second retry budget logs one JSON line, `ci record exceeded its retry budget`, naming the head (`owner`, `repo`, `number`, `sha`), the record's `checks`, the write's `attempts`, the `observations` it answered 503 and the last attempt's `error`, so an alarm can count the listener's 503s by that cause.
@@ -26,9 +27,42 @@
   and never NATS, since the outbox publishes no issue-less event. Every delivery attempt now reads
   `requested_by` (who asked for it, kept on a resume, null before migration 0054), `accepted_at`
   and `accepted_as` (LEGION-394).
+- `POST /api/v1/broadcasts` requires `idempotency_key`, naming one send (letters, digits, `.`,
+  `_`, `:` and `-`, at most 128 characters), so a repeated create no longer hands every recipient
+  the message twice. A repeat by the same human with the same key, body, mode and `session_ids`
+  is answered `200` with the broadcast the key made, even while the listener is down; the same
+  key with a different request is `409 BROADCAST_KEY_REUSED`, naming that broadcast as
+  `broadcast_id`, and sends nothing; two requests carrying one key at once write one broadcast.
+  A missing key or one with another character is `400 BROADCAST_INPUT`, and one over 128
+  characters `400 CAP_EXCEEDED`; only the missing-key text adds what a page loaded before this
+  change should do (restore its draft, copy the message, reload and send again). Keys are stored
+  per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
+  broadcast (LEGION-446).
 
 ### Changed
 
+- The stream stores an envelope under a MsgId, and so recognises its repeat, when its dedupe key was
+  minted once for its message: the listener's own `publish.<id>` and `agent.<session>.<id>`, and the
+  same around the shared transport's UUID idempotency key (`contracts.MintedDedupeKeyPattern`,
+  generated from `MINTED_DEDUPE_KEY_PATTERN` in `packages/contracts`). Only a re-send of that
+  message repeats such a key: the transport's retry of a send whose answer was lost, which now
+  answers `duplicate: true` and is stored once, and the Legion daemon's copy of a role-lane notice
+  (LEGION-108). Before, only Dispatch and webhook delivery-id keys earned a MsgId. The same rule,
+  `dedupeKeyNamesItsEvent`, now decides what a core-NATS host drops.
+- The Dispatch dashboard no longer offers a same-mode **Retry** for a targeted message or comment
+  mention its session answered with an error (a BTW whose side turn failed, a frame its host
+  refused). The stream already stored that attempt's frame under the Retry's key, so a session the
+  listener pushes to from the stream was never handed the Retry, and the attempt then read
+  "Delivered by an earlier attempt". The card now says the session answered with an error and
+  points at its mode-change actions; the mention list points at a new comment. Sending that Retry
+  under a new key is LEGION-431. On a closed issue the mention list, like the card, no longer
+  promises "Retry won't deliver it twice" beside a failure it offers no Retry for.
+- `POST /v1/messages/publish` refuses a `dedupe_key` on a `source: "dispatch"` envelope with a 400
+  naming `dedupe_key`. Every host drops a repeat of a Dispatch key, and Dispatch's outbox numbers
+  its keys in sequence (`dispatch-<event id>`), so any holder of the listener bearer could publish
+  `dispatch-<next id>` on a topic someone follows and make that host drop the real event when it
+  arrived. Dispatch never set one there: its outbox publishes to the bus directly, and its sends
+  go through `/v1/messages/send`, whose key the listener makes.
 - Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the
@@ -90,6 +124,10 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+- Dispatch exits with status 1 when it cannot bind its listen address. It logged
+  `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
+  clash as a clean stop.
+
 - A search that contains only stop words now returns `200` with no results, so every consumer
   can show an empty result rather than a retryable failure.
 

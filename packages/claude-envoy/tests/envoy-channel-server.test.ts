@@ -28,10 +28,13 @@ import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
 
-/** A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for. */
+/**
+ * A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for,
+ * under the key the listener minted for the publish behind the arbiter's forward mark.
+ */
 const roleForwardRaw = JSON.stringify({
   event_id: "evt-role-7",
-  dedupe_key: "envoy.role.forward.role-7",
+  dedupe_key: "envoy.role.forward.publish.0123456789abcdef0123456789abcdef",
   source: "agent",
   source_session: "ses_sender",
   topic: "notifications.role.reviewer",
@@ -107,6 +110,7 @@ test("enqueues a forwarded role-lane event before publishing its adapter receipt
   const delivery = {
     enqueue: async () => {
       nats.order.push("enqueue")
+      return true
     },
     announceFollow: async () => undefined,
     inbox: () => [],
@@ -133,6 +137,7 @@ test("never answers the reply inbox of a JetStream publish to the direct subject
   const delivery = {
     enqueue: async () => {
       nats.order.push("enqueue")
+      return true
     },
     announceFollow: async () => undefined,
     inbox: () => [],
@@ -150,7 +155,7 @@ test("never answers the reply inbox of a JetStream publish to the direct subject
   expect(nats.published).toEqual([])
 })
 
-test("delivers each event id once while acknowledging every forwarded request after enqueue", async () => {
+test("delivers each dedupe key once while acknowledging every forwarded request after enqueue", async () => {
   const nats = new FakeNats()
   const notifier = new FakeNotifier(nats.order)
   const stateDirectory = await scratchState()
@@ -172,6 +177,104 @@ test("delivers each event id once while acknowledging every forwarded request af
       ["_INBOX.receipt", 0],
       ["_INBOX.receipt", 0],
     ])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+/**
+ * One Dispatch message as the listener publishes it for one send: `/v1/messages/send` mints a
+ * fresh `event_id`, `source_event_id` and `trace_id` for every request and derives `dedupe_key`
+ * from the idempotency key Dispatch passes, which is the same for an attempt and its same-mode
+ * Retry (`packages/envoy/cmd/listener/api.go` messageEnvelope, sendHandler).
+ */
+function listenerSend(send: string): string {
+  return JSON.stringify({
+    event_id: `evt-${send}`,
+    source: "dispatch",
+    source_event_id: `src-${send}`,
+    topic: directSubject,
+    dedupe_key: "agent.ses_claude.33333333-3333-4333-8333-333333333333:aside",
+    issued_at: 1_760_000_000_000,
+    payload_summary: "Run the migration",
+    payload: JSON.stringify({
+      event: {
+        actor: { id: "alice", kind: "user" },
+        issue_key: "CORE-1",
+        payload: {
+          author: { id: "alice", kind: "user" },
+          body: "Run the migration",
+          created_at: "2026-09-30T00:00:00Z",
+          deliveries: [],
+          id: "33333333-3333-4333-8333-333333333333",
+          in_reply_to: null,
+          issue_key: "CORE-1",
+          target: "session:ses_claude",
+        },
+        type: "message.created",
+      },
+      delivery: { attempt: 1, mode: "aside" },
+    }),
+    trace_id: `trace-${send}`,
+  })
+}
+
+test("a Dispatch Retry the listener re-sends under the same dedupe key reaches Claude once", async () => {
+  const nats = new FakeNats()
+  const notifier = new FakeNotifier()
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      notifier,
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, listenerSend("attempt"))
+    nats.emit(directSubject, listenerSend("retry"))
+    await settled()
+
+    expect(notifier.notifications).toHaveLength(1)
+    expect(notifier.notifications[0]?.params.meta["event_id"]).toBe("evt-attempt")
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a send whose notification failed is delivered when it is sent again", async () => {
+  const nats = new FakeNats()
+  const delivered: string[] = []
+  let failNext = true
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      notifier: {
+        notification: async (notification) => {
+          if (failNext) {
+            failNext = false
+            throw new Error("the MCP transport refused the write")
+          }
+          delivered.push(String(notification.params.meta["event_id"]))
+        },
+      },
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, listenerSend("attempt"))
+    await settled()
+    nats.emit(directSubject, listenerSend("retry"))
+    await settled()
+    nats.emit(directSubject, listenerSend("third"))
+    await settled()
+
+    // Claude never saw the first send, so its key must not turn the second away as a repeat; it
+    // did see the second, so the third is one.
+    expect(delivered).toEqual(["evt-retry"])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
@@ -343,7 +446,9 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
   })
 
   try {
-    await delivery.enqueue({ subject: directSubject, raw: rejectedFrameRaw })
+    // Not handed to Claude Code, so the forwarder releases its claim: Dispatch records the attempt
+    // failed, and a same-mode Retry is answered again rather than dropped as a repeat.
+    expect(await delivery.enqueue({ subject: directSubject, raw: rejectedFrameRaw })).toBe(false)
 
     expect(notifier.notifications).toEqual([])
     expect(replies).toEqual([
@@ -360,6 +465,65 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
   } finally {
     server.stop(true)
     process.env = previous
+  }
+})
+
+// The forwarder releases the claim of a frame Claude Code was not handed, so the re-send of a
+// Dispatch frame the channel answered with an error is answered again rather than dropped as a
+// repeat of its dedupe key.
+test("a Dispatch frame the channel answered with an error is answered again when re-sent", async () => {
+  const control = JSON.parse(
+    rejectedFrameRaw.replaceAll(
+      "44444444-4444-4444-8444-444444444444",
+      "55555555-5555-4555-8555-555555555555",
+    ),
+  )
+  const replied: string[] = []
+  const controlAnswered = Promise.withResolvers<void>()
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      const path = new URL(request.url).pathname
+      replied.push(path)
+      if (path.includes("55555555")) controlAnswered.resolve()
+      return Response.json({})
+    },
+  })
+  const previous = { ...process.env }
+  process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
+  process.env["DISPATCH_TOKEN"] = "reply-token"
+  const nats = new FakeNats()
+  const notifier = new FakeNotifier()
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", process.cwd()), stateDirectory, {
+      connection: nats,
+      notifier,
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, rejectedFrameRaw)
+    // The listener mints a fresh event id for the re-send; its dedupe key is the first send's.
+    nats.emit(
+      directSubject,
+      JSON.stringify({ ...JSON.parse(rejectedFrameRaw), event_id: "resend" }),
+    )
+    // One subscription's frames are delivered in order, so the control's answer comes after
+    // whatever the channel did with the re-send.
+    nats.emit(
+      directSubject,
+      JSON.stringify({ ...control, event_id: "control", dedupe_key: "dispatch-control" }),
+    )
+    await controlAnswered.promise
+
+    expect(notifier.notifications).toEqual([])
+    expect(replied.filter((path) => path.includes("44444444"))).toHaveLength(2)
+  } finally {
+    await session.shutdown()
+    server.stop(true)
+    process.env = previous
+    await rm(stateDirectory, { recursive: true, force: true })
   }
 })
 
