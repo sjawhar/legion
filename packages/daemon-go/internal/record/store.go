@@ -117,7 +117,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff, decision from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff, decision, completed_at from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -146,13 +146,14 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 		}
 	}
 	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff,
-		decision)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		decision, completed_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (issue, role) do update set claim = excluded.claim,
 		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
-		summary = excluded.summary, last_handoff = excluded.last_handoff, decision = excluded.decision`,
+		summary = excluded.summary, last_handoff = excluded.last_handoff, decision = excluded.decision,
+		completed_at = excluded.completed_at`,
 		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
-		decision,
+		decision, phase.CompletedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -165,9 +166,10 @@ func scanPhase(row scanner) (PhaseRow, error) {
 	var role, token string
 	var decision []byte
 	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
-		&decision); err != nil {
+		&decision, &phase.CompletedAt); err != nil {
 		return PhaseRow{}, err
 	}
+	phase.CompletedAt = phase.CompletedAt.UTC()
 	if decision != nil {
 		phase.Decision = &ReviewDecision{}
 		if err := json.Unmarshal(decision, phase.Decision); err != nil {

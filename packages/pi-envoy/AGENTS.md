@@ -352,8 +352,9 @@ PROCEEDING. An open ask or `opened_since` never suppresses this check.
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with
 `triggerTurn`: it says the agent is waiting on a human for something no open ask covers, and tells
-it to open an ask with `dispatch_ask` (or `dispatch_request_approval` for a document), naming
-exactly what it needs and from whom. The parse is case-sensitive and first-word-only because a false
+it to open an ask with `dispatch_ask`, naming exactly what it needs and from whom. It never offers
+`dispatch_request_approval`: an approval request is for a settled spec, not a way to wait on a
+human. The parse is case-sensitive and first-word-only because a false
 WAITING is the expensive error — its steer tells an agent to page a human with a question it does
 not need — while a false PROCEEDING is only silence. PROCEEDING, an unparsable reply, a side-turn
 failure, the timeout, and a host with no side turn at all are silent; the last also arms no period.

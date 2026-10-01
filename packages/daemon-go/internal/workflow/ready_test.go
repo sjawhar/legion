@@ -226,8 +226,9 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 }
 
 // Linger holds every member of a closed tree where it stood, whichever path a fact takes: no
-// approval, green checks, red checks that exhaust max_fix_attempts, changes requested, backward
-// move, retry of a held phase or failed claim moves a member, counts a review round, posts or notifies, or starts a worker, whose start would
+// approval, green checks, red checks that exhaust max_fix_attempts, changes requested, reviewer's
+// comment on a round no review decided, backward move, retry of a held phase or failed claim moves
+// a member, counts a review round, posts or notifies, or starts a worker, whose start would
 // resume a suspended claim inside a tree that has left the workflow. A worker's own request is
 // refused, so it is told nothing moved. A merge is the one fact GitHub never sends again: it moves
 // the child on to its production check, and still starts nobody.
@@ -248,6 +249,10 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}},
 		{name: "green checks on an approved head", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "head"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Verdict: "green", Failing: []string{}}},
+		{name: "green checks on an approval the head does not carry", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "older"},
+			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Verdict: "green", Failing: []string{}}},
+		{name: "the reviewer's comment on a round no review decided", at: phase.Reviewing, pr: record.PullRequest{Verdict: "green"},
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: "legion-reviewer[bot]", Body: "a thought"}},
 		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Verdict: "red", Failing: []string{"ci"}}},
 		{name: "changes requested at the round cap", at: phase.Reviewing,
@@ -270,7 +275,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			seedPR(t, pool, pr)
 			// The implementer is one round short of the review round cap, so a counted round would
 			// post the cap message and notify the architect. A review ends when both of its halves
-			// are in (advanceReview), so the reviewer of a child in reviewing has completed its round,
+			// are in (reviewRound), so the reviewer of a child in reviewing has completed its round,
 			// and the review decides the rest.
 			reviewer := record.PhaseRow{Role: claim.RoleReviewer, Decision: tc.decision}
 			if tc.at == phase.Reviewing {
@@ -280,7 +285,9 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 				row.Issue, row.Claim = "LEGION-209", claim.Token(string(row.Role)+"-claim")
 				seedPhase(t, pool, row)
 			}
-			apply := applyFacts(t, pool, readyEngine(""))
+			engine := readyEngine("")
+			engine.cfg.ReviewAppLogin = "legion-reviewer[bot]"
+			apply := applyFacts(t, pool, engine)
 
 			apply("close-root", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.closed", Status: "done", Title: "root", Rank: "U"})
 			result := apply("fact", tc.fact)

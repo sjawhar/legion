@@ -7,6 +7,7 @@ import {
   type ReactNode,
   type SyntheticEvent,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -23,6 +24,7 @@ import type {
 } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -46,8 +48,6 @@ import {
   linkHoverText,
   linkText,
   primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   quoteAccentBorder,
   quoteBodyText,
   referencePillBorder,
@@ -439,9 +439,6 @@ function survivingMentions(body: string, mentions: readonly AcceptedMention[]): 
   }
   return surviving;
 }
-function hasDraft(kind: ComposerKind, body: string, replacement: string): boolean {
-  return (kind === "suggestion" ? replacement : body).trim().length > 0;
-}
 
 export function hasUnsavedInput(
   body: string,
@@ -455,14 +452,36 @@ export function hasUnsavedInput(
   );
 }
 
+/** Whether Send takes the draft now: nothing refuses it (`draftRefusal`, the one rule for what an
+ *  empty draft is) and no save or upload it waits on is in flight. */
 export function canSubmitComposer(
-  kind: ComposerKind,
-  body: string,
-  replacement: string,
+  refusal: string | undefined,
   isSaving: boolean,
   pendingUploads: number
 ): boolean {
-  return hasDraft(kind, body, replacement) && !isSaving && pendingUploads === 0;
+  return refusal === undefined && !isSaving && pendingUploads === 0;
+}
+
+/**
+ * Why Send refuses a draft it is not busy with, or undefined when it would take it: an empty
+ * draft, and a delivery command with nothing after it - `/btw ` alone, where the box holds text
+ * and Send is still dead. A save or an upload in flight names itself on the button instead.
+ */
+function draftRefusal(
+  kind: ComposerKind,
+  body: string,
+  replacement: string,
+  outbound: DeliveryPlan
+): string | undefined {
+  if (kind === "suggestion") {
+    return replacement.trim() === "" ? "Type the replacement text first." : undefined;
+  }
+  if (body.trim() === "")
+    return kind === "ask" ? "Type the question first." : "Type a message first.";
+  if (kind === "comment" && outbound.delivery !== undefined && outbound.body.trim() === "") {
+    return `Type the message after ${outbound.delivery === "btw" ? "/btw" : "/aside"}.`;
+  }
+  return undefined;
 }
 
 interface MentionComposerProps {
@@ -893,9 +912,9 @@ export function MentionComposer({
           ? "steer"
           : undefined;
   const outbound = deliveryPlan(body, inheritedDelivery);
-  const canSubmit =
-    canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads) &&
-    (kind !== "comment" || outbound.delivery === undefined || outbound.body.trim() !== "");
+  const submitReason = draftRefusal(kind, body, replacement, outbound);
+  const footId = useId();
+  const canSubmit = canSubmitComposer(submitReason, save.isPending, pendingUploads);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) submitGuard.guard(() => save.mutate(currentDraft()));
@@ -1290,15 +1309,18 @@ export function MentionComposer({
           retrying={save.isPending}
         />
       ) : null}
-      <button
-        className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={!canSubmit}
+      <RefusableButton
+        busy={save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : undefined}
+        refusal={submitReason ?? null}
+        refusalShownBy={footId}
         type="submit"
       >
-        {save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : title}
-      </button>
-      <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
-        Ctrl/Cmd+Enter to send · Enter for a new line
+        {title}
+      </RefusableButton>
+      {/* While Send refuses, the line under it says why - on screen, for a reader with no
+          pointer to hover it - and once the draft can go, how to send it. */}
+      <p className={`text-xs ${textMutedOnSurfaceMuted}`} id={footId}>
+        {submitReason ?? "Ctrl/Cmd+Enter to send · Enter for a new line"}
       </p>
     </form>
   );

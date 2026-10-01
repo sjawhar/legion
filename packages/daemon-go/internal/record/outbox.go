@@ -98,7 +98,9 @@ func (m MessagePost) Posted(id int64) string {
 type NoticeKind string
 
 // Notice is a role-facing workflow observation. A phase-finished notice carries the finishing
-// worker's own summary and, beside it, the verdict it gave (the tester's pass or fail).
+// worker's own summary and, beside it, the verdict it gave (the tester's pass or fail). A
+// review-stuck notice's summary names the fact that wrote it, and its topic is the reviewer's role
+// topic, which the architect asks for the decision.
 type Notice struct {
 	Kind    NoticeKind  `json:"kind"`
 	Role    claim.Role  `json:"role,omitempty"`
@@ -107,6 +109,7 @@ type Notice struct {
 	Verdict string      `json:"verdict,omitempty"`
 	Version int         `json:"version,omitempty"`
 	Reason  string      `json:"reason,omitempty"`
+	Topic   string      `json:"topic,omitempty"`
 	// Resends counts the times the notice was queued again after the listener could not forward
 	// it to its architect's session (the daemon's rehold), which stops at a cap.
 	Resends int `json:"resends,omitempty"`

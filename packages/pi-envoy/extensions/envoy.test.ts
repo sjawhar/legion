@@ -512,7 +512,7 @@ function responseWithRegistration(
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
 const UNASKED_WAIT_NUDGE =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask, naming exactly what you need and from whom.";
 
 /** Custom-message type of the nudge itself, which a session hears amid other deliveries. */
 const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
@@ -3110,7 +3110,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("structured delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "envoy",
         at: "1970-01-01T00:00:00Z",
         id: "evt-toon-structured",
@@ -3154,7 +3154,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("plain-text delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "envoy",
         at: "1970-01-01T00:00:00Z",
         id: "evt-toon-plain-text",
@@ -3197,7 +3197,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("peer delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "ses_peer",
         at: "1970-01-01T00:00:00Z",
         id: "evt-peer-message",
@@ -3242,7 +3242,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("human delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "human",
         at: "1970-01-01T00:00:00Z",
         id: "evt-human-message",
@@ -3284,7 +3284,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("echo delivery was not injected");
     const note = decode(content) as { envoy: Record<string, unknown> };
     expect(note.envoy).toEqual({
-      to: "you (ses_…)",
+      to: "you (ses_omp)",
       from: "ses_omp",
       at: "1970-01-01T00:00:00Z",
       id: "evt-self-echo",

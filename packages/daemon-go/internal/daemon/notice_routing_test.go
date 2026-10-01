@@ -55,7 +55,7 @@ func (p *holderPublisher) setAbsent(topics ...string) {
 // architectTopic is the role topic of issue's architect claim.
 func architectTopic(t *testing.T, issue string) string {
 	t.Helper()
-	return roleTopicPrefix + string(mustClaimToken(t, issue, claim.RoleArchitect))
+	return notify.RoleTopicPrefix + string(mustClaimToken(t, issue, claim.RoleArchitect))
 }
 
 // deliveredKinds is each delivered notice as "<kind> to <architect's issue>", in order.
@@ -218,7 +218,7 @@ func TestANoticeGoesToTheOwningArchitectsRoleTopicAlone(t *testing.T) {
 	for _, issue := range []string{"LEGION-1", "LEGION-2", "LEGION-3"} {
 		subjects := []string{"notifications.legion.legion." + issue}
 		for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
-			subjects = append(subjects, roleTopicPrefix+string(mustClaimToken(t, issue, role)))
+			subjects = append(subjects, notify.RoleTopicPrefix+string(mustClaimToken(t, issue, role)))
 		}
 		if slices.Contains(subjects, delivered[0].topic) {
 			t.Fatalf("the notice went to %s, a subject a phase worker of %s holds", delivered[0].topic, issue)

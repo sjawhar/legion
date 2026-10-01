@@ -127,8 +127,9 @@ func oneSecret(entries ...string) []byte {
 }
 
 // TestApproversSectionIsRefused pins the removal of the approvers: section: approval is by
-// Dispatch login, so a rules file still carrying WebAuthn key material (the shape agent-c's file
-// had) must fail to load with an error naming the removal, never parse with the section ignored.
+// Dispatch login, so a rules file still carrying WebAuthn key material (the shape the deployment
+// repository's file had) must fail to load with an error naming the removal, never parse with the
+// section ignored.
 func TestApproversSectionIsRefused(t *testing.T) {
 	for name, section := range map[string]string{
 		"with keys": "approvers:\n  origin: https://dispatch.test\n  aaguids: [\"ee882879-721c-4913-9775-3dfcce97072a\"]\n" +

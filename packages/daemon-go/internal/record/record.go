@@ -101,6 +101,13 @@ type PhaseRow struct {
 	// reported for the round that carried one, kept until the round ends, since the reviewer's
 	// completion can come after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
+	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
+	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
+	// reviewersAnswer and answerSkew), and is read only for a round whose HandoffCommit is set. It can
+	// be stale: a daemon older than migration 0026 writes a completion without it, and
+	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
+	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
+	CompletedAt time.Time
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,

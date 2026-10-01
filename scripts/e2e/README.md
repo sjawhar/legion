@@ -177,7 +177,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | :--- | :--- |
 | `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `goDaemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
-| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"; the rubric put back |
+| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
 | `gate-refuses-a-skill-only-the-role-prompts-load` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's roles directory can say; the skill put back |
 | `gate-refuses-an-unconfigured-model-role` | `modelRoles.oracle` removed from the isolated profile's `config.yml`; `legion start` refuses with "on its model @oracle: role oracle is not configured", naming `task agent oracle` and the prompts that dispatch it; the profile put back byte for byte |
 | `architect-registers-and-is-ready` | `legion start` passes the gate (its log line); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
@@ -592,6 +592,7 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   LEGION_E2E_DISPATCH_TOKEN_SECRET_ID=<secret id> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
+STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -631,6 +632,27 @@ subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and 
 checkpoint that stopped the run did not fail itself: a `STAGE4B_UNTIL` run's last checkpoint, a
 blocked checkpoint, a signal. Every verdict but the pass exits non-zero: 1, or the
 stopping signal's 129, 130 or 143 when the teardown was clean.
+
+`STAGE4B_DESIGN_GATE=root-issues`, refused without a `STAGE4B_UNTIL` of `spec-posted` or a checkpoint
+before it, arms the design gate (`gates.design: root-issues`) and files tree 1 alone, since each
+admitted root's architect requests approval on its own. Tree 1's document leaves one choice (where
+the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `spec-posted` waits up
+to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
+It then fails unless the architect's approval request at the approved version carries a summary
+after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
+and no approval request on the spec, retracted ones included, was early by either of two rules
+([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by `bun test scripts/e2e/lib`).
+The version rule judges every request: the version it named must hold none of the spec's blocks
+open, read from the version itself by the block ids of the spec's block asks, because Dispatch
+indexes a block as an ask only when it settles the document, after the edit that wrote it. The
+answer-time rule judges a request no human answered: it must not come before a human answered one
+of the spec's blocks, which catches a request made while the choice was still prose or sent in
+parallel with the edit that wrote the block. A request the human answered is left to the version
+rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
+the human answers it, the architect requests again) passes; the trade-off is that a premature
+request the human answered with Request changes no longer fails the run, since the human caught it.
+It keeps the issue's asks as `<issue>-asks.json`, each requested version as
+`<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -730,7 +752,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
 | `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
 | `issue-cap-moves` | the proof human's `backlog` on tree 2's live root is set back: the next status write is `legion-daemon:LEGSMOKE`'s (a control re-attributing it must fail), tree 2's architect receives a `status-reasserted` notice naming the proof human, and tree 2 keeps its slot; `legion status … backlog` then frees the slot, tree 3 is admitted, and tree 2's pods are gone |
-| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/` |
+| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/`. The review round is one no review decides at first: the proof tells the reviewer to submit a `COMMENT` rather than decide and to complete, and requires, at the completion, no approval and the issue still in `reviewing`; then the `review-stuck` notice on the architect, written by the reviewer's completion and naming a head that is a commit of the pull request (kept as `notice-review-stuck.jsonl`). The proof's instructions hold every agent until a targeted message gives its next operation, so the driver then tells the architect only to handle that notice as its role says, naming no topic, head or decision. The proof then requires a message in the reviewer's session whose `reply_role` names the architect's role topic, delivered after the reviewer's completion (the architect asking for the decision; the proof's own steers carry none). Messages are counted from the completion, since the notice is written in the completion's own transaction and the architect needs a model turn after it, so a message the architect sent the reviewer earlier in the round, such as a reply to the reviewer's round report, is not counted, not kept and cannot set the path. The ones after it are kept as `architect-ask.jsonl`; one the architect sent on its own, before the driver's message, counts as the stronger pass and is noted. Then the reviewer's approval of the head, which ends the round, and the issue leaving `reviewing` for retro or merging. An architect acting on the notice unprompted, as it must where no driver holds it, is not proven here (LEGION-413) |
 | `completion-closed` | each phase worker of tree 1 — planner, implementer, tester, reviewer — is suspended once its phase ends, and its saved session answers every `handoff_complete` call of the legion tool, holds one success for each assignment it completed, and records the phase stall `closed` after that call, with no phase-stall follow-up after its last success: the 4b.13b acceptance's stall check (`stage3-4b13b-acceptance.sh`'s `pane-rule-phase-worker-and-stall`), which a suspension that stops the worker inside the call fails (LEGION-283). The sessions and each verdict are kept as `completion-<role>.jsonl` and `completion-<role>-verdict.json`. Its control: the planner's session cut at its `handoff_complete` call, the transcript such a suspension leaves, is refused |
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery or a hub wait or jobs snapshot, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
@@ -1423,9 +1445,10 @@ where an agent runs:
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
 
-`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
-`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
-none, since it runs under its root's tree.
+`new_issue TITLE [PARENT] [SPEC]` creates each issue a proof drives. A root carries the Dispatch
+label `legion`, which hands it to the Go daemon (the daemon admits no root without it), and `SPEC`
+as its primary document, `smoke_spec` when `SPEC` is omitted. A child carries neither, since it runs
+under its root's tree.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to
 GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox

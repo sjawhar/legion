@@ -71,14 +71,17 @@ completion leaves the issue in reviewing until you finish.
   First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
-  with `'~docs/solutions'` appended, which must print nothing. The merger always posts
-  `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
-  `packages/pi-envoy/roles/merger.md` defines), its summary, and the PR body's gate facts as a
-  `dispatch_message` on the issue. When the `Legion addressing` line names a merge queue, it also
-  publishes the same packet there with `envoy_publish`; a 404 means the Dispatch message remains
-  the durable notice and the merger stays idle. The READY packet names both the implementer's and
-  tester's `E2E` lines; a missing one is reported to the architect instead of published. Legion
-  never merges.
+  with `'~docs/solutions'` appended, which must print nothing. *The READY packet*: the merger
+  always posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
+  (the shape `packages/pi-envoy/roles/merger.md` defines), then the PR body's `Outcome:` line and
+  its `Not proven / risk:` value — every bullet under that label joined with `; ` on the one
+  READY line, or `none` — quoted from the `## For the reviewer` block at that same head (or one
+  line saying the body carries no brief — the packet still publishes), then the `--summary`
+  output and the PR body's gate facts, as a `dispatch_message` on the issue. When the `Legion
+  addressing` line names a merge queue, it also publishes the same packet there with
+  `envoy_publish`; a 404 means the Dispatch message remains the durable notice and the merger
+  stays idle. The READY packet names both the implementer's and tester's `E2E` lines; a missing
+  one is reported to the architect instead of published. Legion never merges.
 
 ## After the human merge
 
