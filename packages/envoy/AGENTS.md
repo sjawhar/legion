@@ -24,7 +24,7 @@ events to the right session.
 | Webhook handlers       | `internal/webhook/{github,slack,ghostwispr}.go` | HTTP ingress, signature verification, publish path |
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
-| NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
+| NATS client            | `internal/bus/nats.go`, `internal/bus/recovery.go` | connect, subscribe and publish; reconnect, recovery and the reconnect hooks |
 | NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one |
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
