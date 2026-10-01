@@ -4,6 +4,14 @@ Dispatch is the React single-page application for coordinating native Dispatch
 issues. The Go server lives in `packages/envoy/cmd/dispatch` and serves the
 production build from `web/dist`.
 
+## Reaching production
+
+An image-pin merge and Dispatch deployment are separate steps: the listener can move while Dispatch
+remains on a previous image until the deployment repository's manually dispatched `dispatch-deploy.yml`
+runs on `main`. A pull request whose behavior depends on a deployed Dispatch server states that
+dependency in its body. For the image-pin comparison and `/healthz` deployment evidence, see
+`packages/envoy/cmd/dispatch/AGENTS.md`.
+
 ## Layout
 
 - `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar, main-content, and margin shell. The sidebar provides Inbox, Pinned issues, Projects, Agents, and Settings without loading the full issue list. The `/agents` route groups live sessions by Dispatch activity and freshness, with targeted exchanges and the shared BTW/Aside/Steer composer. Issue pages have Spec, Conversation, Children, and Artifacts tabs. Issue margins show Comments (anchored threads beside the document, Proof's model) and Pinned; standalone project-document margins show Comments only. At `xl` the sidebar and margin are independently collapsible rails; compact widths use their respective sheets. A margin is a property of a document surface, so on a desktop route that has none - the Inbox, a project, Settings, Agents - `features/margin/Margin.tsx` renders nothing at all rather than a 384 px column holding a placeholder sentence; it keys on the route (an issue path, or a project-document path) rather than on `useMarginOwner`, whose document owner only resolves once the artifact query lands, and the reader's own collapse preference is untouched, so the margin returns as they left it on the next issue or document. The desktop sidebar is a `sticky top-0` viewport-tall flex column inside its full-height `<aside>`: the navigation stays reachable on a long issue, and the signed-in name and `Sign out` sit in an `mt-auto` footer beneath the links rather than above them, because identity is read once and the navigation on every visit. Per-user sidebar visibility, margin visibility, and margin width persist in browser storage.
