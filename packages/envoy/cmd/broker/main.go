@@ -1,6 +1,7 @@
 // Command broker is the AGENTC-833 secrets broker: it enrolls agent sessions and pods, decides
 // their secret requests by policy or an approver's Dispatch login over a signed credential-request
-// record, and releases granted values. AGENTC-393 v9: the broker holds no Dispatch credential —
+// record, and releases granted values. Per the shared broker contract
+// (dispatch://AGENTC-393/artifact/plan-overview-md), the broker holds no Dispatch credential —
 // Dispatch's server calls the broker's UI routes with the deciding human's login, and the broker
 // never opens a Dispatch ask.
 package main
@@ -38,9 +39,9 @@ import (
 )
 
 // machineLoginPendingTTL bounds how long a typed-code machine login waits for a human to decide
-// it before the Sweeper expires it. Not a BROKER_* config knob (AGENTC-393 v9's Configuration
-// deltas name none for it): 15 minutes comfortably covers the "look at the terminal, type the
-// code" UX the confirmation-code flow is built around.
+// it before the Sweeper expires it. Not a BROKER_* config knob (the shared broker contract's
+// Configuration deltas name none for it): 15 minutes comfortably covers the "look at the
+// terminal, type the code" UX the confirmation-code flow is built around.
 const machineLoginPendingTTL = 15 * time.Minute
 
 // agentSecretPendingTTL bounds how long an agent_secret request waits for approval before the
