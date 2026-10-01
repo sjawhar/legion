@@ -64,6 +64,7 @@ export const dispatchAskSchema = $markSchema('dispatchAsk', (ctx) => ({
     by: { default: 'unknown' },
   },
   inclusive: false,
+  excludes: '',
   spanning: true,
   parseDOM: [
     {
@@ -484,19 +485,25 @@ export function findAskMarkRange(doc: ProseMirrorNode, markId: string): MarkRang
   return { from: ranges[0].from, to: ranges[ranges.length - 1].to };
 }
 
-/** Removes every span of a dispatchAsk mark id. Returns false if none were found. */
+/** Removes every span of a dispatchAsk mark id, and only that mark: another ask may cover the same
+ *  text (the schema's `excludes: ''`), which a removal by type would take with it. Returns false if
+ *  none were found. */
 export function removeAskMark(view: EditorView, markId: string): boolean {
   const { state } = view;
-  const markType = state.schema.marks.dispatchAsk;
-  if (!markType) return false;
-
-  const ranges = collectAskMarkRanges(state.doc, markId);
-  if (ranges.length === 0) return false;
-
   let tr = state.tr;
-  for (const range of ranges.slice().reverse()) {
-    tr = tr.removeMark(range.from, range.to, markType);
-  }
+  let found = false;
+  state.doc.descendants((node, pos) => {
+    if (!node.isText) return true;
+    const mark = (node.marks as ProseMirrorMark[]).find(
+      (candidate) => candidate.type.name === 'dispatchAsk' && candidate.attrs.id === markId
+    );
+    if (mark) {
+      tr = tr.removeMark(pos, pos + node.nodeSize, mark);
+      found = true;
+    }
+    return true;
+  });
+  if (!found) return false;
   view.dispatch(tr);
   return true;
 }

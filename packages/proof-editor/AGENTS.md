@@ -40,7 +40,7 @@ not reach them:
 | `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Eight kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Nine kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -57,12 +57,15 @@ in the tree (136 lines in the module) — `typedBlockSpec` moved out of `blockSc
 wrapper on `toDOM`, and the suite's cases for all of it; `src/lib.ts` installing its peer
 cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of calling
 `yCursorPlugin` itself; `src/lib.ts` installing `trailingNewlineInputPlugin` from
-`./trailing-newline-input`; and annotations, casts and assertions
-that make a file type-check, each of which erases before runtime (below).
+`./trailing-newline-input`; `src/dispatch-marks.ts`'s `dispatchAsk` schema declaring
+`excludes: ''`, so two readers' asks may cover the same text, and `removeAskMark` removing that
+mark's instance by id rather than every `dispatchAsk` over its range (LEGION-458); and
+annotations, casts and assertions that make a file type-check, each of which erases before
+runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the eight kinds.
+only lines that differ should be the nine kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
