@@ -410,18 +410,18 @@ func (s *server) storeArtifact(
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publish(append(retractions, event)...)
-	var decisionBlocks *int
+	var blocks *documentBlocks
 	if kind == "doc" {
-		decisionBlocks = countAskBlocks(documentMarkdown)
+		blocks = readDocumentBlocks(documentMarkdown)
 	}
 	if advice != nil {
-		advice.DecisionBlocks = decisionBlocks
+		advice.documentBlocks = blocks
 	}
 	responsePayload := map[string]any{"artifact": artifact, "version": version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
-	} else if decisionBlocks != nil {
-		WriteJSON(w, http.StatusCreated, withDecisionBlockAdvice(responsePayload, *decisionBlocks))
+	} else if blocks != nil {
+		WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(responsePayload, blocks))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}
