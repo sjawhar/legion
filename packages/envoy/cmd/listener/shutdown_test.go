@@ -15,6 +15,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -107,6 +108,43 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 		if !strings.Contains(afterSignal, "listener role forwarded") {
 			t.Fatalf("run %d: no role message in flight at the signal reached the holder:\n%s", run, afterSignal)
 		}
+	}
+}
+
+// A replacement that waits out the old task's durable serves /v1 while it waits, so a SIGTERM there
+// (a circuit-breaker rollback, a second deploy) is an ordered shutdown like any other: HTTP drains,
+// NATS drains, nothing on the path is an error, and the durable the old task holds is left alone.
+func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T) {
+	const machineID = "sigterm-during-bind"
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	holder := holdListenerDurable(t, client, machineID)
+
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), machineID)
+	listener.waitForOutput(t, "subscribe failed, retrying")
+	if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+	listener.waitExit(t, "SIGTERM")
+	output := listener.output.String()
+	if code := listener.cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (-1 is a death by the signal, with no ordered shutdown):\n%s", code, output)
+	}
+	for _, line := range []string{"received signal, shutting down", "envoy-listener shutdown complete"} {
+		if !strings.Contains(output, line) {
+			t.Fatalf("the listener's output has no %q:\n%s", line, output)
+		}
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		if errorLine.MatchString(line) {
+			t.Fatalf("a SIGTERM during the durable's bind wait logged an error: %s", line)
+		}
+	}
+	if !holder.IsValid() {
+		t.Fatal("the old task's subscription to the durable is gone after the replacement's shutdown")
 	}
 }
 
@@ -214,6 +252,26 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 	}
 	_ = p.cmd.Process.Kill()
 	t.Fatalf("the listener never became healthy:\n%s", p.output.String())
+}
+
+// waitForOutput waits up to 30 s for each of lines to appear in the listener's output, and fails the
+// test when the listener exits first or a line never appears.
+func (p *listenerProcess) waitForOutput(t *testing.T, lines ...string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for _, line := range lines {
+		for !strings.Contains(p.output.String(), line) {
+			select {
+			case <-p.exited:
+				t.Fatalf("the listener exited before it logged %q:\n%s", line, p.output.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the listener never logged %q:\n%s", line, p.output.String())
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 }
 
 // waitExit waits up to 30 s for the listener to exit, and fails the test with its output when it is

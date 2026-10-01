@@ -156,6 +156,65 @@ func TestCoreSubscriptionRestoresAfterConnectionRecovery(t *testing.T) {
 	})
 }
 
+// While a listener waits out the task that holds its durable, its JetStream subscription is
+// registered but unbound and its core role lane already delivers. A recovery onto a new connection
+// in that window must restore the role lane though the durable still refuses the bind: the role
+// lane is a queue member a role message can be handed to, and nothing else re-subscribes it.
+func TestACoreSubscriptionRecoversWhileTheJetStreamOneCannotBind(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	publisher := testnats.Connect(t, uri)
+	defer publisher.Close()
+
+	const consumer = "held-elsewhere"
+	if _, err := client.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:        consumer,
+		DeliverSubject: natsgo.NewInbox(),
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		FilterSubjects: bus.StreamSubjects(),
+	}); err != nil {
+		t.Fatalf("add the durable: %v", err)
+	}
+	holderConn := testnats.Connect(t, uri)
+	defer holderConn.Close()
+	holderJS, err := holderConn.JetStream()
+	if err != nil {
+		t.Fatalf("holder JetStream: %v", err)
+	}
+	if _, err := holderJS.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err != nil {
+		t.Fatalf("bind the durable as the other task: %v", err)
+	}
+	if err := holderConn.Flush(); err != nil {
+		t.Fatalf("flush the holder: %v", err)
+	}
+	if _, err := client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err == nil {
+		t.Fatal("bound a durable another connection holds")
+	}
+
+	var received atomic.Int32
+	if _, err := client.SubscribeCore("notifications.role.held-durable", func(*natsgo.Msg) { received.Add(1) }); err != nil {
+		t.Fatalf("subscribe core role lane: %v", err)
+	}
+
+	client.Conn.Close()
+	waitFor(t, 30*time.Second, "core role subscription to recover beside a durable that refuses the bind", func() bool {
+		if err := publisher.Publish("notifications.role.held-durable", []byte("recovered")); err != nil {
+			t.Fatalf("publish to the core role lane: %v", err)
+		}
+		if err := publisher.Flush(); err != nil {
+			t.Fatalf("flush the core role publish: %v", err)
+		}
+		return received.Load() > 0
+	})
+	if client.SubOK() {
+		t.Fatal("SubOK reports the durable bound while another connection holds it")
+	}
+}
+
 func TestCoreSubscriptionsShareQueueGroup(t *testing.T) {
 	_, uri := startNATS(t)
 	first, err := bus.ConnectOwningStream([]string{uri})

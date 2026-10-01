@@ -647,6 +647,10 @@ func (c *Client) restoreSubscriptions() error {
 	if c.stopped() {
 		return errStopped
 	}
+	// Every subscription is attempted, so one that cannot be restored leaves the others delivering: a
+	// listener waiting out the task that holds its durable has an unbound JetStream subscription
+	// beside a core role lane that is already a member of its machine's queue group.
+	var errs []error
 	for index := range c.subscriptions {
 		subscription := &c.subscriptions[index]
 		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
@@ -658,10 +662,10 @@ func (c *Client) restoreSubscriptions() error {
 		}
 		slog.Info("envoy nats resubscribing", slog.String("subject", subscription.subject))
 		if err := restoreSubscription(subscription, conn, js); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (c *Client) ensureConn() error {

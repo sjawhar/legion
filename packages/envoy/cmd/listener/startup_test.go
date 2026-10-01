@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,48 +27,31 @@ import (
 
 // During a rolling deploy the replacement listener cannot bind its durable consumer until the task
 // it replaces lets go of it, which takes the old task's deregistration and shutdown; the load
-// balancer already sends the replacement webhooks by then. A webhook needs NATS and the CI store,
-// not the durable, so the replacement serves it: GitHub does not redeliver a refused delivery on
-// its own. /v1 still waits for every dependency.
-func TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
+// balancer and the private DNS name already send the replacement traffic by then. Neither a webhook
+// nor /v1 reads the durable, so the replacement serves both, and runs its role lane, while it waits:
+// GitHub does not redeliver a refused delivery on its own, and a refused /v1 call is a failed
+// Dispatch delivery or a lost publish. /healthz stays 200 "starting" until the durable binds: a
+// healthy answer there would let ECS take the replacement for ready before it fans anything out,
+// and a 503 would keep ECS from ever stopping the task that holds the durable.
+func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	const (
-		machineID = "webhook-bind-window"
+		machineID = "v1-bind-window"
 		secret    = "bind-window-secret"
 		delivery  = "delivery-bind-window"
+		target    = "ses_bind_window_target"
+		holderID  = "ses_bind_window_holder"
+		role      = "bind-window-role"
 	)
 	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	consumer := "listener-" + machineID
-	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
-	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
-	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
-	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
-	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
-		t.Fatalf("add the durable: %v", err)
-	}
-	// The task being replaced: it holds the durable's push binding until it stops.
-	holder, err := client.JS().Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
-	if err != nil {
-		t.Fatalf("bind the durable as the old task: %v", err)
-	}
+	holder := holdListenerDurable(t, client, machineID)
 
 	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), machineID,
 		"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET="+secret, "ENVOY_REVIEWER_APP_ID=1")
-	deadline := time.Now().Add(30 * time.Second)
-	for !strings.Contains(listener.output.String(), "subscribe failed, retrying") {
-		select {
-		case <-listener.exited:
-			t.Fatalf("the listener exited before it met the bound durable:\n%s", listener.output.String())
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the listener never met the bound durable:\n%s", listener.output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	listener.waitForOutput(t, "subscribe failed, retrying")
 
 	body := []byte(`{"ref":"refs/heads/main","after":"` + strings.Repeat("b", 40) + `","before":"` + strings.Repeat("a", 40) + `",` +
 		`"pusher":{"name":"example-author"},"sender":{"login":"example-author","type":"User"},` +
@@ -97,19 +81,270 @@ func TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the stream's last push is delivery %q, want %q", envelope.SourceEventID, delivery)
 	}
 
-	sessions, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/v1/sessions", nil)
-	if err != nil {
-		t.Fatalf("sessions request: %v", err)
+	if status, answer := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusOK {
+		t.Fatalf("GET /v1/sessions while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.output.String())
 	}
-	sessions.Header.Set("Authorization", "Bearer "+listenerTestToken)
-	if status, answer := do(t, sessions); status != http.StatusServiceUnavailable || !strings.Contains(answer, "service starting") {
-		t.Fatalf("/v1 before the durable binds: status %d %q, want 503 service starting", status, answer)
+	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+target+`","topics":[],"self_subscribed":true}`)
+	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/send", `{"target_session":"`+target+`","message":"sent while the durable is held"}`)
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/messages/send while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.output.String())
+	}
+	var sent contracts.Envelope
+	if err := json.Unmarshal([]byte(answer), &sent); err != nil {
+		t.Fatalf("decode the send answer %q: %v", answer, err)
+	}
+	message, err = client.JS().GetLastMsg(bus.Stream, contracts.AgentSubject(target))
+	if err != nil {
+		t.Fatalf("the sent message is not on the stream: %v", err)
+	}
+	var stored contracts.Envelope
+	if err := json.Unmarshal(message.Data, &stored); err != nil {
+		t.Fatalf("decode the stored message: %v", err)
+	}
+	if stored.EventID != sent.EventID {
+		t.Fatalf("the stream's last message for %s is event %q, want the sent %q", target, stored.EventID, sent.EventID)
+	}
+
+	// The role lane is open too: a role message reaches its holder through this listener's queue
+	// subscription before the durable binds.
+	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, listener.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
+	frames := receiveAsSession(t, client, holderID)
+	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/publish",
+		`{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"role message while the durable is held","source_session":"ses_bind_window_sender"}`)
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/messages/publish to a role while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.output.String())
+	}
+	select {
+	case forwarded := <-frames:
+		if forwarded.Topic != contracts.RoleTopicPrefix+role || !strings.HasPrefix(forwarded.DedupeKey, roleForwardDedupePrefix) {
+			t.Fatalf("the holder received topic %q dedupe key %q, want the role forward of %s", forwarded.Topic, forwarded.DedupeKey, contracts.RoleTopicPrefix+role)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the role holder received no forward while another task holds the durable:\n%s", listener.output.String())
+	}
+
+	// Negative control: the replacement is neither healthy nor unhealthy while it waits. Healthy
+	// would let ECS stop the old task before this one fans anything out; a 503 would never let ECS
+	// stop it at all, and the container health check (curl -sf) would kill this one.
+	status, answer = do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/healthz"))
+	if status != http.StatusOK || !strings.Contains(answer, `"status":"starting"`) {
+		t.Fatalf("/healthz while another task holds the durable: status %d %q, want 200 starting", status, answer)
 	}
 
 	if err := holder.Unsubscribe(); err != nil {
 		t.Fatalf("release the durable as the old task: %v", err)
 	}
 	listener.waitHealthy(t)
+	listener.waitForOutput(t, "durable bound")
+}
+
+// Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
+// before its durable binds, so both subscribe notifications.role.> at once. They are one core-NATS
+// queue group (envoy-listener-<machine id>), and NATS hands each message to one member of a group,
+// so a role message reaches its holder once whichever task takes it: no publish is forwarded by
+// both. A re-publish under the same dedupe key can land on the other task, whose dedupe cache has
+// not seen it, and is forwarded again; the holder's pump drops that copy by its dedupe key, as it
+// drops the copy each other machine's listener forwards today.
+func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T) {
+	const (
+		machineID = "two-tasks"
+		holderID  = "ses_two_tasks_holder"
+		role      = "two-tasks-role"
+		messages  = 64
+	)
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	binary := buildListener(t)
+	uri := client.Conn.ConnectedUrl()
+	old := startListenerProcess(t, binary, uri, machineID)
+	old.waitHealthy(t)
+	replacement := startListenerProcess(t, binary, uri, machineID)
+	replacement.waitForOutput(t, "subscribe failed, retrying")
+
+	postListener(t, replacement.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
+	postListener(t, replacement.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
+	frames := receiveAsSession(t, client, holderID)
+	// The old task learns the claim from the role and session buckets its caches follow.
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		status, _ := callListener(t, old.port, http.MethodGet, "/v1/roles/"+role, "")
+		if status == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the old task never saw %s hold %s: GET /v1/roles/%s is %d", holderID, role, role, status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	publish := func(body string) contracts.Envelope {
+		t.Helper()
+		status, answer := callListener(t, old.port, http.MethodPost, "/v1/messages/publish", body)
+		if status != http.StatusOK {
+			t.Fatalf("POST /v1/messages/publish %s: status %d %q", body, status, answer)
+		}
+		var published contracts.Envelope
+		if err := json.Unmarshal([]byte(answer), &published); err != nil {
+			t.Fatalf("decode the publish answer %q: %v", answer, err)
+		}
+		return published
+	}
+	for index := range messages {
+		publish(`{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"two tasks message ` + strconv.Itoa(index) + `","source_session":"ses_two_tasks_sender"}`)
+	}
+	keys := map[string]int{}
+	for received := range messages {
+		select {
+		case frame := <-frames:
+			if !strings.HasPrefix(frame.DedupeKey, roleForwardDedupePrefix) {
+				t.Fatalf("the holder received dedupe key %q, want one prefixed %s", frame.DedupeKey, roleForwardDedupePrefix)
+			}
+			keys[frame.DedupeKey]++
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the holder received %d of %d role messages:\nold task:\n%s\nreplacement:\n%s", received, messages, old.output.String(), replacement.output.String())
+		}
+	}
+	select {
+	case frame := <-frames:
+		t.Fatalf("the holder received a frame past the %d published: %+v", messages, frame)
+	case <-time.After(time.Second):
+	}
+	if len(keys) != messages {
+		t.Fatalf("the holder received %d distinct dedupe keys over %d frames, want %d: a publish was forwarded twice", len(keys), messages, messages)
+	}
+	roleForwards := func(p *listenerProcess) int {
+		return countRecords(p, "listener role forwarded", func(record map[string]any) bool {
+			return record["topic"] == contracts.RoleTopicPrefix+role
+		})
+	}
+	byOld, byReplacement := roleForwards(old), roleForwards(replacement)
+	if byOld+byReplacement != messages {
+		t.Fatalf("the two tasks logged %d + %d role forwards, want %d in all", byOld, byReplacement, messages)
+	}
+	// NATS spreads a group's messages over its members; all 64 on one has probability 2^-63.
+	if byOld == 0 || byReplacement == 0 {
+		t.Fatalf("the old task forwarded %d and the replacement %d of %d: the replacement's role lane is not a member of the machine's queue group before its durable binds", byOld, byReplacement, messages)
+	}
+
+	// A re-publish under one dedupe key: either the task that forwarded the first copy skips it,
+	// or the other task forwards it again, for the holder's pump to drop.
+	const repeatKey = "two-tasks-repeat"
+	events := map[string]bool{}
+	for range 2 {
+		published := publish(`{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"two tasks repeat","source_session":"ses_two_tasks_sender","dedupe_key":"` + repeatKey + `"}`)
+		events[published.EventID] = true
+	}
+	ofRepeat := func(record map[string]any) bool { return events[record["event_id"].(string)] }
+	handled := func() int {
+		total := 0
+		for _, p := range []*listenerProcess{old, replacement} {
+			total += countRecords(p, "listener role forwarded", ofRepeat) + countRecords(p, "listener role dedupe skip", ofRepeat)
+		}
+		return total
+	}
+	for deadline := time.Now().Add(10 * time.Second); handled() != 2; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the two tasks handled the repeated key %d times, want 2:\nold task:\n%s\nreplacement:\n%s", handled(), old.output.String(), replacement.output.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	repeats := 0
+	for collecting := true; collecting; {
+		select {
+		case frame := <-frames:
+			if frame.DedupeKey != roleForwardDedupePrefix+repeatKey {
+				t.Fatalf("the holder received dedupe key %q, want %s", frame.DedupeKey, roleForwardDedupePrefix+repeatKey)
+			}
+			repeats++
+		case <-time.After(time.Second):
+			collecting = false
+		}
+	}
+	if repeats != 1 && repeats != 2 {
+		t.Fatalf("the holder received %d frames for the repeated key, want 1 or 2", repeats)
+	}
+
+	if err := old.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM the old task: %v", err)
+	}
+	old.waitExit(t, "SIGTERM")
+	replacement.waitHealthy(t)
+	replacement.waitForOutput(t, "durable bound")
+}
+
+// holdListenerDurable creates machineID's durable as a listener creates it and binds it from
+// client, as the task a rolling deploy replaces holds it until that task stops. Unsubscribing the
+// returned subscription is that task letting go.
+func holdListenerDurable(t *testing.T, client *bus.Client, machineID string) *natsgo.Subscription {
+	t.Helper()
+	consumer := "listener-" + machineID
+	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
+	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
+	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
+		t.Fatalf("add the durable: %v", err)
+	}
+	holder, err := client.JS().Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
+	if err != nil {
+		t.Fatalf("bind the durable as the old task: %v", err)
+	}
+	return holder
+}
+
+// receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers
+// each frame with the empty receipt the pump returns and hands the frame's envelope to the channel.
+func receiveAsSession(t *testing.T, client *bus.Client, sessionID string) <-chan contracts.Envelope {
+	t.Helper()
+	frames := make(chan contracts.Envelope, 256)
+	subscription, err := client.Conn.Subscribe(contracts.AgentSubject(sessionID), func(msg *natsgo.Msg) {
+		var envelope contracts.Envelope
+		_ = json.Unmarshal(msg.Data, &envelope)
+		_ = msg.Respond(nil)
+		frames <- envelope
+	})
+	if err != nil {
+		t.Fatalf("subscribe as %s: %v", sessionID, err)
+	}
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the subscription as %s: %v", sessionID, err)
+	}
+	return frames
+}
+
+// callListener calls a listener /v1 route as the test's shared-token caller and returns its status
+// and body.
+func callListener(t *testing.T, port int, method, path, body string) (int, string) {
+	t.Helper()
+	request, err := http.NewRequest(method, "http://127.0.0.1:"+strconv.Itoa(port)+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	request.Header.Set("Authorization", "Bearer "+listenerTestToken)
+	if body != "" {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	return do(t, request)
+}
+
+// countRecords counts the JSON records in the listener's output whose msg is name and that match
+// accepts.
+func countRecords(p *listenerProcess, name string, match func(map[string]any) bool) int {
+	count := 0
+	for line := range strings.SplitSeq(p.output.String(), "\n") {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) != nil || record["msg"] != name {
+			continue
+		}
+		if match(record) {
+			count++
+		}
+	}
+	return count
 }
 
 // A listener built before the KV key check stored role claims, interests, sessions and CI records
