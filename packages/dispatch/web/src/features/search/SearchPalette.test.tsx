@@ -2,14 +2,16 @@ import { expect, spyOn, test } from "bun:test";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { SearchResult } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { appKeymap } from "../shell/keymap";
 import { SearchButton } from "./SearchButton";
-import { SearchPalette } from "./SearchPalette";
+import { type PaletteMode, SearchPalette } from "./SearchPalette";
+import { optionId } from "./search-model";
 
 const results: SearchResult[] = [
   {
@@ -288,6 +290,169 @@ test("a background refresh that fails keeps the hits the query has, and the high
     expect(input.getAttribute("aria-activedescendant")).toBe(arrowed);
   } finally {
     search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+// The shell's part in a chosen action: the palette closes, and the row runs once it has.
+function PaletteHost(): ReactNode {
+  const [mode, setMode] = useState<PaletteMode | null>("all");
+  return <SearchPalette mode={mode} onClose={() => setMode(null)} />;
+}
+
+function renderPaletteHost(): { queryClient: QueryClient; unmount: () => void } {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <KeymapProvider>
+          <CurrentRoute />
+          <PaletteHost />
+        </KeymapProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { queryClient, unmount: view.unmount };
+}
+
+const CLOSE_ROW = "search-option-action-global-close";
+
+// `Close issue` stands for any row whose label holds a search word somewhere past its start.
+function registerClose(ran: string[]): () => void {
+  return appKeymap.register("global", [
+    { id: "close", keys: [], label: "Close issue", run: () => ran.push("close") },
+  ]);
+}
+
+function optionIds(): string[] {
+  return screen.queryAllByRole("option").map((option) => option.id);
+}
+
+test("a query found inside an action's label lists the action below the hits, and Enter opens the first hit", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const hit = issueHit("LEGION-3");
+  const search = spyOn(api, "search").mockResolvedValue({ results: [hit], took_ms: 1 });
+  const view = renderPaletteHost();
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await waitFor(() => expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]));
+    expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/LEGION-3");
+    expect(ran).toEqual([]);
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("while the search is in flight no action found inside its label is highlighted, so Enter runs nothing", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const hit = issueHit("LEGION-3");
+  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const search = spyOn(api, "search").mockReturnValue(answer.promise);
+  const view = renderPaletteHost();
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    expect(optionIds()).toEqual([CLOSE_ROW]);
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
+    expect(ran).toEqual([]);
+
+    // The hits arriving take the head; the action row was never adopted while they were out.
+    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await waitFor(() => expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit)));
+    expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]);
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("a search that finds nothing still leaves an action found inside its label unhighlighted", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const search = spyOn(api, "search").mockResolvedValue({ results: [], took_ms: 1 });
+  const view = renderPaletteHost();
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await screen.findByText('No results for "issue"');
+    expect(optionIds()).toEqual([CLOSE_ROW]);
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
+    expect(ran).toEqual([]);
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("an arrow from no highlight lands on the first row, which keeps the highlight when hits arrive above it", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const hit = issueHit("LEGION-3");
+  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const search = spyOn(api, "search").mockReturnValue(answer.promise);
+  const view = renderPaletteHost();
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
+
+    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await waitFor(() => expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]));
+    expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(ran).toEqual(["close"]));
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("a query that starts an action's label lists it above the hits, and Enter runs it", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const hit = issueHit("LEGION-3");
+  const search = spyOn(api, "search").mockResolvedValue({ results: [hit], took_ms: 1 });
+  const view = renderPaletteHost();
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "clo" } });
+    await waitFor(() => expect(optionIds()).toEqual([CLOSE_ROW, optionId(hit)]));
+    expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(ran).toEqual(["close"]));
+    expect(screen.getByTestId("current-route").textContent).toBe("/");
+  } finally {
+    search.mockRestore();
+    unregister();
     view.unmount();
     view.queryClient.clear();
   }

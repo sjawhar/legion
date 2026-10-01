@@ -337,6 +337,16 @@ test("actions() omits palette:false, multi-key, inEditable and unavailable bindi
   expect(keymap.actions().map((action) => action.id)).toEqual(["open"]);
 });
 
+test("an inEditable binding is no row unless it says palette: true, which makes it one", () => {
+  const { keymap } = harness();
+  const back = binding("back", "Escape", { inEditable: true });
+  const send = binding("send", "$mod+Enter", { inEditable: true, palette: true });
+  keymap.register("board", [back.definition, send.definition]);
+  keymap.pushScope("board");
+
+  expect(keymap.actions().map((action) => action.id)).toEqual(["send"]);
+});
+
 test("a binding with several keys is a row only when it says so, and the row presses its first key", () => {
   const { keymap } = harness();
   let pressed = "";

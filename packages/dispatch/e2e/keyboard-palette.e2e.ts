@@ -115,7 +115,19 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");
     await input.fill("priority p2");
+    const setP2 = actions.getByRole("option", { name: "Set priority P2" });
     await expect(actions.getByRole("option")).toHaveCount(1);
+    // `priority p2` sits inside the label rather than starting it, so the row is offered but not
+    // highlighted: Enter alone runs nothing, even once the search has answered with no hits.
+    await expect(dialog.getByText('No results for "priority p2"')).toBeVisible();
+    await expect(input).not.toHaveAttribute("aria-activedescendant");
+    await input.press("Enter");
+    await expect(dialog).toBeVisible();
+    await input.press("ArrowDown");
+    await expect(input).toHaveAttribute(
+      "aria-activedescendant",
+      (await setP2.getAttribute("id")) as string
+    );
     await input.press("Enter");
     await expect(dialog).toHaveCount(0);
     await expect(page.getByLabel(`Priority of ${issue.key}`)).toHaveValue("2");
@@ -125,7 +137,7 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
   }
 });
 
-test("/ searches only, and a query lists matching actions above the hits", async ({
+test("/ searches only, and a query that is no action's start lists the hits above the actions", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
@@ -163,14 +175,34 @@ test("/ searches only, and a query lists matching actions above the hits", async
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
 
-    // The same query under `$mod+k` puts what this page can do above what the query found.
+    // The same query under `$mod+k` lists the hits first. No action here starts with `issue`, so
+    // the ones that hold it further in (`Close issue` among them) sit below the hits, and Enter
+    // opens the first hit rather than closing the issue the reader is on.
+    const statusWrites: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+      ) {
+        statusWrites.push(request.postData() ?? "");
+      }
+    });
     await page.keyboard.press("Control+k");
     await expect(input).toHaveValue("");
     await input.fill("issue");
-    await expect(actions.getByRole("option", { name: "Close issue" })).toBeVisible();
     const options = dialog.getByRole("option");
-    await expect(options.first()).toHaveAttribute("id", /^search-option-action-/);
-    await expect(options.last()).toHaveAttribute("id", /^search-option-issue-/);
+    await expect(options.first()).toHaveAttribute("id", /^search-option-issue-/);
+    await expect(actions.getByRole("option", { name: "Close issue" })).toBeVisible();
+    await expect(options.last()).toHaveAttribute("id", /^search-option-action-/);
+    await expect(input).toHaveAttribute("aria-activedescendant", /^search-option-issue-/);
+    await input.press("Enter");
+    await expect(dialog).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Astrolabe issue calibration" })
+    ).toBeVisible();
+    await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
+    expect(statusWrites).toEqual([]);
+    expect((await getIssue(issue.key)).status).not.toBe("done");
   } finally {
     await context.close();
   }
@@ -359,6 +391,66 @@ test("a board card's row runs on the card that opened the palette", async ({
     }
     await actions.getByRole("option", { name: "Open issue" }).click();
     await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}`));
+  } finally {
+    await context.close();
+  }
+});
+
+test("a query that holds a card move further in moves no card on Enter", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  // Two cards in one column, so `Move card down` from the first one has somewhere to go.
+  const first = await createIssue({ project: "CORE", title: "Board query one" });
+  const second = await createIssue({ project: "CORE", title: "Board query two" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    const writes: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET" && new URL(request.url()).pathname.startsWith("/api/")) {
+        writes.push(`${request.method()} ${new URL(request.url()).pathname}`);
+      }
+    });
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await page.goto("/projects/CORE/issues");
+    await page.getByRole("button", { name: "Board" }).click();
+    await expect(page.locator(`[data-board-card="${first.key}"]`)).toBeVisible();
+    await expect(page.locator(`[data-board-card="${second.key}"]`)).toBeVisible();
+    // `j` from the page takes the top card, the one `Move card down` would move.
+    const card = page.locator("[data-board-card]").first();
+    await page.locator("body").focus();
+    await page.keyboard.press("j");
+    await expect(card).toBeFocused();
+
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const input = page.getByRole("combobox", { name: "Search" });
+    const actions = dialog.getByRole("group", { name: "Actions" });
+    // Each query sits inside a move's label without starting it: the move is offered, and only
+    // an arrow can highlight it, so Enter, even once the search has answered, moves nothing.
+    // `down` is all stop words to the server, which refuses it, and the move stays unhighlighted
+    // through that answer too.
+    for (const [query, move] of [
+      ["status", "Move card to the next status"],
+      ["down", "Move card down"],
+    ] as const) {
+      await page.keyboard.press("Control+k");
+      await input.fill(query);
+      await expect(actions.getByRole("option", { name: move })).toHaveCount(1);
+      await expect(dialog.getByText("Searching…")).toHaveCount(0);
+      await expect(input).not.toHaveAttribute("aria-activedescendant");
+      await input.press("Enter");
+      await expect(dialog).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(card).toBeFocused();
+    }
+    expect(writes).toEqual([]);
+    const [after, other] = await Promise.all([getIssue(first.key), getIssue(second.key)]);
+    expect(after.status).toBe(first.status);
+    expect(other.status).toBe(second.status);
   } finally {
     await context.close();
   }
@@ -675,15 +767,20 @@ test("hits that arrive after the reader has arrowed keep the highlight on the ro
     const create = rows.filter({ hasText: "Create issue" });
     await expect(create).toHaveCount(1);
     const createId = await create.getAttribute("id");
+    // `issue` starts no action's label, so nothing is highlighted until the reader arrows, and the
+    // first arrow lands on the first row.
+    await expect(input).not.toHaveAttribute("aria-activedescendant");
     const ids = await rows.evaluateAll((options) => options.map((option) => option.id));
-    for (let step = 0; step < ids.indexOf(createId ?? ""); step += 1) {
+    for (let step = 0; step <= ids.indexOf(createId ?? ""); step += 1) {
       await input.press("ArrowDown");
     }
     await expect(input).toHaveAttribute("aria-activedescendant", createId as string);
     await expect.poll(() => held).toBeGreaterThan(0);
 
+    // The hits arrive above the rows the query found mid-label, and the chosen row keeps the
+    // highlight.
     release.resolve();
-    await expect(dialog.getByRole("option").last()).toHaveAttribute("id", /^search-option-issue-/);
+    await expect(dialog.getByRole("option").first()).toHaveAttribute("id", /^search-option-issue-/);
     await expect(input).toHaveAttribute("aria-activedescendant", createId as string);
     await input.press("Enter");
     await expect(page.getByRole("dialog", { name: "Create issue" })).toBeVisible();
