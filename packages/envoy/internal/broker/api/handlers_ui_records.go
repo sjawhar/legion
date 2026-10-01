@@ -143,7 +143,7 @@ func (s *server) decideMachineLogin(w http.ResponseWriter, r *http.Request, reco
 	case errors.Is(err, record.ErrNotApprover):
 		writeError(w, http.StatusForbidden, "NOT_APPROVER", err.Error())
 		return
-	case errors.Is(err, machine.ErrAlreadyDecided):
+	case errors.Is(err, machine.ErrAlreadyDecided), errors.Is(err, machine.ErrLoginExpired):
 		writeError(w, http.StatusConflict, "RECORD_TERMINAL", err.Error())
 		return
 	case errors.Is(err, machine.ErrKeyHoldsLiveCredential):
@@ -166,7 +166,7 @@ func (s *server) decideAgentSecret(w http.ResponseWriter, r *http.Request, recor
 	case errors.Is(err, pgx.ErrNoRows):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such credential request")
 		return
-	case errors.Is(err, requests.ErrTerminal):
+	case errors.Is(err, requests.ErrTerminal), errors.Is(err, requests.ErrExpired):
 		writeError(w, http.StatusConflict, "RECORD_TERMINAL", err.Error())
 		return
 	case errors.Is(err, requests.ErrGrantChainInvalid):

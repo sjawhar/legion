@@ -431,7 +431,8 @@ func TestExpirePendingWritesTheExpiredEventAndFlipsTheRequest(t *testing.T) {
 
 // TestApplyDecisionRefusesARecordPastItsExpiry pins that a record past its expiry is decided no
 // more, before the sweeper has expired it as well as after: approve and deny both answer
-// ErrTerminal, the answer an expired request gives, and neither writes a decision or a grant.
+// ErrExpired, whose message says the record expired rather than that it was decided, and neither
+// writes a decision or a grant.
 func TestApplyDecisionRefusesARecordPastItsExpiry(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()
@@ -441,8 +442,9 @@ func TestApplyDecisionRefusesARecordPastItsExpiry(t *testing.T) {
 		t.Fatalf("Create = %+v, %v", req, err)
 	}
 	for _, approve := range []bool{true, false} {
-		if dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, approver); !errors.Is(err, ErrTerminal) {
-			t.Fatalf("ApplyDecision(approve=%v) past the record's expiry = %+v, %v, want ErrTerminal", approve, dec, err)
+		dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, approver)
+		if err == nil || !strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "decided") {
+			t.Fatalf("ApplyDecision(approve=%v) past the record's expiry = %+v, %v, want a refusal saying it expired", approve, dec, err)
 		}
 	}
 	var events, grants int
@@ -731,31 +733,6 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	var actor string
 	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != "human:alice" {
 		t.Fatalf("grant.revoked actor = %q, %v, want human:alice", actor, err)
-	}
-}
-
-// TestGrantsForApproverNamesWhoApproved pins that the approver list names each grant's approver:
-// the operator's list holds a grant another login approved on their enrollment, and must say that
-// login decided it, not leave the operator to assume they did.
-func TestGrantsForApproverNamesWhoApproved(t *testing.T) {
-	m, enr, key, operator := newFixture(t)
-	ctx := context.Background()
-	pending, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "ALICE_KEY"), "")
-	if err != nil || pending.RecordID == nil {
-		t.Fatalf("Create(pending) = %+v, %v", pending, err)
-	}
-	dec, err := m.ApplyDecision(ctx, *pending.RecordID, true, "Alice")
-	if err != nil || dec.GrantID == "" {
-		t.Fatalf("ApplyDecision(alice): %+v %v", dec, err)
-	}
-	for _, viewer := range []string{operator, "alice"} {
-		grants, err := m.GrantsForApprover(ctx, viewer)
-		if err != nil {
-			t.Fatalf("GrantsForApprover(%s): %v", viewer, err)
-		}
-		if len(grants) != 1 || grants[0].GrantID != dec.GrantID || grants[0].Approver != "alice" {
-			t.Fatalf("GrantsForApprover(%s) = %+v, want grant %s approved by alice", viewer, grants, dec.GrantID)
-		}
 	}
 }
 

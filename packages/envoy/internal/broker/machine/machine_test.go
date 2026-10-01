@@ -5,11 +5,13 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -34,10 +36,10 @@ var codePattern = regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`)
 // its ChainVerifier (so AuthenticateLauncher's own issuance-chain re-verification is the genuine
 // thing, not a stub), and rules.Current loaded from a minimal valid rules file — a machine login's
 // own decision never consults the rules (it always requires approval), so the fixture needs only
-// a valid, versioned Set. params are extra connection parameters, as storetest.Open takes them.
-func newFixture(t *testing.T, params ...string) *Service {
+// a valid, versioned Set.
+func newFixture(t *testing.T) *Service {
 	t.Helper()
-	st := storetest.Open(t, params...)
+	st := storetest.Open(t)
 
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(st, testAudience, time.Minute)
@@ -372,8 +374,8 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 
 // TestApplyDecisionRefusesALoginPastItsExpiry pins that a machine login past its own expires_at is
 // decided no more, before the sweeper has written its 'expired' event as well as after: approve and
-// deny both answer ErrAlreadyDecided, the answer an expired login gives, and neither mints a
-// credential or records a decision.
+// deny both answer ErrLoginExpired, whose message says the login expired rather than that it was
+// decided, and neither mints a credential or records a decision.
 func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
@@ -387,8 +389,9 @@ func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 		t.Fatalf("LookupByCode: %v", err)
 	}
 	for _, approve := range []bool{true, false} {
-		if _, _, err := svc.ApplyDecision(ctx, view.RecordID, approve, testApprover, code); !errors.Is(err, ErrAlreadyDecided) {
-			t.Fatalf("ApplyDecision(approve=%v) past the login's expiry = %v, want ErrAlreadyDecided", approve, err)
+		_, _, err := svc.ApplyDecision(ctx, view.RecordID, approve, testApprover, code)
+		if err == nil || !strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "decided") {
+			t.Fatalf("ApplyDecision(approve=%v) past the login's expiry = %v, want a refusal saying it expired", approve, err)
 		}
 	}
 	var events, credentials int
@@ -398,14 +401,16 @@ func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 	}
 }
 
-// TestASweepWhileADecisionHoldsItsRowLockCommits pins ApplyDecision's row-lock level. The
-// sweeper's 'expired' insert checks its foreign key with `for key share` on the record's row,
-// which `for no key update` leaves free: the sweep commits while a decision holds the lock, and
-// the decision's own event insert then answers ErrAlreadyDecided and mints nothing. Under `for
-// update` the sweep waits on the decision, which would then wait on the sweep's unique-index
-// entry, a deadlock; the fixture's lock_timeout makes that wait this test's failure, not a hang.
+// TestASweepWhileADecisionHoldsItsRowLockCommits pins ApplyDecision's row-lock level, with no
+// seam in the service. A second transaction holds launcher_credentials exclusively, so an
+// approving decision takes the record's row lock, passes every check and waits at its mint insert.
+// The sweeper's 'expired' insert checks its foreign key with `for key share` on that row, which
+// `for no key update` leaves free: the sweep commits while the decision holds the lock, and once
+// the table is released the decision's own event insert answers ErrAlreadyDecided, minting
+// nothing. Under `for update` the sweep waits on the decision instead; the sweep's own
+// lock_timeout makes that wait this test's failure (55P03), not a hang.
 func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
-	svc := newFixture(t, "lock_timeout=5000")
+	svc := newFixture(t)
 	ctx := context.Background()
 	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "example-host-devbox", ""))
 	if err != nil {
@@ -415,20 +420,33 @@ func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupByCode: %v", err)
 	}
+	config := svc.Store.Pool.Config()
+	config.ConnConfig.RuntimeParams["lock_timeout"] = "5000"
+	sweepPool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open the sweep's pool: %v", err)
+	}
+	defer sweepPool.Close()
+	sweeper := &Service{Store: &store.Store{Pool: sweepPool}}
 
-	locked, release := make(chan struct{}), make(chan struct{})
-	svc.testDecisionHook = func() {
-		close(locked)
-		<-release
+	holder, err := svc.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(ctx)
+	if _, err := holder.Exec(ctx, `lock table launcher_credentials in access exclusive mode`); err != nil {
+		t.Fatalf("hold launcher_credentials: %v", err)
 	}
 	decided := make(chan error, 1)
 	go func() {
 		_, _, err := svc.ApplyDecision(ctx, view.RecordID, true, testApprover, code)
 		decided <- err
 	}()
-	<-locked
-	swept := svc.ExpirePending(ctx, time.Now().Add(svc.PendingTTL+time.Minute))
-	close(release)
+	waitForLockWait(t, ctx, svc.Store, "insert into launcher_credentials%", decided)
+	swept := sweeper.ExpirePending(ctx, time.Now().Add(svc.PendingTTL+time.Minute))
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if swept != nil {
 		t.Fatalf("ExpirePending while a decision holds the record's row lock = %v, want it to commit", swept)
 	}
@@ -442,6 +460,30 @@ func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
 	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where record_id=$1`, view.RecordID).Scan(&credentials); err != nil || credentials != 0 {
 		t.Fatalf("launcher credentials for the record = %d, %v, want 0", credentials, err)
 	}
+}
+
+// waitForLockWait returns once a statement matching like waits on a lock, and fails at once with
+// the waiting operation's result if it returns first (Dispatch's docs tests use the same probe).
+func waitForLockWait(t *testing.T, ctx context.Context, st *store.Store, like string, returned <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-returned:
+			t.Fatalf("the operation returned (%v) before any statement matching %s waited on a lock", err, like)
+		default:
+		}
+		var waiting int
+		if err := st.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock' and query like $1`, like).Scan(&waiting); err != nil {
+			t.Fatalf("inspect database locks: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("no statement waiting on a lock matching %s", like)
 }
 
 // TestChainVerificationRefusesADecisionTheBrokerDidNotWrite pins what AuthenticateLauncher's

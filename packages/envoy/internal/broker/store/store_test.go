@@ -3,8 +3,12 @@ package store
 import (
 	"context"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -39,6 +43,37 @@ func TestMigrateIsIdempotentAndCreatesTables(t *testing.T) {
 		('approver_keys','approver_key_seeds','webauthn_ceremonies')`).Scan(&n)
 	if err != nil || n != 0 {
 		t.Fatalf("expected the approver key tables dropped, found %d (%v)", n, err)
+	}
+}
+
+// TestTerminalEventNamesMatchTheDecisionIndex pins record.TerminalEventNames to the predicate of
+// credential_request_decision, the partial unique index that holds a record to one terminal
+// event, so the Go list and the index cannot drift apart.
+func TestTerminalEventNamesMatchTheDecisionIndex(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, testDatabaseURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var definition string
+	if err := s.Pool.QueryRow(ctx, `select indexdef from pg_indexes where schemaname='public' and indexname='credential_request_decision'`).
+		Scan(&definition); err != nil {
+		t.Fatalf("read credential_request_decision: %v", err)
+	}
+	_, predicate, found := strings.Cut(definition, " WHERE ")
+	if !found {
+		t.Fatalf("credential_request_decision = %q, want a partial index", definition)
+	}
+	var indexed []string
+	for _, match := range regexp.MustCompile(`'([a-z_]+)'::text`).FindAllStringSubmatch(predicate, -1) {
+		indexed = append(indexed, match[1])
+	}
+	if names := record.TerminalEventNames(); !slices.Equal(names, indexed) {
+		t.Fatalf("record.TerminalEventNames() = %v, credential_request_decision's predicate names %v (%s)", names, indexed, predicate)
 	}
 }
 

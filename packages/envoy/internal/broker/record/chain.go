@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -24,10 +25,16 @@ type TerminalEvent struct {
 	Login string
 }
 
-// TerminalEventNames are the events that end a record's pending state, which a record carries at
+// terminalEventNames are the events that end a record's pending state, which a record carries at
 // most once: credential_request_decision's partial unique index, whose predicate spells the same
-// list, holds it to that. A query passes them as `event = any($n)`.
-var TerminalEventNames = []string{"approved", "denied", "expired", "cancelled"}
+// list, holds it to that.
+var terminalEventNames = []string{"approved", "denied", "expired", "cancelled"}
+
+// TerminalEventNames returns a copy of the terminal events, for a query to pass as
+// `event = any($n)`; a copy, so no caller can change the list another caller reads.
+func TerminalEventNames() []string {
+	return slices.Clone(terminalEventNames)
+}
 
 // ChainVerifier re-derives a credential-request record's full issuance chain rather than
 // trusting a downstream row (a launcher credential, a grant) that merely names the record's id:

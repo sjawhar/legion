@@ -35,10 +35,12 @@ var (
 	// record's own: the human is deciding a different login than the one their terminal or
 	// dashboard actually shows, refused before the approver is even checked.
 	ErrCodeMismatch = errors.New("confirmation code does not match")
-	// ErrAlreadyDecided is ApplyDecision's refusal for a record that is no longer pending: it
-	// already carries its one terminal event (a second approve or deny, one that lost the race to a
-	// concurrent one, or the sweeper's 'expired'), or its expires_at has passed.
+	// ErrAlreadyDecided is ApplyDecision's refusal for a record that already carries its one
+	// decision: a second approve or deny, or one that lost the race to a concurrent one.
 	ErrAlreadyDecided = errors.New("this machine login has already been decided")
+	// ErrLoginExpired is ApplyDecision's refusal for a login that expired undecided: the sweeper
+	// recorded it expired, or its expires_at has passed before the sweeper got to it.
+	ErrLoginExpired = errors.New("this machine login expired before its approver acted on it")
 	// ErrKeyHoldsLiveCredential is ApplyDecision's refusal to approve a pending login whose key
 	// already holds a live launcher credential under another record: a machine signed two logins
 	// with one key and the first was approved. The record stays pending.
@@ -62,12 +64,6 @@ type Service struct {
 	// and confirmation code — a confirmation-fatigue/notification-spam vector against the named
 	// operator.
 	Replay func(ctx context.Context, jti string, expires time.Time) (fresh bool, err error)
-
-	// testDecisionHook, when set, runs inside ApplyDecision once the record's row lock is held and
-	// the record found pending, before anything is minted or recorded. It exists only so a test
-	// can run the sweeper's 'expired' insert while a decision holds that lock; no production
-	// caller sets it.
-	testDecisionHook func()
 }
 
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
@@ -196,10 +192,11 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // means the human is looking at a different login than the one they're deciding, refused before
 // anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be
 // the record's own approver (record.ErrNotApprover), checked next, so another login is refused the
-// same way whatever the record's state. A record that already carries a terminal event, or whose
-// expires_at has passed though the sweeper has not yet recorded it expired, is ErrAlreadyDecided,
-// checked under the record's row lock before anything is minted, so a second decision, one racing
-// the first and one after expiry all answer the same way. Approval mints the
+// same way whatever the record's state. A record that already carries a decision is
+// ErrAlreadyDecided, and one that expired undecided — recorded expired by the sweeper, or past its
+// expires_at before the sweeper got to it — is ErrLoginExpired, both checked under the record's
+// row lock before anything is minted, so a second decision, one racing the first and one after
+// expiry all answer the same way. Approval mints the
 // credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
 // CredentialLifetime counted from the decision — in the same transaction that records the
 // decision, so a crash between the two never orphans a credential no decision names. A key that
@@ -245,16 +242,16 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return "", "", err
 	}
-	var decided bool
-	if err := tx.QueryRow(ctx, `select exists(select 1 from credential_request_events where record_id=$1 and event = any($2))`, recordID, record.TerminalEventNames).
+	var decided string
+	if err := tx.QueryRow(ctx, `select coalesce((select event from credential_request_events where record_id=$1 and event = any($2)), '')`, recordID, record.TerminalEventNames()).
 		Scan(&decided); err != nil {
 		return "", "", err
 	}
-	if decided || expired {
+	switch {
+	case decided == "expired" || decided == "" && expired:
+		return "", "", ErrLoginExpired
+	case decided != "":
 		return "", "", ErrAlreadyDecided
-	}
-	if s.testDecisionHook != nil {
-		s.testDecisionHook()
 	}
 	event := "denied"
 	if approve {
@@ -325,7 +322,7 @@ func (s *Service) Read(ctx context.Context, pendingID string) (state, credential
 func (s *Service) recordState(ctx context.Context, recordID string) (state, credentialID string, err error) {
 	var event string
 	var credID *string
-	err = s.Store.Pool.QueryRow(ctx, `select event, credential_id from credential_request_events where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames).
+	err = s.Store.Pool.QueryRow(ctx, `select event, credential_id from credential_request_events where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).
 		Scan(&event, &credID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "pending", "", nil
@@ -391,7 +388,7 @@ func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, er
 // target is credential_request_events' partial unique index on (record_id) where event names a
 // decision, so a record a concurrent ApplyDecision just decided is silently left alone rather
 // than raising a constraint violation. That target spells the index's own predicate literally,
-// not record.TerminalEventNames: Postgres infers a partial index only from a predicate it can
+// not record.TerminalEventNames(): Postgres infers a partial index only from a predicate it can
 // prove implies the index's, and a bound parameter proves nothing.
 func (s *Service) ExpirePending(ctx context.Context, now time.Time) error {
 	_, err := s.Store.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, actor)

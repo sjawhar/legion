@@ -239,7 +239,7 @@ func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]Pe
 	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
 		where cr.approver=$1 and not exists (
 			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event = any($2)
-		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.TerminalEventNames)
+		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.TerminalEventNames())
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +336,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	var event, credID string
 	var decidedAt time.Time
 	err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
-		where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames).Scan(&event, &decidedAt, &credID)
+		where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return detail, nil

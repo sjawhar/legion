@@ -31,9 +31,12 @@ import (
 )
 
 var (
-	ErrNotYours     = errors.New("this request or grant belongs to another session")
-	ErrNotApprover  = errors.New("only the grant's approver or its enrollment's operator may revoke it")
-	ErrTerminal     = errors.New("request is already decided")
+	ErrNotYours    = errors.New("this request or grant belongs to another session")
+	ErrNotApprover = errors.New("only the grant's approver or its enrollment's operator may revoke it")
+	ErrTerminal    = errors.New("request is already decided")
+	// ErrExpired is ApplyDecision's refusal for a record that expired undecided: the sweeper
+	// expired its request, or its pending_expires_at has passed before the sweeper got to it.
+	ErrExpired      = errors.New("request expired before its approver acted on it")
 	ErrGrantNotLive = errors.New("grant is expired, revoked, or its session ended")
 	// ErrGrantChainInvalid: re-verifying a grant's whole approval chain (record hash, requester
 	// signature, one approval by the record's approver) failed — a row written by anyone but the
@@ -420,11 +423,11 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]expiredRe
 // otherwise the request is denied. It re-reads the record body, recomputes its id, refuses any
 // login but the record's own approver (record.ErrNotApprover) whatever the record's state,
 // re-verifies the embedded request object, and writes the event (naming that login), the request
-// transition and the audit row in one transaction. A non-pending record, or one past its
-// pending_expires_at that the sweeper has not yet expired, is ErrTerminal for its approver: a
-// duplicate or late decision changes nothing. The enrollment row is locked before the
-// request row — the same order every other enrollment-then-request writer in this package takes
-// them in, so none of them deadlock.
+// transition and the audit row in one transaction. For its approver, a record that expired
+// undecided — expired by the sweeper, or past its pending_expires_at before the sweeper got to it
+// — is ErrExpired, and any other non-pending record ErrTerminal: a duplicate or late decision
+// changes nothing. The enrollment row is locked before the request row — the same order every
+// other enrollment-then-request writer in this package takes them in, so none of them deadlock.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -457,7 +460,10 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
-	if state != "pending" || expired {
+	switch {
+	case state == "expired" || state == "pending" && expired:
+		return Decision{}, ErrExpired
+	case state != "pending":
 		return Decision{}, ErrTerminal
 	}
 	// now is reset to the record's own creation time: the request object's own iat/exp bound only

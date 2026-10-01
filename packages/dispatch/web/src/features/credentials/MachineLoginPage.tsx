@@ -30,9 +30,13 @@ function MachineLoginDecision({
   return (
     <div className="space-y-1 text-sm">
       <p className={`font-medium ${textPrimaryOnCanvas}`}>
-        {event === "approved"
-          ? `Approved. ${host} can start agent sessions as you.`
-          : `${event.charAt(0).toUpperCase()}${event.slice(1)}. ${host} is not logged in.`}
+        {event === "approved" ? (
+          `Approved. ${host} can start agent sessions as you.`
+        ) : (
+          <>
+            <span className="capitalize">{event}</span>. {host} is not logged in.
+          </>
+        )}
       </p>
       {credentialId === null ? null : (
         <p className={textMutedOnCanvas}>Credential {credentialId}</p>
@@ -84,16 +88,20 @@ export function MachineLoginPage(): ReactNode {
     });
   };
   const madeHere = approve.data ?? deny.data;
-  // The looked-up record as the page now knows it: a decision made here leaves it decided.
-  const shown =
-    record === undefined || madeHere === undefined ? record : { ...record, state: madeHere.state };
-  const decided =
-    madeHere === undefined
-      ? record?.decided
-      : {
-          credential_id: madeHere.state === "approved" ? madeHere.credential_id : null,
-          event: madeHere.state,
-        };
+  // The looked-up record and its decision as the page now knows them: a decision made here leaves
+  // the record decided, with the credential an approval minted.
+  const view =
+    record === undefined
+      ? undefined
+      : madeHere === undefined
+        ? { decided: record.decided, record }
+        : {
+            decided: {
+              credential_id: madeHere.state === "approved" ? madeHere.credential_id : null,
+              event: madeHere.state,
+            },
+            record: { ...record, state: madeHere.state },
+          };
 
   return (
     <section className="max-w-2xl space-y-6">
@@ -130,16 +138,16 @@ export function MachineLoginPage(): ReactNode {
           {apiErrorMessage(lookup.error, "Could not look up that code.")}
         </p>
       ) : null}
-      {shown === undefined ? null : (
+      {view === undefined ? null : (
         <div className="space-y-4">
-          <CredentialRecordFacts record={shown} />
-          {decided === undefined || decided === null ? (
+          <CredentialRecordFacts record={view.record} />
+          {view.decided === null ? (
             <CredentialDecisionButtons approve={approve} deny={deny} submitGuard={submitGuard} />
           ) : (
             <MachineLoginDecision
-              credentialId={decided.credential_id}
-              event={decided.event}
-              host={shown.identifiers[0] ?? ""}
+              credentialId={view.decided.credential_id}
+              event={view.decided.event}
+              host={view.record.identifiers[0] ?? ""}
             />
           )}
         </div>
