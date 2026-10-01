@@ -69,6 +69,10 @@ export function composerKindFor(kind: SelectionBarKind): "comment" | "suggestion
   return kind;
 }
 
+export function selectionBarKindFor(kind: "comment" | "suggestion" | "ask"): SelectionBarKind {
+  return kind === "suggestion" ? "suggest" : kind;
+}
+
 export function setActiveMarkClass(root: HTMLElement, markIds: readonly string[]): void {
   const activeMarkIds = new Set(markIds);
   for (const mark of root.querySelectorAll<HTMLElement>("[data-id]")) {

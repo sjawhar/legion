@@ -75,9 +75,10 @@ import {
 } from "./conversation-model";
 import {
   duplicateText,
+  failureGuidance,
   isSafeRetry,
   MODE_LABELS,
-  safeRetryGuidance,
+  receiptAnsweredWithError,
   withGuidance,
 } from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
@@ -119,6 +120,7 @@ function eventItems(data: { pages: Event[][] } | undefined): Event[] {
 function attemptsOf(deliveries: readonly MessageDeliveryEvent[]): TargetedMessageAttempt[] {
   return deliveries.map((attempt) => ({
     attempt: attempt.payload.attempt,
+    answeredWithError: receiptAnsweredWithError(attempt),
     createdAt: attempt.created_at,
     delivery: attempt.payload.delivery,
     duplicate: attempt.payload.duplicate,
@@ -466,13 +468,16 @@ function CommentDeliveryList({
           state: delivery.state,
           createdAt: delivery.created_at,
           duplicate: delivery.duplicate,
+          answeredWithError: delivery.answeredWithError,
+          error: delivery.error,
         };
         // The same rule the targeted-message card applies: a mention's Retry re-sends its own
-        // mode under its own key, so it can only be offered while the stream would still
-        // recognise the repeat. The list offers no mode-change action, so its guidance says
-        // nothing about one.
+        // mode under its own key, so it is offered only while `isSafeRetry` holds, and the
+        // guidance beside it names that Retry or a new comment, so a closed issue, which takes
+        // neither, says nothing about one.
         const safeRetry = isSafeRetry(outcome);
         const canRetry = capabilities === undefined || capabilities.includes(delivery.delivery);
+        const guidance = disabled ? undefined : failureGuidance(outcome, "mention");
         return (
           <li
             className="flex flex-wrap items-center gap-x-2"
@@ -482,14 +487,8 @@ function CommentDeliveryList({
               {delivery.target} · {delivery.duplicate === true ? duplicateText : delivery.state}
               {delivery.error === null
                 ? ""
-                : ` · ${
-                    safeRetry
-                      ? withGuidance(delivery.error, safeRetryGuidance("mention", delivery.error))
-                      : delivery.error
-                  }`}
-              {delivery.error === null && safeRetry
-                ? ` · ${safeRetryGuidance("mention", delivery.error)}`
-                : ""}
+                : ` · ${guidance === undefined ? delivery.error : withGuidance(delivery.error, guidance)}`}
+              {delivery.error === null && guidance !== undefined ? ` · ${guidance}` : ""}
             </span>
             {disabled || !canRetry || !safeRetry ? null : (
               <button

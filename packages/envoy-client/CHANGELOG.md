@@ -101,6 +101,22 @@
   URL never carries the bearer, which travels in a header. Dispatch's own JSON errors render as
   before: their `error` text under their `code`.
 
+- `createDeliveryDedupe` replaces `rememberBounded` as the one dedupe both core-NATS hosts keep: it
+  recognises a re-send by its `dedupe_key`, and only for a key that names its event
+  (`dedupeKeyNamesItsEvent` in `@legion/contracts`: every Dispatch key, a webhook key of its
+  delivery id, a key the listener or this package's transport minted once for its message), which
+  it remembers for `DELIVERY_DUPLICATE_WINDOW_MS`. Any other key is never a repeat: the latest-1,000
+  memory it replaces dropped a later event that shared a key with an earlier one (the MCP bridge's
+  content hash, the Go daemon's outbox row id). It also recognises a second copy of one publish,
+  arriving on an overlapping subscription, by the `event_id` the copies share, whatever their key,
+  holding the last 5,000 to 10,000 event ids apart from the keys. A host `claim`s a frame before
+  anything it awaits, which records it and says whether it is a repeat in one step: `undefined`
+  for a repeat, otherwise a `DeliveryClaim` whose `release` undoes exactly what that claim
+  recorded, once, for a frame its agent was not handed (a delivery that threw, a frame it answered
+  with an error), so its re-send still arrives. `DedupeIdentitySchema` is the identity a host
+  parses a frame into for the claim. The record holds at most `DELIVERY_DEDUPE_KEY_LIMIT`
+  (250,000) keys and forgets the oldest past it, so a producer that floods a followed topic with
+  fresh keys cannot grow a host's memory without bound.
 - `getArchitectureSource` reads both answers a server gives for a project with no architecture
   source as `null`: a current server's `200 null` and an older server's `404 SOURCE_NOT_FOUND`.
   A client meets both while a rollout mixes versions. Before, only `200 null` read as none, so
