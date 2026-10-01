@@ -883,8 +883,8 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   /** One of this session's messages, on its way to whoever has the session open, tagged with the
-   *  Dispatch message a user message delivered when it is a person's turn this extension sent in.
-   *  Only the top-level instance publishes: a `task` subagent's instance never learns a session
+   *  Dispatch message a user message delivered when it matches a person's turn this extension sent
+   *  in. Only the top-level instance publishes: a `task` subagent's instance never learns a session
    *  id, and its work reaches the viewer as the parent's tool call anyway. */
   const recordAgentStreamMessage = (message: unknown, streaming: boolean): void => {
     if (sessionID === "") return;
