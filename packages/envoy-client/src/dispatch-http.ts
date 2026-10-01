@@ -47,6 +47,8 @@ import type {
   WhoamiResponse,
 } from "@legion/contracts";
 
+import { textHead } from "./ask-answer";
+
 export type { DispatchServiceErrorShape } from "@legion/contracts";
 
 export class DispatchServiceError extends Error {
@@ -117,10 +119,7 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
  */
 function whyNotAPage(answer: unknown): string | undefined {
   if (typeof answer === "string") {
-    return (
-      "text that is not a JSON page, which looks like a proxy or gateway page rather than " +
-      "Dispatch's own answer, so a retry may succeed."
-    );
+    return `text that is not a JSON page, ${gatewayAnswer(true)}`;
   }
   let what: string;
   if (Array.isArray(answer)) {
@@ -143,6 +142,53 @@ function whyNotAPage(answer: unknown): string | undefined {
   return (
     `${what}. Retrying will not help: the same request gets the same answer until that ` +
     "Dispatch is upgraded or fixed."
+  );
+}
+
+/**
+ * The tail of a refusal for a body that is not Dispatch's JSON. Dispatch writes every answer as
+ * JSON, its errors and its `/api` 404 included, so anything else in its place came from a proxy or
+ * gateway in the way. `retryMaySucceed` is the caller's reading of whether asking again can get
+ * past it.
+ */
+function gatewayAnswer(retryMaySucceed: boolean): string {
+  return (
+    "which looks like a proxy or gateway page rather than Dispatch's own answer, so " +
+    (retryMaySucceed
+      ? "a retry may succeed."
+      : "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, " +
+        "is fixed.")
+  );
+}
+
+/**
+ * Whether a status that did not come from Dispatch can clear on its own: a gateway's 5xx, a
+ * timeout or a rate limit can; any other status answers the same request the same way.
+ */
+function transientStatus(status: number): boolean {
+  return status >= 500 || status === 408 || status === 429;
+}
+
+const REDACTED = "[redacted]";
+
+/**
+ * The first words of a body that is not JSON, as plain text safe to quote: scripts, styles and
+ * tags dropped, then whatever reads as a credential redacted, since the body is text a gateway
+ * chose and a misconfigured one echoes the request back. That is the client's own bearer wherever
+ * it appears and the value after `Authorization:` (its scheme kept) or `Bearer`. Redaction runs
+ * before the cut, so a cut never leaves a credential's first characters behind.
+ */
+function bodyExcerpt(text: string, token: string): string {
+  const plain = text
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<[^>]*>/g, " ");
+  return textHead(
+    (token === "" ? plain : plain.replaceAll(token, REDACTED))
+      .replace(
+        /(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi,
+        `$1${REDACTED}`
+      )
+      .replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`)
   );
 }
 
@@ -616,23 +662,25 @@ export class DispatchClient {
       Authorization: `Bearer ${this.token}`,
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    const response = await this.fetchImpl(this.#url(path, query), {
+    const url = this.#url(path, query);
+    const response = await this.fetchImpl(url, {
       method,
       headers,
       signal: this.#signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    return this.#response<T>(response);
+    return this.#response<T>(method, url, response);
   }
 
   async #form<T>(method: string, path: readonly string[], body: FormData): Promise<T> {
-    const response = await this.fetchImpl(this.#url(path), {
+    const url = this.#url(path);
+    const response = await this.fetchImpl(url, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
       signal: this.#signal,
     });
-    return this.#response<T>(response);
+    return this.#response<T>(method, url, response);
   }
 
   #url(path: readonly string[], query?: object): string {
@@ -652,7 +700,16 @@ export class DispatchClient {
     return url.toString();
   }
 
-  async #response<T>(response: Response): Promise<T> {
+  /**
+   * The answer's payload, or the refusal it carries. Dispatch's own refusal is JSON with a string
+   * `error` (`writeError` in the server), and it renders as that text with its `code`. Any other
+   * non-2xx body — a gateway's HTML page, an empty body, JSON of another shape — did not come
+   * from Dispatch, so the error names the request (method, URL and query; the token travels in a
+   * header, never the URL), the status, a short plain-text excerpt of the body with anything that
+   * reads as a credential redacted, and whether a retry can help, under the same `HTTP_<status>`
+   * code as before.
+   */
+  async #response<T>(method: string, url: string, response: Response): Promise<T> {
     const text = await response.text();
     let payload: unknown = text;
     if (text && isJson(response)) {
@@ -664,13 +721,27 @@ export class DispatchClient {
     }
     if (!response.ok) {
       const error = asErrorShape(payload);
+      if (typeof error.error === "string") {
+        throw new DispatchServiceError(
+          error.code ?? `HTTP_${response.status}`,
+          response.status,
+          error.error,
+          error.candidates,
+          error.current,
+          error.mismatches
+        );
+      }
+      const excerpt = bodyExcerpt(text, this.token);
+      const body =
+        excerpt === ""
+          ? "an empty body"
+          : `a body that is not Dispatch's error JSON (${JSON.stringify(excerpt)})`;
+      const reason = response.statusText === "" ? "" : ` ${response.statusText}`;
       throw new DispatchServiceError(
-        error.code ?? `HTTP_${response.status}`,
+        `HTTP_${response.status}`,
         response.status,
-        error.error ?? (typeof payload === "string" && payload ? payload : response.statusText),
-        error.candidates,
-        error.current,
-        error.mismatches
+        `${method} ${url} answered ${response.status}${reason} with ${body}, ` +
+          gatewayAnswer(transientStatus(response.status))
       );
     }
     return payload as T;

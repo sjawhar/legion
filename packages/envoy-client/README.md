@@ -45,6 +45,16 @@ line an agent passes to subscribe to the whole issue itself.
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.
+
+A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
+`error`, is the error's message under its `code` (`HTTP_<status>` when the server set none). Any
+other body — a gateway's HTML page, an empty body, JSON of another shape — did not come from
+Dispatch, so the message names the method, the URL with its query (never the bearer, which is a
+header), the status, a one-line plain-text excerpt of the body with tags dropped and anything
+that reads as a credential redacted (the client's bearer, the value after `Authorization:` or
+`Bearer`), and whether a retry can help: it can for a 5xx, 408 or 429; any other status answers
+the same until the Dispatch URL, or whatever answers in its place, is fixed.
+
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec
 with no decision blocks, three or more session writes without a human response (with stronger

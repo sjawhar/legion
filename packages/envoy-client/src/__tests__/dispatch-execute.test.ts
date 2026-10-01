@@ -254,6 +254,53 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // A gateway in front of Dispatch answers a non-2xx with its own page. The tool result is the
+  // thrown message, so through the executor the agent must get the request, the status and a
+  // plain-text excerpt rather than the page's markup, for a write and for a read alike. The
+  // message's wording is pinned in dispatch-http.test.ts.
+  test("hands the agent the request and status, not a gateway's HTML, when Dispatch's host answers non-2xx", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(String(url)).pathname}`);
+      return new Response(
+        "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>",
+        {
+          status: 502,
+          statusText: "Bad Gateway",
+          headers: { "Content-Type": "text/html" },
+        }
+      );
+    };
+    const run = (tool: string, args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      }).then(
+        () => "",
+        (error: Error) => error.message
+      );
+
+    const write = await run("dispatch_message", { issue: "DSP-1", body: "Shipped." });
+    expect(write).toStartWith(
+      "POST http://dispatch.test/api/v1/issues/DSP-1/messages answered 502 Bad Gateway with a body that is not Dispatch's error JSON"
+    );
+    expect(write).not.toContain("<");
+    expect(requests).toEqual(["POST /api/v1/issues/DSP-1/messages"]);
+
+    const read = await run("dispatch_read", { issue: "DSP-1" });
+    expect(read).toStartWith(
+      "GET http://dispatch.test/api/v1/issues/DSP-1 answered 502 Bad Gateway with a body that is not Dispatch's error JSON"
+    );
+    expect(read).not.toContain("<");
+  });
+
   test("names the configured Dispatch URL when its transport is unreachable", async () => {
     const fetchImpl = (() => {
       throw new TypeError("Unable to connect. Is the computer able to access the url?");
