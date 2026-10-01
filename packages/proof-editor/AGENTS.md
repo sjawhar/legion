@@ -15,7 +15,7 @@ held them. The cut that followed deleted them from the fork, so that commit stay
 source however far the fork line moves.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
-**06fc1977f1fee637d92c6393965555e88ab9adcb** on the fork's cleaned `library` line. Moving that
+**340653cfaeb52866aabfd2e9d3d1e9f0ba87f2cd** on the fork's cleaned `library` line. Moving that
 pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstream` holds, and
 `tests/upstream-pin.test.ts` is what checks it.
 
@@ -107,16 +107,25 @@ copied file carries `// @ts-nocheck` any more. `tests/upstream-boundary.ts` is t
 names every binding this package imports across the boundary and fails `bun run typecheck` if
 one of them is `any`.
 
-The pinned source commit carries two fixes, each an open upstream pull request. The Dark Reader
+The pinned source commit carries four fixes, each an open upstream pull request. The Dark Reader
 fix (EveryInc/proof-sdk#81): peer-cursor colours and mark decorations avoid inline `style`
 attributes, because Dark Reader rewrites those attributes inside the contenteditable and
 ProseMirror reads the writes as content mutations. That can cause an endless redraw loop that
 wedges the tab. The proof-mark rendering fix (EveryInc/proof-sdk#82): the five proof marks render
 only their `data-*` attributes, where upstream renders `id`, `kind` and `by` as
-`[object Object]`, and a replace suggestion's widget redraws when its replacement changes.
-`tests/upstream-pin.test.ts` reads or runs the installed modules so a pin that loses either fix
-fails. Moving the pin changes the package dependency, `bun.lock`, `upstream/` and this file's
-source audit references; no Bun patch applies to this source.
+`[object Object]`, and a replace suggestion's widget redraws when its replacement changes. The
+split-mark fix (EveryInc/proof-sdk#83): accept, reject and deleteMark act on each run of a mark
+that other text splits, rather than on one range from its first run to its last, which deleted or
+re-attributed the text between. The overlapping record marks fix (EveryInc/proof-sdk#84):
+`proofComment` and `proofSuggestion` declare `excludes: ''`, so a comment or suggestion over text
+another one covers no longer cuts it out of the overlap; the plugin's removals take the mark with
+the acted-on id rather than every mark of its type over its text, and the markdown parser closes
+the nested span it is closing rather than every open span of the type. `tests/upstream-pin.test.ts`
+reads or runs the installed modules so a pin that loses any of them fails: it reads the Dark Reader
+fix where it lives, renders each proof mark, redraws a revised replacement in a happy-dom view,
+rejects an insert split by another, and comments twice over one word, round-trips that through
+markdown and deletes one of the two. Moving the pin changes the package dependency, `bun.lock`,
+`upstream/` and this file's source audit references; no Bun patch applies to this source.
 
 ## No build step
 

@@ -7,19 +7,28 @@
  *
  * Each fix case below is one member of that line. The proof-mark rendering fix is checked by
  * running the pinned modules: each mark rendered from the schema the headless engine builds, and
- * the marks plugin drawing a replacement in a real (happy-dom) view. The Dark Reader fix has no
- * exported seam a unit test could call, so it is read where it lives. A cut that loses one passes
- * every other check in the repository.
+ * the marks plugin drawing a replacement in a real (happy-dom) view. The split-mark actions and
+ * the overlapping record marks are checked the same way, through the marks plugin's own actions
+ * on a headless state. The Dark Reader fix has no exported seam a unit test could call, so it is
+ * read where it lives. A cut that loses one passes every other check in the repository.
  */
 
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Ctx } from "@milkdown/kit/ctx";
-import { EditorState } from "@milkdown/kit/prose/state";
+import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import { EditorState, Plugin, type Transaction } from "@milkdown/kit/prose/state";
 import { EditorView } from "@milkdown/kit/prose/view";
 import { Window } from "happy-dom";
-import { applyRemoteMarks, marksPlugin } from "proof-sdk-upstream/src/editor/plugins/marks";
+import {
+  applyRemoteMarks,
+  comment,
+  deleteMark,
+  marksPlugin,
+  marksPluginKey,
+  reject,
+} from "proof-sdk-upstream/src/editor/plugins/marks";
 import type { StoredMark } from "proof-sdk-upstream/src/formats/marks";
 import { createHeadlessProof } from "../src/lib-headless.js";
 
@@ -138,6 +147,109 @@ test("the pinned dependency redraws a replacement revised on a viewer's page", a
     }
     await window.happyDOM.close();
   }
+});
+
+/** A state holding the marks plugin's metadata and the two members its actions read: the state,
+ *  and dispatch applying to it. */
+function headlessMarksView(doc: ProseMirrorNode, metadata: Record<string, StoredMark>) {
+  const plugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        return meta?.type === "SET_METADATA" ? { ...value, metadata: meta.metadata } : value;
+      },
+    },
+  });
+  const double = {
+    state: EditorState.create({ doc, plugins: [plugin] }),
+    dispatch(tr: Transaction) {
+      double.state = double.state.apply(tr);
+    },
+  };
+  return double;
+}
+
+/** The text a mark id covers, its runs joined in document order. */
+function coveredBy(doc: ProseMirrorNode, id: string): string {
+  let text = "";
+  doc.descendants((node) => {
+    if (node.isText && node.marks.some((mark) => mark.attrs.id === id)) text += node.text;
+    return true;
+  });
+  return text;
+}
+
+test("the pinned dependency acts on a split insert's own runs", async () => {
+  // Alice's insert "quick brown" with Bob's insert "lazy " between its runs. Rejecting hers
+  // joined her runs into one range and deleted his text too (EveryInc/proof-sdk#83).
+  const { schema } = await createHeadlessProof();
+  const suggestion = schema.marks.proofSuggestion;
+  if (suggestion === undefined) throw new Error("the editor schema has no proofSuggestion mark");
+  const insert = (id: string, by: string) => suggestion.create({ by, id, kind: "insert" });
+  const createdAt = new Date(Date.now() - 60_000).toISOString();
+  const stored = (by: string, content: string) =>
+    ({ by, content, createdAt, kind: "insert", status: "pending" }) as StoredMark;
+  const doc = schema.node("doc", null, [
+    schema.node("paragraph", null, [
+      schema.text("The "),
+      schema.text("quick ", [insert("a", "human:alice")]),
+      schema.text("lazy ", [insert("b", "human:bob")]),
+      schema.text("brown", [insert("a", "human:alice")]),
+      schema.text(" fox"),
+    ]),
+  ]);
+  const view = headlessMarksView(doc, {
+    a: stored("human:alice", "quick brown"),
+    b: stored("human:bob", "lazy "),
+  });
+  expect(reject(view as unknown as EditorView, "a")).toBe(true);
+  expect(view.state.doc.textContent).toBe("The lazy  fox");
+  expect(coveredBy(view.state.doc, "b")).toBe("lazy ");
+});
+
+test("the pinned dependency lets two people's comments and suggestions cover the same text", async () => {
+  const { schema, parseMarkdown, serializeMarkdown } = await createHeadlessProof();
+  const { proofComment, proofSuggestion, proofFlagged, proofApproved, proofAuthored } =
+    schema.marks;
+  if (!proofComment || !proofSuggestion || !proofFlagged || !proofApproved || !proofAuthored) {
+    throw new Error("the editor schema is missing a proof mark");
+  }
+  expect({
+    proofComment: proofComment.excludes(proofComment),
+    proofSuggestion: proofSuggestion.excludes(proofSuggestion),
+    proofFlagged: proofFlagged.excludes(proofFlagged),
+    proofApproved: proofApproved.excludes(proofApproved),
+    proofAuthored: proofAuthored.excludes(proofAuthored),
+  }).toEqual({
+    proofComment: false,
+    proofSuggestion: false,
+    proofFlagged: true,
+    proofApproved: true,
+    proofAuthored: true,
+  });
+
+  // Bob comments on "quick brown", Alice on "brown": Bob's comment keeps "brown", and deleting
+  // Alice's removes hers only.
+  const doc = schema.node("doc", null, [
+    schema.node("paragraph", null, [schema.text("The quick brown fox")]),
+  ]);
+  const view = headlessMarksView(doc, {});
+  const editorView = view as unknown as EditorView;
+  const bob = comment(editorView, "quick brown", "human:bob", "Bob", { from: 5, to: 16 });
+  const alice = comment(editorView, "brown", "human:alice", "Alice", { from: 11, to: 16 });
+  expect(coveredBy(view.state.doc, bob.id)).toBe("quick brown");
+  expect(coveredBy(view.state.doc, alice.id)).toBe("brown");
+
+  // Written to markdown, the nested spans read back as both comments.
+  const reparsed = parseMarkdown(serializeMarkdown(view.state.doc));
+  expect(coveredBy(reparsed, bob.id)).toBe("quick brown");
+  expect(coveredBy(reparsed, alice.id)).toBe("brown");
+
+  expect(deleteMark(editorView, alice.id)).toBe(true);
+  expect(coveredBy(view.state.doc, alice.id)).toBe("");
+  expect(coveredBy(view.state.doc, bob.id)).toBe("quick brown");
 });
 
 // The timeout is explicit because the case spawns tsc over the whole upstream closure — two

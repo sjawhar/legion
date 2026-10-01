@@ -195,8 +195,9 @@ func TestRejectSuggestionInCodeGivesBackTheCode(t *testing.T) {
 // boundary, nothing but the boundary between them, are one range, so the blocks join, which undoes
 // the split an insert made (Enter typed while suggesting), and a table the range cuts keeps its
 // width, its short row padded as the browser pads it. Runs with other text between them are each
-// deleted where they stand, keeping that text, which the browser's reject deletes too. Each want
-// is the browser editor's result, written as this renderer writes it.
+// deleted where they stand, keeping that text, as the browser's reject does too: the pinned fork
+// carries the split-mark fix (EveryInc/proof-sdk#83). Each want is the browser editor's result,
+// written as this renderer writes it.
 func TestRejectSuggestionDeletesTheInsertsText(t *testing.T) {
 	const (
 		table    = "\n\n| ZZNext | b |\n| --- | --- |\n| c | d |\n"
