@@ -26,109 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
-
-var (
-	sharedListenerNATSOnce sync.Once
-	sharedListenerNATSURI  string
-	sharedListenerNATSErr  error
-	// sharedListenerNATSContainer is the container the tests share, which TestMain terminates.
-	sharedListenerNATSContainer *tcnats.NATSContainer
-)
-
-func sharedListenerTestNATSURI(t *testing.T) string {
-	t.Helper()
-	sharedListenerNATSOnce.Do(func() {
-		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, testnats.Image)
-		if err != nil {
-			sharedListenerNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedListenerNATSURI, sharedListenerNATSErr = ctr.ConnectionString(ctx)
-		if sharedListenerNATSErr != nil {
-			sharedListenerNATSErr = errors.Join(sharedListenerNATSErr, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedListenerNATSContainer = ctr
-	})
-	if sharedListenerNATSErr != nil {
-		t.Fatalf("failed to start shared NATS: %v", sharedListenerNATSErr)
-	}
-	return sharedListenerNATSURI
-}
-
-func clearKVBucket(t *testing.T, conn *natsgo.Conn, bucket string) {
-	t.Helper()
-	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("failed to open JetStream: %v", err)
-	}
-	kv, err := js.KeyValue(bucket)
-	if errors.Is(err, natsgo.ErrBucketNotFound) {
-		return
-	}
-	if err != nil {
-		t.Fatalf("failed to open bucket %s: %v", bucket, err)
-	}
-	keys, err := kv.Keys()
-	if errors.Is(err, natsgo.ErrNoKeysFound) {
-		return
-	}
-	if err != nil {
-		t.Fatalf("failed to list bucket %s keys: %v", bucket, err)
-	}
-	for _, key := range keys {
-		if err := kv.Delete(key); err != nil && !errors.Is(err, natsgo.ErrKeyNotFound) {
-			t.Fatalf("failed to delete key %s from bucket %s: %v", key, bucket, err)
-		}
-	}
-}
-
-func resetListenerTestState(t *testing.T, conn *natsgo.Conn) {
-	t.Helper()
-	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("failed to open JetStream: %v", err)
-	}
-	if err := js.PurgeStream(bus.Stream); err != nil && !errors.Is(err, natsgo.ErrStreamNotFound) {
-		t.Fatalf("failed to purge stream %s: %v", bus.Stream, err)
-	}
-	clearKVBucket(t, conn, store.Bucket)
-	clearKVBucket(t, conn, store.RoleBucket)
-	if err := js.DeleteKeyValue(session.SessionBucket); err != nil &&
-		!errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
-		t.Fatalf("failed to reset session bucket: %v", err)
-	}
-}
-
-func TestResetListenerTestStateRecreatesSessionBucket(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
-	defer client.Close()
-	resetListenerTestState(t, client.Conn)
-
-	if _, err := session.OpenSessionRegistry(
-		client.Conn,
-		session.WithSessionReplicas(1),
-		session.WithSessionTTL(100*time.Millisecond),
-	); err != nil {
-		t.Fatalf("open short-lived session registry: %v", err)
-	}
-	resetListenerTestState(t, client.Conn)
-
-	registry, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
-	if err != nil {
-		t.Fatalf("open reset session registry: %v", err)
-	}
-	if got := registry.TTL(); got != 5*time.Minute {
-		t.Fatalf("session bucket TTL = %s, want %s", got, 5*time.Minute)
-	}
-}
 
 func TestStartingGate_Closed_Returns503(t *testing.T) {
 	var handler startingGate
@@ -397,12 +295,11 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 func setupPublishTestClient(t *testing.T, options ...bus.ConnectOption) *bus.Client {
 	t.Helper()
 	options = append([]bus.ConnectOption{bus.WithReplicas(1)}, options...)
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, options...)
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, options...)
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	return client
 }
 
@@ -1189,12 +1086,11 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 
 func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.Registry {
 	t.Helper()
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -1311,12 +1207,11 @@ func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
 
 func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[string]int) (*store.Registry, *session.SessionRegistry) {
 	t.Helper()
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -1398,12 +1293,11 @@ func TestSessionsHandler_JoinsRegistries(t *testing.T) {
 }
 
 func TestSessionsHandler_IncludesTitle(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -1755,14 +1649,12 @@ func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 }
 
 func TestDurableConsumerRestart(t *testing.T) {
-	publisher, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	publisher, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect publisher bus: %v", err)
 	}
 	t.Cleanup(publisher.Close)
-	resetListenerTestState(t, publisher.Conn)
-
-	firstListener, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	firstListener, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect first listener bus: %v", err)
 	}
@@ -1872,7 +1764,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 		t.Fatalf("publish third failed: %v", err)
 	}
 
-	secondListener, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	secondListener, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect second listener bus: %v", err)
 	}
@@ -1909,7 +1801,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 // subscription before re-subscribing. A fresh consumer must therefore be
 // created server-side and bound, so that unsubscribe never resets the cursor.
 func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
@@ -1951,7 +1843,7 @@ func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
 // WARN. It acks explicitly, one message at a time. Each durable here also carries a drifted ack
 // wait, which the refusal must leave as it is: a refused durable is never corrected.
 func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
@@ -2050,7 +1942,7 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 // deliver inbox can never deliver again; left subscribed, each rebuild adds one more SUB the
 // connection carries until the process exits.
 func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
@@ -2101,7 +1993,7 @@ func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
 // listener must be rejected, not delete the consumer to steal the binding —
 // stealing resets the durable cursor and replays the full retention window.
 func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
-	first, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	first, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect first bus: %v", err)
 	}
@@ -2129,7 +2021,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	second, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	second, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect second bus: %v", err)
 	}
@@ -3321,11 +3213,9 @@ func exceptionRecipient(t *testing.T, exception contracts.Envelope) string {
 }
 
 func TestHealthzConsumerLag(t *testing.T) {
-	natsURI := sharedListenerTestNATSURI(t)
+	natsURI := testnats.URL(t)
 	conn := testnats.Connect(t, natsURI)
 	defer conn.Close()
-
-	resetListenerTestState(t, conn)
 
 	// Create a bus client
 	client, err := bus.ConnectOwningStream([]string{natsURI})
@@ -3951,20 +3841,8 @@ func setupTestNATS(t *testing.T) *bus.Client {
 	return client
 }
 
-// TestMain terminates the NATS container this package's tests share once they have all run.
-// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedListenerNATSContainer != nil {
-		if err := testcontainers.TerminateContainer(sharedListenerNATSContainer); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
-	os.Exit(code)
-}
+// TestMain removes the NATS server the package's tests share (testnats.Main).
+func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
 
 // endInterestWatcherWhileConnected ends the interest registry's KV watcher while NATS stays
 // connected: deleting the bucket's stream makes the watcher's ordered consumer fail to reset.
@@ -4112,7 +3990,7 @@ func consumerCreates(t *testing.T, conn *natsgo.Conn, consumer string) *atomic.I
 // setting NATS can update is corrected once and then left alone. A correction that updated on
 // every start would pass every other test, while every listener start rewrote its durable.
 func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T) {
-	uri := sharedListenerTestNATSURI(t)
+	uri := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
