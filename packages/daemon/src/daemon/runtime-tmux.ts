@@ -486,28 +486,27 @@ export class TmuxRuntime implements Runtime {
   private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
     // createDaemonRunner merges `{ ...environment.paneEnv, ...options?.env }`, so an `env` option
     // here can only add variables, never remove the ones paneEnv already carries (which may
-    // include a one-shot GitHub token or other secrets). `env -i` starts the child from a
-    // genuinely empty environment regardless of what environment the `env` process itself
-    // received, so this is the one way to give codegraph a minimal environment on this runtime:
-    // its own PATH and HOME (so it resolves and keeps its config/cache), and DO_NOT_TRACK=1,
-    // which disables both CodeGraph's telemetry and its update check (its docs rank DO_NOT_TRACK
-    // above CODEGRAPH_TELEMETRY above stored config above default-on) — an automatic, non-opt-in
-    // warm-up must never phone home, nor leak a token into a third-party CLI's environment.
-    const codegraphEnv = [
-      `PATH=${process.env.PATH ?? ""}`,
-      `HOME=${process.env.HOME ?? ""}`,
-      "DO_NOT_TRACK=1",
-    ];
+    // include a one-shot GitHub token or other secrets); `process.env` is also wrong here — the
+    // runtime's command contract is the runner's resolved environment (`environment.paneEnv`,
+    // the mise-resolved env workers inherit), not this process's own. So this runs through a
+    // shell that inherits the runner-merged env — giving it genuine PATH/HOME — then execs
+    // `env -i` from inside that shell, which drops every other variable regardless of what
+    // environment the shell itself received: `codegraph` gets only PATH, HOME, and
+    // DO_NOT_TRACK=1, never a one-shot GitHub token or any other secret the merged env carries.
+    // DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its docs rank
+    // DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on) — an
+    // automatic, non-opt-in warm-up must never phone home.
+    const codegraphShell = 'exec env -i PATH="$PATH" HOME="$HOME" DO_NOT_TRACK=1 codegraph "$@"';
     try {
       const status = await this.deps.run(
-        ["env", "-i", ...codegraphEnv, "codegraph", "status", "--json"],
+        ["sh", "-c", codegraphShell, "codegraph", "status", "--json"],
         {
           cwd: workspaceDir,
           timeoutMs: this.deps.slowCommandTimeoutMs,
         }
       );
       if (status.exitCode === 0 && isCodegraphInitialized(status.stdout)) return;
-      const result = await this.deps.run(["env", "-i", ...codegraphEnv, "codegraph", "init"], {
+      const result = await this.deps.run(["sh", "-c", codegraphShell, "codegraph", "init"], {
         cwd: workspaceDir,
         timeoutMs: this.deps.slowCommandTimeoutMs,
       });
