@@ -33,7 +33,7 @@ func (s *Store) ChainVerifier(kind, audience string, skew time.Duration) *record
 		},
 		FetchDecisions: func(ctx context.Context, recordID string) ([]record.TerminalEvent, error) {
 			rows, err := s.Pool.Query(ctx, `select event, coalesce(login, '') from credential_request_events
-				where record_id=$1 and event in ('approved','denied','expired','cancelled') order by id`, recordID)
+				where record_id=$1 and event = any($2) order by id`, recordID, record.TerminalEventNames)
 			if err != nil {
 				return nil, err
 			}

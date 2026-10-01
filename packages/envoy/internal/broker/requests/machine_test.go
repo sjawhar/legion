@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -89,8 +88,7 @@ func withRules(t *testing.T, m *Machine, yaml string) {
 func replayer(st *store.Store) func(context.Context, string, time.Time) (bool, error) {
 	return func(ctx context.Context, jti string, expires time.Time) (bool, error) {
 		_, err := st.Pool.Exec(ctx, `insert into proof_jtis (jti, expires_at) values ($1,$2)`, jti, expires)
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if store.IsUniqueViolation(err) {
 			return false, nil
 		}
 		return err == nil, err

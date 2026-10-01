@@ -220,8 +220,7 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 		in.ID, in.Kind, in.RuntimeID, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if store.IsUniqueViolation(err) {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before
 		// recovery asks the pool for one: holding one connection while waiting for a second is how
 		// enough concurrent retries of one enrollment deadlock the whole pool.
@@ -444,8 +443,7 @@ func (s *Service) SessionID(ctx context.Context, id string) (string, error) {
 // so the table stays bounded without a separate job.
 func (s *Service) Replay(ctx context.Context, jti string, expires time.Time) (bool, error) {
 	_, err := s.Store.Pool.Exec(ctx, `insert into proof_jtis (jti, expires_at) values ($1,$2)`, jti, expires)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if store.IsUniqueViolation(err) {
 		return false, nil
 	}
 	if err != nil {

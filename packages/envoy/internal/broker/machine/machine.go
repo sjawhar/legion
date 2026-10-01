@@ -20,7 +20,6 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -247,7 +246,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", err
 	}
 	var decided bool
-	if err := tx.QueryRow(ctx, `select exists(select 1 from credential_request_events where record_id=$1 and event in ('approved','denied','expired','cancelled'))`, recordID).
+	if err := tx.QueryRow(ctx, `select exists(select 1 from credential_request_events where record_id=$1 and event = any($2))`, recordID, record.TerminalEventNames).
 		Scan(&decided); err != nil {
 		return "", "", err
 	}
@@ -282,7 +281,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		}
 		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
 			time.Now().Add(time.Duration(body.LifetimeSeconds)*time.Second))
-		if isUniqueViolation(err) {
+		if store.IsUniqueViolation(err) {
 			return "", "", ErrKeyHoldsLiveCredential
 		}
 		if err != nil {
@@ -293,7 +292,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, credential_id, actor) values ($1,$2,$3,$4,$5)`,
-		recordID, event, login, credID, "human:"+login); isUniqueViolation(err) {
+		recordID, event, login, credID, "human:"+login); store.IsUniqueViolation(err) {
 		return "", "", ErrAlreadyDecided
 	} else if err != nil {
 		return "", "", err
@@ -305,12 +304,6 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "issued", *credID, nil
 	}
 	return "denied", "", nil
-}
-
-// isUniqueViolation reports whether err is Postgres's unique_violation (23505).
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // Read answers a machine's own poll: the record's current state and, once issued, its minted
@@ -332,7 +325,7 @@ func (s *Service) Read(ctx context.Context, pendingID string) (state, credential
 func (s *Service) recordState(ctx context.Context, recordID string) (state, credentialID string, err error) {
 	var event string
 	var credID *string
-	err = s.Store.Pool.QueryRow(ctx, `select event, credential_id from credential_request_events where record_id=$1 and event in ('approved','denied','expired','cancelled')`, recordID).
+	err = s.Store.Pool.QueryRow(ctx, `select event, credential_id from credential_request_events where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames).
 		Scan(&event, &credID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "pending", "", nil
@@ -397,7 +390,9 @@ func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, er
 // expires_at has passed now and that has no terminal event yet. The insert's own ON CONFLICT
 // target is credential_request_events' partial unique index on (record_id) where event names a
 // decision, so a record a concurrent ApplyDecision just decided is silently left alone rather
-// than raising a constraint violation.
+// than raising a constraint violation. That target spells the index's own predicate literally,
+// not record.TerminalEventNames: Postgres infers a partial index only from a predicate it can
+// prove implies the index's, and a bound parameter proves nothing.
 func (s *Service) ExpirePending(ctx context.Context, now time.Time) error {
 	_, err := s.Store.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, actor)
 		select id, 'expired', 'broker' from credential_requests

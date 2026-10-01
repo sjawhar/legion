@@ -348,3 +348,9 @@ func (b Body) ApproverLogin(login string) (string, error) {
 	}
 	return login, nil
 }
+
+// isApprover reports whether login is the approver this record names, by ApproverLogin's rule.
+func (b Body) isApprover(login string) bool {
+	_, err := b.ApproverLogin(login)
+	return err == nil
+}

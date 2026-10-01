@@ -24,6 +24,11 @@ type TerminalEvent struct {
 	Login string
 }
 
+// TerminalEventNames are the events that end a record's pending state, which a record carries at
+// most once: credential_request_decision's partial unique index, whose predicate spells the same
+// list, holds it to that. A query passes them as `event = any($n)`.
+var TerminalEventNames = []string{"approved", "denied", "expired", "cancelled"}
+
 // ChainVerifier re-derives a credential-request record's full issuance chain rather than
 // trusting a downstream row (a launcher credential, a grant) that merely names the record's id:
 // the stored body must reproduce the record's own content-addressed id, the request object it
@@ -84,8 +89,7 @@ func (c *ChainVerifier) Verify(ctx context.Context, recordID string) (Body, erro
 		return Body{}, fmt.Errorf("%w: %d terminal decision events, want exactly one", ErrChainBroken, len(decisions))
 	case decisions[0].Event != "approved":
 		return Body{}, fmt.Errorf("%w: no approved event (decided %s)", ErrChainBroken, decisions[0].Event)
-	}
-	if _, err := body.ApproverLogin(decisions[0].Login); err != nil {
+	case !body.isApprover(decisions[0].Login):
 		return Body{}, fmt.Errorf("%w: approved by %q, not the record's approver %q", ErrChainBroken, decisions[0].Login, body.Approver)
 	}
 	return body, nil
