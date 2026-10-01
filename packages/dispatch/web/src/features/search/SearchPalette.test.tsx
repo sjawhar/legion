@@ -507,6 +507,117 @@ test("while the search is out the arrows walk only the actions the query starts,
   }
 });
 
+test("a refetch behind a stale cached answer is still out, so Down and Enter reach no action found inside its label", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const hit = issueHit("LEGION-3");
+  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const search = spyOn(api, "search").mockReturnValue(answer.promise);
+  const view = renderPaletteHost();
+  // The reader searched `issue` earlier and found nothing; that answer is stale now.
+  view.queryClient.setQueryData(["search", "issue"], { results: [], took_ms: 1 });
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    expect(optionIds()).toEqual([CLOSE_ROW]);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(ran).toEqual([]);
+
+    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await waitFor(() => expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]));
+    expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/LEGION-3");
+    expect(ran).toEqual([]);
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("once the search has failed, Down takes the first action found inside its label", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const search = spyOn(api, "search").mockRejectedValue(new Error("503"));
+  const view = renderPaletteHost();
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    expect((await screen.findByRole("alert")).textContent).toContain("Search failed.");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(ran).toEqual(["close"]));
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("a background refetch keeps the actions the query starts and the hits walkable, and a highlight already among the More actions moving", async () => {
+  const ran: string[] = [];
+  const unregister = appKeymap.register("global", [
+    { id: "close", keys: [], label: "Close issue", run: () => ran.push("close") },
+    { id: "report", keys: [], label: "Issue the report", run: () => ran.push("report") },
+  ]);
+  const hit = issueHit("LEGION-3");
+  const search = spyOn(api, "search").mockResolvedValue({ results: [hit], took_ms: 1 });
+  const view = renderPaletteHost();
+  const report = "search-option-action-global-report";
+  const refetchHeld = async (calls: number) => {
+    const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+    search.mockReturnValue(answer.promise);
+    act(() => {
+      void view.queryClient.refetchQueries();
+    });
+    await waitFor(() => expect(search).toHaveBeenCalledTimes(calls));
+    return answer;
+  };
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await waitFor(() => expect(optionIds()).toEqual([report, optionId(hit), CLOSE_ROW]));
+    expect(input.getAttribute("aria-activedescendant")).toBe(report);
+
+    // A focus or staleTime refetch is out with the hits still shown: the arrows walk the
+    // leading row and the hits, and stop short of the More actions.
+    const first = await refetchHeld(2);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(report);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
+    await act(async () => first.resolve({ results: [hit], took_ms: 1 }));
+    await waitFor(() => expect(view.queryClient.isFetching()).toBe(0));
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
+
+    // Moved there after an answer, a highlight among the More actions keeps moving over the
+    // whole list through the next refetch.
+    const second = await refetchHeld(3);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(report);
+    await act(async () => second.resolve({ results: [hit], took_ms: 1 }));
+    expect(ran).toEqual([]);
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
 test("a query that starts an action's label lists it above the hits, and Enter runs it", async () => {
   const ran: string[] = [];
   const unregister = registerClose(ran);

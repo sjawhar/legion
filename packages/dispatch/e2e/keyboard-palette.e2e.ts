@@ -856,9 +856,9 @@ test("an arrow pressed before the search answers reaches no action the query fin
     const input = page.getByRole("combobox", { name: "Search" });
     await input.fill("issue");
     await expect(dialog.getByRole("option", { name: "Close issue" })).toHaveCount(1);
-    // Down and Enter in one burst, inside the debounce and again once the request is out: the
-    // list holds only the actions `issue` finds mid-label, `Close issue` first, and the hits are
-    // still to arrive above them, so the arrows move nothing yet.
+    // Down and Enter right after typing, and again once the request is held: the list holds only
+    // the actions `issue` finds mid-label, `Close issue` first, and the hits are still to arrive
+    // above them, so neither burst highlights or runs anything.
     await input.press("ArrowDown");
     await input.press("Enter");
     await expect(dialog).toBeVisible();
@@ -873,6 +873,72 @@ test("an arrow pressed before the search answers reaches no action the query fin
     await expect(dialog.getByRole("option").first()).toHaveAttribute("id", /^search-option-issue-/);
     await expect(input).toHaveAttribute("aria-activedescendant", /^search-option-issue-/);
     await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
+    expect(statusWrites).toEqual([]);
+    expect((await getIssue(issue.key)).status).toBe("in_progress");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a stale answer refreshing for the same query keeps the arrows off the actions it finds mid-label", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Stale answer for an issue search" });
+  await patchIssue(issue.key, { status: "in_progress" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    const statusWrites: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+      ) {
+        statusWrites.push(request.postData() ?? "");
+      }
+    });
+    // The clock is the page's own, so the cached answer can go stale without a 30 s wait.
+    await page.clock.install();
+    await openIssue(page, issue.key, "Stale answer for an issue search");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const input = page.getByRole("combobox", { name: "Search" });
+    const hit = dialog.getByRole("option").first();
+
+    // The reader searched `issue` once: the answer is cached, with `Close issue` below the hit.
+    await page.keyboard.press("Control+k");
+    await input.fill("issue");
+    await expect(hit).toHaveAttribute("id", /^search-option-issue-/);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    // Past the answer's 30 s staleTime, the same query shows that answer and refetches it.
+    await page.clock.fastForward("00:31");
+    const release = Promise.withResolvers<void>();
+    let held = 0;
+    await page.route(
+      (url) => url.pathname === "/api/v1/search",
+      async (route) => {
+        held += 1;
+        await release.promise;
+        await route.continue();
+      }
+    );
+    await page.locator("body").focus();
+    await page.keyboard.press("Control+k");
+    await input.fill("issue");
+    await expect.poll(() => held).toBeGreaterThan(0);
+    await expect(hit).toHaveAttribute("id", /^search-option-issue-/);
+    await expect(input).toHaveAttribute("aria-activedescendant", /^search-option-issue-/);
+    // The hits may still change above `Close issue`, so Down stays among them.
+    await input.press("ArrowDown");
+    await expect(input).toHaveAttribute("aria-activedescendant", /^search-option-issue-/);
+    release.resolve();
+    await input.press("Enter");
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
     expect(statusWrites).toEqual([]);
