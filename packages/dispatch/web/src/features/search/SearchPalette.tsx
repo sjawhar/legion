@@ -542,13 +542,15 @@ function PaletteDialog({
     }
     onClose();
   };
-  // While the query's search is out, its hits have still to arrive above the More actions, so an
-  // arrow aimed at the list now would land on whatever row then sits there: until the search
-  // answers, the arrows walk only the rows above where the hits will go, and with none they do
-  // nothing.
-  const searchOut =
-    waitingForQuery || (queryEnabled && search.data === undefined && !search.isError);
-  const walkable = searchOut ? rows.length - moreActions.options.length : rows.length;
+  // While the query's search is out - its first answer, or a refetch behind a cached one - its
+  // hits can still arrive above the More actions, so an arrow aimed at the list now would land
+  // on whatever row then sits there: until the search answers, the arrows walk only the rows
+  // above the More actions, and with none they do nothing. A highlight the reader moved into the
+  // More actions after an earlier answer keeps moving over the whole list. `isFetching`, not the
+  // message's `isPending`: with a stale cached answer `isPending` is false while the refetch runs.
+  const searchOut = waitingForQuery || (queryEnabled && search.isFetching);
+  const firstMore = rows.length - moreActions.options.length;
+  const walkable = searchOut && activeIndex < firstMore ? firstMore : rows.length;
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if ((event.key === "ArrowDown" || event.key === "ArrowUp") && walkable > 0) {
       event.preventDefault();
