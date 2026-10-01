@@ -30,7 +30,7 @@ symptoms:
 
 The Dispatch dashboard's browser suite (`cd packages/dispatch && bun run e2e`) is the package's
 own integration harness: the Playwright config starts the fake Envoy (`e2e/fake-envoy.ts`) and the
-real Go server (`e2e/run-server.sh` → `go run ./cmd/dispatch`) itself, against a Postgres the
+real Go server (`e2e/run-server.sh`, which builds `./cmd/dispatch` and execs the binary) itself, against a Postgres the
 developer supplies. It is allowed as a worker's local proof. Three things about running it from a
 Legion pane on a shared box cost LEGION-94 an evening; none of them exists in CI.
 
@@ -63,7 +63,8 @@ resolves the concrete Go binary with the caller's toolchain before it isolates
 the server process. It then reads the harness ports, unsets every
 inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, and supplies the
 server's configuration in full: `ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake
-GitHub and dashboard origins, and fresh App and signing keys. The server runs
+GitHub and dashboard origins, and a fresh App key, with no cookie signing key: the server
+generates one for its own process under `DISPATCH_DEV_SIGNIN`. The server runs
 with no caller Home or XDG directory, so
 `~/.config/opencode/envoy.json` and
 `~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake

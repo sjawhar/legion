@@ -422,9 +422,17 @@ Postgres. The harness runs `e2e/run-server.sh` unless
 to `DISPATCH_E2E_PORT=8777`, which keeps its temporary server separate from
 the production listener on port 8766, but `DATABASE_URL` is required: the
 database must be isolated because `e2e/seed.ts` truncates it before every
-scenario and never falls back to `dispatch_c`. It uses trusted
-`X-Dispatch-User` identity for `alice` and `bob`; do not replace it with a
-fixture server.
+scenario and never falls back to `dispatch_c`. It runs the server in cookie
+identity, the production mode, and signs `alice` and `bob` in through the
+server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
+origin, listener and database, with a per-process signing key):
+`e2e/users.ts`'s `signIn`/`asUser` for a browser context, `e2e/api.ts`'s
+`userHeaders` for a plain fetch, which also sends the dashboard origin the CSRF
+guard requires on writes. A cookie names its login's generation in
+`user_sessions`, which `resetDatabase` truncates, so a context signs in after the
+reset, never before it. Address the harness as `127.0.0.1:<port>`, never
+`localhost`: the router refuses any other `Host`. Do not replace the server with
+a fixture server.
 
 A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
 
@@ -437,10 +445,20 @@ fires, since a selector check that cannot fire only looks like a guard. The one 
 project's title `grep`; its fallback is the one-time manual check beside the `webkit-iphone` project below.
 
 `run-server.sh` resolves the concrete Go binary in the caller's toolchain
-environment, then starts Dispatch with every server setting pinned. It
-unsets inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies fresh App
-and signing keys, and gives the server no caller Home or XDG directory. A
-caller's environment or `~/.config/opencode/envoy.json` /
+environment, builds the server with it, and execs the binary with every server
+setting pinned. It execs the binary rather than `go run`: the go command ignores
+only SIGINT and SIGQUIT, so a SIGTERM to `go run` ends the go command and leaves
+its server listening. Playwright kills the whole process group and the
+skill-scenarios rig the whole process tree, so neither noticed, but a caller
+that signals the one pid it started (`kill $!`) needs it to be the server. The binary is one per
+checkout, `packages/envoy/dispatch-e2e` (gitignored), built under
+`flock packages/envoy/.dispatch-e2e.lock` so two harnesses starting at once in
+one checkout serialise their builds; Go rewrites it only when the source
+changed, and a running server keeps the inode it started from. The script
+unsets inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies a fresh App
+key, passes no cookie signing key (the server generates one for its process, as
+`DISPATCH_DEV_SIGNIN` requires), and gives the server no caller Home or XDG
+directory. A caller's environment or `~/.config/opencode/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
 exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
@@ -503,7 +521,12 @@ in its own order, and the two crossing is a PostgreSQL deadlock that kills eithe
 the settlement. With no live room and no armed settlement timer the two cannot overlap, so the
 reset does not retry. It still waits for any open server transaction before truncating. For a
 deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
-bearer-seeded API calls.
+bearer-seeded API calls. Every psql the harness runs, `seed.ts`'s and `failed-room.e2e.ts`'s,
+goes through `e2e/psql.ts`, which drops `PGHOSTADDR` from psql's environment: libpq reads it and
+connects there in place of the URL's host, and the server's pgx does not read it, so with it set
+in a shell psql would truncate a database the server's own loopback check never saw. `PGHOST`
+and `PGSERVICE` stay, since pgx and libpq read both. `e2e/psql.ts` imports nothing from `e2e/`,
+so a module can import it statically before the harness is up, without evaluating `e2e/api.ts`.
 
 That reset is also the one rig failure that presents as a code failure. Any other process holding
 a non-idle connection to the test database — most often a Dispatch server from an earlier run

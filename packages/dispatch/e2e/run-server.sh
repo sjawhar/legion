@@ -23,14 +23,10 @@ fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
 
 # Resolve the concrete Go executable before hiding HOME. A mise shim can use
-# the caller's configuration here, but the hermetic server process invokes the
-# resolved Go binary directly and never asks mise to choose a version.
+# the caller's configuration here; the server is built with that toolchain in
+# the caller's environment, before the hermetic environment below exists, and
+# the server process itself never asks mise or Go to choose anything.
 go_binary="$(go env GOROOT)/bin/go"
-
-# `go run` still compiles the concrete server command, so provide its build
-# and module caches explicitly rather than letting Go derive them from HOME.
-go_cache="${GOCACHE:-$(go env GOCACHE)}"
-go_mod_cache="${GOMODCACHE:-$(go env GOMODCACHE)}"
 
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
@@ -41,14 +37,27 @@ done
 
 # Architecture-source access checks run against the fake GitHub listener with
 # throwaway App credentials: a fresh RSA key per run (nothing secret to
-# commit), a dummy client secret because LoadAppFromEnv requires one whenever
-# the client id is set, and the trusted-header ack the server demands when App
-# credentials meet header identity. The fresh signing key makes the cookie
-# layer just as isolated; nothing reaches the caller's persistent data dir.
+# commit), and a dummy client secret because LoadAppFromEnv requires one
+# whenever the client id is set. Identity is the production cookie: the server
+# mints it at its dev sign-in route (DISPATCH_DEV_SIGNIN=1) with a signing key it
+# generates for this process alone, so no key is passed and nothing reaches the
+# caller's persistent data dir; DISPATCH_INSECURE_COOKIE=1 keeps the cookie
+# usable over plain HTTP in every engine. DISPATCH_SERVER_URL stays
+# http://127.0.0.1:$e2e_port: it is the origin the CSRF guard compares writes
+# against, the only Host the router serves under the flag, and the Playwright
+# config's baseURL. The flag also refuses a DATABASE_URL whose host is not
+# loopback or a unix socket.
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
-signing_key="$(openssl rand -hex 32)"
 
 cd "$(dirname "$0")/../../envoy"
+# Build first and exec the binary itself. A server started as `go run` is the go command's
+# child; the go command ignores only SIGINT and SIGQUIT, so a SIGTERM to it ends the go command
+# and leaves the server listening. Playwright kills the whole process group and the
+# skill-scenarios rig the whole process tree, but a caller that signals the one pid it started
+# (`kill $!`) needs that pid to be the server. One binary per checkout, built under a lock so two
+# harnesses starting at once serialise: Go rewrites it only when the source changed, and a
+# running server keeps the inode it started from.
+flock ./.dispatch-e2e.lock "$go_binary" build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
@@ -56,22 +65,19 @@ exec env \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
   DISPATCH_APP_CLIENT_SECRET=e2e-dummy-secret \
   DISPATCH_APP_PEM_B64="$app_pem_b64" \
+  DISPATCH_DEV_SIGNIN=1 \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
-  DISPATCH_IDENTITY=header:X-Dispatch-User \
-  DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+  DISPATCH_IDENTITY=cookie \
+  DISPATCH_INSECURE_COOKIE=1 \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_NATS_DISABLED=1 \
   DISPATCH_PORT="$e2e_port" \
   DISPATCH_SERVER_URL="http://127.0.0.1:$e2e_port" \
-  DISPATCH_SIGNING_KEY="$signing_key" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_WEB_DIST=../dispatch/web/dist \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \
-  GOCACHE="$go_cache" \
-  GOMODCACHE="$go_mod_cache" \
-  GOENV=off \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  "$go_binary" run ./cmd/dispatch
+  ./dispatch-e2e

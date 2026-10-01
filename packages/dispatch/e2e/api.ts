@@ -43,7 +43,8 @@ import type {
 } from "../web/src/api/types";
 import { dispatchPort } from "./harness-ports";
 
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
+export const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
+const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
 // e2e/run-server.sh, so an E2E_AGENT_TOKEN left in the shell from a deployed run would only
 // make every bearer-seeded call 401 against it.
@@ -58,6 +59,50 @@ interface ApiOptions {
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+}
+
+const sessionCookies = new Map<string, Promise<string>>();
+
+/** The `dsession` cookie the server issues `login` at /auth/_dev/signin, minted once per spelling
+ *  of a login. `forgetSessions` drops them when the database is reset: the generation a cookie
+ *  encodes lives in `user_sessions`, which the reset truncates. */
+function sessionCookie(login: string): Promise<string> {
+  let cookie = sessionCookies.get(login);
+  if (cookie === undefined) {
+    cookie = fetch(new URL(`/auth/_dev/signin?login=${encodeURIComponent(login)}`, baseUrl), {
+      redirect: "manual",
+    }).then(async (response) => {
+      const value = /(?:^|,\s*)dsession=([^;]+)/.exec(
+        response.headers.get("set-cookie") ?? ""
+      )?.[1];
+      if (response.status !== 302 || value === undefined) {
+        sessionCookies.delete(login);
+        throw new Error(
+          `dev sign-in as ${login} failed: ${response.status} ${await response.text()}`
+        );
+      }
+      return `dsession=${value}`;
+    });
+    sessionCookies.set(login, cookie);
+  }
+  return cookie;
+}
+
+/** Forgets every cached session cookie; `resetDatabase` calls it after truncating `user_sessions`. */
+export function forgetSessions(): void {
+  sessionCookies.clear();
+}
+
+/** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
+ *  the server requires on every cookie-authenticated write (either the Origin match or the
+ *  same-origin fetch metadata satisfies enforceCookieOrigin; both are sent so the runtime's
+ *  header policy cannot turn a seeding write into `invalid request origin`). */
+export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
+  return {
+    Cookie: await sessionCookie(login),
+    Origin: dashboardOrigin,
+    "Sec-Fetch-Site": "same-origin",
+  };
 }
 
 async function request<T>(
@@ -78,7 +123,7 @@ async function request<T>(
   if (as === "agent") {
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
-    headers["X-Dispatch-User"] = options.login ?? "alice";
+    Object.assign(headers, await userHeaders(options.login ?? "alice"));
   }
 
   const response = await fetch(new URL(path, baseUrl), {

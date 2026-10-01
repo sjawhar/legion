@@ -42,22 +42,30 @@ runs the Vite development server for interface work.
 `bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
 server and Postgres. The harness starts `e2e/run-server.sh` unless
 `PLAYWRIGHT_BASE_URL` selects a deployed server. The script resolves the
-concrete Go binary in the caller's toolchain environment, then starts Dispatch
-with pinned server settings: trusted `X-Dispatch-User` identity for `alice`
-and `bob`, `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
-key and cookie-signing key, a loopback listen host and the suite's dashboard
-origin. The server process has no caller Home or XDG directory and receives no
-inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*` variable, so neither a shell
-setting nor `~/.config/opencode/envoy.json` /
+concrete Go binary in the caller's toolchain environment, builds the server
+into `packages/envoy/dispatch-e2e` and execs it, so a SIGTERM to the pid it
+hands its caller stops the server. It pins every server setting: cookie
+identity, the production mode, with `alice` and `bob` signed in through the
+server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
+origin, listener and database, with a signing key the server generates for its
+process), `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+key, a loopback listen host and the suite's dashboard origin. Address the
+harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
+refuses any other `Host`. The server process has no caller Home or XDG
+directory and receives no inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*`
+variable, so neither a shell setting nor `~/.config/opencode/envoy.json` /
 `~/.local/share/dispatch` can redirect it.
 
-`DATABASE_URL` is required and must name an isolated database: `e2e/seed.ts`
-truncates it before every scenario and never selects a shared default. The
-harness ports `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`) and `FAKE_GITHUB_PORT` (default `9022`) are its other inputs, resolved
-for the whole suite by `e2e/harness-ports.ts`. A run starts its own servers on
-those three ports and refuses before any of them starts if one is taken, so it
-never truncates the database behind a server it did not start;
+`DATABASE_URL` is required and must name an isolated loopback database:
+`e2e/seed.ts` truncates it before every scenario and never selects a shared
+default, and the dev sign-in flag refuses a non-loopback host. psql runs without
+`PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
+never checked. The harness ports `DISPATCH_E2E_PORT` (default `8777`),
+`FAKE_ENVOY_PORT` (default `9021`) and `FAKE_GITHUB_PORT` (default `9022`) are
+its other inputs, resolved for the whole suite by `e2e/harness-ports.ts`. A run
+starts its own servers on those three ports and refuses before any of them
+starts if one is taken, so it never truncates the database behind a server it
+did not start;
 `DISPATCH_E2E_REUSE_SERVERS=1` is the opt-in for running against a harness you
 started yourself. `AGENTS.md`'s end-to-end section states that rule in full —
 the accepted values, what a bad or duplicated port does, and which invocations
@@ -76,21 +84,25 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
 ## Acceptance run against the deployed image
 
 The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with its
-own Postgres volume and database. It uses header identity for `alice` and `bob`, an
-acceptance-only agent token, disabled NATS, and port 8767; it starts only the named acceptance
-service and its database dependency.
+own Postgres volume and database. It signs `alice` and `bob` in through the dev sign-in route, as
+the local harness does, so the image must be built from a tree that has the route; it also uses
+an acceptance-only agent token, disabled NATS, and port 8767, and it starts only the named
+acceptance service and its database dependency. Compose still interpolates every service in the
+file, and the production `dispatch` service requires five variables the acceptance run never
+uses, so the recipe passes placeholders for them.
 
 ```bash
 cd packages/envoy/deploy/compose
-DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -f dispatch.compose.yml build dispatch
-DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance up -d dispatch-acceptance
+unused=(DATABASE_URL=unused DISPATCH_AGENT_TOKEN=unused DISPATCH_ALLOWED_LOGINS=unused DISPATCH_SERVER_URL=unused NATS_URLS=unused)
+env "${unused[@]}" DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -f dispatch.compose.yml build dispatch
+env "${unused[@]}" DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance up -d dispatch-acceptance
 cd ../../../dispatch
 PLAYWRIGHT_BASE_URL=http://127.0.0.1:8767 \
 PLAYWRIGHT_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55516/dispatch_acceptance?sslmode=disable' \
 E2E_AGENT_TOKEN=acceptance-token \
 bun run e2e:deployed
 cd ../envoy/deploy/compose
-DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance down -v
+env "${unused[@]}" DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance down -v
 docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
 ```
 

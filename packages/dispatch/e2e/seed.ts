@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-import { quiesceDocuments } from "./api";
+import { forgetSessions, quiesceDocuments } from "./api";
+import { psql } from "./psql";
 
 const tables = [
   "agent_tokens",
@@ -24,9 +22,8 @@ const tables = [
   "issues",
   "projects",
   "users",
+  "user_sessions",
 ];
-
-const execFileAsync = promisify(execFile);
 
 // A deployed server can name its database independently, but a leftover deployed URL must not
 // override a local harness's DATABASE_URL. Every SQL mutation, especially resetDatabase's
@@ -49,7 +46,7 @@ function sqlLiteral(value: string): string {
 }
 
 export async function insertExternalLink(issueKey: string, url: string): Promise<void> {
-  await execFileAsync("psql", [
+  await psql([
     databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
@@ -59,7 +56,7 @@ export async function insertExternalLink(issueKey: string, url: string): Promise
 }
 
 export async function setEventCreatedAt(eventId: number, iso: string): Promise<void> {
-  await execFileAsync("psql", [
+  await psql([
     databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
@@ -72,7 +69,7 @@ export async function setEventCreatedAt(eventId: number, iso: string): Promise<v
  *  its actor under the shared token and the server drops a body-supplied `service`, so the only
  *  way to fixture a service-authored write is the `comments.author` jsonb itself. */
 export async function setCommentAuthorService(commentId: string, service: string): Promise<void> {
-  await execFileAsync("psql", [
+  await psql([
     databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
@@ -83,7 +80,7 @@ export async function setCommentAuthorService(commentId: string, service: string
 
 /** Marks a newly created fixture issue as pre-creator metadata. */
 export async function clearIssueCreator(issueKey: string): Promise<void> {
-  await execFileAsync("psql", [
+  await psql([
     databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
@@ -98,7 +95,7 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
 // the document service first.
 
 async function resetDatabaseOnce(): Promise<void> {
-  await execFileAsync("psql", [
+  await psql([
     databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
@@ -138,9 +135,12 @@ async function resetDatabaseOnce(): Promise<void> {
  * artifact_versions, while TRUNCATE takes an exclusive lock on every table in its own order;
  * with both running PostgreSQL breaks the cycle by aborting one of them (LEGION-168), which is
  * either a failed reset or a settlement that dies mid-scenario. Quiescing first leaves the
- * server with nothing to run, so the two never overlap.
+ * server with nothing to run, so the two never overlap. The truncate takes `user_sessions` with
+ * it, so every session cookie minted before it is refused afterwards: e2e/api.ts forgets its
+ * cached ones here, and a browser context signs in after the reset (e2e/users.ts).
  */
 export async function resetDatabase(): Promise<void> {
   await quiesceDocuments();
   await resetDatabaseOnce();
+  forgetSessions();
 }

@@ -520,14 +520,8 @@ test("document marks and table alignment use classes rather than inline styles",
   const alice = await asUser(browser, "alice");
   // Dispatch omits collaborative awareness below 1280 px, so exercise the peer selection in an
   // explicit desktop context even while the mark/table invariant runs under every project.
-  const selectionAlice = await browser.newContext({
-    extraHTTPHeaders: { "X-Dispatch-User": "alice" },
-    viewport: { height: 900, width: 1440 },
-  });
-  const selectionBob = await browser.newContext({
-    extraHTTPHeaders: { "X-Dispatch-User": "bob" },
-    viewport: { height: 900, width: 1440 },
-  });
+  const selectionAlice = await asUser(browser, "alice", { viewport: { height: 900, width: 1440 } });
+  const selectionBob = await asUser(browser, "bob", { viewport: { height: 900, width: 1440 } });
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);

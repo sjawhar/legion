@@ -896,6 +896,7 @@ test("the inbox defaults to Mine with an Unassigned band, Assign to me takes a r
 });
 
 test("a mentioned session's callback reply reaches the open ask card", async ({ browser }) => {
+  test.skip(process.env.PLAYWRIGHT_BASE_URL !== undefined, "drives the fake Envoy listener");
   await setLiveSessions([{ capabilities: ["btw", "steer"], session_id: "planner", title: "P" }]);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Callback ask thread" });

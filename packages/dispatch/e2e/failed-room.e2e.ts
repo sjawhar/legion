@@ -12,19 +12,13 @@
 //
 // Comparing a tree against another is what it is for: run it on this head and on the base, and
 // read the two lines it prints for the queued writer.
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import { expect, test } from "@playwright/test";
 
-import { createComment, createIssue, createProject } from "./api";
+import { baseUrl, createComment, createIssue, createProject, userHeaders } from "./api";
 import { documentEditor } from "./editor";
-import { dispatchPort } from "./harness-ports";
+import { psql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-
-const execFileAsync = promisify(execFile);
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
 
 /** The database this probe may write to, resolved as `seed.ts` resolves it: a deployed server's
  * own `PLAYWRIGHT_DATABASE_URL`, else the `DATABASE_URL` this run supplied. It never falls back
@@ -44,13 +38,7 @@ function databaseUrl(): string {
 }
 
 async function sql(statement: string): Promise<string> {
-  const { stdout } = await execFileAsync("psql", [
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-tAc",
-    statement,
-  ]);
+  const { stdout } = await psql([databaseUrl(), "-v", "ON_ERROR_STOP=1", "-tAc", statement]);
   return stdout.trim();
 }
 
@@ -118,7 +106,7 @@ async function anchoredComment(issueKey: string, body: string, quote: string): P
   const started = Date.now();
   const response = await fetch(`${baseUrl}/api/v1/issues/${issueKey}/comments`, {
     body: JSON.stringify({ anchor: { artifact: "spec", quote }, body }),
-    headers: { "Content-Type": "application/json", "X-Dispatch-User": "alice" },
+    headers: { "Content-Type": "application/json", ...(await userHeaders("alice")) },
     method: "POST",
     signal: AbortSignal.timeout(30_000),
   });
@@ -219,10 +207,10 @@ test("a writer inside the docs layer when its room fails is told, and the room r
   expect(recovered.status).toBe(201);
 
   const artifacts = await fetch(`${baseUrl}/api/v1/issues/${issue.key}`, {
-    headers: { "X-Dispatch-User": "alice" },
+    headers: await userHeaders("alice"),
   }).then((response) => response.json() as Promise<{ artifacts: { id: string }[] }>);
   const text = await fetch(`${baseUrl}/api/v1/artifacts/${artifacts.artifacts[0].id}/text`, {
-    headers: { "X-Dispatch-User": "alice" },
+    headers: await userHeaders("alice"),
   }).then((response) => response.json() as Promise<{ markdown: string }>);
   console.log(`FAILED-ROOM document text=${JSON.stringify(text.markdown)}`);
   // The room reloaded from its durable copy with the browser's own paragraph in it, which is the
