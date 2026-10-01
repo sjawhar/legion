@@ -79,6 +79,18 @@ true` and no `dispatch.serverUrl`, the URL defaults to `http://localhost:8766`,
 the Go server's listen address. Invalid configuration, malformed URLs, and
 empty tokens leave Dispatch disabled and name the failing source in `error`.
 
+### Driving a tool by hand
+
+`bun bin/dispatch-tool.ts <dispatch_tool> '<json arguments>'` runs one tool through
+`executeDispatchTool`, the function every host's registered tool calls, and prints what the model
+would see: the result text (exit 0) or the failure text (exit 1), with each request traced on
+stderr. It resolves Dispatch as the hosts do, so to aim it at a stand-in set both `DISPATCH_URL`
+and `DISPATCH_TOKEN`; against a real Dispatch a write tool writes, as the session
+`ENVOY_SESSION_ID` names. `bun bin/stand-in-gateway.ts --status 502 --body html` serves one
+non-Dispatch answer (`html`, `empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on
+`--port` (ephemeral by default) and prints its URL, for proving what a tool shows when a gateway,
+not Dispatch, answers.
+
 ## Tool contract
 
 `@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty-one
