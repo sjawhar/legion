@@ -134,7 +134,7 @@
               },
               {
                 "name": "PATH",
-                "value": "/legion/worker-bin:/opt/legion/go/bin:/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"
+                "value": "/legion/worker-bin:/opt/legion/go/bin:/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
                 "name": "PI_SHELL_PREFIX",
@@ -257,7 +257,7 @@
             "env": [
               {
                 "name": "PATH",
-                "value": "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"
+                "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
                 "name": "TMPDIR",
@@ -318,7 +318,7 @@
             "env": [
               {
                 "name": "PATH",
-                "value": "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"
+                "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
                 "name": "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS",

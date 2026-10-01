@@ -497,7 +497,7 @@ func TestSlackEnvelopesThread(t *testing.T) {
 	// first wins per (key, session). Publishing the thread copy ahead of the
 	// channel copy gives dual-subscribed sessions ONE push labeled with the most
 	// specific topic — instead of the channel copy silently starving the thread
-	// subscription (observed live 2026-07-20).
+	// subscription.
 	if items[0].Topic != "notifications.slack.T01234567.C01234567.thread.1234567890_123456.message" {
 		t.Fatalf("unexpected thread topic: %s", items[0].Topic)
 	}
@@ -1158,10 +1158,10 @@ func TestGithubEnvelopesWorkflowRunCompleted(t *testing.T) {
 }
 
 func TestGithubEnvelopesWorkflowRunLargeRunIDNotScientific(t *testing.T) {
-	// Regression: real GitHub run_ids are 11+ digit integers. JSON unmarshals
-	// them as float64, and fmt.Sprintf("%v", ...) used to render them in
-	// scientific notation (e.g. "2.5964358269e+10"). The payload must carry
-	// the integer form so downstream consumers can parse it as an ID.
+	// Real GitHub run_ids are 11+ digit integers. JSON unmarshals them as
+	// float64, and fmt.Sprintf("%v", ...) renders those in scientific notation
+	// (e.g. "2.5964358269e+10"). The payload must carry the integer form so
+	// downstream consumers can parse it as an ID.
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "workflow_run",
 		Delivery: "d-wf-bigid",

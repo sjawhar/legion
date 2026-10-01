@@ -13,7 +13,7 @@
 # creates is its own and goes on any exit: its scratch directory, which holds the isolated OMP
 # profile under the HOME the run gives its Oh My Pi processes (make_omp_home, lib/omp-home.sh),
 # the tmux servers, and its Postgres and NATS containers. CONTROLLER_START_EVIDENCE_DIR (default a
-# fresh /tmp directory, kept and printed) keeps the daemon and listener logs.
+# fresh /tmp directory, kept and printed) keeps the transcript and the daemon and listener logs.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -25,6 +25,12 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e-controller.$$.XXXXXXXX")
 evidence=${CONTROLLER_START_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-controller-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/checks"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which stops the panes and removes both containers, never fail on a write whoever is
+# reading.
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to "$evidence/transcript.log"
 ok=
 daemon_pid=
 listener_pid=
@@ -70,7 +76,7 @@ cleanup() {
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
   [ -n "$ok" ] || echo "controller start e2e: FAIL (check $check)"
-  echo "evidence: $evidence (logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
+  echo "evidence: $evidence (transcript.log, logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
   return 0
 }
 trap cleanup EXIT
@@ -138,10 +144,9 @@ manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$pr
 want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
 note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, goDaemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
-# their roles (@review, @oracle) and the default one model, served by a static-key provider that
-# listens nowhere: the controller's one model turn, the start message `legion controller start`
-# opens it with, fails against it, no check reads its answer, and no credential the machine
-# carries decides the gate.
+# their roles and the default one model, served by a static-key provider that listens nowhere: the
+# controller's one model turn, the start message `legion controller start` opens it with, fails
+# against it, no check reads its answer, and no credential the machine carries decides the gate.
 mkdir -p "$profile_agent"
 cat >"$profile_agent/models.yml" <<'EOF'
 providers:
@@ -154,7 +159,7 @@ providers:
       - id: m1
         name: M1
 EOF
-printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n' >"$profile_agent/config.yml"
+printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n  deep: offline/m1\n' >"$profile_agent/config.yml"
 
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token")
 cat >"$work/legion.yaml" <<EOF

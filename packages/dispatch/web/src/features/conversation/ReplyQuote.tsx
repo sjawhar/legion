@@ -3,8 +3,8 @@ import { Link } from "react-router-dom";
 import { TruncatedText } from "../../components/TruncatedText";
 import { linkHoverText, secondaryButtonBorder, textMutedOnCanvas } from "../../theme/classes";
 
-// The phone stylesheet makes every link an inline-flex 44 px tap target, which no longer
-// truncates its own text; the quote therefore truncates in an inner span, whatever the link is.
+// The phone stylesheet makes every link an inline-flex 44 px tap target, which does not truncate
+// its own text; the quote therefore truncates in an inner span, whatever the link is.
 const quoteClasses = `flex min-w-0 max-w-full items-center border-l-2 pl-2 text-xs ${secondaryButtonBorder} ${textMutedOnCanvas}`;
 
 /** The one wording of a reply quote - "Replying to <author> — <first line>" - so a turn's

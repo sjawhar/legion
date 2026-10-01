@@ -2581,8 +2581,8 @@ func TestTreeOfRefusesAnUnloadedDocument(t *testing.T) {
 }
 
 // A room evicted after settleRoom's generation check but before it reads the live document
-// (an Evict whose timer Stop misses the timer that already fired) used to make the settle
-// dereference a nil document and crash the server. The settle now ends quietly and the next
+// (an Evict whose timer Stop misses the timer that already fired) must not make the settle
+// dereference a nil document and crash the server. The settle ends quietly and the next
 // write to the room settles on its own.
 func TestSettleSurvivesEvictionBetweenWarmAndTreeRead(t *testing.T) {
 	service, artifactID := newTestService(t)

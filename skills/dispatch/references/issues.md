@@ -9,23 +9,24 @@ project's architecture model, or list or audit a project's backlog.
 When you finish an issue, or are told to work on the next thing, take the top ready issue of the
 whole backlog, across every project: status `todo`, highest priority first, then board rank. There
 are no areas: a standing role, a product owner and a lane each take the top issue like everyone
-else (Sami, 2026-09-27, dispatch://AGENTC-34/ask/01ed2956-73cc-48d2-8ed4-7a86c6d439b1). `todo`
+else (dispatch://AGENTC-34/ask/01ed2956-73cc-48d2-8ed4-7a86c6d439b1). `todo`
 means ready: specced, unblocked, and waiting on neither a deploy nor a decision. An issue that
 waits on one belongs in `backlog`, with what it waits on said on the issue.
 
 Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), of any
-kind (Sami, 2026-09-27, answering dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca;
-the question proposed two, and his answer set three). The limit is per agent and has nothing to do
-with the week's priorities (Sami, 2026-09-28, reply a7647eb0 on
-dispatch://AGENTC-393/ask/b773d9f6): the priorities decide only what you pull next. Past three:
+kind (dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca). The limit is per agent and
+has nothing to do with the week's priorities (dispatch://AGENTC-393/comment/a7647eb0): the
+priorities decide only what you pull next. Past three:
 push any unfinished work, say where in one comment on the issue, move it to `backlog` and clear
 its route. Each issue counts on its own; a child does not ride under its parent's slot.
 In-flight issues with no owner at all go
 back to `backlog` as well: no claim or route held by a live session, no Dispatch activity in the
 last day, and no pull request moving on GitHub (an owner working there leaves no Dispatch trace).
 The order keeper sweeps those. Never write the status of an issue that carries the `legion`
-label, or of any issue under one: the Legion daemon writes those statuses, and moving one of its
-admitted roots out of its flow parks the tree and stops its workers.
+label, or of any issue under one: the Legion daemon writes those statuses. A status your session
+writes on the root of a tree Legion is running is set back and the tree's architect told who wrote
+it; only a person in the dashboard, or `legion status`, stops that tree. On an issue under one, a
+status that takes it out of the flow parks that issue and stops its workers.
 
 One agent keeps the backlog's order against those priorities, with Sami
 (dispatch://AGENTC-34/ask/f6780f9e-8b96-49eb-9be7-7c7f2036d5cc). Setting an issue's priority
@@ -36,9 +37,7 @@ reordering the board yourself.
 
 ## Claim the issue before you work it
 
-Two sessions once spent a night implementing the same issue, because nothing on it said who was
-on it (Sami, 2026-09-24, verbatim: "It seems like we need a better way of tracking what's already
-in progress"). So before you start implementing an issue, claim it:
+Before you start implementing an issue, claim it:
 
 ```ts
 dispatch_claim({ issue: "LEGION-234" })                  // I am implementing this
@@ -74,8 +73,7 @@ you find work nobody is on.
 
 **Claiming and moving the status are two separate actions, and you do both.** A claim says which
 session is on the work; the status says where the work has got to, and humans use it to track
-that too (Sami, 2026-09-24, verbatim: "Keep them separate — Separate because humans might be
-using them to keep track of work"). So when you start: `dispatch_claim({ issue })` **and**
+that too. So when you start: `dispatch_claim({ issue })` **and**
 `dispatch_issue_update({ issue, status: "in_progress" })`.
 
 ## Issue status is yours to move
@@ -85,9 +83,8 @@ the daemon writes it), the session doing the work moves it, the way a person mov
 `in_progress` when implementation starts, `testing` when the change is being proven on a
 production-like surface, `needs_review` when its pull request is open and waiting on the merge
 queue, `done` when the change has been driven in production (a merge is not `done`). Move child
-issues you own as well as the root. An issue left at `triage` while work is underway is a defect:
-Sami, 2026-09-15, on the roadmap he could not read — "I'm not even sure what their development
-status is." Waiting for the deploy lane is not a status and is never announced.
+issues you own as well as the root. An issue left at `triage` while work is underway is a defect.
+Waiting for the deploy lane is not a status and is never announced.
 
 ```ts
 // PATCH /api/v1/issues/{key} — status, title, labels, priority, external_links (merged by URL), route, parent
@@ -120,10 +117,9 @@ when work has started.
 ## Priority is yours to set
 
 Priority is the coarse bucket a backlog is read by: `0` is P0, the highest, through `3`, P3, the
-lowest, and `null` clears it. Sami ruled on 2026-09-24, answering "may agents set issue priority
-(P0–P3), or only propose it for you?" on `dispatch://LEGION/artifact/issue-status-conventions-md`:
-**"Agents may set"**. So set it — on creation, and on a grooming pass over issues that have none —
-and say what you set and why; he overrides anything he disagrees with from the dashboard. A closed
+lowest, and `null` clears it. Agents set it (`dispatch://LEGION/artifact/issue-status-conventions-md`)
+— on creation, and on a grooming pass over issues that have none — and say what you set and why;
+Sami overrides anything he disagrees with from the dashboard. A closed
 issue takes only `rank`, `components`, and a reopening `status` (any status but `done`);
 everything else, `priority` included, waits for the reopen (`409 ISSUE_CLOSED`). So reopen it
 first, then set the priority — the two cannot go in one call. `rank` itself is not a tool field:
@@ -163,26 +159,21 @@ dispatch_issues({ project, priority: [0, 1], limit: 250 })
 Every unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone takes it and
 builds it, or it closes. A row in `in_progress`, `testing`, `needs_review` or `retro`, or one that
 carries a claim, is work under way ([Issue status is yours to move](#issue-status-is-yours-to-move))
-and is not re-staffed. A todo with a finished spec reads as queued work that nobody is doing
-(LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
-with nobody building it).
+and is not re-staffed. A todo with a finished spec reads as queued work that nobody is doing.
 
 A close that says the defect cannot happen cites the code that makes it impossible. An issue
 closed because a rewrite forecloses it names the file and line in the rewrite that does so; a
 close that cannot name one is not foreclosed, it is unread. The cheapest way for a rewrite to reach
-parity is to port the code, defect included: LEGION-211's bare `git worktree prune`, filed against
-the TypeScript daemon, had been ported into the Go coordinator and was live in production.
+parity is to port the code, defect included.
 
 The audit finds four shapes:
 
 - **Unstaffed work.** A plan or measurement exists, and no one is building it.
 - **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
-  naming it. Check the change live, then move the issue (AGENTC-1033 sat at `triage` after its fix,
-  agent-c #20367, merged).
+  naming it. Check the change live, then move the issue.
 - **Unrecorded practice.** Someone does the issue's work by hand, more than once, while the issue
-  sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
-  find; the tell is your own messages. Doing something by hand more than once means an issue is
-  wearing the wrong status.
+  sits in backlog. It leaves no plan and no PR to find; the tell is your own messages. Doing
+  something by hand more than once means an issue is wearing the wrong status.
 - **Unreachable route.** An open issue whose route names a role nobody holds, or a session that is
   not running, reaches nobody, whatever its priority, and the priority filter above never finds
   it. List it on its own:
@@ -190,16 +181,14 @@ The audit finds four shapes:
   dispatch_issues({ project, route_status: "no_holder", limit: 250 })
   ```
   Each row reads `route role:sre (nobody holds it right now)` or `route session:<id> (that session
-  is not running right now)`. That is one read of the listener, and one read is a restart gap as
-  often as a vacancy: an agent box that restarts or resumes keeps the session id, but the session
-  is absent from the listener for minutes, and its role with it. On 2026-09-27, 58 of 63 session
-  routes one read showed as unreachable pointed at a single session that was moving between boxes.
+  is not running right now)`. That is one read of the listener, and one read cannot tell a
+  restart gap from a vacancy: an agent box that restarts or resumes keeps the session id, but the
+  session is absent from the listener for minutes, and its role with it.
   So a route is unowned only when it is `no_holder` on two reads at least ten minutes apart: list
   again after ten minutes and act on the issues both lists name. Confirm with the second
   `dispatch_issues` read, not `envoy_role_get`: a role lookup releases the claim of a holder whose
   session is absent from the registry as it answers. Then staff the role, re-route the
-  issue to a live holder, or clear the route and assign it (AGENTC-1065, a P2 production listener
-  503, sat routed to an unheld `role:sre` with no assignee). `route_status: "unknown"` means the
+  issue to a live holder, or clear the route and assign it. `route_status: "unknown"` means the
   listener did not answer, so a route could not be judged; a `no_holder` filter refuses rather
   than answer an empty list then.
 

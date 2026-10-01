@@ -29,9 +29,7 @@ func engineReadings(t *testing.T, markdowns []string) []*Node {
 	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bun", "run", "differential.ts", in, out, "md")
-	cmd.Dir = "gen"
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := genScript("differential.ts", in, out, "md").CombinedOutput(); err != nil {
 		t.Fatalf("differential.ts: %v\n%s", err, output)
 	}
 	raw, err := os.ReadFile(out)

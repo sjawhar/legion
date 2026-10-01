@@ -184,6 +184,8 @@ func agentEventSessionID(e model.Event) (string, error) {
 		}
 	case model.MessageDeliveryEventPayload:
 		target = payload.Target
+	case model.MessageAcceptedEventPayload:
+		target = payload.Target
 	case model.UserAgentStateEventPayload:
 		target = "session:" + payload.SessionID
 	}

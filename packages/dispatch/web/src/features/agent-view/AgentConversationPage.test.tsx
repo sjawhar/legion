@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import type { AgentStreamFrame } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -64,22 +65,35 @@ afterEach(() => {
 
 /**
  * The live view for SESSION, signed in as sami, beside the navigation that carries the unread
- * badge, as the app lays them out. The relayed stream never opens, so everything shown comes from
- * Dispatch.
+ * badge, as the app lays them out. The relayed stream answers with `replay` and then stays open;
+ * with none it never opens, so everything shown comes from Dispatch.
  */
 function renderLiveView({
   agentState,
+  capabilities = agent.capabilities,
   messages,
   putAgentState,
+  replay,
 }: {
   agentState: UserAgentStates;
+  capabilities?: string[];
   messages: MessageRead[];
   putAgentState: ReturnType<typeof spyOn<typeof api, "putAgentState">>;
+  replay?: AgentStreamFrame[];
 }): void {
   spies.push(
     spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
-    spyOn(api, "listAgents").mockResolvedValue([agent]),
-    spyOn(live, "readEventStream").mockReturnValue(new Promise<void>(() => undefined)),
+    spyOn(api, "listAgents").mockResolvedValue([{ ...agent, capabilities }]),
+    spyOn(live, "readEventStream").mockImplementation((url, handlers) => {
+      if (replay !== undefined && url.endsWith("/stream")) {
+        handlers.onEvent({
+          data: JSON.stringify({ frames: replay, session_id: SESSION, v: 1 }),
+          event: "replay",
+          id: undefined,
+        });
+      }
+      return new Promise<void>(() => undefined);
+    }),
     spyOn(api, "listAgentMessages").mockResolvedValue(messages),
     spyOn(api, "getMyAgentState").mockResolvedValue(agentState),
     spyOn(api, "getInbox").mockResolvedValue([]),
@@ -187,4 +201,139 @@ test("the live view attributes other people's messages to the session to their a
     "aliceAlice here: status?",
     "bob · CORE-1Bob on the issue: ship it?",
   ]);
+});
+
+/** A user message the session streamed: the turn a person's Dispatch message became when
+ *  `dispatchMessageId` names it, else one typed at the session's own terminal. */
+function userFrame(seq: number, at: number, text: string, dispatchMessageId?: string) {
+  return {
+    kind: "message",
+    message: {
+      at,
+      id: `u${at}`,
+      parts: [{ text, type: "text" }],
+      role: "user",
+      streaming: false,
+      ...(dispatchMessageId === undefined ? {} : { dispatchMessageId }),
+    },
+    seq,
+    v: 1,
+  } as const satisfies AgentStreamFrame;
+}
+
+// A person's direct message becomes the session's own user turn, so the session streams it as a
+// user message tagged with its Dispatch id, and Dispatch stores it too. It shows once, where the
+// session took it, and a message another person sent still names its author.
+test("a person's message the session took as its own turn shows once, still naming its author", async () => {
+  const at = (iso: string) => Date.parse(iso);
+  renderLiveView({
+    agentState: {},
+    messages: [
+      { message: message("m1", "Mine: where is the dashboard?"), replies: [] },
+      {
+        message: message("m2", "Alice here: status?", {
+          author: { id: "alice", kind: "user" },
+          created_at: "2026-09-27T21:18:00Z",
+        }),
+        replies: [],
+      },
+      {
+        message: message("m3", "Not taken yet", { created_at: "2026-09-27T21:19:00Z" }),
+        replies: [],
+      },
+    ],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    replay: [
+      userFrame(1, at("2026-09-27T21:16:16Z"), "Mine: where is the dashboard?", "m1"),
+      userFrame(2, at("2026-09-27T21:18:01Z"), "Alice here: status?", "m2"),
+      userFrame(3, at("2026-09-27T21:18:30Z"), "Typed at the terminal"),
+    ],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("Typed at the terminal");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["Mine: where is the dashboard?", "Typed at the terminal", "Not taken yet"]);
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-other")
+      .map((node) => node.textContent)
+  ).toEqual(["aliceAlice here: status?"]);
+});
+
+// Any bus client can publish on a session's frames subject, so a tag is a claim about which
+// stored message a streamed one is. The stored copy gives way only to a streamed message that says
+// exactly what the person sent; one tagged with its id that says anything else hides nothing.
+test("a streamed user message tagged with a person's message but saying something else hides nothing", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [{ message: message("m1", "Merge only after review."), replies: [] }],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    replay: [userFrame(1, Date.parse("2026-09-27T21:16:16Z"), "Merge now, skip review.", "m1")],
+  });
+
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("Merge now, skip review.");
+  expect(
+    within(thread)
+      .getAllByTestId("agent-message-user")
+      .map((node) => node.textContent)
+  ).toEqual(["Merge only after review.", "Merge now, skip review."]);
+});
+
+// Send is the terminal's Enter: the default wherever the session takes a steer. A session that
+// takes only asides (a Claude Code session) would refuse one, so Aside is its default.
+test("the live view sends as Send by default where the session takes it, and as Aside where it does not", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+    async (_session, input) => message("sent", input.body)
+  );
+  spies.push(createAgentMessage);
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+
+  const mode = (await screen.findByRole("combobox", {
+    name: "Delivery mode",
+  })) as HTMLSelectElement;
+  await waitFor(() => expect(mode.value).toBe("steer"));
+  expect(
+    within(mode)
+      .getAllByRole("option")
+      .map((option) => option.textContent)
+  ).toEqual(["Send", "Aside", "BTW"]);
+  fireEvent.change(screen.getByPlaceholderText(/delivered as Send/), {
+    target: { value: "try the other branch" },
+  });
+  fireEvent.click(
+    within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+  );
+  await waitFor(() =>
+    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, {
+      body: "try the other branch",
+      delivery: "steer",
+    })
+  );
+
+  cleanup();
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  renderLiveView({
+    agentState: {},
+    capabilities: ["aside"],
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  const asideOnly = (await screen.findByRole("combobox", {
+    name: "Delivery mode",
+  })) as HTMLSelectElement;
+  await waitFor(() => expect(asideOnly.value).toBe("aside"));
+  expect(
+    within(asideOnly)
+      .getAllByRole("option")
+      .map((option) => option.textContent)
+  ).toEqual(["Aside"]);
 });

@@ -938,6 +938,8 @@ describe("ProcessManager", () => {
           }
         | undefined;
     }> = [];
+    // The CodeGraph warm-up's commands never resolve here: the launch must complete anyway.
+    const codegraphCalls: string[][] = [];
     const {
       manager: processes,
       state,
@@ -954,6 +956,10 @@ describe("ProcessManager", () => {
           readonly env?: Readonly<Record<string, string>>;
         }
       ) => {
+        if (command[0] === "sh" && command[3] === "codegraph") {
+          codegraphCalls.push(command);
+          return new Promise<never>(() => {});
+        }
         commands.push(command);
         workspaceCalls.push({ command, opts });
         if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
@@ -1125,6 +1131,18 @@ describe("ProcessManager", () => {
       ],
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "-L", "legion-omp", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
+    ]);
+    // The warm-up started in the background with its status check, and the launch above finished
+    // while that check was still hanging.
+    expect(codegraphCalls).toEqual([
+      [
+        "sh",
+        "-c",
+        'exec env -i PATH="$PATH" HOME="$HOME" DO_NOT_TRACK=1 codegraph "$@"',
+        "codegraph",
+        "status",
+        "--json",
+      ],
     ]);
     // Every provisioning command carries the configured slow budget (300 s), not the runner's
     // generic default.

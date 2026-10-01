@@ -689,8 +689,7 @@ func main() {
 	// Wait for the interest cache to finish its initial scan of existing KV
 	// entries before we start accepting NATS messages. Without this gate, real
 	// events that arrive in the warm-up window get "no matching interests"
-	// even when the durable KV entry has subscribers — the second half of the
-	// Atlas dropout investigation (PR #610 fixed the silent-fallback half).
+	// even when the durable KV entry has subscribers.
 	//
 	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
 	// If the watcher fails to start, signalReady() unblocks startup and the
@@ -848,12 +847,11 @@ func main() {
 	registry.StartRoleClaimReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, sessions.TTL())
 
 	// Phase 6b1: Collect the interest bucket's delete markers, which the reaper above leaves one of
-	// per dead session on a key that is never reused and which nothing has ever removed: 41,833 of
-	// them behind 40 live keys in production, replayed by every restart's cache warm-up before it
-	// serves (LEGION-374). The first pass runs now, after the warm-up gate above, so it is off the
-	// readiness path; then on the reapers' cadence. Every listener runs it and the purge is
-	// idempotent, so it needs no leader. The JetStream context comes from the client at each pass,
-	// since a replaced connection reassigns it.
+	// per dead session on a key that is never reused and which nothing else removes, so every
+	// restart's cache warm-up replays them before it serves (LEGION-374). The first pass runs now,
+	// after the warm-up gate above, so it is off the readiness path; then on the reapers' cadence.
+	// Every listener runs it and the purge is idempotent, so it needs no leader. The JetStream
+	// context comes from the client at each pass, since a replaced connection reassigns it.
 	registry.StartInterestMarkerCollector(client.JS, 5*time.Minute)
 
 	// Phase 6b2: Start the CI summary loop, on a listener that opened the CI store. It emits one

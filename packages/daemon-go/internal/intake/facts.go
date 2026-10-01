@@ -32,8 +32,10 @@ type DispatchIssue struct {
 	Rank   string
 	// HandedOver is whether the event's own labels carried dispatch.LegionLabel.
 	HandedOver bool
-	// ActorSession is the id of the session that wrote the event, when a session did; empty for a
-	// user or any other actor kind.
+	// ActorSession is the id of the session that wrote the event, when a session other than the
+	// daemon did. It is empty for the writes the workflow acts on as a person's move: a user's, the
+	// daemon's own under dispatch.DaemonSession (every `legion status`, the controller's park, a
+	// close's done), and any other actor kind's.
 	ActorSession string
 }
 

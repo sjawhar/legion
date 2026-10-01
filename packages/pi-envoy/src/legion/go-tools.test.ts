@@ -14,6 +14,7 @@ function context(sessionId = "ses_208"): SessionContext {
       getSessionId: () => sessionId,
       getSessionFile: () => "/sessions/208.jsonl",
       ensureOnDisk: async () => undefined,
+      getEntries: () => [],
     },
     ui: { notify: () => undefined },
   };

@@ -7,7 +7,6 @@ import {
   dispatchToolSpecs,
   ISSUE_STATUSES,
   SEARCH_QUERY_MAX,
-  SPEC_SECTIONS,
 } from "./dispatch-tools";
 import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
 
@@ -53,20 +52,14 @@ function recordingSchemaApi(): {
   };
 }
 
-function dispatchSkillSpecSections() {
+/** Every `## ` heading of the Dispatch skill, the names a tool description may point at. */
+function dispatchSkillHeadings() {
   const repoRoot = resolve(import.meta.dir, "../../..");
   const skill = readFileSync(resolve(repoRoot, "skills/dispatch/SKILL.md"), "utf8");
-  const sectionStart = skill.indexOf("## Writing a spec\n");
-  if (sectionStart === -1) throw new Error("Dispatch skill has no Writing a spec section");
-
-  const sectionEnd = skill.indexOf("\n## ", sectionStart + 1);
-  return skill
-    .slice(sectionStart, sectionEnd === -1 ? undefined : sectionEnd)
-    .split("\n")
-    .flatMap((line) => {
-      const match = line.match(/^\| \*\*(.+?)\*\* \|/u);
-      return match === null ? [] : [match[1]];
-    });
+  return skill.split("\n").flatMap((line) => {
+    const match = line.match(/^## (.+)$/u);
+    return match === null ? [] : [match[1]];
+  });
 }
 
 const validCalls = {
@@ -102,7 +95,10 @@ const validCalls = {
     ops: [{ op: "replace", find: "old", with: "new" }],
   },
   dispatch_doc_read: { issue: "DSP-1" },
-  dispatch_request_approval: { issue: "DSP-1" },
+  dispatch_request_approval: {
+    issue: "DSP-1",
+    summary: "Proposes a live sync in place of the nightly export.",
+  },
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
@@ -214,6 +210,33 @@ describe("dispatchToolSpecs", () => {
     expect(over.error?.issues.map((issue) => issue.message)).toEqual([
       `is 1 characters over the ${SEARCH_QUERY_MAX}-character limit (${SEARCH_QUERY_MAX + 1}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage`,
     ]);
+  });
+
+  test("dispatch_search takes a project key or none, and refuses anything else by name", () => {
+    const schema = schemaFor("dispatch_search");
+
+    // The key's length limits, and anchors that hold at the ends of the whole value rather than
+    // of a line, are what keep the search URL short ("Search limits" in
+    // packages/contracts/AGENTS.md), and this copy of the pattern changes without a migration.
+    for (const project of [undefined, "", "AB", "K8S", "LEGION", "LEGSMOKE", "ABCDEFGHIJ"]) {
+      expect(schema.safeParse({ query: "ok", project }).success).toBe(true);
+    }
+    for (const project of [
+      "A",
+      "ABCDEFGHIJK",
+      "1ABC",
+      "legion",
+      " LEGION",
+      "LEGION\n",
+      "LEGION\nX",
+      "LEGION-1",
+      "中".repeat(100),
+    ]) {
+      const refused = schema.safeParse({ query: "ok", project });
+      expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
+        "project must be a project key such as CORE",
+      ]);
+    }
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
@@ -430,9 +453,8 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  // Sami, 2026-09-24, answering "may agents set issue priority (P0–P3), or only propose it for
-  // you?" on dispatch://LEGION/artifact/issue-status-conventions-md: "Agents may set". Only
-  // priority was ruled on, so rank stays the board's and is still refused.
+  // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
+  // rank stays the board's and is refused.
   test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
     const schema = schemaFor("dispatch_issue_update");
 
@@ -540,10 +562,10 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
-  // A mistyped `with` (`replace:`) used to be stripped by Zod's default strip mode, so the call
-  // validated with `with` simply absent - which the server reads as the one `with` that deletes
-  // the match. The edit applied, 200, and the quoted prose was gone with nothing to tell the
-  // model. Every key of an op but `op` is optional, so an unknown key is the only signal there is.
+  // A mistyped `with` (`replace:`) stripped by Zod's default strip mode would validate with `with`
+  // simply absent - which the server reads as the one `with` that deletes the match: the edit would
+  // apply, 200, and the quoted prose would be gone with nothing to tell the model. Every key of an
+  // op but `op` is optional, so an unknown key is the only signal there is.
   test("rejects a document edit op carrying an unknown key rather than stripping it", () => {
     const schema = schemaFor("dispatch_doc_edit");
     const target = { issue: "DSP-1", artifact: "spec" };
@@ -836,19 +858,33 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ comment: "comment-1", reason: "done" }).success).toBe(false);
   });
-  test("keeps shared spec guidance aligned with the Dispatch skill", () => {
-    const skillSections = dispatchSkillSpecSections();
-    expect(skillSections).toEqual([...SPEC_SECTIONS]);
-    const sectionOrder = SPEC_SECTIONS.join(", ");
+  test("dispatch_request_approval refuses a call with no summary, or an empty one", () => {
+    const schema = schemaFor("dispatch_request_approval");
+    expect(schema.safeParse({ issue: "DSP-1" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", summary: "" }).success).toBe(false);
+    expect(
+      schema.safeParse({ issue: "DSP-1", summary: "Proposes a live sync in place of the export." })
+        .success
+    ).toBe(true);
+  });
+
+  test("points dispatch_issue's spec and dispatch_doc_edit at a section the Dispatch skill has", () => {
     const issue = dispatchToolSpecs.find((spec) => spec.name === "dispatch_issue");
     const documentEdit = dispatchToolSpecs.find((spec) => spec.name === "dispatch_doc_edit");
     if (!issue || !documentEdit) throw new Error("missing spec-writing tools");
-
     const issueArguments = issue.arguments(schemaApi) as unknown as {
       spec: z.ZodOptional<z.ZodString>;
     };
-    expect(issueArguments.spec.unwrap().description).toContain(sectionOrder);
-    expect(documentEdit.description).toContain(sectionOrder);
+    const headings = dispatchSkillHeadings();
+
+    for (const [tool, description] of [
+      ["dispatch_issue spec", issueArguments.spec.unwrap().description ?? ""],
+      ["dispatch_doc_edit", documentEdit.description],
+    ] as const) {
+      const section = description.match(/the "([^"]+)" section of skill:\/\/dispatch/u)?.[1];
+      if (section === undefined) throw new Error(`${tool} names no section of skill://dispatch`);
+      expect(headings, tool).toContain(section);
+    }
   });
 
   test("dispatch_follow takes a full ask id and follow or unfollow, nothing else", () => {

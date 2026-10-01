@@ -718,6 +718,63 @@ func TestProvisionLocksAnExistingUnlockedWorkspace(t *testing.T) {
 	}
 }
 
+// Provision writes ".codegraph/" to the shared clone's ".git/info/exclude" exactly once, and
+// every workspace of that clone — this one, and any other issue's — has a `codegraph init`
+// inside it leave no trace for `jj status`: CodeGraph's own generated `.codegraph/.gitignore`
+// (`*` then `!.gitignore`) would otherwise get tracked, since git worktrees share one
+// `info/exclude` through their common git directory.
+func TestProvisionExcludesTheCodegraphDirectoryFromEveryWorkspaceOfTheClone(t *testing.T) {
+	run := newLocalRunner(t)
+	// No global git or jj configuration anywhere a real `jj status` below could read one: the
+	// bug this guards against only shows on a host with no global ignore for `.codegraph/`.
+	t.Setenv("HOME", t.TempDir())
+	request := provisionRequest(t)
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	excludePath := filepath.Join(workspace.Clone, ".git", "info", "exclude")
+	body, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", excludePath, err)
+	}
+	if !slices.Contains(strings.Split(string(body), "\n"), ".codegraph/") {
+		t.Fatalf("%s = %q, want a \".codegraph/\" line", excludePath, body)
+	}
+
+	// A second provisioning of a different issue on the same clone writes the line again only
+	// if it is missing; with it already present, the file does not grow.
+	second := request
+	second.Issue = "WIDGETS-91"
+	if _, err := Provision(context.Background(), run, second); err != nil {
+		t.Fatalf("provision a second issue on the same clone: %v", err)
+	}
+	after, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read %s after the second provisioning: %v", excludePath, err)
+	}
+	if string(after) != string(body) {
+		t.Fatalf("%s changed on a second provisioning: %q -> %q", excludePath, body, after)
+	}
+
+	// A codegraph init's own tracked file (`.codegraph/.gitignore`, which CodeGraph's `*` then
+	// `!.gitignore` leaves visible to git) must not reach `jj status` from this workspace, nor
+	// from the other issue's, since both share the clone's one `info/exclude`. runSetup's bare
+	// `jj status`, unlike onClone's, snapshots the working copy for real.
+	for _, dir := range []string{workspace.Dir, filepath.Join(filepath.Dir(workspace.Dir), "widgets-91")} {
+		if err := os.Mkdir(filepath.Join(dir, ".codegraph"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".codegraph", ".gitignore"), []byte("*\n!.gitignore\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		status := runSetup(t, dir, "jj", "status")
+		if strings.Contains(status, "codegraph") {
+			t.Fatalf("jj status in %s = %q, want no .codegraph path tracked", dir, status)
+		}
+	}
+}
+
 // git writes a relative worktree pointer between real paths, so provisioning finds its own entry
 // through a symlinked repos directory: it locks it, re-adds the workspace after its directory went,
 // and removal deletes it.

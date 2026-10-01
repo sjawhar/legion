@@ -13,11 +13,12 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/testcontainers/testcontainers-go"
 )
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
 
-// This protects the testcontainers boundary that failed on #1243: a server can accept NATS's
+// This protects the testcontainers boundary: a server can accept NATS's
 // protocol handshake while JetStream is still starting, so a KV test that returns at the handshake
 // races CreateKeyValue. The helper must retry the JetStream operation itself.
 func TestWaitForJetStreamRetriesTheOperationUntilItIsReady(t *testing.T) {
@@ -35,7 +36,8 @@ func TestWaitForJetStreamRetriesTheOperationUntilItIsReady(t *testing.T) {
 }
 
 // The package's tests share one server, and each gets it as a fresh container was: a stream and its
-// messages left by one test are gone when the next asks for the server.
+// messages left by one test are not there when the next asks for the server, which hands it an
+// account of its own.
 func TestEachTestGetsTheSharedServerEmpty(t *testing.T) {
 	t.Run("leaves a stream and a message", func(t *testing.T) {
 		conn := Connect(t, URL(t))
@@ -63,14 +65,14 @@ func TestEachTestGetsTheSharedServerEmpty(t *testing.T) {
 			t.Fatalf("account info: %v", err)
 		}
 		if info.Streams != 0 {
-			t.Errorf("the shared server holds %d streams from the previous test", info.Streams)
+			t.Errorf("the second subtest's account holds %d streams, want none of the first's", info.Streams)
 		}
 	})
 }
 
 // A test that publishes a burst without waiting for acks leaves messages the server routes after
-// the test ends. The next test, recreating a stream on the same subjects, finds none of them: the
-// reset waits for the previous test's connections to be gone first.
+// the test ends. They land in that test's own account, so the next test, creating a stream on the
+// same subjects, finds none of them.
 func TestABurstLeftInFlightDoesNotReachTheNextTest(t *testing.T) {
 	const burst = 20000
 	config := &natsgo.StreamConfig{Name: "BURST", Subjects: []string{"burst.>"}}
@@ -124,31 +126,114 @@ func (f *fatalRecorder) Fatalf(format string, args ...any) {
 	runtime.Goexit()
 }
 
-// A test that takes the shared server twice is refused at once, naming itself, instead of waiting
-// on itself for the whole test binary's timeout.
-func TestASecondTakeByTheSameTestFailsAtOnce(t *testing.T) {
-	URL(t)
-	again := &fatalRecorder{TB: t}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		URL(again)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a second take by the same test waited on itself")
+// A test gets one account however often it asks, so every connection it makes reaches the streams
+// any other made; a subtest gets an account of its own, where none of its parent's streams is.
+func TestATestGetsOneAccountAndEachSubtestItsOwn(t *testing.T) {
+	uri := URL(t)
+	if again := URL(t); again != uri {
+		t.Fatalf("a second URL for the same test is %q, want its first, %q", again, uri)
 	}
-	if !strings.Contains(again.message, "already holds the shared NATS server") {
-		t.Errorf("a second take by the same test failed with %q, not the re-entry refusal", again.message)
+	conn := Connect(t, uri)
+	defer conn.Close()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.AddStream(&natsgo.StreamConfig{Name: "PARENT", Subjects: []string{"parent.>"}}); err != nil {
+		t.Fatalf("add stream: %v", err)
+	}
+	t.Run("subtest", func(t *testing.T) {
+		subURI := URL(t)
+		if subURI == uri {
+			t.Fatalf("the subtest got its parent's account, %q", uri)
+		}
+		sub := Connect(t, subURI)
+		defer sub.Close()
+		subJS, err := sub.JetStream()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := subJS.StreamInfo("PARENT"); !errors.Is(err, natsgo.ErrStreamNotFound) {
+			t.Fatalf("the subtest's account answers its parent's stream with %v, want not found", err)
+		}
+	})
+}
+
+// namedTB is a test under another name, so one test can ask a server for accounts as many tests.
+type namedTB struct {
+	testing.TB
+	name string
+}
+
+func (n namedTB) Name() string { return n.name }
+
+// ownAccountServer starts an account server of the test's own, declaring accounts accounts.
+func ownAccountServer(t *testing.T, accounts int) *accountServer {
+	t.Helper()
+	server, err := startAccountServer(accounts)
+	if server != nil {
+		testcontainers.CleanupContainer(t, server.ctr)
+	}
+	if err != nil {
+		t.Fatalf("start an account server: %v", err)
+	}
+	return server
+}
+
+// A server whose accounts are all handed out declares twice as many by a reload and hands out the
+// next, and an account a test is still using keeps its connection and its watcher across the
+// reload.
+func TestAServerOutOfAccountsDoublesThemWithoutDisturbingOneInUse(t *testing.T) {
+	server := ownAccountServer(t, 2)
+	live := Connect(t, server.url(namedTB{t, "live"}))
+	defer live.Close()
+	js, err := live.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "live"})
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	watcher, err := kv.WatchAll()
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	defer func() { _ = watcher.Stop() }()
+	if entry := <-watcher.Updates(); entry != nil {
+		t.Fatalf("the empty bucket's scan delivered %v before its marker", entry)
+	}
+
+	server.url(namedTB{t, "second"})
+	third := server.url(namedTB{t, "third"})
+	if server.declared != 4 {
+		t.Fatalf("the server declares %d accounts after handing out its third, want 4", server.declared)
+	}
+	if want := fmt.Sprintf("nats://t3:t3@%s", server.host); third != want {
+		t.Fatalf("the third test's URL is %q, want %q", third, want)
+	}
+	if _, err := kv.Put("after-the-reload", []byte("1")); err != nil {
+		t.Fatalf("put after the reload: %v", err)
+	}
+	select {
+	case entry := <-watcher.Updates():
+		if entry == nil || entry.Key() != "after-the-reload" {
+			t.Fatalf("the watcher delivered %v after the reload, want the put", entry)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the watcher of an account in use delivered nothing after the reload")
+	}
+	if status := live.Status(); status != natsgo.CONNECTED {
+		t.Fatalf("the connection of an account in use is %v after the reload, want CONNECTED", status)
 	}
 }
 
 // StartNkeyAuthorized's readiness wait refuses a server that admits a client with no credential:
 // such a server enforces no nkey users, and every refusal a test expects of it would pass for the
-// wrong reason. The shared server, which asks for no credential, stands in for one.
+// wrong reason. A server started with no configuration, which asks for no credential, stands in
+// for one.
 func TestTheNkeyReadinessWaitRefusesAServerThatAdmitsAnyone(t *testing.T) {
-	uri := URL(t)
+	_, uri := Start(t)
 	wait := &fatalRecorder{TB: t}
 	done := make(chan struct{})
 	go func() {
@@ -166,8 +251,7 @@ func TestTheNkeyReadinessWaitRefusesAServerThatAdmitsAnyone(t *testing.T) {
 }
 
 // A restart keeps its server's URL even when something else takes the URL's port while the server is
-// stopped, as another test's container or a free-port pick can on a busy host: #1387's CI lost the
-// port between a stop and a start ("address already in use" on restart 3).
+// stopped, as another test's container or a free-port pick can on a busy host.
 func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
 	ctr, uri := StartRestartable(t)
 	Stop(t, ctr)

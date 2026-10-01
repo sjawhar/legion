@@ -25,7 +25,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
-import { strandedRetryGuidance } from "../conversation/delivery";
+import { MODE_LABELS, strandedRetryGuidance } from "../conversation/delivery";
 import {
   capabilitiesForTarget,
   DeliveryRetry,
@@ -186,7 +186,7 @@ export function BroadcastPage(): ReactNode {
           Broadcast to {sent.recipients.length} {sent.recipients.length === 1 ? "agent" : "agents"}
         </h1>
         <p className={`mt-1 flex flex-wrap items-center gap-2 text-sm ${textMutedOnCanvas}`}>
-          <LabelPill>{sent.delivery}</LabelPill>
+          <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
           <span>{resolveAuthor(sent.author, titles).label}</span>
           <Timestamp at={sent.created_at} />
           <span>

@@ -1,4 +1,28 @@
-import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
+import {
+  DELIVERY_CAPABILITIES,
+  DELIVERY_DUPLICATE_WINDOW_MS,
+  type MessageDeliveryMode,
+  RECEIPT_TIMEOUT_CAUSE,
+} from "@legion/contracts";
+
+/**
+ * Each delivery mode as a person reads it, the one mapping every surface names a mode with: the
+ * conversation composer's picker, the Agents list's card headlines and attempt lines, the
+ * mention composer's warning, the broadcast's exclusions and the issue event feed all say what the
+ * composer said. Send is Enter at the session's terminal, the wire's `steer`.
+ */
+export const MODE_LABELS: Record<MessageDeliveryMode, string> = {
+  aside: "Aside",
+  btw: "BTW",
+  steer: "Send",
+};
+
+/** A capability a session advertises, as a person reads it: its mode's label, or the capability
+ *  as the session wrote it when this dashboard knows no such mode. */
+export function capabilityLabel(capability: string): string {
+  const mode = DELIVERY_CAPABILITIES.find((known) => known === capability);
+  return mode === undefined ? capability : MODE_LABELS[mode];
+}
 
 /**
  * The one rule every delivery surface applies, so the dashboard cannot promise on one card what
@@ -141,11 +165,11 @@ export function answeredWithErrorGuidance(surface: "card" | "mention"): string {
  * attempt's own, so the promise holds only while its repeat is still recognised.
  */
 export function strandedRetryGuidance(
-  mode: string,
+  mode: MessageDeliveryMode,
   createdAt: string | undefined,
   now: number = Date.now()
 ): string {
-  const retry = `Nobody is carrying this send. Retry uses ${mode} again`;
+  const retry = `Nobody is carrying this send. Retry uses ${MODE_LABELS[mode]} again`;
   if (createdAt === undefined || insideDuplicateWindow(createdAt, now)) {
     return `${retry}, which cannot deliver it twice ${unlessRestarted}.`;
   }

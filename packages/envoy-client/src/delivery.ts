@@ -90,6 +90,9 @@ export type DispatchDelivery = {
   readonly replyFields: Readonly<Record<string, string>>;
   readonly issueKey: string | null;
   readonly body: string;
+  /** The broadcast a message frame says its message is one recipient's copy of, when it names
+   *  one. The frame is untrusted: this can only rule a user turn out, never in. */
+  readonly broadcastId?: string;
 };
 
 function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): string {
@@ -492,6 +495,17 @@ function dispatchPayload(event: DispatchEvent): unknown {
   return parsed.success ? parsed.data : event.payload;
 }
 
+function hasTarget(value: unknown): value is { readonly target: unknown } {
+  return isObject(value) && "target" in value;
+}
+
+function dispatchPayloadForReader(event: DispatchEvent, sessionID: string): unknown {
+  const payload = dispatchPayload(event);
+  if (!hasTarget(payload)) return payload;
+  const target = payload.target;
+  return target === `session:${sessionID}` ? { ...payload, target: `you (${target})` } : payload;
+}
+
 // A comment.created reply to an ask carries the question text (ask_question) alongside
 // the ask id, so the frame names the question head the way an ask event does; `re:` stays
 // the ask's ref.
@@ -741,6 +755,9 @@ export function renderInbound(
               replyFields: {},
               issueKey: frame.event.issue_key,
               body: message.data.body,
+              ...(typeof message.data.broadcast_id === "string"
+                ? { broadcastId: message.data.broadcast_id }
+                : {}),
             };
             // A human's direct message to this session carries no issue key, and
             // `dispatch_message` answers it with `in_reply_to` alone; every other targeted
@@ -787,7 +804,7 @@ export function renderInbound(
           owner: dispatchOwner(frame.event, topic),
           type: frame.event.type,
           actor: frame.event.actor,
-          ...(compactRecord ?? { payload: dispatchPayload(frame.event) }),
+          ...(compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }),
         };
         dispatchActor = frame.event.actor;
       } else {
@@ -855,9 +872,7 @@ export function renderInbound(
       ...(dispatchIssue === undefined ? [] : [dispatchIssue]),
     ].join(", ") || undefined;
   const rendered = {
-    ...(envelope.topic === agentSubject(sessionID)
-      ? { to: `you (${sessionID.slice(0, 4)}…)` }
-      : {}),
+    ...(envelope.topic === agentSubject(sessionID) ? { to: `you (${sessionID})` } : {}),
     from: senderLabel(envelope),
     at: inboundTimestamp(envelope.issued_at),
     id: envelope.event_id ?? "unknown",

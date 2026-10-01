@@ -1,10 +1,10 @@
 // contract_test.go is Task 2's contract layer (plan-overview.md v9's own lesson: "every fake had
 // been built from the client's assumption"): it mounts the real broker handlers (brokerapi.
-// Register with real services on BROKER_TEST_DATABASE_URL, seeded via webauthntest + a seeded
-// approver key, exactly as Plan A's broker/api tests do) behind an httptest.Server, wires
-// Dispatch's own routes to relay to it, and drives every UI action through DISPATCH's routes —
-// proving the proxy round-trips a real broker, not a fake built from agentsecrets.Client's own
-// assumptions. Skips without BROKER_TEST_DATABASE_URL (via brokerstoretest.Open) or
+// Register with real services on BROKER_TEST_DATABASE_URL, exactly as the broker/api tests do)
+// behind an httptest.Server, wires Dispatch's own routes to relay to it, and drives every UI
+// action through DISPATCH's routes as a signed-in human — proving the proxy round-trips a real
+// broker, which decides by the login Dispatch names, not a fake built from agentsecrets.Client's
+// own assumptions. Skips without BROKER_TEST_DATABASE_URL (via brokerstoretest.Open) or
 // DISPATCH_TEST_DATABASE_URL (via storetest.Open, already required by every other test in this
 // package).
 package api
@@ -14,9 +14,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -29,7 +26,6 @@ import (
 	"github.com/google/uuid"
 
 	brokerapi "github.com/sjawhar/envoy/internal/broker/api"
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -39,7 +35,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	brokerstoretest "github.com/sjawhar/envoy/internal/broker/store/storetest"
-	"github.com/sjawhar/envoy/internal/broker/webauthntest"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -47,50 +42,27 @@ import (
 )
 
 const (
-	contractRPID     = "dispatch.contract.test"
-	contractOrigin   = "https://dispatch.contract.test"
-	contractAAGUID   = "ee882879-721c-4913-9775-3dfcce97072a"
 	contractApprover = "sjawhar"
-	contractUIToken  = "contract-ui-token"
+	// contractOther is a second allowed Dispatch login, neither any record's approver nor any
+	// enrollment's operator.
+	contractOther   = "mallory"
+	contractUIToken = "contract-ui-token"
 )
 
-// contractRig is the real broker (real Postgres, real WebAuthn software authenticator) behind
-// Dispatch's own mounted routes. Every UI action a test drives goes through rig.Dispatch; rig's
-// direct broker helpers exist only to seed fixtures Dispatch has no route to create (a pending
-// request comes from an agent's session proof, a machine login from the machine's own key —
-// neither is a Dispatch UI action).
+// contractRig is the real broker (real Postgres) behind Dispatch's own mounted routes. Every UI
+// action a test drives goes through rig.Dispatch; rig's direct broker helpers exist only to seed
+// fixtures Dispatch has no route to create (a pending request comes from an agent's session
+// proof, a machine login from the machine's own key — neither is a Dispatch UI action) and to
+// read a grant's value back as the session that holds it.
 type contractRig struct {
 	Dispatch    http.Handler
 	BrokerURL   string
-	Approver    *webauthntest.Authenticator
-	CA          *webauthntest.CA
 	brokerStore *store.Store
 }
 
 func newContractRig(t *testing.T) *contractRig {
 	t.Helper()
 	brokerStore := brokerstoretest.Open(t)
-
-	ca := webauthntest.NewCA(t)
-	auth := ca.NewAuthenticator(t, uuid.MustParse(contractAAGUID))
-	nonce := strings.Repeat("a", 64)
-	challenge := record.RegisterChallenge(contractApprover, nonce)
-	entry := approvers.KeyEntry{
-		CredentialID:   base64.RawURLEncoding.EncodeToString(auth.CredentialID),
-		ChallengeNonce: nonce,
-		Registration:   auth.Register(t, contractRPID, contractOrigin, challenge[:]),
-		Seed:           true,
-	}
-	if _, err := brokerStore.Pool.Exec(context.Background(),
-		`insert into approver_key_seeds (login, credential_id) values ($1,$2)`, contractApprover, entry.CredentialID); err != nil {
-		t.Fatalf("insert approver_key_seeds: %v", err)
-	}
-	approversSvc := &approvers.Service{Store: brokerStore, Verifier: &approvers.Verifier{
-		Roots: ca.Pool(), Origin: contractOrigin, AAGUIDs: map[uuid.UUID]bool{uuid.MustParse(contractAAGUID): true},
-	}}
-	if err := approversSvc.Reconcile(context.Background(), map[string][]approvers.KeyEntry{contractApprover: {entry}}); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
 
 	rulesYAML := `version: 1
 secrets:
@@ -101,17 +73,6 @@ secrets:
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: ` + contractApprover + `, decision: approval, approver: operator}
-approvers:
-  origin: ` + contractOrigin + `
-  aaguids: ["` + contractAAGUID + `"]
-  logins:
-    ` + contractApprover + `:
-      keys:
-        - credential_id: "` + entry.CredentialID + `"
-          registration:
-            challenge_nonce: "` + entry.ChallengeNonce + `"
-            response: ` + string(entry.Registration) + `
-          seed: true
 `
 	rulesPath := t.TempDir() + "/rules.yaml"
 	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
@@ -127,20 +88,21 @@ approvers:
 	t.Cleanup(brokerServer.Close)
 
 	enr := &enroll.Service{Store: brokerStore, Lease: time.Hour}
-	enr.Chain = enroll.NewChainVerifier(brokerStore, approversSvc, brokerServer.URL, time.Minute)
+	enr.Chain = enroll.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	reqMachine := &requests.Machine{
 		Store: brokerStore, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1"},
-		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
+		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
+	reqMachine.Chain = requests.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	mach := &machine.Service{
-		Store: brokerStore, Enroll: enr, Approvers: approversSvc, Rules: cur,
+		Store: brokerStore, Enroll: enr, Rules: cur,
 		Audience: brokerServer.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}
 	brokerapi.Register(brokerMux, brokerapi.Deps{
-		PublicURL: brokerServer.URL, UIOrigin: contractOrigin, UIToken: contractUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach, Approvers: approversSvc,
+		PublicURL: brokerServer.URL, UIToken: contractUIToken,
+		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 	})
 
@@ -149,7 +111,7 @@ approvers:
 		Store: dispatchDB, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-	allowed := map[string]struct{}{contractApprover: {}}
+	allowed := map[string]struct{}{contractApprover: {}, contractOther: {}}
 	deps, err := NewDeps(DepsInput{
 		Store: dispatchDB, Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
 		AllowedLogins: allowed, ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
@@ -161,10 +123,7 @@ approvers:
 	dispatchMux := http.NewServeMux()
 	Register(dispatchMux, deps)
 
-	return &contractRig{
-		Dispatch: dispatchMux, BrokerURL: brokerServer.URL, Approver: auth, CA: ca,
-		brokerStore: brokerStore,
-	}
+	return &contractRig{Dispatch: dispatchMux, BrokerURL: brokerServer.URL, brokerStore: brokerStore}
 }
 
 // --- fixture seeding: direct broker access, mirroring what an agent or a machine would do ---
@@ -235,10 +194,18 @@ func (rig *contractRig) brokerReq(t *testing.T, method, path string, headers map
 	return response.StatusCode, respBody
 }
 
+// pendingAgentSecret is a pending agent_secret record and the session that asked for it, which
+// alone can read a grant's value back.
+type pendingAgentSecret struct {
+	RecordID     string
+	EnrollmentID string
+	Key          *ecdsa.PrivateKey
+}
+
 // createPendingAgentSecretRecord signs a real request object with a fresh session enrollment's
 // key and posts it straight to the broker's own session route — the only way a pending
-// agent_secret record comes to exist — returning the record id Dispatch's routes then decide.
-func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason string, names ...string) string {
+// agent_secret record comes to exist — returning the record Dispatch's routes then decide.
+func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason string, names ...string) pendingAgentSecret {
 	t.Helper()
 	enrollmentID, key := rig.newSessionEnrollment(t, contractApprover)
 	details := make([]record.AuthorizationDetail, len(names))
@@ -264,54 +231,80 @@ func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason stri
 	if err := json.Unmarshal(body, &created); err != nil || created.RecordID == nil {
 		t.Fatalf("decode create-request response: %v (body: %s)", err, body)
 	}
-	return *created.RecordID
+	return pendingAgentSecret{RecordID: *created.RecordID, EnrollmentID: enrollmentID, Key: key}
 }
 
-func decodeChallenge(t *testing.T, b64 string) []byte {
+// values reads a grant's released values as the session that holds it, straight from the broker.
+func (rig *contractRig) values(t *testing.T, pending pendingAgentSecret, grantID string) (int, map[string]string) {
 	t.Helper()
-	raw, err := base64.RawURLEncoding.DecodeString(b64)
+	path := "/v1/grants/" + grantID + "/values"
+	p, err := proof.Sign(pending.Key, pending.EnrollmentID, http.MethodPost, rig.BrokerURL+path, time.Now())
 	if err != nil {
-		t.Fatalf("decode challenge %q: %v", b64, err)
+		t.Fatalf("proof.Sign: %v", err)
 	}
-	return raw
-}
-
-type contractChallenges struct {
-	Approve string `json:"approve"`
-	Deny    string `json:"deny"`
+	status, body := rig.brokerReq(t, http.MethodPost, path, map[string]string{"Proof": p}, nil)
+	var released struct {
+		Values map[string]string `json:"values"`
+	}
+	_ = json.Unmarshal(body, &released)
+	return status, released.Values
 }
 
 type contractRecord struct {
-	RecordID   string              `json:"record_id"`
-	Kind       string              `json:"kind"`
-	State      string              `json:"state"`
-	Challenges *contractChallenges `json:"challenges"`
+	RecordID string `json:"record_id"`
+	Kind     string `json:"kind"`
+	State    string `json:"state"`
+	Approver string `json:"approver"`
+}
+
+type contractError struct {
+	Code string `json:"code"`
 }
 
 // --- tests ---
 
-// TestApproveRelaysTheAssertionAndTheBrokerDecides is the plan's own contract test, copied
-// verbatim (plan-dispatch-credential-inbox.md Task 2): approving through Dispatch's route with a
-// real assertion succeeds and the broker's answer passes straight through; replaying the same
-// call is the broker's own 409, unchanged by Dispatch.
-func TestApproveRelaysTheAssertionAndTheBrokerDecides(t *testing.T) {
+// TestApproveThroughDispatchReleasesTheValue drives the approval as a signed-in human end to
+// end against the real broker: another Dispatch login is refused NOT_APPROVER even when its
+// browser body names the approver, the approver's own click succeeds whatever login its browser
+// body names, the session then releases the value, and replaying the approval is the broker's
+// own 409, forwarded unchanged.
+func TestApproveThroughDispatchReleasesTheValue(t *testing.T) {
 	rig := newContractRig(t)
-	recordID := rig.createPendingAgentSecretRecord(t, "need it for the demo", "DEEL_API_KEY")
+	pending := rig.createPendingAgentSecretRecord(t, "need it for the demo", "DEEL_API_KEY")
+	approvePath := "/api/v1/credential-requests/" + pending.RecordID + "/approve"
 
-	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+recordID, nil, contractApprover)
-	var readRecord contractRecord
-	if err := json.Unmarshal(readResp.Body.Bytes(), &readRecord); err != nil || readRecord.Challenges == nil {
-		t.Fatalf("record read = %s (err %v), want challenges", readResp.Body.String(), err)
+	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractApprover)
+	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != contractApprover {
+		t.Fatalf("record read = %s, want pending with approver %s", readResp.Body.String(), contractApprover)
 	}
 
-	assertion := rig.Approver.Assert(t, contractRPID, contractOrigin, decodeChallenge(t, readRecord.Challenges.Approve))
-	body := map[string]any{"assertion": json.RawMessage(assertion)}
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+recordID+"/approve", body, contractApprover)
-	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"approved"`) {
-		t.Fatalf("%d %s", resp.Code, resp.Body.String())
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"approver": contractApprover}, contractOther)
+	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
+		t.Fatalf("approve as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
 	}
-	// Dispatch added nothing and decided nothing: replaying the same call is the broker's 409.
-	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+recordID+"/approve", body, contractApprover)
+
+	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"approver": contractOther}, contractApprover)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("approve as %s = %d %s", contractApprover, resp.Code, resp.Body.String())
+	}
+	approved := decodeBody[struct {
+		State   string  `json:"state"`
+		GrantID *string `json:"grant_id"`
+	}](t, resp)
+	if approved.State != "approved" || approved.GrantID == nil {
+		t.Fatalf("approve response = %s, want state=approved with a grant_id", resp.Body.String())
+	}
+	var decidedBy string
+	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
+		`select login from credential_request_events where record_id=$1 and event='approved'`, pending.RecordID).Scan(&decidedBy); err != nil || decidedBy != contractApprover {
+		t.Fatalf("approved event login = %q (%v), want %s", decidedBy, err, contractApprover)
+	}
+
+	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["DEEL_API_KEY"] != "deel-v1" {
+		t.Fatalf("values = %d %v, want DEEL_API_KEY=deel-v1", status, released)
+	}
+
+	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
 	if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "RECORD_TERMINAL") {
 		t.Fatalf("terminal forwarding: %d %s", resp.Code, resp.Body.String())
 	}
@@ -321,7 +314,7 @@ func TestApproveRelaysTheAssertionAndTheBrokerDecides(t *testing.T) {
 // record shows in Dispatch's proxied ?approver=me list with its minimal facts.
 func TestPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
-	recordID := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY")
+	recordID := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY").RecordID
 
 	resp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, contractApprover)
 	if resp.Code != http.StatusOK {
@@ -348,8 +341,9 @@ func TestPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
 }
 
 // TestMachineLoginLookupAndApproveThroughDispatch drives the typed-code machine flow: a machine's
-// signed login request produces a code; Dispatch's lookup route resolves it to the record and its
-// challenges (ruling 13's one exception); approving through Dispatch mints a launcher credential.
+// signed login request produces a code; Dispatch's lookup route resolves it to the record (ruling
+// 13's one selector); approving through Dispatch with the same code mints a launcher credential,
+// and without the code the broker refuses CODE_REQUIRED.
 func TestMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	machineKey := contractSigningKey(t)
@@ -374,17 +368,17 @@ func TestMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
 	if lookupResp.Code != http.StatusOK {
 		t.Fatalf("machine-lookup = %d: %s", lookupResp.Code, lookupResp.Body.String())
 	}
-	var looked contractRecord
-	if err := json.Unmarshal(lookupResp.Body.Bytes(), &looked); err != nil || looked.Challenges == nil {
-		t.Fatalf("machine-lookup body = %s (err %v), want challenges", lookupResp.Body.String(), err)
-	}
-	if looked.Kind != "launcher_credential" {
-		t.Fatalf("machine-lookup kind = %q, want launcher_credential", looked.Kind)
+	looked := decodeBody[contractRecord](t, lookupResp)
+	if looked.Kind != "launcher_credential" || looked.State != "pending" {
+		t.Fatalf("machine-lookup = %+v, want a pending launcher_credential record", looked)
 	}
 
-	assertion := rig.Approver.Assert(t, contractRPID, contractOrigin, decodeChallenge(t, looked.Challenges.Approve))
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"assertion": json.RawMessage(assertion), "code": created.Code}, contractApprover)
+	approvePath := "/api/v1/credential-requests/" + looked.RecordID + "/approve"
+	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
+	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
+		t.Fatalf("machine approve without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
+	}
+	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": created.Code}, contractApprover)
 	if approveResp.Code != http.StatusOK {
 		t.Fatalf("machine approve = %d: %s", approveResp.Code, approveResp.Body.String())
 	}
@@ -397,100 +391,15 @@ func TestMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
 	}
 }
 
-// TestApproverKeysListAndCeremoniesThroughDispatch drives the key pages' three proxied routes:
-// the seeded key lists, a register ceremony returns yaml, and an endorse ceremony (signed by the
-// seeded key over the new key's hash) returns yaml too.
-func TestApproverKeysListAndCeremoniesThroughDispatch(t *testing.T) {
-	rig := newContractRig(t)
-
-	keysResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-keys/"+contractApprover, nil, contractApprover)
-	if keysResp.Code != http.StatusOK {
-		t.Fatalf("GET keys = %d: %s", keysResp.Code, keysResp.Body.String())
-	}
-	keys := decodeBody[struct {
-		Keys []struct {
-			CredentialID string `json:"credential_id"`
-			Seeded       bool   `json:"seeded"`
-		} `json:"keys"`
-	}](t, keysResp)
-	if len(keys.Keys) != 1 || !keys.Keys[0].Seeded {
-		t.Fatalf("keys = %+v, want one seeded key", keys.Keys)
-	}
-	seededCredentialID := keys.Keys[0].CredentialID
-
-	beginResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-keys/"+contractApprover+"/register/begin", nil, contractApprover)
-	if beginResp.Code != http.StatusOK {
-		t.Fatalf("register/begin = %d: %s", beginResp.Code, beginResp.Body.String())
-	}
-	begin := decodeBody[struct {
-		CeremonyID string `json:"ceremony_id"`
-		PublicKey  struct {
-			Challenge string `json:"challenge"`
-		} `json:"publicKey"`
-	}](t, beginResp)
-	if begin.CeremonyID == "" {
-		t.Fatalf("register/begin = %+v, want a ceremony id", begin)
-	}
-
-	newKeyAuth := rig.CA.NewAuthenticator(t, uuid.MustParse(contractAAGUID)) // must chain to the broker's pinned root
-	registration := newKeyAuth.Register(t, contractRPID, contractOrigin, decodeChallenge(t, begin.PublicKey.Challenge))
-	finishResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-keys/"+contractApprover+"/register/finish",
-		map[string]any{"ceremony_id": begin.CeremonyID, "response": json.RawMessage(registration)}, contractApprover)
-	if finishResp.Code != http.StatusOK {
-		t.Fatalf("register/finish = %d: %s", finishResp.Code, finishResp.Body.String())
-	}
-	finished := decodeBody[struct {
-		YAML string `json:"yaml"`
-	}](t, finishResp)
-	if !strings.Contains(finished.YAML, "credential_id") {
-		t.Fatalf("register/finish yaml = %q, want it to mention credential_id", finished.YAML)
-	}
-
-	keyHash := sha256.Sum256(newKeyAuth.CredentialID)
-	endorseBeginResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-keys/"+contractApprover+"/endorse/begin",
-		map[string]any{"credential_id": seededCredentialID, "key_hash": hex.EncodeToString(keyHash[:])}, contractApprover)
-	if endorseBeginResp.Code != http.StatusOK {
-		t.Fatalf("endorse/begin = %d: %s", endorseBeginResp.Code, endorseBeginResp.Body.String())
-	}
-	endorseBegin := decodeBody[struct {
-		CeremonyID string `json:"ceremony_id"`
-		PublicKey  struct {
-			Challenge string `json:"challenge"`
-		} `json:"publicKey"`
-	}](t, endorseBeginResp)
-	if endorseBegin.CeremonyID == "" {
-		t.Fatalf("endorse/begin = %+v, want a ceremony id", endorseBegin)
-	}
-
-	endorseAssertion := rig.Approver.Assert(t, contractRPID, contractOrigin, decodeChallenge(t, endorseBegin.PublicKey.Challenge))
-	endorseFinishResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-keys/"+contractApprover+"/endorse/finish",
-		map[string]any{"ceremony_id": endorseBegin.CeremonyID, "response": json.RawMessage(endorseAssertion)}, contractApprover)
-	if endorseFinishResp.Code != http.StatusOK {
-		t.Fatalf("endorse/finish = %d: %s", endorseFinishResp.Code, endorseFinishResp.Body.String())
-	}
-	endorseFinished := decodeBody[struct {
-		YAML string `json:"yaml"`
-	}](t, endorseFinishResp)
-	if !strings.Contains(endorseFinished.YAML, "endorsement") {
-		t.Fatalf("endorse/finish yaml = %q, want it to mention endorsement", endorseFinished.YAML)
-	}
-}
-
 // TestGrantsListAndRevokeByApproverThroughDispatch approves a request to mint a grant, lists it
-// through Dispatch's own grants route, then revokes it with an assertion over the revoke
-// challenge — the human path that ends a grant, distinct from a session ending its own.
+// through Dispatch's own grants route, then revokes it as the signed-in approver — refused for
+// another login — the human path that ends a grant, distinct from a session ending its own.
 func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
-	recordID := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY")
+	pending := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY")
 
-	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+recordID, nil, contractApprover)
-	var readRecord contractRecord
-	if err := json.Unmarshal(readResp.Body.Bytes(), &readRecord); err != nil || readRecord.Challenges == nil {
-		t.Fatalf("record read = %s (err %v), want challenges", readResp.Body.String(), err)
-	}
-	assertion := rig.Approver.Assert(t, contractRPID, contractOrigin, decodeChallenge(t, readRecord.Challenges.Approve))
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+recordID+"/approve",
-		map[string]any{"assertion": json.RawMessage(assertion)}, contractApprover)
+	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/approve",
+		map[string]any{}, contractApprover)
 	approved := decodeBody[struct {
 		GrantID *string `json:"grant_id"`
 	}](t, approveResp)
@@ -502,23 +411,26 @@ func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 	grantsResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, contractApprover)
 	grants := decodeBody[struct {
 		Grants []struct {
-			GrantID string `json:"grant_id"`
+			GrantID  string `json:"grant_id"`
+			Approver string `json:"approver"`
 		} `json:"grants"`
 	}](t, grantsResp)
 	found := false
 	for _, g := range grants.Grants {
-		if g.GrantID == grantID {
+		if g.GrantID == grantID && g.Approver == contractApprover {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("grants list %+v does not include %s", grants.Grants, grantID)
+		t.Fatalf("grants list %+v does not include %s approved by %s", grants.Grants, grantID, contractApprover)
 	}
 
-	revokeChallenge := record.RevokeChallenge(grantID)
-	revokeAssertion := rig.Approver.Assert(t, contractRPID, contractOrigin, revokeChallenge[:])
-	revokeResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-grants/"+grantID+"/revoke",
-		map[string]any{"assertion": json.RawMessage(revokeAssertion)}, contractApprover)
+	revokePath := "/api/v1/credential-grants/" + grantID + "/revoke"
+	otherResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractOther)
+	if otherResp.Code != http.StatusForbidden || decodeBody[contractError](t, otherResp).Code != "NOT_APPROVER" {
+		t.Fatalf("revoke as %s = %d %s, want 403 NOT_APPROVER", contractOther, otherResp.Code, otherResp.Body.String())
+	}
+	revokeResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractApprover)
 	if revokeResp.Code != http.StatusOK {
 		t.Fatalf("revoke = %d: %s", revokeResp.Code, revokeResp.Body.String())
 	}

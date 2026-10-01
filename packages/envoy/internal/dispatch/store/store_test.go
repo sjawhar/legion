@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/url"
 	"os"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/pgmigrate"
@@ -744,6 +746,125 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	_, err := store.Pool.Exec(ctx, `update asks set kind = 'action' where id = '5a660655-04ad-4ce0-8a9b-93dd03c412b7'`)
 	if err == nil || !strings.Contains(err.Error(), "asks_kind_check") {
 		t.Fatalf("action kind update error = %v, want asks_kind_check violation", err)
+	}
+}
+
+// 0053 pairs an ask's kind with its approval: an approval ask carries an approval whose known keys
+// hold the types model.AskApproval decodes and name a document version, and no other kind carries
+// one, not even the JSON null. A hand-written row that breaks the pairing either way is refused at
+// insert, and an approval the route writes is stored at every version a document can have. The
+// rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are
+// skipped, which go test reports only under -v, and dispatch://LEGION-429 deletes their entries
+// when it adds the check that refuses them.
+func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');
+	`); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	const approval = `{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`
+	residual := map[string]bool{
+		"an approval ask repeating version under another case as a fraction":     true,
+		"an approval ask repeating name under another case as a number":          true,
+		"an approval ask repeating version with a long s as a fraction":          true,
+		"an approval ask carrying a value nested past the decoder's depth limit": true,
+	}
+	for _, row := range []struct {
+		name     string
+		kind     string
+		approval *string
+		refused  bool
+	}{
+		{"an approval ask naming no document", "approval", nil, true},
+		// The JSON value null is what encoding a nil *model.AskApproval writes (encodeJSON, as the
+		// approval-request route writes the column), and it names no document either: ScanAsk
+		// reads it as an approval with no artifact, and answering the ask fails on it.
+		{"an approval ask whose approval is the JSON null", "approval", new("null"), true},
+		// What ScanAsk reads the JSON null as. It separates this check from one that asks only for
+		// an object.
+		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
+		// An id that is not a uuid fails the cast answering the ask makes on it (22P02), and one in
+		// capitals is never found by docs.ApprovalAskAt, which compares the id as text with the
+		// lowercase text Postgres writes, so a new version would never retract the ask.
+		{"an approval ask whose document id is empty at a real version", "approval", new(`{"artifact_id":"","name":"spec.md","version":1}`), true},
+		{"an approval ask whose document id is in capitals", "approval", new(`{"artifact_id":"7C1E8A52-3F4B-4D6E-9A0B-1C2D3E4F5A6B","name":"spec.md","version":1}`), true},
+		// A character before or after the uuid, or a letter past f in it, also fails that cast, and
+		// docs.ApprovalAskAt never finds the ask. Each row is refused only while its anchor, or the
+		// pattern's hex class, is as written.
+		{"an approval ask whose document id has a digit after the uuid", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b0","name":"spec.md","version":1}`), true},
+		{"an approval ask whose document id has a digit before the uuid", "approval", new(`{"artifact_id":"07c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`), true},
+		{"an approval ask whose document id has a letter that is not hex", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6g","name":"spec.md","version":1}`), true},
+		// A missing key reads as its zero value, which no writer writes. These are the rows a check
+		// with its coalesce around one conjunct alone would store, since a CHECK that evaluates to
+		// null passes.
+		{"an approval ask naming no version", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md"}`), true},
+		{"an approval ask naming no document name", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","version":1}`), true},
+		// ScanAsk decodes the approval into model.AskApproval, whose version is an int and whose name
+		// is a string, so a number that is no int, or a name that is no string, fails every read of
+		// the ask: the ask itself, its issue, the inbox, answering it, and each new version of its
+		// document, which reads every open approval ask on the document to retract it.
+		{"an approval ask whose version is not a whole number", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.5}`), true},
+		{"an approval ask whose version is written with a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.0}`), true},
+		{"an approval ask whose version is past what an int holds", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":9223372036854775808}`), true},
+		{"an approval ask whose name is not a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":5,"version":1}`), true},
+		// jsonb stores 1e30 as a 31-digit integer, which a check on the digits alone has to bound.
+		{"an approval ask whose version is 1e30", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1e30}`), true},
+		// The first version past ten digits, which no integer version reaches; it is refused only
+		// while the digit pattern's bound is ten.
+		{"an approval ask whose version has eleven digits", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10000000000}`), true},
+		// The digit pattern matches the text of the string "1" too; only the number test refuses it,
+		// and a string does not decode into the int.
+		{"an approval ask whose version is a string", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":"1"}`), true},
+		// Version 0 decodes, but no version has that number and the approval-request route never
+		// writes it.
+		{"an approval ask at version 0", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":0}`), true},
+		// encoding/json matches an object's keys to model.AskApproval's fields without regard to
+		// case, Unicode folding included, so a key the check does not name can still land on a
+		// field and fail its decode; and it scans every value, so one nested past its depth limit
+		// fails the decode whatever its key. Either fails every read of the ask as the rows above do.
+		{"an approval ask repeating version under another case as a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"Version":1.5}`), true},
+		{"an approval ask repeating name under another case as a number", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","Name":5,"version":1}`), true},
+		{"an approval ask repeating version with a long s as a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"verſion":1.5}`), true},
+		{"an approval ask carrying a value nested past the decoder's depth limit", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"x":` + strings.Repeat("[", 10001) + strings.Repeat("]", 10001) + `}`), true},
+		{"a question naming a document", "question", new(approval), true},
+		// A check keyed on the approval being an object, (kind = 'approval') = (jsonb_typeof(approval)
+		// = 'object'), would store this, and ScanAsk would then put an approval on the question.
+		{"a question carrying the JSON null", "question", new("null"), true},
+		{"an approval ask naming its document", "approval", new(approval), false},
+		// The route writes every version a document has, and a check that admitted too few would
+		// refuse its own insert. artifact_versions.number is an integer: 10 is the first version
+		// with two digits, and 2147483647 the highest it holds.
+		{"an approval ask at version 10", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10}`), false},
+		{"an approval ask at the highest version a document can have", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":2147483647}`), false},
+		{"a question naming none", "question", nil, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if residual[row.name] {
+				t.Skip("0053 admits this shape and ScanAsk fails on it; dispatch://LEGION-429 refuses it and deletes this entry")
+			}
+			_, err := store.Pool.Exec(ctx, `
+				insert into asks (issue_key, author, question, options, kind, approval)
+				values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 1)?',
+					'[{"label":"Approve"},{"label":"Request changes"}]', $1, $2::jsonb)
+			`, row.kind, row.approval)
+			if !row.refused {
+				if err != nil {
+					t.Fatalf("insert: %v", err)
+				}
+				return
+			}
+			var refusal *pgconn.PgError
+			if !errors.As(err, &refusal) || refusal.Code != "23514" || refusal.ConstraintName != "asks_approval_kind_check" {
+				t.Fatalf("insert error = %v, want SQLSTATE 23514 naming asks_approval_kind_check", err)
+			}
+		})
 	}
 }
 

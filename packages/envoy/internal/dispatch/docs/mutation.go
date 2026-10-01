@@ -1104,7 +1104,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	}
 	// An approval ask naming an older version can no longer be answered, so it leaves the Inbox
 	// now, and its followers learn that approval has to be requested again.
-	retractions, err := RetractStaleApprovalAsks(ctx, tx, s.events, artifactID, version.Number, actor)
+	retractions, err := RetractStaleApprovalAsks(ctx, tx, s.events, artifactID, version)
 	if err != nil {
 		return versionWriteResult{}, err
 	}

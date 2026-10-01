@@ -98,6 +98,7 @@ function mainIsMessageEvent(event: Event): boolean {
   return (
     event.type === "message.created" ||
     event.type === "message.delivery" ||
+    event.type === "message.accepted" ||
     event.type === "message.answered"
   );
 }
@@ -477,6 +478,16 @@ const eventsByType: Record<EventType, readonly Event[]> = {
     event("message.created", { references_changed_truncated: true }),
   ],
   "message.delivery": [event("message.delivery", { target: "session:planner" })],
+  // A session took a person's direct message as its own turn: the Agents list's card for it
+  // changes, owned by the conversation, and an issue message's by its issue.
+  "message.accepted": [
+    event(
+      "message.accepted",
+      { target: "session:planner" },
+      { artifact_id: null, issue_key: null }
+    ),
+    event("message.accepted", { target: "session:planner" }),
+  ],
   "message.answered": [
     event("message.answered", {}),
     event("message.answered", { in_reply_to: "message-1", thread_target: "session:planner" }),

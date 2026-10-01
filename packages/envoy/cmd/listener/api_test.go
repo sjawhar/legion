@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 type fakeStreamInfo struct {
@@ -316,19 +317,19 @@ func TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends(t *testing.T) {
 	}
 }
 
-// TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames proves the listener refuses --
-// rather than silently allowing, as it once did -- a send whose targeted frame claims
+// TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames proves the listener refuses, rather
+// than silently allows, a send whose targeted frame claims
 // delivery (the exact "delivery" key is present) but whose mode cannot be read as a single,
 // unambiguous, non-empty string: an empty delivery object, a non-string mode, an empty mode
 // string, a delivery value that is not even an object, and a same-key-different-case sibling
 // key at either level. Presence of the exact "delivery" key is itself a claim that this send
 // is targeted; an unreadable or ambiguous claim is refused, never defaulted open the way a
 // send with no "delivery" key at all is (see TestSendHandlerAllowsAdvertisedFrameModeAnd
-// UntaggedSends). The case-variant case reproduces a second independent review's finding: the
-// guard used to decode the payload into a Go struct, whose case-insensitive key matching could
-// read a same-key-different-case sibling ("Delivery") instead of the exact "delivery" key the
-// receiving client actually executes, so an attacker could hide an unadvertised real mode
-// ("btw", exact key) behind an advertised decoy in the wrong-cased key ("aside", sibling key).
+// UntaggedSends). The case-variant case is why the guard never decodes the payload into a Go
+// struct: case-insensitive key matching could read a same-key-different-case sibling
+// ("Delivery") instead of the exact "delivery" key the receiving client actually executes, so an
+// attacker could hide an unadvertised real mode ("btw", exact key) behind an advertised decoy in
+// the wrong-cased key ("aside", sibling key).
 func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
@@ -378,9 +379,9 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 // TestSendHandlerRefusesAModeThatIsNotADeliveryMode proves the listener decides what a delivery
 // mode is, rather than deferring to what the target session advertises. `capabilities` is an
 // open string list the session itself writes at registration, so "no session advertises a bogus
-// capability" was an assumption about every present and future client, not a property of this
-// boundary. A session that advertises "agentstream" and a frame claiming that mode used to pass
-// both checks and reach the receiver; now the mode itself is refused, as the Dispatch server's
+// capability" is an assumption about every present and future client, not a property of this
+// boundary. A session that advertises "agentstream" and a frame claiming that mode would pass
+// both checks and reach the receiver, so the mode itself is refused, as the Dispatch server's
 // own `validDelivery` refuses it.
 func TestSendHandlerRefusesAModeThatIsNotADeliveryMode(t *testing.T) {
 	client := setupPublishTestClient(t)
@@ -1337,7 +1338,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
-	routeClient, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	routeClient, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open session registry connection: %v", err)
 	}
@@ -1607,12 +1608,11 @@ func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
 // matches) is the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as
 // for a message NATS cannot take, and the connection stays up.
 func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
-	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.Connect([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open registry: %v", err)

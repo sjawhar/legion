@@ -2,8 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
+  the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
+  `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing
+  headings.
+- `dispatch_request_approval`'s description says the call is refused while the document holds an
+  open decision block, even when a human asked for approval (LEGION-387); its `summary`
+  description no longer repeats that rule. `dispatch_doc_edit`'s description says a `delete` or
+  `retype` that would take an ask block out of the document while its ask is open is refused.
+
 ### Added
 
+- `CreateBroadcastInput.idempotency_key` (required): names one send, so the server answers a
+  repeat of it with the broadcast the first request made and refuses the key's reuse for a
+  different request with `409 BROADCAST_KEY_REUSED` (LEGION-446).
+- Added the plan handoff's two plan checks (LEGION-421): `gapAnalysis` (`findings`, each a
+  `finding` with the plan's `answer`, or the failed call's `error`) and `planReview` (`verdict`
+  `approved`, `rejected` or `failed`, `rounds`, `remainingIssues` of `{issue, evidence}`, `error`),
+  with `PLAN_REVIEW_MAX_ROUNDS` (3) and `PLAN_REVIEW_VERDICTS`. `describePhaseHandoffWriteProblems`
+  refuses a plan missing either, a rejection recorded before the last round or without the issues
+  it named, an approval with issues standing, and a failure without its error. The record is the
+  planner's own report: the write checks its shape, not that the checks ran. Reading stays
+  tolerant of a plan committed before the checks, and refuses a record that is there without the
+  fields its type requires (a review's `verdict` and `rounds`, each finding's `finding` and
+  `answer`, each remaining issue's `issue` and `evidence`).
 - `LegionGoControllerSecretResponse` carries `designGate` (`root-issues` or `off`): the Go daemon
   tells `legion controller start` its design gate policy, which the controller's take comment
   reads before it promises a design approval.
@@ -21,9 +45,19 @@
   (every Dispatch key, a webhook key of its delivery id, and a key minted once for its message,
   `MINTED_DEDUPE_KEY_PATTERN`), which both core-NATS hosts' dedupe asks; the pattern is generated
   into Go as `contracts.MintedDedupeKeyPattern` for the stream's MsgId rule.
+- Added `PROJECT_KEY_PATTERN`, a whole project key as the Dispatch server creates them; `dispatch_search`'s `project` must now be empty or match it (`project must be a project key such as CORE`), where any other value was sent and answered with no results.
 - Added `maxHint` to `SchemaApi.string`'s options: text appended to the over-cap message, saying what to send instead.
 - Added `LegionGoChildRequest`, the body of the Go daemon's `POST /legion/v1/children/park` and `/rerun` (an architect's `park_child` and `rerun_child`), whose answers are `LegionGoEmptyResponse`.
 - Added optional `legionAppLogins` to `LegionGoGitHubTokenResponse` and to `LegionDaemonApi.GitHubToken`'s response: each Legion role App's login keyed by its App role (`{implement, review}`), on `/legion/v1/gh-token`, which `legion threads resolve` keeps out of its bot-thread rule and whose `review` login's `Accepted:` closes a bot's thread (LEGION-208).
+- Added optional `Message.broadcast_id`, the broadcast a message is one recipient's copy of: null
+  for every other message, absent from a Dispatch older than the field. Added optional
+  `AgentStreamMessage.dispatchMessageId`, the Dispatch message a streamed user message delivered,
+  set when the session matched the user message to a person's direct message it sent in as its
+  user's own turn (LEGION-394). Added optional
+  `MessageDelivery.requested_by`, `accepted_as` and `accepted_at`, `AcceptedMessageDelivery` (the
+  accept route's answer: the attempt with the message's stored `body`), the `message.accepted`
+  event (`MessageAcceptedEventPayload`), and `broadcast_id` on
+  `DispatchTargetedMessagePayloadSchema` (LEGION-394).
 - Added `IssueSummaryPage` (`{issues, total, limit, offset}`), the answer of
   `GET /api/v1/issues?limit=&offset=`, and `MAX_ISSUE_PAGE_LIMIT` (250) and
   `DEFAULT_ISSUE_PAGE_LIMIT` (50), generated into Go as `contracts.MaxIssuePageLimit` and
