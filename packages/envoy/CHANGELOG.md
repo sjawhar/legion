@@ -26,6 +26,16 @@
   and never NATS, since the outbox publishes no issue-less event. Every delivery attempt now reads
   `requested_by` (who asked for it, kept on a resume, null before migration 0054), `accepted_at`
   and `accepted_as` (LEGION-394).
+- `POST /api/v1/broadcasts` requires `idempotency_key`, naming one send (letters, digits, `.`,
+  `_`, `:` and `-`, at most 128 characters), so a repeated create no longer hands every recipient
+  the message twice. A repeat by the same human with the same key, body, mode and `session_ids`
+  is answered `200` with the broadcast the key made, even while the listener is down; the same
+  key with a different request is `409 BROADCAST_KEY_REUSED`, naming that broadcast as
+  `broadcast_id`, and sends nothing; two requests carrying one key at once write one broadcast.
+  A missing or malformed key is `400 BROADCAST_INPUT`, whose text tells a page loaded before
+  this change to restore its draft, copy the message, reload and send again. Keys are stored
+  per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
+  broadcast (LEGION-446).
 
 ### Changed
 

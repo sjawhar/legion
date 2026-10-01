@@ -8,8 +8,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -64,6 +67,16 @@ func (l *broadcastListener) targets() []string {
 	return targets
 }
 
+// postBroadcast sends one create as login, minting an idempotency key when the input names
+// none: every send carries one, and most tests have no interest in which.
+func postBroadcast(t *testing.T, handler http.Handler, input map[string]any, login string) *httptest.ResponseRecorder {
+	t.Helper()
+	if _, ok := input["idempotency_key"]; !ok {
+		input["idempotency_key"] = uuid.NewString()
+	}
+	return dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", input, login)
+}
+
 // broadcastResponse mirrors the create and read shapes the browser consumes.
 type broadcastResponse struct {
 	ID         string `json:"id"`
@@ -94,7 +107,7 @@ func TestBroadcastSendsOneMessagePerRecipientAndExcludesTheRest(t *testing.T) {
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	response := postBroadcast(t, handler, map[string]any{
 		"body":     "Stand down and report status.",
 		"delivery": "steer",
 		// "planner" twice: a selection that names a session more than once is one recipient.
@@ -190,7 +203,7 @@ func TestBroadcastRecipientRepliesAppearInTheBroadcastAndItsSummary(t *testing.T
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"},
 	}, "alice"))
 	var plannerMessage string
@@ -258,7 +271,7 @@ func TestMessageReadsNameTheBroadcastThatSentThem(t *testing.T) {
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "steer", "session_ids": []string{"planner"},
 	}, "alice"))
 	broadcastMessage := awaitBroadcastDeliveries(t, handler, created.ID).Recipients[0].Message.ID
@@ -322,7 +335,7 @@ func TestBroadcastWithNoReachableRecipientIsRefusedAndWritesNothing(t *testing.T
 	listener, sends := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	response := postBroadcast(t, handler, map[string]any{
 		"body": "Anyone?", "delivery": "steer", "session_ids": []string{"reviewer", "ghost"},
 	}, "alice")
 	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"BROADCAST_EMPTY"`) {
@@ -346,7 +359,7 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
 	}, "alice"))
 
@@ -357,7 +370,7 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	}{
 		"create": {http.MethodPost, "/api/v1/broadcasts", map[string]any{
 			"body": "From a session", "delivery": "btw", "session_ids": []string{"planner"},
-			"actor": map[string]string{"kind": "session", "id": "tester"},
+			"idempotency_key": "from-a-session", "actor": map[string]string{"kind": "session", "id": "tester"},
 		}},
 		"list": {http.MethodGet, "/api/v1/broadcasts", nil},
 		"read": {http.MethodGet, "/api/v1/broadcasts/" + created.ID, nil},
@@ -391,13 +404,45 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 			map[string]any{"body": strings.Repeat("x", maxMessageBody16+1), "delivery": "btw", "session_ids": []string{"planner"}},
 			"CAP_EXCEEDED",
 		},
+		"key with a space": {
+			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "press 1"},
+			"BROADCAST_INPUT",
+		},
+		"key with a slash": {
+			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "a/b"},
+			"BROADCAST_INPUT",
+		},
+		"over the key cap": {
+			map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": strings.Repeat("k", 129)},
+			"CAP_EXCEEDED",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", input.body, "alice")
+			response := postBroadcast(t, handler, input.body, "alice")
 			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+input.code+`"`) {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
+	}
+	// A tab opened before send keys shipped posts none. Its failed row is the only copy of the
+	// message and a reload drops it, so the refusal it shows says what to do, in order.
+	t.Run("no key", func(t *testing.T) {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+			"body": "hi", "delivery": "btw", "session_ids": []string{"planner"},
+		}, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"BROADCAST_INPUT"`) {
+			t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+		}
+		for _, phrase := range []string{"Restore draft", "reload the page"} {
+			if !strings.Contains(response.Body.String(), phrase) {
+				t.Fatalf("the refusal %s does not say %q", response.Body.String(), phrase)
+			}
+		}
+	})
+	if accepted := postBroadcast(t, handler, map[string]any{
+		"body": "hi", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "A1._:-z",
+	}, "alice"); accepted.Code != http.StatusCreated {
+		t.Fatalf("a key using every allowed class: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
 
 	missing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts/5a660655-04ad-4ce0-8a9b-93dd03c412b7", nil, "alice")
@@ -467,7 +512,7 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 
 	// Every listener send is blocked, so a handler that delivered inside the request could not
 	// answer at all.
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	response := postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"},
 	}, "alice")
 	if response.Code != http.StatusCreated {
@@ -561,7 +606,7 @@ func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
 	defer listener.Close()
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 
-	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
 	}, "alice"))
 	message := created.Recipients[0].Message.ID
@@ -643,7 +688,7 @@ func TestBroadcastRecipientsReadBackInRequestOrder(t *testing.T) {
 			handler, database := newTargetedMessageHandler(t, listener.URL)
 			installReverseBroadcastMessageIDDefault(t, database)
 
-			created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+			created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 				"body": "Keep this recipient order.", "delivery": "btw", "session_ids": requested,
 			}, "alice"))
 			var createdAtCount int
@@ -762,5 +807,295 @@ func TestBroadcastReadsLegacyUnpositionedRecipientsByCreatedAtAndID(t *testing.T
 	}
 	if got, want := broadcastRecipientSessionIDs(decodeBody[broadcastResponse](t, read)), []string{"zeta", "alpha"}; !equalStrings(got, want) {
 		t.Fatalf("legacy recipient order = %v, want created_at and id order %v", got, want)
+	}
+}
+
+// countMessages counts every message the test's database holds: a repeat that wrote a second
+// broadcast shows here whichever broadcast it wrote.
+func countMessages(t *testing.T, database *store.Store) int {
+	t.Helper()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from messages`).Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	return count
+}
+
+// broadcastCount reads the broadcast list as the Sends strip's owner would.
+func broadcastCount(t *testing.T, handler http.Handler) int {
+	t.Helper()
+	return len(decodeBody[[]json.RawMessage](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts", nil, "alice")))
+}
+
+// LEGION-446. A repeat of one send - the same human, key and request, as a double press, a
+// proxy's retry or the Sends strip's Retry makes it - is answered the broadcast the first
+// request made, so every recipient is handed the message once rather than twice.
+func TestBroadcastRepeatWithItsKeyAnswersTheOriginalAndDeliversOnce(t *testing.T) {
+	listener, sends := newBroadcastListener(t, broadcastSessions)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	send := func() *httptest.ResponseRecorder {
+		t.Helper()
+		// The reviewer advertises aside alone, so a steer excludes it.
+		return postBroadcast(t, handler, map[string]any{
+			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester", "reviewer"},
+			"idempotency_key": "press-1",
+		}, "alice")
+	}
+
+	first := send()
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first send: status=%d body=%s", first.Code, first.Body.String())
+	}
+	original := decodeBody[broadcastResponse](t, first)
+	if got := sendTargets(original); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("first send's recipients = %v", got)
+	}
+	if len(original.Excluded) != 1 || original.Excluded[0].SessionID != "reviewer" ||
+		original.Excluded[0].Reason != "does not advertise steer" {
+		t.Fatalf("first send's exclusions = %#v", original.Excluded)
+	}
+
+	repeat := send()
+	if repeat.Code != http.StatusOK {
+		t.Fatalf("repeat: status=%d body=%s, want 200 with the original broadcast", repeat.Code, repeat.Body.String())
+	}
+	replayed := decodeBody[broadcastResponse](t, repeat)
+	if replayed.ID != original.ID {
+		t.Fatalf("the repeat answered broadcast %s, want the original %s", replayed.ID, original.ID)
+	}
+	if got := sendTargets(replayed); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("the repeat's recipients = %v", got)
+	}
+	if len(replayed.Excluded) != 1 || replayed.Excluded[0].SessionID != "reviewer" ||
+		replayed.Excluded[0].Reason != "excluded by the original send" {
+		t.Fatalf("the repeat's exclusions = %#v, want the reviewer the original left out", replayed.Excluded)
+	}
+
+	if listed := broadcastCount(t, handler); listed != 1 {
+		t.Fatalf("the broadcast list holds %d broadcasts, want the one send", listed)
+	}
+	awaitBroadcastDeliveries(t, handler, original.ID)
+	if got := sends.targets(); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("listener sends = %v, want one frame per recipient", got)
+	}
+	if messages := countMessages(t, database); messages != 2 {
+		t.Fatalf("the database holds %d messages, want one per recipient", messages)
+	}
+}
+
+// A retry of a send that landed is answered from the database before the registry is read, so
+// it is answered even while the listener is down, rather than refused as unreachable.
+func TestBroadcastRepeatIsAnsweredWhileTheListenerIsDown(t *testing.T) {
+	var down atomic.Bool
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case down.Load():
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(broadcastSessions))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			_, _ = w.Write([]byte(`{"event_id":"envelope","recipient":"planner"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	send := func(key string) *httptest.ResponseRecorder {
+		t.Helper()
+		return postBroadcast(t, handler, map[string]any{
+			"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": key,
+		}, "alice")
+	}
+
+	created := send("before-the-outage")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("send: status=%d body=%s", created.Code, created.Body.String())
+	}
+	original := decodeBody[broadcastResponse](t, created)
+	awaitBroadcastDeliveries(t, handler, original.ID)
+
+	down.Store(true)
+	// A send nobody has made yet cannot be judged without the registry: the listener is down.
+	if fresh := send("during-the-outage"); fresh.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(fresh.Body.String(), `"code":"ENVOY_UNAVAILABLE"`) {
+		t.Fatalf("a new send while the listener is down: status=%d body=%s, want 503 ENVOY_UNAVAILABLE",
+			fresh.Code, fresh.Body.String())
+	}
+	repeat := send("before-the-outage")
+	if repeat.Code != http.StatusOK {
+		t.Fatalf("a repeat while the listener is down: status=%d body=%s, want 200", repeat.Code, repeat.Body.String())
+	}
+	if got := decodeBody[broadcastResponse](t, repeat).ID; got != original.ID {
+		t.Fatalf("the repeat answered broadcast %s, want the original %s", got, original.ID)
+	}
+}
+
+// A key names one request. Reused for a different one, it is refused and nothing is sent: the
+// key's broadcast says something else, so answering with it would tell the caller a message it
+// never sent had gone out.
+func TestBroadcastKeyReusedForADifferentRequestIsRefused(t *testing.T) {
+	listener, sends := newBroadcastListener(t, broadcastSessions)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	created := postBroadcast(t, handler, map[string]any{
+		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"}, "idempotency_key": "reused",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("send: status=%d body=%s", created.Code, created.Body.String())
+	}
+	original := decodeBody[broadcastResponse](t, created)
+	awaitBroadcastDeliveries(t, handler, original.ID)
+
+	for name, changed := range map[string]map[string]any{
+		"another message":    {"body": "Stand down.", "delivery": "btw", "session_ids": []string{"planner", "tester"}},
+		"another mode":       {"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester"}},
+		"sessions reordered": {"body": "Status?", "delivery": "btw", "session_ids": []string{"tester", "planner"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed["idempotency_key"] = "reused"
+			response := postBroadcast(t, handler, changed, "alice")
+			if response.Code != http.StatusConflict {
+				t.Fatalf("status=%d body=%s, want 409", response.Code, response.Body.String())
+			}
+			refusal := decodeBody[struct {
+				Code        string `json:"code"`
+				Error       string `json:"error"`
+				BroadcastID string `json:"broadcast_id"`
+			}](t, response)
+			if refusal.Code != "BROADCAST_KEY_REUSED" || refusal.BroadcastID != original.ID ||
+				!strings.Contains(refusal.Error, "this request was not sent") {
+				t.Fatalf("refusal = %#v, want BROADCAST_KEY_REUSED naming %s and saying nothing was sent", refusal, original.ID)
+			}
+		})
+	}
+	if listed := broadcastCount(t, handler); listed != 1 {
+		t.Fatalf("the broadcast list holds %d broadcasts, want the one send", listed)
+	}
+	if messages := countMessages(t, database); messages != 2 {
+		t.Fatalf("the database holds %d messages, want the original's two", messages)
+	}
+	if got := sends.targets(); !equalStrings(got, []string{"planner", "tester"}) {
+		t.Fatalf("listener sends = %v, want the original's two and no other", got)
+	}
+}
+
+// A key belongs to the human who sent it. Another person's identical send under the same key is
+// another send, since a broadcast carries one author; the same person under GitHub's display
+// casing is the same human.
+func TestBroadcastKeysAreScopedToTheSender(t *testing.T) {
+	listener, _ := newBroadcastListener(t, broadcastSessions)
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	send := func(login string) *httptest.ResponseRecorder {
+		t.Helper()
+		return postBroadcast(t, handler, map[string]any{
+			"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"}, "idempotency_key": "shared",
+		}, login)
+	}
+
+	alices := send("alice")
+	if alices.Code != http.StatusCreated {
+		t.Fatalf("alice's send: status=%d body=%s", alices.Code, alices.Body.String())
+	}
+	original := decodeBody[broadcastResponse](t, alices).ID
+	bobs := send("bob")
+	if bobs.Code != http.StatusCreated {
+		t.Fatalf("bob's send under alice's key: status=%d body=%s, want a broadcast of his own", bobs.Code, bobs.Body.String())
+	}
+	if got := decodeBody[broadcastResponse](t, bobs).ID; got == original {
+		t.Fatalf("bob's send answered alice's broadcast %s", original)
+	}
+	again := send("Alice")
+	if again.Code != http.StatusOK {
+		t.Fatalf("Alice's repeat: status=%d body=%s, want 200", again.Code, again.Body.String())
+	}
+	if got := decodeBody[broadcastResponse](t, again).ID; got != original {
+		t.Fatalf("Alice's repeat answered %s, want alice's broadcast %s", got, original)
+	}
+}
+
+// A retry racing its original: two requests carrying one key, both past the replay check before
+// either writes. The key's primary key makes the second wait for the first and roll back, so one
+// broadcast is written and each recipient is handed one frame.
+func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
+	var reads atomic.Int32
+	var both sync.WaitGroup
+	both.Add(2)
+	var listenerState struct {
+		sync.Mutex
+		sends []string
+	}
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			// Only the two creates meet here: each recipient's delivery reads the registry again
+			// after the 201 (envoy_resolve.go), and a third Done would drive the group negative.
+			if reads.Add(1) <= 2 {
+				both.Done()
+				both.Wait()
+			}
+			_, _ = w.Write([]byte(broadcastSessions))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request struct {
+				TargetSession string `json:"target_session"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode send: %v", err)
+			}
+			listenerState.Lock()
+			listenerState.sends = append(listenerState.sends, request.TargetSession)
+			listenerState.Unlock()
+			_, _ = w.Write([]byte(`{"event_id":"envelope-` + request.TargetSession + `","recipient":"` + request.TargetSession + `"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	for range 2 {
+		go func() {
+			responses <- postBroadcast(t, handler, map[string]any{
+				"body": "Status?", "delivery": "btw", "session_ids": []string{"planner", "tester"}, "idempotency_key": "race",
+			}, "alice")
+		}()
+	}
+	var codes []int
+	ids := map[string]struct{}{}
+	for range 2 {
+		select {
+		case response := <-responses:
+			codes = append(codes, response.Code)
+			if response.Code == http.StatusOK || response.Code == http.StatusCreated {
+				ids[decodeBody[broadcastResponse](t, response).ID] = struct{}{}
+			} else {
+				t.Errorf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a concurrent send did not answer")
+		}
+	}
+	sort.Ints(codes)
+	if len(codes) != 2 || codes[0] != http.StatusOK || codes[1] != http.StatusCreated {
+		t.Fatalf("status codes = %v, want one 201 and one 200", codes)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("the two answers name %d broadcasts, want one", len(ids))
+	}
+	if listed := broadcastCount(t, handler); listed != 1 {
+		t.Fatalf("the broadcast list holds %d broadcasts, want one", listed)
+	}
+	if messages := countMessages(t, database); messages != 2 {
+		t.Fatalf("the database holds %d messages, want one per recipient", messages)
+	}
+	for id := range ids {
+		awaitBroadcastDeliveries(t, handler, id)
+	}
+	listenerState.Lock()
+	sends := append([]string(nil), listenerState.sends...)
+	listenerState.Unlock()
+	sort.Strings(sends)
+	if !equalStrings(sends, []string{"planner", "tester"}) {
+		t.Fatalf("listener sends = %v, want one frame per recipient", sends)
 	}
 }

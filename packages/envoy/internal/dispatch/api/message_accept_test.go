@@ -409,7 +409,7 @@ func TestAcceptRefusesAMessageThatIsNotAPersonsDirectMessageToTheSession(t *test
 		t.Helper()
 		listener, _ := newBroadcastListener(t, broadcastSessions)
 		handler, database := newTargetedMessageHandler(t, listener.URL)
-		created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+		created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner"},
 		}, "alice"))
 		return handler, database, awaitBroadcastDeliveries(t, handler, created.ID).Recipients[0].Message.ID
@@ -747,7 +747,7 @@ func TestEveryPathThatOpensAnAttemptRecordsWhoAskedForIt(t *testing.T) {
 	t.Run("a broadcast", func(t *testing.T) {
 		listener, _ := newBroadcastListener(t, broadcastSessions)
 		handler, database := newTargetedMessageHandler(t, listener.URL)
-		created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+		created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 			"body": "Status?", "delivery": "steer", "session_ids": []string{"planner", "tester"},
 		}, "alice"))
 		for _, recipient := range awaitBroadcastDeliveries(t, handler, created.ID).Recipients {

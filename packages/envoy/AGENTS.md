@@ -704,7 +704,9 @@ always deliver. Their clause ("sending in a different mode delivers it again") i
 for a receipt timeout, the one cause whose send may already have reached the recipient;
 `RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that cause's single literal, generated into
 Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the string the
-dashboard keys on cannot drift.
+dashboard keys on cannot drift. This window bounds a delivery retry only: a broadcast's
+`idempotency_key` is a `broadcast_idempotency_keys` row that lives as long as its broadcast, so
+a repeated create is recognised however late it arrives (the broadcast paragraphs below).
 
 An attempt the stream recognised records `duplicate` and no envelope id: it reached the listener
 and put nothing new on the recipient's subject, so it reads as "already delivered" rather than as
@@ -1300,9 +1302,9 @@ row in `packages/envoy/cmd/dispatch/AGENTS.md`, whose requester checks read `req
 a session does with the answer is `packages/pi-envoy/AGENTS.md`'s.
 
 A human reaches many sessions at once with `POST /api/v1/broadcasts`
-`{body, delivery, session_ids}`. A broadcast is a grouping over the targeted messages above,
-not a second delivery mechanism: one row in `broadcasts` plus one issue-less message per
-recipient carrying its `broadcast_id`, all in one transaction, then the ordinary
+`{body, delivery, session_ids, idempotency_key}`. A broadcast is a grouping over the targeted
+messages above, not a second delivery mechanism: one row in `broadcasts` plus one issue-less
+message per recipient carrying its `broadcast_id`, all in one transaction, then the ordinary
 `deliverMessage` path per recipient - so each recipient's attempts, retries and replies are
 exactly a single targeted message's. Recipients are judged against one listener read: a
 selected session that is not live, or does not advertise the chosen mode, is excluded before
@@ -1319,6 +1321,29 @@ message, which a delivery worker then claims and settles.
 `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the
 order the send named them; all three routes are human-only, like the one-session route they are
 built from.
+
+Every send carries an `idempotency_key` naming that one send (LEGION-446): letters, digits,
+`.`, `_`, `:` and `-`, at most 128 characters; a missing or malformed key is
+`400 BROADCAST_INPUT`, a longer one `400 CAP_EXCEEDED`. A key belongs to the human who sent it:
+its `broadcast_idempotency_keys` row (migration `0055`) is keyed on `(login, idempotency_key)`,
+`login` being `canonicalLogin`, so one person's key is never another's and `Alice` is `alice`.
+The row also stores a SHA-256 of what the send asked for - its body, mode and requested
+sessions in order, after validation trims and de-duplicates them. A repeat (the same human, key
+and request) is answered `200` with the broadcast the key made, in the create response's shape
+and read as `GET /api/v1/broadcasts/{id}` reads it, its `excluded` recomputed as the requested
+sessions it has no recipient for, each with the reason `excluded by the original send`, since
+the original reasons are not stored. A reuse for a different request is
+`409 BROADCAST_KEY_REUSED`, whose text says the request was not sent and whose body names the
+broadcast that used the key as `broadcast_id`; nothing is written. The key is looked up before
+the listener's registry is read, so a retry of a send that landed is answered even while the
+listener is down. Two requests carrying one key at once both miss that lookup and reach the
+write together: the key row is inserted in the broadcast's own transaction, so the second waits
+on the first's uncommitted row, is refused it (`23505`) once the first commits, rolls back
+everything it wrote and answers the first's broadcast - one broadcast, one frame per recipient.
+A replay reads the broadcast as it stands: a recipient whose attempt a process death stranded
+pending before delivery comes back pending, for the broadcast view's same-mode retry to resume,
+so a `200` says the broadcast exists, not that delivery is under way. A key is recognised for as
+long as its broadcast exists; there is no window, and a broadcast from before `0055` has no key.
 
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no
