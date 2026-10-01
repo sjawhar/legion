@@ -4,12 +4,24 @@ Part of `skill://legion-worker`. Read it before you write or edit any line of th
 body, put a `proof` array in a handoff, verify another phase's proof, or run the simplify pass.
 Every path it cites is in sjawhar/legion.
 
-## The READY format
+## The pull request body template
 
-The implementer writes the PR body in the READY format from the moment the PR opens, and every
+The implementer writes the PR body from this template from the moment the PR opens, and every
 later phase keeps it current rather than replacing it:
 
 ```
+## For the reviewer
+
+**Outcome:** <one sentence a user of this repository would recognise: what someone can now do, or what stops going wrong>
+**Why:** <the problem, one or two sentences, ending with the Dispatch key in parentheses — the key only, never a URL>
+**Change:**
+- <two to five bullets, each one behaviour a user or operator meets, never a file name>
+**Look at first:** <one to three `path:line` places where a wrong decision would hurt> (the reviewer writes this line)
+**Proven by:** <the `E2E (implementer)` line's surface and run, one line>
+**Not proven / risk:**
+- <one line per claim recorded as unproven before READY>, or the single word `none` (the reviewer writes this line; `none` is invalid while such a claim stands)
+**Size:** <files changed, +added/−removed>
+
 ## Verification
 
 **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
@@ -28,10 +40,10 @@ left open <thread URL> — newest reply by <login> is not its opener's or the Le
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
 
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
+Negative control: <deliberately broken input or call> → <refusal or failure observed>.
 
 **E2E (tester):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
+Negative control: <deliberately broken input or call> → <refusal or failure observed>.
 Verified the implementer's proof by <re-running its command | driving the same surface independently>.
 
 **Production:** <what was checked in production, how, what was observed> — merge commit <sha>.
@@ -42,11 +54,27 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
 
+## The brief for the human
+
+`## For the reviewer` is written for the person who merges; `## Verification` below it stays the
+ledger the reviewer and merger check against GitHub. The implementer writes `Outcome`, `Why`,
+`Change`, `Proven by`, and `Size` when the pull request opens, and keeps them true after every
+push; `Outcome` is a sentence a user of the repository would recognise, never "fix bug" or a file
+name, and `Why` ends with the Dispatch key, never a URL. The reviewer writes `Look at first` and
+`Not proven / risk` at each round, into the live body (`legion gh -- api
+repos/{owner}/{repo}/pulls/{number} --jq .body`, edit, then `--method PATCH ... -F body=@body.md`);
+`Not proven / risk` copies every claim recorded as unproven before READY — the tester's
+`failures`, the reviewer's own review, any proof-check comment already on the pull request —
+word for word, and `none` is a finding while one stands. The merger quotes `Outcome` and
+`Not proven / risk` from the body at the published head in the READY packet
+(*The READY packet* in `skill://legion-worker/references/merge-gate.md`); a stale `Outcome` that no
+longer describes the diff is a finding against the implementer, not a line the merger rewrites.
+
 ## What a proof is
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
 as the exact command or run id, what was observed, the head SHA, and one negative control —
-a deliberately broken input and the refusal or failure observed. The surface is
+a deliberately broken input or call and the refusal or failure observed. The surface is
 **production-like** — the repository's real-process test harness and fixtures, a sandbox
 repository, a real browser, a devN stack, staging, or a local stack with real migrations, one that
 has the resource the change touches — and each `E2E` line carries a **link** to that run,

@@ -14,6 +14,7 @@ import {
 import {
   actionBar,
   barAction,
+  connectedDot,
   deleteEditorText,
   documentEditor,
   documentTransport,
@@ -100,8 +101,8 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     ]);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
     await expect(documentEditor(bobPage)).toContainText(initialMarkdown);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     // Cancelling a mark composer rejects the editor action and removes the provisional mark.
     await selectEditorText(alicePage, "brown");
@@ -220,8 +221,8 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
       alicePage.goto(`/issues/${issue.key}/spec`),
       bobPage.goto(`/issues/${issue.key}/spec`),
     ]);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     const comment = await createComment(
       issue.key,
@@ -270,8 +271,8 @@ test("highlights follow edits in the other browser and preserve their anchor sta
     ]);
     const aliceEditor = documentEditor(alicePage);
     const bobEditor = documentEditor(bobPage);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
     const brown = await createComment(
       issue.key,
       { anchor: { artifact: "spec", quote: "brown" }, body: "brown note" },
@@ -351,8 +352,8 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     ]);
     const aliceEditor = documentEditor(alicePage);
     const bobEditor = documentEditor(bobPage);
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     await selectEditorText(bobPage, "brown");
     await barAction(bobPage, "Suggest");
@@ -525,7 +526,7 @@ test("a document mark opens its thread in the margin and stays on the document",
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
     const comment = await createComment(
       issue.key,
       { anchor: { artifact: "spec", quote: "brown" }, body: "focus this" },
@@ -557,7 +558,7 @@ test("a document mark opens its thread in the margin and stays on the document",
       ).toHaveAttribute("aria-selected", "true");
     }
     await expect(page).toHaveURL(`/issues/${issue.key}/spec`);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
 
     // The comment is anchored, so its deep link lands on the document it quotes, with the
     // thread open beside it — the same place clicking the mark just opened. On a phone the
@@ -897,7 +898,7 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
     const page = await bob.newPage();
     const transport = await documentTransport(page);
     await page.goto(`/issues/${issue.key}/spec`);
-    const connected = page.getByRole("status", { name: "connected" });
+    const connected = connectedDot(page);
     await expect(connected).toHaveText("connected");
     await expect(markSpan(page, suggestion.anchor.mark_id)).not.toHaveCount(0);
 

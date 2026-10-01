@@ -287,7 +287,7 @@ rather than creating a replacement bookmark or PR.
 
 ## PR body, review, and the merge gate
 
-The implementer writes the pull request body in the READY format when it opens the pull request,
+The implementer writes the pull request body from the template when it opens the pull request,
 and every later phase edits its own lines of the live body rather than replacing it. Each proof
 (the implementer's `E2E (implementer)` line and `proof` array, the tester's `E2E (tester)` line
 and `proof` array) is the changed behaviour exercised on a production-like surface, recorded as

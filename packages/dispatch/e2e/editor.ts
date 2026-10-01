@@ -13,6 +13,13 @@ export function documentEditor(page: Page): Locator {
   return page.getByRole("textbox", { name: "Document editor" });
 }
 
+/** The document's connection dot once it is connected. Its accessible name is its `title`
+ * (ConnectionDot.tsx), which reads "connected" only in that state, so this matches nothing while
+ * the document connects and none of the shell skeleton's loading statuses. */
+export function connectedDot(scope: Page | Locator): Locator {
+  return scope.getByRole("status", { name: "connected" });
+}
+
 /** Opens an issue's spec in page and waits for the update its editor makes on its own as it opens
  * the document: an id for each heading an agent wrote, which changes the document's full-state
  * token and none of its text. The spec needs a heading. Returns the token after that update. */

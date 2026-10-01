@@ -177,7 +177,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | :--- | :--- |
 | `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `goDaemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
-| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"; the rubric put back |
+| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
 | `gate-refuses-a-skill-only-the-role-prompts-load` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's roles directory can say; the skill put back |
 | `gate-refuses-an-unconfigured-model-role` | `modelRoles.oracle` removed from the isolated profile's `config.yml`; `legion start` refuses with "on its model @oracle: role oracle is not configured", naming `task agent oracle` and the prompts that dispatch it; the profile put back byte for byte |
 | `architect-registers-and-is-ready` | `legion start` passes the gate (its log line); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
@@ -592,6 +592,7 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   LEGION_E2E_DISPATCH_TOKEN_SECRET_ID=<secret id> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
+STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -631,6 +632,27 @@ subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and 
 checkpoint that stopped the run did not fail itself: a `STAGE4B_UNTIL` run's last checkpoint, a
 blocked checkpoint, a signal. Every verdict but the pass exits non-zero: 1, or the
 stopping signal's 129, 130 or 143 when the teardown was clean.
+
+`STAGE4B_DESIGN_GATE=root-issues`, refused without a `STAGE4B_UNTIL` of `spec-posted` or a checkpoint
+before it, arms the design gate (`gates.design: root-issues`) and files tree 1 alone, since each
+admitted root's architect requests approval on its own. Tree 1's document leaves one choice (where
+the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `spec-posted` waits up
+to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
+It then fails unless the architect's approval request at the approved version carries a summary
+after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
+and no approval request on the spec, retracted ones included, was early by either of two rules
+([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by `bun test scripts/e2e/lib`).
+The version rule judges every request: the version it named must hold none of the spec's blocks
+open, read from the version itself by the block ids of the spec's block asks, because Dispatch
+indexes a block as an ask only when it settles the document, after the edit that wrote it. The
+answer-time rule judges a request no human answered: it must not come before a human answered one
+of the spec's blocks, which catches a request made while the choice was still prose or sent in
+parallel with the edit that wrote the block. A request the human answered is left to the version
+rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
+the human answers it, the architect requests again) passes; the trade-off is that a premature
+request the human answered with Request changes no longer fails the run, since the human caught it.
+It keeps the issue's asks as `<issue>-asks.json`, each requested version as
+`<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -1423,9 +1445,10 @@ where an agent runs:
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
 
-`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
-`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
-none, since it runs under its root's tree.
+`new_issue TITLE [PARENT] [SPEC]` creates each issue a proof drives. A root carries the Dispatch
+label `legion`, which hands it to the Go daemon (the daemon admits no root without it), and `SPEC`
+as its primary document, `smoke_spec` when `SPEC` is omitted. A child carries neither, since it runs
+under its root's tree.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to
 GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox

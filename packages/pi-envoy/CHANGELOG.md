@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
+  the eight required headings: a spec starts as the problem and its evidence, puts each open
+  question in a decision block at the end of the section that discusses it, records a settled
+  point in the human's words with the date, and is rewritten in place as it changes. "Approval of
+  a spec" says to request approval only once no decision block is open and the spec proposes
+  something the human hasn't settled. The `dispatch_issue` and `dispatch_doc_edit` descriptions
+  point at that section instead of listing headings.
+- `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
+  the human hasn't already agreed to, in one to three sentences. The Inbox shows it after "Approve
+  spec.md (version N)?", and the result text quotes the question the human sees. It needs a
+  Dispatch server that accepts `summary`; an older one refuses the call.
+- `dispatch_request_approval` is refused while the document holds an open decision block, even
+  when a human asked for approval, and the refusal names each block. "Approval of a spec" says
+  what to do instead: name the open block and ask the human to answer or waive it; a waived block
+  is closed with `dispatch_resolve_ask`. It also says to request approval in the pass that
+  finishes a spec whose remaining choices are the agent's own, rather than making each of them a
+  decision block.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open, even in a batch that inserts it
+  again; the refusal names `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. A whole-document
+  replace through `dispatch_artifact` is not refused, so it can still remove an open block.
+- The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
+  decision blocks first, as "Approval of a spec" defines settled, then request approval with a
+  summary of what the tree will do. `legion-architect` states that condition once.
+- The run-end nudge that tells an agent to open an ask no longer offers
+  `dispatch_request_approval` as a way to wait on a human.
+
 ### Added
 
 - The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
@@ -19,6 +48,13 @@
   this release before the Go daemon build: that build's role prompts dispatch `plan-gap-analyst`
   and `plan-reviewer`, so it refuses an older image, whose plugin ships neither, and an old daemon
   build on the new image boots.
+- Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
+  `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
+  ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`
+  lines quoted from the published head (AGENTC-1305). The implementer writes the brief when the
+  PR opens and keeps it true; the reviewer fills `Look at first` and `Not proven / risk` each
+  round; a body with no brief still publishes, with one line saying so.
+
 - The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
   `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
   (`@deep`): given a goal, the workspace and files in scope, the skills to follow and the checks
@@ -48,6 +84,19 @@
   extension inserts one. It is read once at load, so a package without
   `dist/skills/dispatch-first/SKILL.md` fails to load naming the file. A session without Dispatch
   configured gets nothing.
+- The reviewer's pair runs an explicit security pass. The `thermonuclear-deep-review` rubric gains
+  Security Guidelines: six tagged rows (`authz`, `secret`, `untrusted-input`, `prompt`,
+  `supply-chain`, `sandbox`), each answered with a file:line citation when the diff touches its
+  surface and summed up in one `Security:` line. Every security finding that states an exploit path
+  stands at its own priority, prefixed `Security[<tag>]:`, and only hardening is capped, at two
+  items. The rubric also gains a section on attacking the PR body's safety claims. The reviewer's
+  core role text has it write that `Security:` line into every review body, every round, and the
+  review body template carries it. The tester's core text makes the call made as the party a new
+  or moved authorization boundary must refuse that change's negative control. Both pair agents
+  declare their rubric in `autoloadSkills`, so the subagent starts with it rather than being told
+  to read it. Each still names it as `skill://<name>`, the form the Go daemon's boot gate
+  resolves, and `src/legion/shipped-agents.test.ts` fails an autoloaded name with no such token
+  (AGENTC-1305).
 - The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
   they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
   which runs that procedure and decides whether the push skips CI: a handoff push that a later push
