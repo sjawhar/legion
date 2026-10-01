@@ -770,7 +770,8 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 // only through Dispatch: the approver's own login sent without the UI bearer is 401 UI_INVALID,
 // another login's approve and deny are both 403 NOT_APPROVER, a missing approver is 400
 // APPROVER_REQUIRED, all of them leave the record pending, the approver's deny succeeds, and a
-// second decision on the now-terminal record is 409 RECORD_TERMINAL.
+// second decision on the now-terminal record is 409 RECORD_TERMINAL for its approver and still 403
+// NOT_APPROVER for another login.
 func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
@@ -818,9 +819,12 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("second decision = %d, want 409: %s", status, body)
 	}
-	werr := decode[wireError](t, body)
-	if werr.Code != "RECORD_TERMINAL" {
+	if werr := decode[wireError](t, body); werr.Code != "RECORD_TERMINAL" {
 		t.Fatalf("code = %q, want RECORD_TERMINAL", werr.Code)
+	}
+	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{"approver": "mallory"})
+	if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+		t.Fatalf("approve the decided record as mallory = %d %s, want 403 NOT_APPROVER", status, body)
 	}
 }
 

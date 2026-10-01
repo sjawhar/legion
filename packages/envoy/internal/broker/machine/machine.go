@@ -190,9 +190,10 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
 // means the human is looking at a different login than the one they're deciding, refused before
 // anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be
-// the record's own approver (record.ErrNotApprover). A record that already carries a terminal
-// event is ErrAlreadyDecided, checked under the record's row lock before anything is minted, so a
-// second decision and one racing the first both answer the same way. Approval mints the
+// the record's own approver (record.ErrNotApprover), checked next, so another login is refused the
+// same way whatever the record's state. A record that already carries a terminal event is
+// ErrAlreadyDecided, checked under the record's row lock before anything is minted, so a second
+// decision and one racing the first both answer the same way. Approval mints the
 // credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
 // CredentialLifetime counted from the decision — in the same transaction that records the
 // decision, so a crash between the two never orphans a credential no decision names. A key that
@@ -233,6 +234,10 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", err
 	}
 
+	login, err = body.ApproverLogin(login)
+	if err != nil {
+		return "", "", err
+	}
 	var decided bool
 	if err := tx.QueryRow(ctx, `select exists(select 1 from credential_request_events where record_id=$1 and event in ('approved','denied','expired','cancelled'))`, recordID).
 		Scan(&decided); err != nil {
@@ -240,10 +245,6 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	if decided {
 		return "", "", ErrAlreadyDecided
-	}
-	login, err = body.ApproverLogin(login)
-	if err != nil {
-		return "", "", err
 	}
 	event := "denied"
 	if approve {

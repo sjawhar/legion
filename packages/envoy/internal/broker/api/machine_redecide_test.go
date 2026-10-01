@@ -10,8 +10,9 @@ import (
 )
 
 // TestApprovingADecidedMachineLoginAgainIsRecordTerminal pins that a machine login already
-// decided answers any second decision 409 RECORD_TERMINAL, as an agent_secret record does. A
-// second approve used to mint a second launcher credential before recording its event, hit the
+// decided answers any second decision by its approver 409 RECORD_TERMINAL, as an agent_secret
+// record does, and one by another login 403 NOT_APPROVER, whatever the record's state. A second
+// approve used to mint a second launcher credential before recording its event, hit the
 // live-credential unique key, and answer 500 INTERNAL: the path a second click on Dispatch's
 // machine-login page takes, since that page keeps the looked-up record, and its Approve button,
 // after the first approval lands.
@@ -38,6 +39,13 @@ func TestApprovingADecidedMachineLoginAgainIsRecordTerminal(t *testing.T) {
 		}
 		if werr := decode[wireError](t, body); werr.Code != "RECORD_TERMINAL" {
 			t.Fatalf("%s after approval: code = %q, want RECORD_TERMINAL", action, werr.Code)
+		}
+	}
+	mallory := map[string]any{"approver": "mallory", "code": login.Code}
+	for _, action := range []string{"approve", "deny"} {
+		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/"+action, mallory)
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+			t.Fatalf("%s after approval as mallory = %d %s, want 403 NOT_APPROVER", action, status, body)
 		}
 	}
 }

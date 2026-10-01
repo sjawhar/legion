@@ -417,13 +417,13 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]expiredRe
 
 // ApplyDecision decides a pending agent_secret record by login, the Dispatch login of the human
 // deciding it. approve=true mints the grant while the requesting enrollment is still live;
-// otherwise the request is denied. It re-reads the record body, recomputes its id, re-verifies
-// the embedded request object, refuses any login but the record's own approver
-// (record.ErrNotApprover), and writes the event (naming that login), the request transition and
-// the audit row in one transaction. A non-pending record is ErrTerminal: a duplicate or late
-// decision changes nothing. The enrollment row is locked before the request row — the same order
-// every other enrollment-then-request writer in this package takes them in, so none of them
-// deadlock.
+// otherwise the request is denied. It re-reads the record body, recomputes its id, refuses any
+// login but the record's own approver (record.ErrNotApprover) whatever the record's state,
+// re-verifies the embedded request object, and writes the event (naming that login), the request
+// transition and the audit row in one transaction. A non-pending record is ErrTerminal for its
+// approver: a duplicate or late decision changes nothing. The enrollment row is locked before the
+// request row — the same order every other enrollment-then-request writer in this package takes
+// them in, so none of them deadlock.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -447,13 +447,16 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		Scan(&requestID, &state, &lifetime); err != nil {
 		return Decision{}, err
 	}
-	if state != "pending" {
-		return Decision{}, ErrTerminal
-	}
-
 	parsed, err := verifyRecordBody(recordID, body)
 	if err != nil {
 		return Decision{}, err
+	}
+	login, err = parsed.ApproverLogin(login)
+	if err != nil {
+		return Decision{}, err
+	}
+	if state != "pending" {
+		return Decision{}, ErrTerminal
 	}
 	// now is reset to the record's own creation time: the request object's own iat/exp bound only
 	// how fresh it had to be when the broker first accepted it (up to 10 minutes), never how long
@@ -463,10 +466,6 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
 	}
 
-	login, err = parsed.ApproverLogin(login)
-	if err != nil {
-		return Decision{}, err
-	}
 	event, by := "denied", "human:"+login
 	next, detail := "denied", ""
 	if approve {

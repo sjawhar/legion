@@ -1562,10 +1562,11 @@ transaction serialized by an advisory lock keyed on the enrollment and the sorte
 identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
 a second one. `ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
-record's id and re-verifying its embedded request object, then refusing any login but the
-record's approver (`record.ErrNotApprover`, `403 NOT_APPROVER`), and writing the decision event
-(which records the deciding login), the request transition and the audit row in one transaction;
-a non-pending record is `409` (a duplicate or late decision changes nothing). `Values` releases a
+record's id, refusing any login but the record's approver whatever the record's state
+(`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
+writing the decision event (which records the deciding login), the request transition and the
+audit row in one transaction; a non-pending record is `409 RECORD_TERMINAL` for its approver (a
+duplicate or late decision changes nothing). `Values` releases a
 live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
@@ -1592,10 +1593,11 @@ pending login by that human-readable code alone (`LookupByCode` / `POST /v1/mach
 record (ruling 13: a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
-update`, which an event insert's foreign-key check does not wait on), answers a record that
+update`, which an event insert's foreign-key check does not wait on), refuses any login but the
+record's own approver (`403 NOT_APPROVER`) whatever the record's state, answers a record that
 already carries a terminal event `409 RECORD_TERMINAL` before minting anything, as a decided
-`agent_secret` record answers, so a second click and a concurrent one both get it, then refuses
-any login but the record's own approver (`403 NOT_APPROVER`) and, on approval, mints the launcher
+`agent_secret` record answers, so a second click and a concurrent one both get it, and, on
+approval, mints the launcher
 credential in the same transaction: bound to the request object's own key (its thumbprint and
 embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
 from the decision, so a crash between minting and recording the decision never orphans a
