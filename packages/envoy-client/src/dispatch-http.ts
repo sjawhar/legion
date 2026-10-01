@@ -109,12 +109,12 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 }
 
-/** What `listIssuePage` got in place of the page it asked for, for its refusal. */
-function notAPage(answer: unknown): string {
+/** Why `answer` is not the page `listIssuePage` asked for, or undefined when it is one. */
+function whyNotAPage(answer: unknown): string | undefined {
   if (Array.isArray(answer)) {
     return (
-      `a bare array of ${answer.length} entries, the unpaged listing: a Dispatch older than ` +
-      "sjawhar/legion#1612, which pages it, or a regression of that change"
+      `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` +
+      "is older than sjawhar/legion#1612 or that change has regressed"
     );
   }
   if (answer === null) return "null";
@@ -126,7 +126,7 @@ function notAPage(answer: unknown): string {
       .filter((name) => typeof fields[name] !== "number")
       .map((name) => `a numeric ${name}`),
   ];
-  return `an object without ${lacking.join(" or ")}`;
+  return lacking.length === 0 ? undefined : `an object without ${lacking.join(" or ")}`;
 }
 
 /** JSON HTTP client for Dispatch's native-tool API. */
@@ -156,32 +156,23 @@ export class DispatchClient {
 
   /**
    * One page of `GET /api/v1/issues?limit=&offset=`, used as Dispatch served it: `IssueSummaryPage`
-   * (sjawhar/legion#1612). Any other answer is refused with what arrived; a bare array is the
-   * unpaged listing, which a Dispatch older than that change or a regression of it answers.
+   * (sjawhar/legion#1612). Any other answer is refused, naming the request sent and what arrived; a
+   * bare array answered to this paged request means a Dispatch older than that change or a
+   * regression of it.
    */
   async listIssuePage(
     options: ListIssuesOptions,
     page: IssuePageRequest
   ): Promise<IssueSummaryPage> {
-    const answer: unknown = await this.#json("GET", ["api", "v1", "issues"], undefined, {
-      ...options,
-      limit: page.limit,
-      offset: page.offset,
-    });
-    const served = answer as Partial<IssueSummaryPage> | null;
-    if (
-      typeof served === "object" &&
-      served !== null &&
-      Array.isArray(served.issues) &&
-      typeof served.total === "number" &&
-      typeof served.limit === "number" &&
-      typeof served.offset === "number"
-    ) {
-      return served as IssueSummaryPage;
-    }
+    const path = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer: unknown = await this.#json("GET", path, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined) return answer as IssueSummaryPage;
     throw new Error(
-      `GET /api/v1/issues?limit=${page.limit}&offset=${page.offset} asked for a page ` +
-        `({issues, total, limit, offset}) and got ${notAPage(answer)}`
+      `GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` +
+        `${refusal}. Retrying will not help: the same request gets the same answer until that ` +
+        "Dispatch is upgraded or fixed."
     );
   }
 

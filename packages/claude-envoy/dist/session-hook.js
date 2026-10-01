@@ -15174,9 +15174,9 @@ function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 }
-function notAPage(answer) {
+function whyNotAPage(answer) {
   if (Array.isArray(answer)) {
-    return `a bare array of ${answer.length} entries, the unpaged listing: a Dispatch older than ` + "sjawhar/legion#1612, which pages it, or a regression of that change";
+    return `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
   }
   if (answer === null)
     return "null";
@@ -15187,7 +15187,7 @@ function notAPage(answer) {
     ...Array.isArray(fields.issues) ? [] : ["an issues array"],
     ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
   ];
-  return `an object without ${lacking.join(" or ")}`;
+  return lacking.length === 0 ? undefined : `an object without ${lacking.join(" or ")}`;
 }
 
 class DispatchClient {
@@ -15209,16 +15209,13 @@ class DispatchClient {
     return this.#resolveIssue(issueReference);
   }
   async listIssuePage(options, page) {
-    const answer = await this.#json("GET", ["api", "v1", "issues"], undefined, {
-      ...options,
-      limit: page.limit,
-      offset: page.offset
-    });
-    const served = answer;
-    if (typeof served === "object" && served !== null && Array.isArray(served.issues) && typeof served.total === "number" && typeof served.limit === "number" && typeof served.offset === "number") {
-      return served;
-    }
-    throw new Error(`GET /api/v1/issues?limit=${page.limit}&offset=${page.offset} asked for a page ` + `({issues, total, limit, offset}) and got ${notAPage(answer)}`);
+    const path2 = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer = await this.#json("GET", path2, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined)
+      return answer;
+    throw new Error(`GET ${this.#url(path2, query)} asked for a page ({issues, total, limit, offset}) and got ` + `${refusal}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.");
   }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);

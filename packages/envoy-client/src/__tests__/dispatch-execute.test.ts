@@ -1838,9 +1838,10 @@ describe("executeDispatchTool", () => {
   });
 
   // Every Dispatch the hosts reach pages the listing (sjawhar/legion#1612), so an array answered to
-  // dispatch_issues is an older server or a regression, and the agent is told which rather than
-  // shown a page the client cut from every issue.
-  test("dispatch_issues refuses Dispatch's unpaged array and names the Dispatch that sends it", async () => {
+  // dispatch_issues means an older server or a regression, and the agent gets a refusal naming both
+  // rather than a page the client cut from every issue. The message itself is pinned in
+  // dispatch-http.test.ts.
+  test("dispatch_issues refuses Dispatch's unpaged array and names the change it lacks", async () => {
     const requests: URL[] = [];
     const issues = Array.from({ length: 5 }, (_, index) => ({
       key: `AGENTC-${index}`,
@@ -1871,11 +1872,7 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).rejects.toThrow(
-      "GET /api/v1/issues?limit=2&offset=0 asked for a page ({issues, total, limit, offset}) and " +
-        "got a bare array of 5 entries, the unpaged listing: a Dispatch older than " +
-        "sjawhar/legion#1612, which pages it, or a regression of that change"
-    );
+    ).rejects.toThrow("sjawhar/legion#1612");
     expect(requests).toHaveLength(1);
     expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
       project: "AGENTC",
