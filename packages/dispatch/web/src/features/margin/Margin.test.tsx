@@ -7,14 +7,10 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Ask, Comment, IssueDetails } from "../../api/types";
+import type { RetypeOutcome } from "../doc/editor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Margin } from "./Margin";
-import {
-  type DocumentBridge,
-  MarginProvider,
-  type RetypeOutcome,
-  useMargin,
-} from "./margin-context";
+import { type DocumentBridge, MarginProvider, useMargin } from "./margin-context";
 import {
   anchoredAsk,
   comment,
@@ -728,9 +724,11 @@ test("composeForMark rejects when the composer is dismissed unsaved", async () =
 
 function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
   bridge: DocumentBridge;
+  held: (string | null)[];
   removed: string[];
   retyped: [string, string][];
 } {
+  const held: (string | null)[] = [];
   const removed: string[] = [];
   const retyped: [string, string][] = [];
   return {
@@ -746,7 +744,11 @@ function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
       },
       setActiveBlocks() {},
       setActiveMarks() {},
+      setComposerMark(markId) {
+        held.push(markId);
+      },
     },
+    held,
     removed,
     retyped,
   };
@@ -835,7 +837,7 @@ test("the composer's kind switch retypes its mark through the document and sends
   }
 });
 
-test("the margin removes the composer's mark when the composer is cancelled or replaced", async () => {
+test("the margin removes the composer's mark when the composer is cancelled or replaced, and tells the document which mark the composer holds", async () => {
   const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
   const view = renderMarginWithBridge(fake.bridge);
 
@@ -860,6 +862,9 @@ test("the margin removes the composer's mark when the composer is cancelled or r
     );
     await waitFor(() => expect(fake.removed).toEqual(["m-1-ask", "m-2"]));
     expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+    // The document always knew which mark was the composer's, so a selection-bar action that cut
+    // into it counted as the composer's own write.
+    expect(fake.held).toEqual(["m-1", "m-1-ask", "m-2", null]);
   } finally {
     view.unmount();
   }

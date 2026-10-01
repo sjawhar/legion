@@ -530,7 +530,7 @@ export function MentionComposer({
   edit,
   initialMentions = [],
   inline = false,
-  kind: initialKind = "comment",
+  kind = "comment",
   onCancelReply,
   onCarry,
   onClose,
@@ -554,7 +554,6 @@ export function MentionComposer({
   const queryClient = useQueryClient();
   const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
-  const [kind, setKind] = useState<ComposerKind>(initialKind);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
   const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() => [emptyAskOption()]);
   const [multiple, setMultiple] = useState(false);
@@ -613,9 +612,6 @@ export function MentionComposer({
     previousBody.current = editBody;
     setMentions([]);
   }, [editBody]);
-  useEffect(() => {
-    setKind(initialKind);
-  }, [initialKind]);
   useEffect(() => {
     if (autoFocus) textarea.current?.focus();
   }, [autoFocus]);

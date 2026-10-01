@@ -38,7 +38,7 @@ not reach them:
 | `src/collab-cursor-plugin.ts` | The peer-cursor plugin: y-prosemirror's, except that a peer's caret is not drawn while it sits on the focused local caret, where Chromium and WebKit otherwise drop or misplace typing (LEGION-289); it is also biome-checked |
 | `src/editor/schema/dom-attributes.ts` | `withDomAttributes`, the DOM-output-spec helper lifted out of `block-ids.ts` so the typed-block schema can use it too |
 | `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
-| `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes (a pure creation of a `proofComment`, `proofSuggestion` or `dispatchAsk`, or `removeRecordMark`'s removal) out of undo history, so neither undo nor redo writes one back; a creation that cuts into another record's mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
+| `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (its removals are of the open composer's own mark, `setComposerMark`, or put straight back, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; a write that cuts into another record's mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark` (LEGION-363); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
@@ -60,8 +60,9 @@ wrapper on `toDOM`, and the suite's cases for all of it; `src/lib.ts` installing
 cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of calling
 `yCursorPlugin` itself; `src/lib.ts` installing `trailingNewlineInputPlugin` from
 `./trailing-newline-input`; `src/lib.ts` installing `recordMarkHistoryPlugin` from
-`./record-mark-history`; `src/lib.ts` exposing `retypeMark` and routing `removeMark` through
-`./record-mark-retype`; and annotations, casts and assertions
+`./record-mark-history`; `src/lib.ts` routing `removeMark` and the new `retypeMark` through
+`./record-mark-retype`, and the new `setComposerMark` through `./record-mark-history`; and
+annotations, casts and assertions
 that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r

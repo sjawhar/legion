@@ -120,9 +120,12 @@ The composer a selection-bar action opens is anchored to the provisional mark th
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch
 retypes the mark through `ProofEditorHandle.retypeMark` so the server verifies a mark of the kind
 being sent, and the mark is removed when the composer ends unsaved — cancelled, or replaced by a
-newer composer. The composer's own mark writes are never undo steps (`@legion/proof-editor`'s
-`recordMarkHistoryPlugin`), so neither undo nor redo writes one back; a bar Comment that cut into
-someone else's comment (LEGION-458) stays undoable. A switch the editor refuses (the mark is gone,
+newer composer. The margin also names the mark the open composer holds to the editor
+(`ProofEditorHandle.setComposerMark`). The composer's own mark writes are never undo steps
+(`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or y-prosemirror's
+UndoManager: neither undo nor redo writes one back, beside a recorded suggestion or after the
+reader refines the selection under an open composer. A bar Comment that cut into someone else's
+comment (LEGION-458) stays undoable. A switch the editor refuses (the mark is gone,
 a suggestion over text upstream will not mark, or another reader's mark of that kind already
 covers part of the text) is said under the switch in the reader's words, and the kind stays.
 

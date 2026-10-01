@@ -117,6 +117,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       retypeMark() {
         return { refused: "missing" as const };
       },
+      setComposerMark() {},
       setMarkdown(markdown: string) {
         editor.markdown = markdown;
         root.textContent = markdown;

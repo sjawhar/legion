@@ -8,10 +8,10 @@
  * the bar uses - which mint the new mark's id, so the id changes with the kind, as the server's
  * bookkeeping expects (it keys a mark by type and id) - then removes the old one.
  *
- * Neither the new mark nor the removal is an undo step: ./record-mark-history.ts keeps a pure
- * record-mark creation and `removeRecordMark`'s removal out of undo history, so Ctrl/Cmd+Z after
- * a switch never puts the old mark back and redo never writes it again. The creation stays pure
- * because a retype over text another record already marks with the new kind is refused.
+ * Neither the new mark nor the removal is an undo step: ./record-mark-history.ts keeps the
+ * composer's own record-mark writes out of undo history, so Ctrl/Cmd+Z after a switch never puts
+ * the old mark back and redo never writes it again. The creation takes nothing from another
+ * record because a retype over text another record already marks with the new kind is refused.
  *
  * `removeRecordMark` is the precise removal both this module and the handle's `removeMark` use:
  * span by span, by id, whatever the mark's type. Upstream's `deleteMark` is not it - it cannot
@@ -29,17 +29,13 @@ import { comment, suggestReplace } from "proof-sdk-upstream/src/editor/plugins/m
 import type { SelectionBarActionKind } from "./dispatch-marks";
 import { createAskMark } from "./dispatch-marks";
 
-/** The mark types a Dispatch record anchors to: the server's `docs.MarkKind` values. */
-export const RECORD_MARK_TYPES: Record<string, true> = {
-  dispatchAsk: true,
-  proofComment: true,
-  proofSuggestion: true,
-};
 const MARK_TYPE_FOR_KIND: Record<SelectionBarActionKind, string> = {
   ask: "dispatchAsk",
   comment: "proofComment",
   suggest: "proofSuggestion",
 };
+/** The mark types a Dispatch record anchors to: the server's `docs.MarkKind` values. */
+export const RECORD_MARK_TYPES: ReadonlySet<string> = new Set(Object.values(MARK_TYPE_FOR_KIND));
 
 export interface RetypedMark {
   readonly markId: string;
@@ -68,7 +64,7 @@ export function findRecordMark(
   doc.descendants((node, pos) => {
     if (!node.isText) return true;
     const held = node.marks.find(
-      (mark) => RECORD_MARK_TYPES[mark.type.name] === true && mark.attrs.id === markId
+      (mark) => RECORD_MARK_TYPES.has(mark.type.name) && mark.attrs.id === markId
     );
     if (held === undefined) return true;
     if (from === -1) {
@@ -81,10 +77,11 @@ export function findRecordMark(
   return from === -1 ? null : { range: { from, to }, type };
 }
 
-/** The meta key `removeRecordMark` sets on its transaction, and the value it sets there. Only
- *  this module holds either, so no other writer can label its own removal as the composer's:
- *  ProseMirror files a meta under the key's derived string (`"recordMarkRemoval$"`), which any
- *  caller can write, so the label is this module's own symbol rather than `true`.
+/** The meta key `removeRecordMark` sets on its transaction, and the value it sets there. Both are
+ *  this module's own, so no other writer's meta can be read as this label by accident: ProseMirror
+ *  files a meta under the key's derived string (`"recordMarkRemoval$"`), which another meta could
+ *  share, so the label is this module's symbol rather than `true`. It guards against that
+ *  collision, not against a forger - any writer can set `addToHistory: false` itself.
  *  ./record-mark-history.ts asks `isRecordMarkRemoval`, which reads it. */
 const recordMarkRemoval = new PluginKey("recordMarkRemoval");
 const composerRemoval = Symbol("composer's own record-mark removal");
@@ -119,7 +116,7 @@ export function removeRecordMark(view: EditorView, markId: string): boolean {
   view.state.doc.descendants((node, pos) => {
     if (!node.isText) return true;
     for (const mark of node.marks) {
-      if (RECORD_MARK_TYPES[mark.type.name] === true && mark.attrs.id === markId) {
+      if (RECORD_MARK_TYPES.has(mark.type.name) && mark.attrs.id === markId) {
         transaction = transaction.removeMark(pos, pos + node.nodeSize, mark);
       }
     }

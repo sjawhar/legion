@@ -1,20 +1,12 @@
 import { expect, test } from "bun:test";
-import type { Ctx } from "@milkdown/kit/ctx";
-import type { Node as ProseMirrorNode, Schema } from "@milkdown/kit/prose/model";
-import { EditorState, type Plugin } from "@milkdown/kit/prose/state";
-import { EditorView } from "@milkdown/kit/prose/view";
-import { Window } from "happy-dom";
-import {
-  comment,
-  getMarks,
-  marksPlugin,
-  marksPluginKey,
-} from "proof-sdk-upstream/src/editor/plugins/marks";
+import type { EditorView } from "@milkdown/kit/prose/view";
+import { comment, getMarks, marksPluginKey } from "proof-sdk-upstream/src/editor/plugins/marks";
 import { createAskMark } from "../src/dispatch-marks";
-import { createHeadlessProof } from "../src/lib-headless.js";
 import { findRecordMark, removeRecordMark, retypeMark } from "../src/record-mark-retype";
+import { withMarksEditor } from "./marks-editor";
 
 const BY = "alice";
+const SENTENCE = "The quick brown fox";
 // "quick brown" inside the paragraph "The quick brown fox" (the paragraph opens at 0, text at 1).
 const RANGE = { from: 5, to: 16 };
 
@@ -36,57 +28,8 @@ function marksInDoc(view: EditorView) {
   return marks;
 }
 
-function sentence(schema: Schema): ProseMirrorNode {
-  return schema.node("doc", null, [
-    schema.node("paragraph", null, [schema.text("The quick brown fox")]),
-  ]);
-}
-
-/** A real EditorView with the upstream marks plugin, the way tests/upstream-pin.test.ts builds
- *  one: the creators and `normalizeMetadata` need the plugin's state. */
-async function withEditor(
-  run: (view: EditorView) => void,
-  {
-    doc = sentence,
-    plugins = [],
-  }: { doc?: (schema: Schema) => ProseMirrorNode; plugins?: Plugin[] } = {}
-): Promise<void> {
-  const { schema } = await createHeadlessProof();
-  const window = new Window();
-  const previous = (["document", "window"] as const).map(
-    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const
-  );
-  Object.assign(globalThis, { document: window.document, window });
-  try {
-    const proseContext = {
-      update: (_slice: unknown, updater: (plugins: unknown[]) => unknown[]) => void updater([]),
-      wait: async () => undefined,
-    } as unknown as Ctx;
-    await marksPlugin(proseContext)();
-    const mount = window.document.body.appendChild(window.document.createElement("div"));
-    const view = new EditorView(mount as unknown as HTMLElement, {
-      state: EditorState.create({
-        doc: doc(schema),
-        plugins: [marksPlugin.plugin(), ...plugins],
-        schema,
-      }),
-    });
-    try {
-      run(view);
-    } finally {
-      view.destroy();
-    }
-  } finally {
-    for (const [key, descriptor] of previous) {
-      if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
-      else Object.defineProperty(globalThis, key, descriptor);
-    }
-    await window.happyDOM.close();
-  }
-}
-
 test("retypeMark replaces the mark with one of the new kind over the same text, under a new id", async () => {
-  await withEditor((view) => {
+  await withMarksEditor(SENTENCE, ({ view }) => {
     const start = comment(view, "quick brown", BY, "", RANGE);
 
     const ask = retypeMark(view, start.id, "ask", BY);
@@ -129,7 +72,7 @@ test("retypeMark replaces the mark with one of the new kind over the same text, 
 });
 
 test("retypeMark refuses, changing nothing, a mark the document does not hold and a suggestion upstream will not write", async () => {
-  await withEditor((view) => {
+  await withMarksEditor(SENTENCE, ({ view }) => {
     const start = comment(view, "quick brown", BY, "", RANGE);
     const before = marksInDoc(view);
     expect(retypeMark(view, "never", "ask", BY)).toEqual({ refused: "missing" });
@@ -145,42 +88,21 @@ test("retypeMark refuses, changing nothing, a mark the document does not hold an
     expect(retypeMark(view, midWord.id, "suggest", BY)).toEqual({ refused: "unmarkable" });
     expect(marksInDoc(view)).toEqual(withMidWord);
   });
-  await withEditor(
-    (view) => {
-      // table > header row > header("alpha"), header("beta"): "alpha" is 4..9, "beta" is 13..17.
-      const across = comment(view, "alpha\nbeta", BY, "", { from: 4, to: 17 });
-      const before = marksInDoc(view);
-      expect(before.map((mark) => mark.type)).toEqual(["proofComment", "proofComment"]);
-      expect(retypeMark(view, across.id, "suggest", BY)).toEqual({ refused: "unmarkable" });
-      expect(marksInDoc(view)).toEqual(before);
-      const ask = retypeMark(view, across.id, "ask", BY);
-      if ("refused" in ask) throw new Error(`the ask retype was refused: ${ask.refused}`);
-      expect(marksInDoc(view).map((mark) => mark.type)).toEqual(["dispatchAsk", "dispatchAsk"]);
-    },
-    {
-      doc: (schema) =>
-        schema.node("doc", null, [
-          schema.node("table", null, [
-            schema.node("table_header_row", null, [
-              schema.node("table_header", null, [
-                schema.node("paragraph", null, [schema.text("alpha")]),
-              ]),
-              schema.node("table_header", null, [
-                schema.node("paragraph", null, [schema.text("beta")]),
-              ]),
-            ]),
-            schema.node("table_row", null, [
-              schema.node("table_cell", null, [schema.node("paragraph", null, [schema.text("x")])]),
-              schema.node("table_cell", null, [schema.node("paragraph", null, [schema.text("y")])]),
-            ]),
-          ]),
-        ]),
-    }
-  );
+  // table > header row > header("alpha"), header("beta"): "alpha" is 4..9, "beta" is 13..17.
+  await withMarksEditor("| alpha | beta |\n| --- | --- |\n| x | y |", ({ view }) => {
+    const across = comment(view, "alpha\nbeta", BY, "", { from: 4, to: 17 });
+    const before = marksInDoc(view);
+    expect(before.map((mark) => mark.type)).toEqual(["proofComment", "proofComment"]);
+    expect(retypeMark(view, across.id, "suggest", BY)).toEqual({ refused: "unmarkable" });
+    expect(marksInDoc(view)).toEqual(before);
+    const ask = retypeMark(view, across.id, "ask", BY);
+    if ("refused" in ask) throw new Error(`the ask retype was refused: ${ask.refused}`);
+    expect(marksInDoc(view).map((mark) => mark.type)).toEqual(["dispatchAsk", "dispatchAsk"]);
+  });
 });
 
 test("retypeMark refuses a kind whose mark another record already holds over part of the text", async () => {
-  await withEditor((view) => {
+  await withMarksEditor(SENTENCE, ({ view }) => {
     // Bob's recorded comment covers "quick brown"; Alice asks about "brown" inside it.
     const bob = comment(view, "quick brown", "bob", "", RANGE);
     const alice = createAskMark(view, { from: 11, to: 16 }, BY);
@@ -218,7 +140,7 @@ test("retypeMark refuses a kind whose mark another record already holds over par
 });
 
 test("removeRecordMark removes a provisional comment the unified marks system cannot see", async () => {
-  await withEditor((view) => {
+  await withMarksEditor(SENTENCE, ({ view }) => {
     // Upstream's `deleteMark` answers false here: a comment with no body is dropped by
     // buildAnchorMarks, so only a span-by-span removal reaches it.
     const start = comment(view, "quick brown", BY, "", RANGE);
