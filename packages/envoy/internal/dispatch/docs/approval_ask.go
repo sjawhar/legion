@@ -63,15 +63,19 @@ func ApprovalAskAt(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifa
 	return current, retractions, nil
 }
 
-// RetractStaleApprovalAsks is ApprovalAskAt for a writer that has just written version: every
-// approval ask open on the document names an older version, and each is retracted in the
-// writer's name. Every route that writes a version calls it in the version's transaction. A
-// settlement can know no writer of its version - it names one from its pending authors, else
-// the room's last actor, and after a room reload has neither - and then retracts in its own name.
-func RetractStaleApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version int, actor model.Actor) ([]model.Event, error) {
-	if actor.Kind == "" && actor.ID == "" {
-		actor = SettlementActor
+// RetractStaleApprovalAsks is ApprovalAskAt for a version just written: every approval ask open on
+// the document names an older version, and each is retracted. Every route that writes a version
+// calls it in the version's transaction. The retraction is in the name of the version's writer
+// when exactly one is credited with it, and otherwise SettlementActor's. A version credits several
+// when a browser edit arrives with several peers connected, since the room cannot tell which sent
+// it, or when an agent's write and a human's typing share it. Naming one of them could name the
+// ask's own author, and the outbox sends no event to its own actor, so the author would never
+// hear that it has to request approval again.
+func RetractStaleApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version) ([]model.Event, error) {
+	actor := SettlementActor
+	if len(version.Authors) == 1 {
+		actor = version.Authors[0]
 	}
-	_, retractions, err := ApprovalAskAt(ctx, tx, broker, artifactID, version, actor, "request approval of that version to ask again")
+	_, retractions, err := ApprovalAskAt(ctx, tx, broker, artifactID, version.Number, actor, "request approval of that version to ask again")
 	return retractions, err
 }

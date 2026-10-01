@@ -140,9 +140,9 @@ func TestConnectReachesANonLocalNATSWhenTheRunSaysSo(t *testing.T) {
 	}
 }
 
-// remoteLookingURL reaches the test's own NATS by an address of this machine that is not
-// loopback, which is what a NATS on another machine looks like to the refusal. No test reaches a
-// NATS it did not start.
+// remoteLookingURL reaches the test's own NATS, as the same user, by an address of this machine
+// that is not loopback, which is what a NATS on another machine looks like to the refusal. No test
+// reaches a NATS it did not start.
 func remoteLookingURL(t *testing.T, uri string) string {
 	t.Helper()
 	parsed, err := url.Parse(uri)
@@ -158,7 +158,8 @@ func remoteLookingURL(t *testing.T, uri string) string {
 		if !ok || network.IP.IsLoopback() || network.IP.To4() == nil {
 			continue
 		}
-		return "nats://" + net.JoinHostPort(network.IP.String(), parsed.Port())
+		parsed.Host = net.JoinHostPort(network.IP.String(), parsed.Port())
+		return parsed.String()
 	}
 	t.Skip("no non-loopback IPv4 address on this machine to reach the test server by")
 	return ""

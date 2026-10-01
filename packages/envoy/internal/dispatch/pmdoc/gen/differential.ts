@@ -42,6 +42,12 @@ for (const line of readFileSync(input, "utf8").split("\n")) {
       read[field] = { err: String(error) };
     }
   }
-  writeSync(out, `${JSON.stringify(read)}\n`);
+  const text = `${JSON.stringify(read)}\n`;
+  const length = Buffer.byteLength(text);
+  // On a full disk writeSync writes what fits and returns the short count instead of throwing.
+  const written = writeSync(out, text);
+  if (written !== length) {
+    throw new Error(`short write to ${output}: ${written} of ${length} bytes`);
+  }
 }
 closeSync(out);

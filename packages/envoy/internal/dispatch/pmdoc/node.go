@@ -270,15 +270,22 @@ func askQuestionOpening(ask *Node) string {
 	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
 		return ""
 	}
-	question := []rune(strings.Join(strings.Fields(textContent(ask.Children[0])), " "))
-	if len(question) == 0 {
+	question := openingWords(strings.Join(strings.Fields(textContent(ask.Children[0])), " "))
+	if question == "" {
 		return ""
 	}
+	return fmt.Sprintf(", asking %q,", question)
+}
+
+// openingWords is text's first 40 characters, cut short with an ellipsis where it runs on: how a
+// refusal names a block whose author has only its text to find it by.
+func openingWords(text string) string {
 	const opening = 40
-	if len(question) > opening {
-		question = append([]rune(strings.TrimRight(string(question[:opening]), " ")), '…')
+	runes := []rune(text)
+	if len(runes) <= opening {
+		return text
 	}
-	return fmt.Sprintf(", asking %q,", string(question))
+	return strings.TrimRight(string(runes[:opening]), " ") + "…"
 }
 
 // askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -

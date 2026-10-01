@@ -48,8 +48,57 @@
   across a restart too. A rolled-back listener ignores the field. A listener built with #1526 but
   without this change publishes the whole backlog, so every head-gated listener moves straight to
   a build carrying this change.
+- `GET /api/v1/search` refuses a `q` over 1,000 UTF-16 units, counted after trimming, with the
+  ordinary `400 CAP_EXCEEDED` and a sentence saying what to send instead (LEGION-386), and a
+  `project` that is not a project key with `400 INVALID_PROJECT`, where a lowercased key used to
+  answer an empty result. A mistyped key that still has a key's shape, such as `LEGOIN`, is still
+  searched and still answers empty. An empty `project` still searches every project. Both ride
+  in the URL, and the load balancer in front of production Dispatch answers a URL longer than it
+  accepts with a bare `414` before the server sees the request. So deploying this names the rule
+  only to a request that still fits; it cannot answer the 26,637-character search that prompted
+  LEGION-386. Only an updated `@sjawhar/pi-legion-envoy` in a session's profile (or the OpenCode
+  or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
+  because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+
+- Dispatch no longer stores a table row without its last cells. A cell ends at every `|` not
+  written `\|`, inside code and links too, and the parser dropped the cells a body row held past
+  its delimiter row's, which the browser editor's parser keeps: a spec, upload or version whose
+  code span held a bare `|` in a row that filled its table was stored with the rest of that row
+  gone, and no refusal. Such markdown is now refused (`400 INVALID_MARKDOWN`; an insert's
+  `markdown` answers `INVALID_OP`), naming the row's cells, its table's width and its opening
+  words, and both fixes: write a `|` inside a cell as `\|`, or give the header and delimiter rows
+  as many cells as the row. A row whose cells past the width are all blank is still read at the
+  table's width. A bare-row insert now decides in three steps. A fragment whose every line yields
+  a cell and an unescaped `|` (a lone `|` yields no cell, and a line whose only pipe is `\|` has no
+  separator), with no line delimiter-shaped (cells of three hyphens or more), is parsed under a
+  header at the target table's width. What that parse refuses is refused, a wide row of that
+  table as `TABLE_WIDTH`. When it refuses nothing and reads one table holding every line, those
+  rows are inserted. Every other fragment goes to the block path whole, which reads it as a
+  document of its own. The insert used to count cells itself first, line by line, over a fragment
+  trimmed of Unicode spaces and a first row's indentation, so it now answers differently in these
+  ways. It drops blank cells past the width and refuses text there, where it refused both. A `|`
+  after an even run of backslashes is text to it, as it always was to uploads, so
+  `| A11 | new \\| extra |` under two columns is stored as one cell reading `new \| extra` where it
+  was refused as `TABLE_WIDTH`; the browser editor's reading of such a pipe is LEGION-412. A space
+  outside ASCII, a vertical tab or a form feed is a cell's text wherever it stands, so
+  `| A11 | new |` then U+00A0 is refused as three cells where it was stored as two, and a line of
+  `|` then U+00A0 is a row holding it, as an upload reads it, where it was a lone `|` that sent the
+  fragment to blocks. A line the parser refuses as another block (indented code, `2. | a | b |`)
+  is refused as an upload refuses it, `INVALID_OP` on `markdown`, however many cells it holds and
+  on any row. A fragment that goes to the block path was refused as `TABLE_WIDTH` wherever
+  the old count met a line too wide before whatever sends the fragment there, as with
+  `- | a | b |` (counted as three cells), or `| A11 | x | y |` then a lone `|` or a line whose only
+  pipe is `\|` under two columns; it is now written as the blocks it reads as.
+  The route also tries a fragment as rows before it reads it as a document of its own, so rows
+  that reading refused, such as `[x]: |`, which it took for a link reference definition, are
+  inserted as the rows an upload reads. Versions written before 2026-09-19 hold rows with text
+  past their table's width, since the renderer then wrote a code span's pipe unescaped;
+  re-uploading one is refused rather than stored short. A row's closing `|` after an odd run of
+  backslashes (`| x | y \|`) is now kept as the last cell's text, as the browser editor reads it,
+  where it was dropped (`y \`). An image's alt holding a backslash before a pipe in a table cell
+  is written so that the browser editor reads it as one cell too.
 
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before

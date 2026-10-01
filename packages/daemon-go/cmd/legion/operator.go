@@ -97,15 +97,31 @@ func (c *operatorCall) connect() (operator, bool) {
 // bounded by the daemon's configuration, which this command may not have read; a signal to this
 // process ends the wait.
 func (c *operatorCall) send(ctx context.Context, op operator, method, path string, body any, print func(io.Writer, []byte) error) int {
+	_, answer, ok := c.request(ctx, op, method, path, body)
+	if !ok {
+		return 1
+	}
+	return c.printAnswer(op, path, answer, print)
+}
+
+// request makes one request of the daemon and answers its 2xx status and body. A request that got
+// no answer, or an answer outside 2xx — the daemon's refusal, with its status and sentence — is
+// reported and answers false.
+func (c *operatorCall) request(ctx context.Context, op operator, method, path string, body any) (int, []byte, bool) {
 	status, answer, err := op.do(ctx, method, path, body)
 	if err != nil {
 		fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
-		return 1
+		return 0, nil, false
 	}
 	if status/100 != 2 {
 		fmt.Fprintf(c.stderr, "%s: %s\n", c.name, refusal(status, answer))
-		return 1
+		return 0, nil, false
 	}
+	return status, answer, true
+}
+
+// printAnswer hands a 2xx answer path served to print; one it cannot read fails the command.
+func (c *operatorCall) printAnswer(op operator, path string, answer []byte, print func(io.Writer, []byte) error) int {
 	if err := print(c.stdout, answer); err != nil {
 		fmt.Fprintf(c.stderr, "%s: read the answer %s%s served: %v\n", c.name, op.base, path, err)
 		return 1

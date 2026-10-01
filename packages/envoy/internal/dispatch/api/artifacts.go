@@ -340,15 +340,6 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		if !created {
-			// This route writes its version itself rather than through the document service, so it
-			// retracts the approval asks naming an older version as every other version write does.
-			retractions, err = docs.RetractStaleApprovalAsks(r.Context(), tx, s.deps.Events, artifact.ID, version.Number, actor)
-			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-		}
 	} else {
 		size := len(input.content)
 		if err := tx.QueryRow(r.Context(), `
@@ -369,6 +360,13 @@ func (s *server) storeArtifact(
 	}
 	var diff *string
 	if !created && kind == "doc" {
+		// This route writes its version itself rather than through the document service, so it
+		// retracts the approval asks naming an older version as every other version write does.
+		retractions, err = docs.RetractStaleApprovalAsks(r.Context(), tx, s.deps.Events, artifact.ID, version)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -412,18 +410,18 @@ func (s *server) storeArtifact(
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publish(append(retractions, event)...)
-	var decisionBlocks *int
+	var blocks *documentBlocks
 	if kind == "doc" {
-		decisionBlocks = countAskBlocks(documentMarkdown)
+		blocks = readDocumentBlocks(documentMarkdown)
 	}
 	if advice != nil {
-		advice.DecisionBlocks = decisionBlocks
+		advice.documentBlocks = blocks
 	}
 	responsePayload := map[string]any{"artifact": artifact, "version": version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
-	} else if decisionBlocks != nil {
-		WriteJSON(w, http.StatusCreated, withDecisionBlockAdvice(responsePayload, *decisionBlocks))
+	} else if blocks != nil {
+		WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(responsePayload, blocks))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}

@@ -43,7 +43,15 @@ within one textblock; split changes that span separate blocks into separate oper
 `block` plus a zero-based `index`. An insert or move anchor is a quote, `"start"`, `"end"`, `"heading:Title"`, or `"block:<id>"`.
 Ordinary inserts create a sibling block before or after the quote, heading, or block's enclosing document block, and a move lands the
 block at that same boundary; `"start"` and `"end"` select the document edges. At a table-cell quote, a body-row fragment (no header or
-delimiter rows) extends that table before or after the matched row instead; short rows are padded, wider rows are rejected, and deleting
+delimiter rows) extends that table before or after the matched row instead, decided in three steps. A fragment whose every line yields
+a cell and an unescaped `|` (a lone `|` yields no cell, and a line whose only pipe is `\|` has no separator), with no line a delimiter
+row of three hyphens or more a cell, is parsed as rows of that table. What that parse refuses is refused: a row holding text past the
+table's width as `TABLE_WIDTH` (blank cells there are dropped), a line the table cannot hold as a row (indented code, `2. | a | b |`)
+as `INVALID_OP`. When it refuses nothing and reads every line as a row, the rows are inserted, short ones padded. Any other fragment is
+read on its own as blocks, which are inserted after the table or refused as such blocks would be: a whole table you paste there, its
+delimiter row three hyphens or more a cell, becomes a second table, while one with any delimiter cell of one or two hyphens (`| - |`,
+`| --- | - |`) passes the first step, so its header and delimiter rows are inserted as rows of the table, or refused as `TABLE_WIDTH`
+where it is wider than the table. Deleting
 a cell's quoted text removes only that text. `delete_row` / `delete_column` instead mutate their named table in place, keeping the
 table's block id. A row index includes the header: row `0` is the header and its deletion promotes the first body row. The last body
 row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is
@@ -174,3 +182,9 @@ deletion cannot undo a removal.
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
 an existing paragraph is the question that should become a decision.
+
+An ask block has two ids: the block id, shown as `:::ask{#<id> …}` in the rendered document and
+taken bare by `move`/`delete` in `block` (the `block:<id>` form is only for `before`/`after`
+anchors), and the ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read`
+and `dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
+`not found`.

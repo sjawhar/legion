@@ -204,9 +204,13 @@ want of a model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
-and removes the work directory when the run passed (keeping it, with `daemon.log`,
-`deadline.log`, `listener.log`, `model-gateway/hawk-token.log` and each refusal's log, when it did
-not).
+and removes the work directory when the run passed (keeping it, with `transcript.log` (the whole
+run), `daemon.log`, `deadline.log`, `listener.log`, `model-gateway/hawk-token.log` and each
+refusal's log, when it did not). The trap still runs when whoever reads the run's output goes
+first, for example a supervised launcher's own `tee` stopped with the run, and a stop follows: the
+run's output goes through [`lib/transcript.sh`](#libtranscriptsh)'s `tee`, which outlives the
+reader. The transcript is in the work directory, whose processes the teardown kills by path, so
+the script opens it on fd 8 and calls `transcript_to /dev/fd/8`.
 
 Three things the run had to learn about its surface:
 
@@ -727,6 +731,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
 | `issue-cap-moves` | the proof human's `backlog` on tree 2's live root is set back: the next status write is `legion-daemon:LEGSMOKE`'s (a control re-attributing it must fail), tree 2's architect receives a `status-reasserted` notice naming the proof human, and tree 2 keeps its slot; `legion status … backlog` then frees the slot, tree 3 is admitted, and tree 2's pods are gone |
 | `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/`. The review round is one no review decides at first: the proof tells the reviewer to submit a `COMMENT` rather than decide and to complete, and requires, at the completion, no approval and the issue still in `reviewing`; then the `review-stuck` notice on the architect, written by the reviewer's completion and naming a head that is a commit of the pull request (kept as `notice-review-stuck.jsonl`). The proof's instructions hold every agent until a targeted message gives its next operation, so the driver then tells the architect only to handle that notice as its role says, naming no topic, head or decision. The proof then requires a message in the reviewer's session whose `reply_role` names the architect's role topic, delivered after the reviewer's completion (the architect asking for the decision; the proof's own steers carry none). Messages are counted from the completion, since the notice is written in the completion's own transaction and the architect needs a model turn after it, so a message the architect sent the reviewer earlier in the round, such as a reply to the reviewer's round report, is not counted, not kept and cannot set the path. The ones after it are kept as `architect-ask.jsonl`; one the architect sent on its own, before the driver's message, counts as the stronger pass and is noted. Then the reviewer's approval of the head, which ends the round, and the issue leaving `reviewing` for retro or merging. An architect acting on the notice unprompted, as it must where no driver holds it, is not proven here (LEGION-413) |
+| `completion-closed` | each phase worker of tree 1 — planner, implementer, tester, reviewer — is suspended once its phase ends, and its saved session answers every `handoff_complete` call of the legion tool, holds one success for each assignment it completed, and records the phase stall `closed` after that call, with no phase-stall follow-up after its last success: the 4b.13b acceptance's stall check (`stage3-4b13b-acceptance.sh`'s `pane-rule-phase-worker-and-stall`), which a suspension that stops the worker inside the call fails (LEGION-283). The sessions and each verdict are kept as `completion-<role>.jsonl` and `completion-<role>-verdict.json`. Its control: the planner's session cut at its `handoff_complete` call, the transcript such a suspension leaves, is refused |
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery or a hub wait or jobs snapshot, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
 | `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on the gateway's aliases |
@@ -765,11 +770,14 @@ bash scripts/e2e/controller-start-tmux.sh
 
 Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
 run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
-profile, both tmux servers, and its Postgres and NATS containers. `CONTROLLER_START_EVIDENCE_DIR`
-keeps the daemon and listener logs and, under `checks/`, each check's own output (the controllers'
-stderr and exit codes, the refusal, the route answers, the prober's log) and both controller panes
-as they were at exit, so a failed run keeps what failed; it defaults to a fresh `/tmp` directory,
-which is printed. No secret is written there.
+profile, both tmux servers, and its Postgres and NATS containers, also when whoever reads the run's
+output goes first and a stop follows: the run's output goes through
+[`lib/transcript.sh`](#libtranscriptsh)'s `tee`, which outlives the reader.
+`CONTROLLER_START_EVIDENCE_DIR` keeps `transcript.log` (the whole run), the daemon and listener
+logs and, under `checks/`, each check's own output (the controllers' stderr and exit codes, the
+refusal, the route answers, the prober's log) and both controller panes as they were at exit, so a
+failed run keeps what failed; it defaults to a fresh `/tmp` directory, which is printed. No secret
+is written there.
 
 | check | what it holds, and 4b.5's acceptance item |
 | :--- | :--- |
@@ -953,10 +961,11 @@ directory, never beside `package.json`, so an interrupted run strands no `tmp.js
 
 The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
 way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
-dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
-itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
-`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
-the checkout.
+dies halfway never leaves the rewrite for jj to snapshot. The script ignores SIGPIPE, so this holds
+when whoever read its stderr has gone too: bash's `Terminated` notice for an interrupted pack would
+otherwise kill it before the trap ran. It keeps the run's status; if the copy back itself fails, it
+says where the saved bytes are, leaves them there, and exits non-zero. Afterwards `jj status` is as
+it was before the run: `dist/` is gitignored, and nothing else is written inside the checkout.
 
 Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
 itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
@@ -1267,8 +1276,8 @@ refusal exits 2.
 
 ## lib/transcript.sh
 
-The stage proof's transcript. Stage 3, Stage 4a, Stage 4b and `stage3-4b13b-acceptance.sh` source
-it before their first output.
+The stage proof's transcript. Stage 2, Stage 3, Stage 4a, Stage 4b, `stage3-4b13b-acceptance.sh`
+and `controller-start-tmux.sh` source it before their first output.
 
 ```sh
 . "$root/scripts/e2e/lib/transcript.sh"     # sourced, never run
@@ -1281,7 +1290,9 @@ SIGPIPE.
 
 - A signal to the process group, a reader that goes first (a supervised launcher's own `tee`,
   stopped with the run), or a full disk under `FILE` each cost `tee` at most the outputs they break.
-  The driver and its cleanup never fail on a write.
+  The driver and its cleanup never fail on a write. Without it, a group TERM after the reader had
+  gone would end a driver with a TERM trap before its `EXIT` trap ran: bash writes its `Terminated`
+  notice for the interrupted command to the dead pipe first.
 - GNU `tee` stops once every output has failed and never reopens one. `/dev/null`, an output that
   never fails, is what keeps it draining once both the reader and `FILE` have failed.
 - busybox `tee` keeps writing every output and reports errors at EOF, so it picks `FILE` up again
@@ -1289,7 +1300,7 @@ SIGPIPE.
 - The `tee` is one of the run's processes: its argv names `FILE`, and its working directory is the
   caller's at the call. [`lib/rig.sh`](#librigsh)'s `run_processes` matches `$work` in either, so a
   caller keeps both outside `$work`, or opens `FILE` on a descriptor and passes `/dev/fd/N`, as
-  `stage3-4b13b-acceptance.sh` does with its evidence under `$work`.
+  Stage 2 and `stage3-4b13b-acceptance.sh` do with their transcript under `$work`.
 
 ## lib/rig.sh
 

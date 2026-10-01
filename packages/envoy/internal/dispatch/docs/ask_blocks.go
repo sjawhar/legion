@@ -78,10 +78,11 @@ func (e *ErrInvalidAskBlock) Error() string { return e.Reason.Error() }
 
 func (e *ErrInvalidAskBlock) Unwrap() error { return e.Reason }
 
-// SettlementActor writes what a document's settlement decides on its own: the retraction of an
-// ask whose block left the document, and the retraction of a stale approval ask when a
-// settlement knows no writer of its version (RetractStaleApprovalAsks). Crediting the room's
-// last editor instead would put a deletion nobody made in their name.
+// SettlementActor writes what a document decides on its own rather than any one person: the
+// retraction of an ask whose block left the document, and the retraction of a stale approval ask
+// when the version that staled it credits no writer or several, whichever write versioned it
+// (RetractStaleApprovalAsks). Crediting the room's last editor instead would put a deletion
+// nobody made in their name.
 var SettlementActor = model.Actor{Kind: "system", ID: "document-settlement"}
 
 // SettlementRetractionReason opens the reason of every retraction settlement writes, followed by

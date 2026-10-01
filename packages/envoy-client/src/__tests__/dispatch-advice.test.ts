@@ -226,6 +226,9 @@ function advice(overrides: Partial<AdviceFixture> = {}): AdviceFixture {
 beforeEach(() => resetAdviceMemory());
 
 describe("Dispatch write advice", () => {
+  const zeroBlocks =
+    'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".';
+
   test.each([
     ["dispatch_issue", { project: "DSP", title: "Created issue", spec: "# Spec\n" }],
     ["dispatch_artifact", { issue: "DSP-42", name: "spec.md", content: "# Spec\n" }],
@@ -233,9 +236,7 @@ describe("Dispatch write advice", () => {
     const rawAdvice = advice({ decision_blocks: 0 });
     const result = await executeWrite(tool, args, rawAdvice);
 
-    expect(result.text).toEndWith(
-      'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
-    );
+    expect(result.text).toEndWith(zeroBlocks);
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
@@ -247,9 +248,7 @@ describe("Dispatch write advice", () => {
       rawAdvice
     );
 
-    expect(result.text).toEndWith(
-      'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
-    );
+    expect(result.text).toEndWith(zeroBlocks);
     expect(result.text).not.toContain("messages on DSP");
     expect(result.text).not.toContain("still in triage");
     expect(result.text).not.toContain("still have an open ask");
@@ -271,7 +270,43 @@ describe("Dispatch write advice", () => {
   ])("does not render decision-block advice for %s", async (_case, tool, args, rawAdvice) => {
     const result = await executeWrite(tool, args, rawAdvice);
 
-    expect(result.text).not.toContain("No decision blocks in this spec");
+    expect(result.text).not.toContain("holds no ask blocks");
+    expect(result.details.advice).toEqual(rawAdvice);
+  });
+
+  // A spec whose questions are text says so before the count, which alone reads as a spec that
+  // needs no decision (LEGION-416); a non-primary document gets the same line, and no count.
+  test.each([
+    [
+      "a primary spec",
+      "dispatch_issue",
+      { project: "DSP", title: "Created issue", spec: "# Spec\n" },
+      true,
+    ],
+    [
+      "a non-primary artifact",
+      "dispatch_artifact",
+      { issue: "DSP-42", name: "notes.md", content: "# Notes\n" },
+      false,
+    ],
+  ])("names typed-block openings stored as text in %s", async (_case, tool, args, primary) => {
+    const rawAdvice = advice({
+      decision_blocks: 0,
+      unparsed_openers: {
+        count: 4,
+        examples: ['Intro 27::::ask{urgency="med"}', '…unmeasured. 57::::ask{urgency="low"}'],
+      },
+    });
+    const result = await executeWrite(tool, args, rawAdvice);
+
+    const openers =
+      '4 typed-block openings in this document are text, not blocks: "Intro 27::::ask{urgency=\\"med\\"}", "…unmeasured. 57::::ask{urgency=\\"low\\"}". An opening like `:::ask{…}` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the `dispatch` skill, "Decision blocks".';
+    expect(result.text).toContain(openers);
+    if (primary) {
+      expect(result.text).toEndWith(`${openers}\n${zeroBlocks}`);
+    } else {
+      expect(result.text).toEndWith(openers);
+    }
     expect(result.details.advice).toEqual(rawAdvice);
   });
   test("handles decision-only advice on a project-document ask reply", async () => {
