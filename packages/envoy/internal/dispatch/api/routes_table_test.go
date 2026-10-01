@@ -103,9 +103,6 @@ func routeProbePath(pattern string) string {
 		{"{repo}", "repo"},
 		{"{slug}", "spec"},
 		{"{number}", "1"},
-		{"{login}", "sjawhar"},
-		{"{kind}", "register"},
-		{"{step}", "begin"},
 		{"{attempt}", "1"},
 	}
 	path := pattern
