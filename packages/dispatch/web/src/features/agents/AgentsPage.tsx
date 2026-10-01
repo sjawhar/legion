@@ -16,6 +16,7 @@ import { api } from "../../api/client";
 import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
 import type {
   Agent,
+  CreateBroadcastInput,
   Message,
   MessageDelivery,
   MessageDeliveryMode,
@@ -67,7 +68,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { deliveryAttempts } from "./attempts";
 import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
-import { broadcastPlan, broadcastSendState } from "./broadcast-plan";
+import { broadcastPlan, broadcastSendState, restoredBroadcastPlan } from "./broadcast-plan";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import {
   AGENT_ROW_SELECTOR,
@@ -1149,7 +1150,10 @@ function SelectionHeader({
  * the ones this mode leaves out. It follows the list and sticks to the viewport's bottom, so
  * appearing costs no layout above the rows: the checkbox that summoned it stays under the
  * pointer. A long recipient list scrolls inside it rather than growing it past half the screen.
- * Send hands the request to the page's queue (`onSend`) at the press.
+ * Send hands the request to the page's queue (`onSend`) at the press. The request carries the
+ * page's current key, so two presses of one composition make one broadcast; a restored send goes
+ * out as it was first sent until it is edited, and the composer describes that request rather
+ * than the live plan, so a session that has since come back is shown as not in it.
  */
 function BroadcastComposer({
   agents,
@@ -1158,7 +1162,9 @@ function BroadcastComposer({
   onBody,
   onDelivery,
   onSend,
+  restored,
   selected,
+  sendKey,
   onDeselect,
 }: {
   agents: readonly Agent[];
@@ -1168,9 +1174,14 @@ function BroadcastComposer({
   onDelivery: (delivery: MessageDeliveryMode) => void;
   onDeselect: (sessionID: string) => void;
   onSend: (send: BroadcastSend) => void;
+  restored: CreateBroadcastInput | null;
   selected: ReadonlySet<string>;
+  sendKey: string;
 }): ReactNode {
-  const plan = broadcastPlan(selected, agents, delivery);
+  const plan =
+    restored === null
+      ? broadcastPlan(selected, agents, delivery)
+      : restoredBroadcastPlan(restored, selected, agents);
   const { excluded, recipients } = plan;
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
   // and refuses a send over it; saying so before Send saves the round trip. The notice line is
@@ -1252,7 +1263,12 @@ function BroadcastComposer({
         describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
         onPress={() =>
           onSend({
-            input: { body, delivery, session_ids: recipients.map((agent) => agent.session_id) },
+            input: restored ?? {
+              body,
+              delivery,
+              idempotency_key: sendKey,
+              session_ids: recipients,
+            },
             selected: [...selected],
           })
         }
@@ -1303,6 +1319,21 @@ export function AgentsPage(): ReactNode {
   // it - the same test the queue uses to hold off opening a broadcast while another is begun.
   const [draft, setDraft] = useState("");
   const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
+  // One key per composed send (`CreateBroadcastInput.idempotency_key`). Every change to the
+  // message, the mode or the selection mints the next one, and Send hands the current one to the
+  // queue, so two presses of one composition name one broadcast on the server and an edited
+  // composition never shares a key with the send before it. Restore draft puts back a refused
+  // send's whole request with its key (`restored`): while nothing has been edited since, Send
+  // re-sends it word for word, so the server sees the same request even when the registry
+  // changed in between and the live plan would now name other session_ids - and the composer
+  // describes that request, not the live plan (`BroadcastComposer`). The first edit drops it and
+  // mints afresh.
+  const [sendKey, setSendKey] = useState(() => crypto.randomUUID());
+  const [restored, setRestored] = useState<CreateBroadcastInput | null>(null);
+  const mintSendKey = () => {
+    setSendKey(crypto.randomUUID());
+    setRestored(null);
+  };
   const composing = draft.trim() !== "" || selected.size > 0;
   const queue = useBroadcastQueue(composing);
   const restoreRefusal = composing
@@ -1335,6 +1366,7 @@ export function AgentsPage(): ReactNode {
       else updated.delete(sessionID);
       return updated;
     });
+    mintSendKey();
   };
   const listRef = useRef<HTMLElement>(null);
   useAgentsKeymap(listRef);
@@ -1363,8 +1395,14 @@ export function AgentsPage(): ReactNode {
           <SelectionHeader
             listed={agents}
             matching={matching}
-            onClear={() => setSelected(new Set())}
-            onToggle={() => setSelected((current) => toggleMatching(matching, current))}
+            onClear={() => {
+              setSelected(new Set());
+              mintSendKey();
+            }}
+            onToggle={() => {
+              setSelected((current) => toggleMatching(matching, current));
+              mintSendKey();
+            }}
             selected={selected}
           />
           {matching.length === 0 ? (
@@ -1422,6 +1460,7 @@ export function AgentsPage(): ReactNode {
                 setDraft(row.send.input.body);
                 setDelivery(row.send.input.delivery);
                 setSelected(new Set(row.send.selected));
+                setRestored(row.send.input);
               }}
               onRetry={queue.retry}
               restoreRefusal={restoreRefusal}
@@ -1433,15 +1472,24 @@ export function AgentsPage(): ReactNode {
               agents={agents}
               body={draft}
               delivery={delivery}
-              onBody={setDraft}
-              onDelivery={setDelivery}
+              onBody={(next) => {
+                setDraft(next);
+                mintSendKey();
+              }}
+              onDelivery={(next) => {
+                setDelivery(next);
+                mintSendKey();
+              }}
               onDeselect={(sessionID) => select(sessionID, false)}
               onSend={(send) => {
                 queue.enqueue(send);
                 setSelected(new Set());
                 setDraft("");
+                mintSendKey();
               }}
+              restored={restored}
               selected={selected}
+              sendKey={sendKey}
             />
           ) : null}
         </div>

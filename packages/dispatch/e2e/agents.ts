@@ -56,6 +56,26 @@ export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   >;
 }
 
+/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
+ *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
+export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
+  let refusing = true;
+  await page.route("**/api/v1/broadcasts", (route) =>
+    refusing && route.request().method() === "POST"
+      ? route.fulfill({
+          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+          contentType: "application/json",
+          status: 503,
+        })
+      : route.fallback()
+  );
+  return {
+    allow: () => {
+      refusing = false;
+    },
+  };
+}
+
 export interface FakeInterest {
   session_id: string;
   topics: string[];

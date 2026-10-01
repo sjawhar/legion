@@ -523,7 +523,12 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     },
     session
   );
-  await createBroadcast({ body: longBroadcast, delivery: "btw", session_ids: ["e2e-long-title"] });
+  await createBroadcast({
+    body: longBroadcast,
+    delivery: "btw",
+    idempotency_key: crypto.randomUUID(),
+    session_ids: ["e2e-long-title"],
+  });
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();

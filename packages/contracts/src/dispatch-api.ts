@@ -826,6 +826,10 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope publishes
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
  * window shorter than that lets a GitHub redelivery publish a second copy.
+ *
+ * This window bounds a *delivery* retry, not a broadcast *create*:
+ * `CreateBroadcastInput.idempotency_key` is a database row that lives as long as its broadcast,
+ * so a repeated `POST /api/v1/broadcasts` is recognised with no window, however late it arrives.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -1760,6 +1764,15 @@ export interface CreateBroadcastInput {
   /** The sessions the human selected. A session named twice is one recipient; one that is no
    *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
   readonly session_ids: readonly string[];
+  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
+   *  at most 128 characters. The server answers a repeat (same human, same key, same body, mode
+   *  and session_ids) with the broadcast the first request made, 200 instead of 201, and refuses
+   *  a reuse of the key for a different request with 409 BROADCAST_KEY_REUSED, whose body names
+   *  the broadcast that already used the key as `broadcast_id`; that request is not sent.
+   *  Recognised for as long as the broadcast exists: there is no window (see
+   *  DELIVERY_DUPLICATE_WINDOW_MS). The dashboard sends a UUID per composed send; a script mints
+   *  its own. Required. */
+  readonly idempotency_key: string;
 }
 
 export interface IssueRead {

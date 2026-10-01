@@ -15,6 +15,9 @@
 
 ### Added
 
+- `CreateBroadcastInput.idempotency_key` (required): names one send, so the server answers a
+  repeat of it with the broadcast the first request made and refuses the key's reuse for a
+  different request with `409 BROADCAST_KEY_REUSED` (LEGION-446).
 - Added the plan handoff's two plan checks (LEGION-421): `gapAnalysis` (`findings`, each a
   `finding` with the plan's `answer`, or the failed call's `error`) and `planReview` (`verdict`
   `approved`, `rejected` or `failed`, `rounds`, `remainingIssues` of `{issue, evidence}`, `error`),

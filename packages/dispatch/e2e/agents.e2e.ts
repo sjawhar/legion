@@ -1,6 +1,12 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { Message } from "../web/src/api/types";
-import { type FakeSession, getSentMessages, setLiveSessions, setSessionLive } from "./agents";
+import {
+  type FakeSession,
+  getSentMessages,
+  refuseBroadcasts,
+  setLiveSessions,
+  setSessionLive,
+} from "./agents";
 import {
   createAgentMessage,
   createAsk,
@@ -1095,26 +1101,6 @@ test.describe("the composer's notices share one slot, highest first, within budg
   });
 });
 
-/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
- *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
-async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
-  let refusing = true;
-  await page.route("**/api/v1/broadcasts", (route) =>
-    refusing && route.request().method() === "POST"
-      ? route.fulfill({
-          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
-          contentType: "application/json",
-          status: 503,
-        })
-      : route.fallback()
-  );
-  return {
-    allow: () => {
-      refusing = false;
-    },
-  };
-}
-
 test("a typed broadcast survives clearing the selection and picking again, and a refused send gives it back", async ({
   browser,
 }, testInfo) => {
@@ -1331,6 +1317,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     expect(posted[0]).toEqual({
       body: "Refused first.",
       delivery: "aside",
+      idempotency_key: expect.any(String),
       session_ids: pair.map((session) => session.session_id),
     });
   } finally {

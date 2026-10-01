@@ -312,7 +312,7 @@ pass
 broadcast_body="LEGION-394 $run broadcast: status, please."
 begin a-broadcast-gets-a-card
 human -X POST "http://127.0.0.1:$dispatch_port/api/v1/broadcasts" \
-  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" '{body: $b, delivery: "steer", session_ids: [$s]}')" >/dev/null
+  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" --arg k "$run" '{body: $b, delivery: "steer", session_ids: [$s], idempotency_key: ("broadcast-" + $k)}')" >/dev/null
 until_true 120 "the broadcast's card" has_card "$broadcast_body"
 [ "$(user_mentions "$broadcast_body")" = 0 ] || fail "the broadcast became a user message"
 note "a card, no user message"
