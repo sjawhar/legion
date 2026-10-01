@@ -57,8 +57,8 @@ for (const { name, edge, type, code } of cases) {
       await alicePage.goto(`/issues/${issue.key}/spec`);
       const bobPage = await bob.newPage();
       await bobPage.goto(`/issues/${issue.key}/spec`);
-      await expect(alicePage.getByRole("status")).toHaveText("connected");
-      await expect(bobPage.getByRole("status")).toHaveText("connected");
+      await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+      await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
       await placeCaret(bobPage, edge, "let y = 2;");
       await expect(bobsCursorInCode(alicePage)).toBeVisible();
@@ -96,8 +96,8 @@ test("a reader outside the editor sees a collaborator's cursor even where their 
     await alicePage.goto(`/issues/${issue.key}/spec`);
     const bobPage = await bob.newPage();
     await bobPage.goto(`/issues/${issue.key}/spec`);
-    await expect(alicePage.getByRole("status")).toHaveText("connected");
-    await expect(bobPage.getByRole("status")).toHaveText("connected");
+    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
     // Alice never clicked, so her selection is the start of the document.
     await placeCaret(bobPage, "before", "Database");

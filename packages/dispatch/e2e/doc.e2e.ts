@@ -186,8 +186,8 @@ test("two users edit the same spec, see each other's text and cursor, and settle
     await bobPage.goto(`/issues/${issue.key}/spec`);
     const bobEditor = documentEditor(bobPage);
     await expect(bobEditor).toContainText("Use SQLite");
-    await expect(alicePage.getByRole("status")).toHaveText("connected");
-    await expect(bobPage.getByRole("status")).toHaveText("connected");
+    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
 
     await typeAtEnd(alicePage, "hello from alice");
     await expect(bobEditor).toContainText("hello from alice");
