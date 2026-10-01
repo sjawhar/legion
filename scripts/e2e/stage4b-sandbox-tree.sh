@@ -168,6 +168,11 @@ audited=
 fixture_branch=
 pair_recorded=
 pair_session=
+# The daemon's configured default bounds launch failures and deaths with work outstanding alike.
+# The completed idle planner probe spends only the former, by deleting each replacement before it
+# registers (supervise/budgets.go).
+launch_failure_limit=3
+
 
 begin() {
   check=$1
@@ -1809,6 +1814,68 @@ send_agent "$tree2" planner "Stage 4b proof planning operation: write the requir
 wait_for_phase "$tree2" implementing 900
 pass
 
+begin finished-idle-planner-death
+# Tree 2's planner completed planning and is now a resident, finished role while its implementer
+# owns the active phase. Its first kill is PID 1 of the real worker container; each replacement is
+# deleted while launching, before Ready resets launch failures. This spends the existing recovery
+# budget without giving the finished planner more work.
+planner2=$(claim_token "$tree2" planner)
+planner2_claim() { claims_cli list --json | jq -ce --arg t "$planner2" '.claims[] | select(.token == $t)'; }
+planner2_idle_without_task() { planner2_claim | jq -e '.state == "idle" and .pending == null'; }
+planner2_task_deliveries() {
+  claim_session_text "$tree2" planner | jq -R -s -r --arg issue "$tree2" \
+    '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "user" and (.message.content | tostring | contains("Issue: " + $issue + ". Phase: planning.")))] | length'
+}
+until_true 300 "tree 2's completed planner idle with no task" planner2_idle_without_task
+wait_for_worker "$tree2" implementer
+planner_before=$(planner2_claim)
+planner_session=$(jq -r '.session // empty' <<<"$planner_before")
+planner_incarnation=$(jq -r '.locator.incarnation // empty' <<<"$planner_before")
+[ -n "$planner_session" ] && [ -n "$planner_incarnation" ] ||
+  fail "tree 2's completed planner has no recorded session and incarnation: $planner_before"
+printf '%s\n' "$planner_before" >"$evidence/finished-idle-planner-before.json"
+planner_tasks_before=$(planner2_task_deliveries) || fail "tree 2's planner session could not be read before its death"
+[ "$planner_tasks_before" = 1 ] ||
+  fail "tree 2's completed planner has $planner_tasks_before planning task deliveries, want one: $planner_before"
+end_claim_pod "$tree2" planner kill
+planner_ended=" $ended_pod_uid "
+planner_launching_without_task() {
+  local claim inc
+  claim=$(planner2_claim) || return 1
+  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$planner_ended" &&
+    jq -e --arg session "$planner_session" '.state == "launching" and .pending == null and .session == $session' <<<"$claim" >/dev/null
+}
+for attempt in $(seq 1 "$launch_failure_limit"); do
+  until_true 300 "tree 2's planner recovery $attempt to launch before registering" planner_launching_without_task
+  end_claim_pod "$tree2" planner delete
+  planner_ended+="$ended_pod_uid "
+  note "killed tree 2's completed planner PID 1 once, then deleted unregistered recovery $attempt (uid $ended_pod_uid)"
+done
+planner_failed() {
+  planner2_claim | jq -e --arg session "$planner_session" --argjson n "$launch_failure_limit" \
+    '.state == "failed" and .session == $session and .pending == null and .budgets.launchFailures == $n and .budgets.deaths == 0'
+}
+until_true 600 "tree 2's completed planner to fail after its recovery budget" planner_failed
+planner_after=$(planner2_claim)
+printf '%s\n' "$planner_after" >"$evidence/finished-idle-planner-after.json"
+worker_died=$(notice_needle worker-died "$tree2")
+until_true 300 "tree 2's architect to receive worker-died for its finished planner" notice_delivered "$tree2" architect "$worker_died"
+planner_notice=$(notice_line "$tree2" architect "$worker_died" | head -1 || true)
+printf '%s\n' "$planner_notice" >"$evidence/notice-finished-idle-planner-worker-died.jsonl"
+[ "$(notice_deliveries "$tree2" architect "$worker_died")" = 1 ] ||
+  fail "tree 2's architect received $(notice_deliveries "$tree2" architect "$worker_died") worker-died notices for its finished planner, want one"
+issue_phase "$tree2" implementing >/dev/null ||
+  fail "tree 2 left implementing after its completed planner failed: $(daemon_state | jq -c --arg issue "$tree2" '.issues[$issue]')"
+issue_worker_live "$tree2" implementer ||
+  fail "tree 2's implementer is not live after its completed planner failed: $(claim_view "$tree2" implementer)"
+planner_tasks_after=$(planner2_task_deliveries) || fail "tree 2's planner session could not be read after its failure"
+[ "$planner_tasks_after" = "$planner_tasks_before" ] ||
+  fail "tree 2's completed planner got $planner_tasks_after planning task deliveries after its failure, want $planner_tasks_before"
+note "tree 2's completed planner ($planner_session, initial uid $planner_incarnation) was killed at PID 1, then failed with launchFailures $launch_failure_limit and no task; its architect received worker-died while tree 2 stayed implementing with its implementer live"
+pass
+
+
 begin issue-cap-moves
 # The proof human's session holds no claim in tree 2, so its backlog on tree 2's live root is set
 # back: Dispatch shows the daemon's own status again, written as legion-daemon:$project, tree 2's
@@ -2195,9 +2262,6 @@ after=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.inca
 note "the daemon restarted and re-adopted the merger as it was: $after"
 pass
 
-# launch_failure_limit is the daemon's default (3), which the run's legion.yaml leaves unset; it
-# bounds a claim's launch failures and its deaths with work outstanding alike.
-launch_failure_limit=3
 begin controller
 # `legion controller start` on the devbox registers with the Sandbox daemon; tree 3 supplies the
 # held phase whose notice reaches it; `legion status … backlog` from the operator shell takes
