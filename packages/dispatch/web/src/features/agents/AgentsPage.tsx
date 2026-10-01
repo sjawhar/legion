@@ -1419,6 +1419,7 @@ export function AgentsPage(): ReactNode {
         <div className="sticky bottom-0 z-10 mt-3 space-y-2 narrow-or-short:contents">
           {queue.rows.length === 0 ? null : (
             <BroadcastSends
+              className="narrow-or-short:mt-3"
               onRestore={(row) => {
                 queue.dismiss(row);
                 setDraft(row.send.input.body);

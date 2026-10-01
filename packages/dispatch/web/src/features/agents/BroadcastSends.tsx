@@ -220,11 +220,14 @@ function agentCount(count: number): string {
  * the host says putting a draft back would replace one (`restoreRefusal`).
  */
 export function BroadcastSends({
+  className = "",
   onRestore,
   onRetry,
   restoreRefusal,
   rows,
 }: {
+  /** Placement only, as the host lays the strip out. */
+  className?: string;
   onRestore: (row: BroadcastSendRow) => void;
   onRetry: (row: BroadcastSendRow) => void;
   restoreRefusal: string | null;
@@ -234,7 +237,7 @@ export function BroadcastSends({
   return (
     <section
       aria-label="Sends"
-      className={`max-h-28 overflow-y-auto rounded-xl border px-3 py-2 text-sm narrow-or-short:mt-3 narrow-or-short:text-xs ${card} ${borderDefault}`}
+      className={`max-h-28 overflow-y-auto rounded-xl border px-3 py-2 text-sm narrow-or-short:text-xs ${card} ${borderDefault} ${className}`}
     >
       <ul className="space-y-1">
         {rows.map((row) => {

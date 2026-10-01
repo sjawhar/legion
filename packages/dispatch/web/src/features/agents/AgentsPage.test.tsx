@@ -1579,6 +1579,9 @@ test("a queued broadcast goes out as soon as the one ahead is answered, with the
       "Second.",
     ]);
   } finally {
+    // `lastRequest` is module state: a held request left unresolved would hold every later
+    // broadcast in this file behind it.
+    held.resolve();
     focusManager.setFocused(undefined);
     page.view.unmount();
     page.restore();
