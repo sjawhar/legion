@@ -1777,6 +1777,55 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 	}
 }
 
+// A dispatch envelope's dedupe key is recognised by every host as the Dispatch event it names, and
+// Dispatch's outbox numbers its keys in sequence, so a key a caller chose there would make a host
+// drop the real event when it arrives. The key is still the caller's on any other source.
+func TestPublishHandler_RefusesAChosenKeyOnADispatchEnvelope(t *testing.T) {
+	client := setupPublishTestClient(t)
+	state := &listenerDeps{client: client}
+	const topic = "notifications.dispatch.issue.SQUAT-1.comment.created"
+	probe, err := client.Conn.SubscribeSync(topic)
+	if err != nil {
+		t.Fatalf("subscribe topic probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	publish := func(body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(body)))
+		return recorder
+	}
+
+	refused := publish(`{"topic":"` + topic + `","source":"dispatch","message":"squat","dedupe_key":"dispatch-1000"}`)
+	if refused.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", refused.Code, refused.Body.String())
+	}
+	var response apiError
+	if err := json.NewDecoder(refused.Body).Decode(&response); err != nil {
+		t.Fatalf("decode 400 body: %v", err)
+	}
+	if response.Error != "dedupe_key cannot be chosen for a dispatch envelope" || len(response.Expected) != 1 || response.Expected[0] != "dedupe_key" {
+		t.Fatalf("400 body = %+v", response)
+	}
+	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("a refused publish must publish nothing: %v", err)
+	}
+
+	for _, body := range []string{
+		`{"topic":"` + topic + `","source":"dispatch","message":"no chosen key"}`,
+		`{"topic":"` + topic + `","source":"agent","message":"a re-send","dedupe_key":"dispatch-1000"}`,
+	} {
+		if recorder := publish(body); recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body = %s", body, recorder.Code, recorder.Body.String())
+		}
+		if _, err := probe.NextMsg(5 * time.Second); err != nil {
+			t.Fatalf("%s: read published envelope: %v", body, err)
+		}
+	}
+}
+
 // The mutual-exclusion rule is publish's alone: send ignores dedupe_key as it
 // ignores any field it does not read, so a body carrying both keys is still a
 // send keyed by its idempotency_key (LEGION-108, architect ruling).

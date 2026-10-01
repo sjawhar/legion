@@ -75,7 +75,9 @@
   content hash, the Go daemon's outbox row id). A host `claim`s a frame before anything it
   awaits, which records the key and says whether the frame is a repeat in one step, and
   `release`s the claim of a frame its agent was not handed (a delivery that threw, a frame it
-  answered with an error) so its re-send still arrives.
+  answered with an error) so its re-send still arrives. The record holds at most
+  `DELIVERY_DEDUPE_KEY_LIMIT` (100,000) keys and forgets the oldest past it, so a producer that
+  floods a followed topic with fresh keys cannot grow a host's memory without bound.
 - `getArchitectureSource` reads both answers a server gives for a project with no architecture
   source as `null`: a current server's `200 null` and an older server's `404 SOURCE_NOT_FOUND`.
   A client meets both while a rollout mixes versions. Before, only `200 null` read as none, so

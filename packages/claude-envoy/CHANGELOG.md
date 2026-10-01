@@ -15,8 +15,8 @@
   its message. Any other key is never dropped, so two distinct events that share one (the MCP
   bridge's, the Go daemon's outbox row id) both arrive. A send whose notification failed, or a
   Dispatch frame the channel answered with an error instead of showing it, is released, so its
-  re-send still arrives. Keys live in memory; a restarted channel server (`claude --resume`
-  included) forgets them.
+  re-send still arrives. Keys live in memory, at most 100,000 of them with the oldest forgotten
+  first; a restarted channel server (`claude --resume` included) forgets them.
 
 ## [0.6.0]
 

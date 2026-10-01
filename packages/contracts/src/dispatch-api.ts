@@ -836,7 +836,9 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   hands its agent at most one frame per such key inside this window, through
  *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. A frame the host answered with an
  *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
- *   key and a same-mode re-send of it reaches the agent.
+ *   key and a same-mode re-send of it reaches the agent. A host keeps at most
+ *   `DELIVERY_DEDUPE_KEY_LIMIT` keys and forgets the oldest past it, a bound set above what the
+ *   whole stream stores in this window, so only a flood of fresh keys reaches it.
  *
  * It fails in two places. A host holds its keys in memory, so one that restarts after the first
  * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS } from "@legion/contracts";
-import { createDeliveryDedupe } from "../delivery";
+import { createDeliveryDedupe, DELIVERY_DEDUPE_KEY_LIMIT } from "../delivery";
 
 // The listener mints a fresh event id for every send, so a re-send of one message - a Dispatch
 // Retry, an outbox re-publish, a webhook redelivery - carries the first send's dedupe key and
@@ -36,6 +36,20 @@ test("a key that names its event is remembered for the duplicate window and not 
   expect(dedupe.claim(retry)).toBe(false);
   now = DELIVERY_DUPLICATE_WINDOW_MS;
   expect(dedupe.claim(retry)).toBe(true);
+});
+
+// A flood of fresh keys inside the window cannot grow the record past its limit: the oldest key
+// goes first, and every later one is still recognised.
+test("past the key limit the oldest key is forgotten first, and only it", () => {
+  const dedupe = createDeliveryDedupe(() => 0);
+  const frame = (n: number) => ({ source: "dispatch", dedupe_key: `dispatch-${n}` });
+  for (let n = 0; n < DELIVERY_DEDUPE_KEY_LIMIT; n++) dedupe.claim(frame(n));
+  expect(dedupe.claim(frame(0))).toBe(false);
+
+  expect(dedupe.claim(frame(DELIVERY_DEDUPE_KEY_LIMIT))).toBe(true);
+  expect(dedupe.claim(frame(1))).toBe(false);
+  expect(dedupe.claim(frame(DELIVERY_DEDUPE_KEY_LIMIT))).toBe(false);
+  expect(dedupe.claim(frame(0))).toBe(true);
 });
 
 // The MCP bridge keys a notification by a hash of its URI and summary, and every textless

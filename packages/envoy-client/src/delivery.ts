@@ -188,16 +188,27 @@ export interface DeliveryDedupe {
 }
 
 /**
+ * The most keys a host's record holds. Past it a claim forgets the oldest key first, so a producer
+ * that floods a followed topic with fresh keys cannot grow a host's memory without bound. It is
+ * set above what the whole production notification stream stored in one duplicate window
+ * (100,028 messages over 72 hours, 2026-09-30), so a host reaches it only when it is handed more
+ * keys that name their events than that, and then the oldest repeat passes as new.
+ */
+export const DELIVERY_DEDUPE_KEY_LIMIT = 100_000;
+
+/**
  * Only a key that names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`) is recorded,
  * for `DELIVERY_DUPLICATE_WINDOW_MS`, the window the retry promise is made for. Any other key is not
  * a dedupe key, and dropping on it would lose a distinct event that shares it.
  *
  * A key is kept no longer than the window, because a repeat never refreshes it and every claim
  * first evicts the keys past the window, so the record holds at most the keys the host was handed
- * in the last 72 hours. A clock that steps backwards keeps a key longer by the size of the step.
+ * in the last 72 hours, and never more than `DELIVERY_DEDUPE_KEY_LIMIT`. A clock that steps
+ * backwards keeps a key longer by the size of the step.
  */
 export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
-  // Insertion order is delivery order, so the entries past the window are always at the front.
+  // Insertion order is delivery order, so the entries past the window, and the oldest entry the
+  // limit evicts, are always at the front.
   const claimed = new Map<string, number>();
   return {
     claim(frame) {
@@ -211,6 +222,10 @@ export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedu
         claimed.delete(oldest);
       }
       claimed.delete(key);
+      if (claimed.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+        const oldest = claimed.keys().next();
+        if (oldest.done !== true) claimed.delete(oldest.value);
+      }
       claimed.set(key, at);
       return true;
     },

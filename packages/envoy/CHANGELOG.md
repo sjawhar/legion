@@ -56,6 +56,12 @@
   "Delivered by an earlier attempt". The card now says the session answered with an error and
   points at its mode-change actions; the mention list points at a new comment. Sending that Retry
   under a new key is LEGION-431.
+- `POST /v1/messages/publish` refuses a `dedupe_key` on a `source: "dispatch"` envelope with a 400
+  naming `dedupe_key`. Every host drops a repeat of a Dispatch key, and Dispatch's outbox numbers
+  its keys in sequence (`dispatch-<event id>`), so any holder of the listener bearer could publish
+  `dispatch-<next id>` on a topic someone follows and make that host drop the real event when it
+  arrived. Dispatch never set one there: its outbox publishes to the bus directly, and its sends
+  go through `/v1/messages/send`, whose key the listener makes.
 - Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the

@@ -260,8 +260,9 @@
   saw those 1,000 in about an hour, so a Dispatch Retry made later than that reached the agent a
   second time while the dashboard promised it would not; and two distinct events under one key (the
   MCP bridge's content hash, the Go daemon's outbox row id, which starts over with each new store)
-  lost the later one. The keys still live in memory, so a restarted session no longer recognises a
-  frame it received before the restart. A frame's key is now recorded before its delivery awaits
+  lost the later one. The keys still live in memory, at most 100,000 of them with the oldest
+  forgotten first, so a restarted session no longer recognises a frame it received before the
+  restart. A frame's key is now recorded before its delivery awaits
   anything, where it was recorded once the delivery finished, so a repeat that arrives while a BTW
   answer or a Dispatch reply is still in flight is dropped too; a delivery that throws, or that
   ends in an error reply (a BTW whose side turn failed, a malformed frame), leaves the key

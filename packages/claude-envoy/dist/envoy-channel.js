@@ -38212,6 +38212,7 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
+var DELIVERY_DEDUPE_KEY_LIMIT = 1e5;
 function createDeliveryDedupe(now = Date.now) {
   const claimed = new Map;
   return {
@@ -38229,6 +38230,11 @@ function createDeliveryDedupe(now = Date.now) {
         claimed.delete(oldest);
       }
       claimed.delete(key);
+      if (claimed.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+        const oldest = claimed.keys().next();
+        if (oldest.done !== true)
+          claimed.delete(oldest.value);
+      }
       claimed.set(key, at);
       return true;
     },
