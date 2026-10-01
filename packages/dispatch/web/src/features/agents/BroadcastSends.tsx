@@ -93,9 +93,10 @@ function sendRow(mutation: BroadcastSendMutation): BroadcastSendRow {
  * `rows` is every send this page holds, newest press first, each with its own state, read from
  * the mutation cache rather than the mutation's latest, so a later send never hides an earlier
  * one's failure; a send still waiting for an earlier one is `queued`. Nothing navigates while a
- * send is queued or on the wire; once the only send of this visit succeeds, the page opens its
- * broadcast as it always has, unless the human has already started another (`composing`). After
- * more than one send the page stays and each row links its broadcast. A sent row leaves the
+ * send is queued or on the wire; once the only send the strip lists succeeds, and it was pressed
+ * on this visit, the page opens its broadcast as it always has, unless the human has already
+ * started another (`composing`). While the strip lists any other send, a failure kept from an
+ * earlier visit included, the page stays and each row links its broadcast. A sent row leaves the
  * cache when the page does; a failed one stays until Retry or Restore draft takes it, since its
  * row is the only copy of a message Send cleared from the composer; and one still out when the
  * page unmounts is shown with its outcome on the next visit.
