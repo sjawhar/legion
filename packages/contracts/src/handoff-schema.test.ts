@@ -229,6 +229,15 @@ test("a plan is written only with its gap analysis and its plan review recorded;
 
   // A plan committed before the checks existed still reads; it is only refused a new write.
   expect(validatePhaseHandoff(base)?.phase).toBe("plan");
+  // A record that is there is read with the fields its type promises: a review without a verdict,
+  // or a finding without its answer, is not a plan a reader can trust.
+  expect(validatePhaseHandoff({ ...base, planReview: { rounds: 1 } })).toBeNull();
+  expect(describePhaseHandoffProblems({ ...base, planReview: { rounds: 1 } })).toEqual([
+    expect.stringMatching(/^planReview\.verdict: /),
+  ]);
+  expect(
+    describePhaseHandoffProblems({ ...base, gapAnalysis: { findings: [{ finding: "a gap" }] } })
+  ).toEqual([expect.stringMatching(/^gapAnalysis\.findings\.0\.answer: /)]);
   expect(write({})).toEqual([
     "gapAnalysis: missing — record the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`",
     "planReview: missing — record the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed",
@@ -245,9 +254,10 @@ test("a plan is written only with its gap analysis and its plan review recorded;
     })
   ).toEqual([]);
 
-  expect(write({ gapAnalysis: { ...gapAnalysis, error: "x" }, planReview: rejected })).toEqual([
-    "gapAnalysis: record either `findings` or the failed call's `error`, not both",
-  ]);
+  for (const notExactlyOne of [{ ...gapAnalysis, error: "x" }, {}])
+    expect(write({ gapAnalysis: notExactlyOne, planReview: rejected })).toEqual([
+      "gapAnalysis: record exactly one of `findings` or the failed call's `error`",
+    ]);
   expect(
     write({ gapAnalysis: { findings: [{ finding: "a gap", answer: " " }] }, planReview: rejected })
   ).toEqual([expect.stringMatching(/^gapAnalysis\.findings\.0\.answer: /)]);

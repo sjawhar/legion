@@ -2,7 +2,6 @@ package prompts
 
 import (
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -212,22 +211,18 @@ func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) 
 		t.Errorf("the composed planner dispatches the gap analyst at %d and the plan reviewer at %d, want the analyst first", gap, review)
 	}
 	want := []string{"plan-gap-analyst", "plan-reviewer"}
-	agents := dispatched[promptrefs.TaskAgents]
-	if got := slices.Sorted(maps.Keys(agents)); !slices.Equal(got, want) {
-		t.Errorf("the composed planner dispatches %q, want %q", got, want)
-	}
 	residue := []string{filepath.Join("state", "prompts", "shared", "planner.md")}
-	for agent, files := range agents {
+	for _, agent := range want {
+		files, named := dispatched[promptrefs.TaskAgents][agent]
+		if !named {
+			t.Errorf("the composed planner does not dispatch task agent %s", agent)
+			continue
+		}
 		if !slices.Equal(files, residue) {
 			t.Errorf("task agent %s is dispatched by %q, want the headless residue %q alone", agent, files, residue)
 		}
-		body, err := os.ReadFile(filepath.Join(plugin, "agents", agent+".md"))
-		if err != nil {
+		if _, err := os.Stat(filepath.Join(plugin, "agents", agent+".md")); err != nil {
 			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
-			continue
-		}
-		if !strings.HasPrefix(string(body), "---\nname: "+agent+"\n") {
-			t.Errorf("agents/%s.md does not open with the frontmatter name %s", agent, agent)
 		}
 	}
 	gated, err := RoleReferences(filepath.Join(plugin, "roles"))

@@ -19,9 +19,12 @@
   `finding` with the plan's `answer`, or the failed call's `error`) and `planReview` (`verdict`
   `approved`, `rejected` or `failed`, `rounds`, `remainingIssues` of `{issue, evidence}`, `error`),
   with `PLAN_REVIEW_MAX_ROUNDS` (3) and `PLAN_REVIEW_VERDICTS`. `describePhaseHandoffWriteProblems`
-  refuses a plan written without either, a rejection recorded before the last round or without
-  the issues it named, an approval with issues standing, and a failure without its error; reading
-  stays tolerant, so a plan committed before the checks still loads.
+  refuses a plan missing either, a rejection recorded before the last round or without the issues
+  it named, an approval with issues standing, and a failure without its error. The record is the
+  planner's own report: the write checks its shape, not that the checks ran. Reading stays
+  tolerant of a plan committed before the checks, and refuses a record that is there without the
+  fields its type requires (a review's `verdict` and `rounds`, each finding's `finding` and
+  `answer`, each remaining issue's `issue` and `evidence`).
 - `LegionGoControllerSecretResponse` carries `designGate` (`root-issues` or `off`): the Go daemon
   tells `legion controller start` its design gate policy, which the controller's take comment
   reads before it promises a design approval.

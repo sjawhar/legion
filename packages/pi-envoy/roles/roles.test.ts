@@ -152,70 +152,18 @@ const agentsDir = path.join(rolesDir, "..", "agents");
 const rolePromptFiles = readdirSync(rolesDir, { recursive: true, encoding: "utf8" }).filter(
   (file) => file.endsWith(".md")
 );
-// The form the boot gate resolves (packages/daemon-go/internal/promptrefs: `agent="<name>"`).
-const dispatched = (text: string) =>
-  [...text.matchAll(/task\(agent="([^"]+)"\)/g)].map((match) => match[1]);
-const frontmatter = (file: string) => {
-  const match = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(path.join(agentsDir, file), "utf8"));
-  if (!match) throw new Error(`${file} has no frontmatter`);
-  return Bun.YAML.parse(match[1]) as Record<string, unknown>;
-};
-// Every phase worker's parts in the order both daemons compose them
-// (packages/daemon/src/daemon/processes.ts, packages/daemon-go/internal/prompts/prompts.go).
-const planner = [
-  path.join("core", "common.md"),
-  path.join("core", "planner.md"),
-  path.join("mechanics", "headless.md"),
-  "planner.md",
-]
-  .map((file) => read(file))
-  .join("\n");
 
 describe("the planner's plan checks", () => {
-  test("every task agent a role prompt dispatches is shipped in agents/ under its own name", () => {
-    const named = new Map<string, string[]>();
+  // The form the boot gate resolves (packages/daemon-go/internal/promptrefs: `agent="<name>"`).
+  // What each shipped agent declares is shipped-agents.test.ts's; the composed planner's dispatch
+  // order is packages/daemon-go/internal/prompts/prompts_test.go's.
+  test("every task agent a role prompt dispatches is shipped in agents/", () => {
     for (const file of rolePromptFiles)
-      for (const agent of dispatched(read(file)))
-        named.set(agent, [...(named.get(agent) ?? []), file]);
-    expect([...named.keys()]).toEqual(
-      expect.arrayContaining(["plan-gap-analyst", "plan-reviewer"])
-    );
-    for (const [agent, files] of named) {
-      const file = `${agent}.md`;
-      expect(existsSync(path.join(agentsDir, file)), `${agent}, dispatched by ${files}`).toBe(true);
-      expect(frontmatter(file).name, file).toBe(agent);
-    }
-  });
-
-  // The core dispatching neither is the mode-neutral rule above (headlessOnly's `agent="`).
-  test("the headless planner runs the gap analyst before the plan is drafted and the reviewer after", () => {
-    const gap = planner.indexOf('task(agent="plan-gap-analyst")');
-    const review = planner.indexOf('task(agent="plan-reviewer")');
-    expect(gap).toBeGreaterThan(-1);
-    expect(review).toBeGreaterThan(gap);
-    expect(dispatched(planner).sort()).toEqual(["plan-gap-analyst", "plan-reviewer"]);
-    expect(dispatched(read("planner.md")).sort()).toEqual(["plan-gap-analyst", "plan-reviewer"]);
-  });
-
-  test("both checks are read-only, blocking, and run on the deployment's oracle and review roles", () => {
-    const readOnly = new Set(["read", "glob", "grep", "find", "lsp", "ast_grep", "todo"]);
-    for (const [agent, model] of [
-      ["plan-gap-analyst", "@oracle"],
-      ["plan-reviewer", "@review"],
-    ]) {
-      const declared = frontmatter(`${agent}.md`);
-      expect(declared.model, agent).toEqual([model]);
-      // The planner waits for each check before it drafts or revises.
-      expect(declared.blocking, `${agent} is blocking`).toBe(true);
-      expect(typeof declared.tools, `${agent} lists its tools`).toBe("string");
-      const tools = String(declared.tools)
-        .split(",")
-        .map((tool) => tool.trim());
-      expect(
-        tools.filter((tool) => !readOnly.has(tool)),
-        `${agent} has a mutation tool`
-      ).toEqual([]);
-    }
+      for (const [, agent] of read(file).matchAll(/task\(agent="([^"]+)"\)/g))
+        expect(
+          existsSync(path.join(agentsDir, `${agent}.md`)),
+          `${agent}, dispatched by ${file}`
+        ).toBe(true);
   });
 
   // A planner that records the checks as its handoff instructions show them is not refused.

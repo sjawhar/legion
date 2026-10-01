@@ -216,9 +216,7 @@ const requiredSkillsSchema = z
 const gapAnalysisSchema = z
   .object({
     findings: z
-      .array(
-        z.object({ finding: z.string().optional(), answer: z.string().optional() }).passthrough()
-      )
+      .array(z.object({ finding: z.string(), answer: z.string() }).passthrough())
       .optional(),
     error: z.string().optional(),
   })
@@ -227,12 +225,10 @@ const gapAnalysisSchema = z
 
 const planReviewSchema = z
   .object({
-    verdict: z.enum(PLAN_REVIEW_VERDICTS).optional(),
-    rounds: z.number().optional(),
+    verdict: z.enum(PLAN_REVIEW_VERDICTS),
+    rounds: z.number(),
     remainingIssues: z
-      .array(
-        z.object({ issue: z.string().optional(), evidence: z.string().optional() }).passthrough()
-      )
+      .array(z.object({ issue: z.string(), evidence: z.string() }).passthrough())
       .optional(),
     error: z.string().optional(),
   })
@@ -316,7 +312,7 @@ const reviewSchema = baseHandoffSchema.extend({
     .optional(),
 });
 
-const nonEmptySkillList = z.array(z.string().trim().min(1)).min(1);
+const nonEmptySkillList = z.array(nonEmpty).min(1);
 
 /** A write-time plan check: the object is required, and its absence is named with what to record. */
 const recorded = <Shape extends z.ZodRawShape>(shape: Shape, whatToRecord: string) =>
@@ -336,7 +332,7 @@ const gapAnalysisWriteSchema = recorded(
   },
   "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`"
 ).refine((analysis) => (analysis.findings === undefined) !== (analysis.error === undefined), {
-  message: "record either `findings` or the failed call's `error`, not both",
+  message: "record exactly one of `findings` or the failed call's `error`",
 });
 
 /** The plan review after the draft: a rejection is recorded only after the last round the planner
@@ -393,7 +389,8 @@ const REQUIRED_SKILLS_PROBLEM =
  *   `none: <what was looked through and why nothing fits>`, since a nascent project may have no
  *   agent skills yet.
  * - the gap analysis before the draft and the plan review after it are both recorded, a failed
- *   call as its error, since a missing check never blocks the plan. */
+ *   call as its error, since a missing check never blocks the plan. The record is the planner's
+ *   own report: the write checks its shape, not that the checks ran. */
 const planWriteSchema = planSchema.extend({
   requiredSkills: z
     .object({

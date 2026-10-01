@@ -14574,13 +14574,13 @@ var requiredSkillsSchema = exports_external.object({
   review: exports_external.array(exports_external.string()).optional()
 }).passthrough().optional();
 var gapAnalysisSchema = exports_external.object({
-  findings: exports_external.array(exports_external.object({ finding: exports_external.string().optional(), answer: exports_external.string().optional() }).passthrough()).optional(),
+  findings: exports_external.array(exports_external.object({ finding: exports_external.string(), answer: exports_external.string() }).passthrough()).optional(),
   error: exports_external.string().optional()
 }).passthrough().optional();
 var planReviewSchema = exports_external.object({
-  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS).optional(),
-  rounds: exports_external.number().optional(),
-  remainingIssues: exports_external.array(exports_external.object({ issue: exports_external.string().optional(), evidence: exports_external.string().optional() }).passthrough()).optional(),
+  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
+  rounds: exports_external.number(),
+  remainingIssues: exports_external.array(exports_external.object({ issue: exports_external.string(), evidence: exports_external.string() }).passthrough()).optional(),
   error: exports_external.string().optional()
 }).passthrough().optional();
 var planSchema = baseHandoffSchema.extend({
@@ -14632,7 +14632,7 @@ var reviewSchema = baseHandoffSchema.extend({
   verdict: exports_external.enum(["approved", "changes_requested"]).optional(),
   keyFindings: exports_external.array(exports_external.object({ severity: exports_external.string(), file: exports_external.string(), description: exports_external.string() }).passthrough()).optional()
 });
-var nonEmptySkillList = exports_external.array(exports_external.string().trim().min(1)).min(1);
+var nonEmptySkillList = exports_external.array(nonEmpty).min(1);
 var recorded = (shape, whatToRecord) => exports_external.object(shape, {
   error: (issue2) => issue2.input === undefined ? `missing \u2014 record ${whatToRecord}` : undefined
 }).passthrough();
@@ -14640,7 +14640,7 @@ var gapAnalysisWriteSchema = recorded({
   findings: exports_external.array(exports_external.object({ finding: nonEmpty, answer: nonEmpty }).passthrough()).optional(),
   error: nonEmpty.optional()
 }, "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`").refine((analysis) => analysis.findings === undefined !== (analysis.error === undefined), {
-  message: "record either `findings` or the failed call's `error`, not both"
+  message: "record exactly one of `findings` or the failed call's `error`"
 });
 var planReviewWriteSchema = recorded({
   verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
