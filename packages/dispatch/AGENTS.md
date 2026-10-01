@@ -133,15 +133,17 @@ lifetime, requested/expiry timestamps, rules version, approver, then the agent's
 `CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
-a machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as you."
-verbatim and renders no buttons at all, pointing instead at the machine page, whose code-entry
-lookup is the only way to decide it. A decision is one plain POST: a plain record's approve and
-deny send no body, and a machine record's approve and deny both send `{code}`, the code the viewer
-typed for that lookup (the broker requires it on either decision). The page never says who
-decides: Dispatch's server names the signed-in viewer (below), and the broker refuses anyone but
-the record's approver with `403 NOT_APPROVER`, surfaced verbatim. Terminal-state records
-(`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their recorded decision and no
-buttons; every broker error surfaces verbatim through `ApiError`'s message, never reworded.
+a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
+you." verbatim; the record page renders no buttons at all for a machine record, pointing instead at
+the machine page, whose code-entry lookup is the only way to decide it. A decision is one plain
+POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
+send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
+decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
+and the broker refuses anyone but the record's approver with `403 NOT_APPROVER`, surfaced verbatim.
+Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
+recorded decision and no buttons, on the record page and on the machine page alike, whether the
+machine page looked the login up already decided or decided it itself; every broker error
+surfaces verbatim through `ApiError`'s message, never reworded.
 
 `GrantsSection.tsx` renders on `/settings`, under the same `FEATURE_OFF` gate: the live
 approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever

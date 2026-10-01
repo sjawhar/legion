@@ -40,8 +40,8 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
 /**
  * The broker's facts about a credential record, then the agent's stated reason as plain text
  * (no markdown pipeline - a `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then,
- * for a machine (`launcher_credential`) record, the sentence explaining what approving it grants.
- * Shared by `CredentialRecordPage` and `MachineLoginPage`, which both show this same layout
+ * for a pending machine (`launcher_credential`) record, the sentence explaining what approving it
+ * grants. Shared by `CredentialRecordPage` and `MachineLoginPage`, which both show this same layout
  * before their own (page-specific) decision/action controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
@@ -79,7 +79,7 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
           </blockquote>
         </div>
       )}
-      {record.kind === "launcher_credential" ? (
+      {record.kind === "launcher_credential" && record.state === "pending" ? (
         <p className={`text-sm font-medium ${textPrimaryOnCanvas}`}>
           Approving lets {record.identifiers[0]} start agent sessions as you.
         </p>

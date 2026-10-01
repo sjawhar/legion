@@ -2,7 +2,6 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
-import type { CredentialDecisionResponse } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   dangerText,
@@ -17,24 +16,27 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
 
-/** What the broker recorded for the looked-up login, in place of the buttons that decided it. */
+/** What the login's decision was, in place of the buttons that decide it: one just made on this
+ *  page, or the one a looked-up record already carries. */
 function MachineLoginDecision({
-  decision,
+  credentialId,
+  event,
   host,
 }: {
-  decision: CredentialDecisionResponse;
+  credentialId: string | null;
+  event: string;
   host: string;
 }): ReactNode {
   return (
     <div className="space-y-1 text-sm">
       <p className={`font-medium ${textPrimaryOnCanvas}`}>
-        {decision.state === "approved"
+        {event === "approved"
           ? `Approved. ${host} can start agent sessions as you.`
-          : `Denied. ${host} is not logged in.`}
+          : `${event.charAt(0).toUpperCase()}${event.slice(1)}. ${host} is not logged in.`}
       </p>
-      {decision.state === "approved" && decision.credential_id ? (
-        <p className={textMutedOnCanvas}>Credential {decision.credential_id}</p>
-      ) : null}
+      {credentialId === null ? null : (
+        <p className={textMutedOnCanvas}>Credential {credentialId}</p>
+      )}
     </div>
   );
 }
@@ -43,9 +45,9 @@ function MachineLoginDecision({
  * The machine-login code-entry page: `agent-secrets launcher login` prints an 8-character code
  * on the machine, and the operator types it here. Contract v9 ruling 13 - only this code-lookup
  * route selects a `launcher_credential` record, and deciding it sends the same code again, so
- * this is the one place a machine record gets Approve/Deny buttons. Once a decision succeeds the
- * page shows it in their place, as the record page does, so a second click never reaches the
- * broker's already-decided refusal.
+ * this is the one place a machine record gets Approve/Deny buttons. A looked-up login already
+ * decided shows its decision, and so does one decided here, in their place, as the record page
+ * does, so a second click never reaches the broker's already-decided refusal.
  */
 export function MachineLoginPage(): ReactNode {
   const [code, setCode] = useState("");
@@ -81,7 +83,17 @@ export function MachineLoginPage(): ReactNode {
       lookup.mutate(code);
     });
   };
-  const decision = approve.data ?? deny.data;
+  const madeHere = approve.data ?? deny.data;
+  // The looked-up record as the page now knows it: a decision made here leaves it decided.
+  const shown =
+    record === undefined || madeHere === undefined ? record : { ...record, state: madeHere.state };
+  const decided =
+    madeHere === undefined
+      ? record?.decided
+      : {
+          credential_id: madeHere.state === "approved" ? madeHere.credential_id : null,
+          event: madeHere.state,
+        };
 
   return (
     <section className="max-w-2xl space-y-6">
@@ -118,13 +130,17 @@ export function MachineLoginPage(): ReactNode {
           {apiErrorMessage(lookup.error, "Could not look up that code.")}
         </p>
       ) : null}
-      {record === undefined ? null : (
+      {shown === undefined ? null : (
         <div className="space-y-4">
-          <CredentialRecordFacts record={record} />
-          {record.state !== "pending" ? null : decision === undefined ? (
+          <CredentialRecordFacts record={shown} />
+          {decided === undefined || decided === null ? (
             <CredentialDecisionButtons approve={approve} deny={deny} submitGuard={submitGuard} />
           ) : (
-            <MachineLoginDecision decision={decision} host={record.identifiers[0] ?? ""} />
+            <MachineLoginDecision
+              credentialId={decided.credential_id}
+              event={decided.event}
+              host={shown.identifiers[0] ?? ""}
+            />
           )}
         </div>
       )}
