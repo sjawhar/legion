@@ -12,9 +12,13 @@
   each with its evidence. The planner revises for at most three rounds, then proceeds with the
   issues still standing; a check whose model call fails is recorded and never blocks the plan. The
   plan handoff records both results (`gapAnalysis`, `planReview`). Both agents ship in `agents/`
-  and are read-only: the gap analyst runs on the operator's `@oracle` role and the reviewer on
-  `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the reviewer's
-  pair.
+  with read-only file tools: the gap analyst runs on the operator's `@oracle` role and the reviewer
+  on `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the
+  reviewer's pair. Oh My Pi also gives each the Dispatch and Envoy tools; their prompts forbid
+  writing through them, and nothing enforces it (LEGION-428). Install the worker image built from
+  this release before the Go daemon build: that build's role prompts dispatch `plan-gap-analyst`
+  and `plan-reviewer`, so it refuses an older image, whose plugin ships neither, and an old daemon
+  build on the new image boots.
 - The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
   `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
   (`@deep`): given a goal, the workspace and files in scope, the skills to follow and the checks
