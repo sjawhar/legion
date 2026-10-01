@@ -181,8 +181,8 @@ test("the sidebar scrolls, so Sign out is reachable with a navigation taller tha
     const signOut = page.getByRole("button", { name: "Sign out" });
     await expect(signOut).toBeAttached();
     // The rail is its own scroll container: the footer comes into view by scrolling the rail,
-    // and the page itself never moves. It used to sit past the end of a long issue, reachable
-    // only by scrolling the document to its end - or, in the drawer, not at all.
+    // and the page itself never moves, so the footer is never left past the end of a long
+    // issue, reachable only by scrolling the document to its end - or, in the drawer, not at all.
     await signOut.scrollIntoViewIfNeeded();
     await expect(signOut).toBeInViewport();
     expect(await page.evaluate(() => window.scrollY)).toBe(0);

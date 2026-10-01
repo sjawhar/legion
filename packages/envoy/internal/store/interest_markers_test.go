@@ -159,8 +159,7 @@ func openRegistry(t *testing.T, conn *natsgo.Conn) *Registry {
 }
 
 // A restart streams every delete marker in the interest bucket before its cache is ready, and
-// nothing ever removed one: production's bucket holds 41,873 subjects for 40 live keys, and the
-// on-prem listeners spend 17-25 s of every restart replaying the 41,833 markers (LEGION-374). One
+// nothing else removes one, so they pile up behind the few live keys (LEGION-374). One
 // collection pass removes them, and every live key keeps its value and its revision: the floor is
 // the lowest revision the pass's own scan of the stream saw as a PUT, so nothing below it belongs
 // to a live key (the bucket keeps one message per subject).
@@ -452,9 +451,9 @@ func TestAPassWhoseStreamWasReplacedFromTheSameFirstSequencePurgesNothing(t *tes
 }
 
 // A pass that cannot read the bucket's stream says so: a listener that has stopped collecting must
-// not look like one with nothing to collect, which is the state LEGION-374 exists because nobody
-// could see. A read before the purge refuses the pass and names itself; the read after the purge
-// only counts what it removed, so the purge is logged as done with its count unknown.
+// not look like one with nothing to collect. A read before the purge refuses the pass and names
+// itself; the read after the purge only counts what it removed, so the purge is logged as done
+// with its count unknown.
 func TestAPassThatCannotReadTheStreamSaysWhichReadFailed(t *testing.T) {
 	t.Run("the first read", func(t *testing.T) {
 		conn, cleanup := connectNATS(t)
@@ -631,8 +630,8 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 // cannot settle what goes on the wire; the server's trace can, and a grant that denies exactly that
 // subject shows it is the one the purge needs. The negative control is also the refusal path the
 // deployed listener must survive: a NATS user without the capability leaves every marker where it
-// was, logs one WARN however many passes run, and keeps the cache healthy (LEGION-374's permission
-// census; the on-prem and production listeners connect under agent-c's `envoyNatsAuthorization`).
+// was, logs one WARN however many passes run, and keeps the cache healthy (LEGION-374); the
+// deployed listeners connect under agent-c's `envoyNatsAuthorization`.
 func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 	// Each subtest starts a server of its own (startGrantedServer), whose grant names the purge
 	// subject of the interest bucket.

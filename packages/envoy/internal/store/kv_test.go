@@ -173,11 +173,9 @@ func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
 
 // --- Unit Tests for mergeForUpsert (pure logic, no NATS) ---
 //
-// Regression coverage for the silent-fallback bug that caused Atlas's pr.11416.>
-// subscription to be silently truncated to [agent-self] across 235 dropped events:
-// when the interest bucket's Get returned a transient error, the original Upsert silently
-// treated it the same as ErrKeyNotFound and clobbered durable state with whatever
-// the heartbeat sent (only the agent topic).
+// Regression coverage for a silent fallback: an Upsert that treats a transient error from the
+// interest bucket's Get as ErrKeyNotFound clobbers durable state with whatever the heartbeat sent
+// (only the agent topic), truncating the session's subscriptions to its own topic.
 
 func TestMergeForUpsert_SuccessfulGetMergesTopics(t *testing.T) {
 	cur := Interest{
@@ -1199,11 +1197,9 @@ func TestPing_ClosedConnReturnsError(t *testing.T) {
 
 // --- Cache readiness tests ---
 //
-// Follow-up to PR #610. The Upsert silent-fallback fix doesn't address the
-// initial-cache-warmup race: after Open() returns, watch() populates the cache
+// The initial-cache-warmup race: after Open() returns, watch() populates the cache
 // asynchronously, and events arriving in that window get "no matching
-// interests" even when the durable KV entry has subscribers. This was ~36/235
-// of Atlas's observed drops (the 07:39:38 burst right at listener restart).
+// interests" even when the durable KV entry has subscribers.
 
 func TestWaitForCacheReady_ReturnsAfterInitialScan(t *testing.T) {
 	conn, cleanup := connectNATS(t)
@@ -2421,30 +2417,28 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 // by load ending the run early — reds this test instead of passing it. That catches a PERMANENT
 // hold and nothing subtler: with budget 0 the consumer-create reply is held too, so the watch
 // fails on its own request deadline, the link still comes back, the Flush still answers and this
-// test passes on every build ("came back: context deadline exceeded", measured here; the review
-// measured the same at 88f9fbaa and 3fa4774d). Held against three builds of this package:
+// test passes on every build ("came back: context deadline exceeded"). Two other ways of reading
+// the bucket, and this package's own, against this test:
 //
-//	88f9fbaa  Keys() plus a Get per key             FAIL  "restoring 232 of 400 claims", err=nil
-//	3fa4774d  one watch, closed-channel check only  FAIL  "restoring 232 of 400 claims", err=nil
-//	this build                                      PASS  "the bucket's watch stopped after 232
-//	                                                      keys: nats: key watcher timed out
-//	                                                      waiting for initial keys"
+//	Keys() plus a Get per key             FAIL  "restoring 232 of 400 claims", err=nil
+//	one watch, closed-channel check only  FAIL  "restoring 232 of 400 claims", err=nil
+//	this build                            PASS  "the bucket's watch stopped after 232
+//	                                            keys: nats: key watcher timed out
+//	                                            waiting for initial keys"
 //
-// How far each partial scan got varies with the link; that it completed and returned no error is
+// How far each partial scan gets varies with the link; that it completes and returns no error is
 // the constant. A one-hour hold, the weakening, reds here on the Flush: "the link never came back
 // after the hold ... nats: timeout".
 //
-// 88f9fbaa is main, so the defect predates the one-pass read: Keys() is itself a watch carrying
-// the same timer. With a stall that never recovers all three would pass, main because its per-key
-// Gets then time out on a dead link — a second route to a failed start that hides the first — and
-// that is the run the Flush assertion refuses.
+// Keys() is itself a watch carrying the same timer, so a Get per key does not escape it. With a
+// stall that never recovers all three would pass, the Get per key because those Gets then time out
+// on a dead link — a second route to a failed start that hides the first — and that is the run the
+// Flush assertion refuses.
 //
-// Those FAIL rows can flip to PASS under load, and do: this test's review saw 2 false passes at
-// 88f9fbaa in 45 iterations, both "context deadline exceeded", and 3fa4774d passed 1 of 3 runs
-// here the same way. A run whose requests time out before the release never reaches the shape
-// being measured. It has never gone red on correct code, so this is a demonstration, and it is
-// not the regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
-// which is deterministic, cannot pass vacuously, and failed on both of those builds in every run.
+// Those FAIL rows can flip to PASS under load: a run whose requests time out before the release
+// never reaches the shape being measured. So this test is a demonstration, and it is not the
+// regression lock. The lock is TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot,
+// which is deterministic, cannot pass vacuously, and fails on either of those two readings.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	direct, cleanup := connectNATS(t)
 	defer cleanup()

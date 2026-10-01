@@ -382,8 +382,9 @@ test("status bands stay expandable and the project key sits beside its name", as
 });
 
 // A row's key and title are one reference. Below 1280 px every link is an inline-flex box, which
-// made the key and the title two flex columns: the key broke mid-key (`CORE-` over `1`) and a
-// long title wrapped in whatever the key and the timestamp left, about 130 px on a phone.
+// would make the key and the title two flex columns: the key would break mid-key (`CORE-` over
+// `1`) and a long title would wrap in whatever the key and the timestamp left, about 130 px on a
+// phone.
 test("a list row keeps its key whole and gives the title the row's width", async ({
   browser,
 }, testInfo) => {

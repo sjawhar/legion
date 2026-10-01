@@ -17,9 +17,8 @@ import (
 //
 // Every delete path leaves one: the reaper for each dead session, an unsubscribe-all, the admin
 // delete. The bucket has no MaxAge and keeps one message per subject, so a marker stays until
-// something removes it, and every listener restart streams all of them before its cache is ready --
-// 41,833 markers behind 40 live keys in production, 17-25 s of a restart on the on-prem machines
-// with no deliveries (LEGION-374).
+// something removes it, and every listener restart streams all of them before its cache is ready,
+// delivering nothing meanwhile (LEGION-374).
 //
 // The floor is the lowest revision the pass's own MetaOnly scan of the bucket delivered as a PUT,
 // and the purge removes every message below it. That floor is safe because it comes from the stream

@@ -18,7 +18,7 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
 
-// This protects the testcontainers boundary that failed on #1243: a server can accept NATS's
+// This protects the testcontainers boundary: a server can accept NATS's
 // protocol handshake while JetStream is still starting, so a KV test that returns at the handshake
 // races CreateKeyValue. The helper must retry the JetStream operation itself.
 func TestWaitForJetStreamRetriesTheOperationUntilItIsReady(t *testing.T) {
@@ -251,8 +251,7 @@ func TestTheNkeyReadinessWaitRefusesAServerThatAdmitsAnyone(t *testing.T) {
 }
 
 // A restart keeps its server's URL even when something else takes the URL's port while the server is
-// stopped, as another test's container or a free-port pick can on a busy host: #1387's CI lost the
-// port between a stop and a start ("address already in use" on restart 3).
+// stopped, as another test's container or a free-port pick can on a busy host.
 func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
 	ctr, uri := StartRestartable(t)
 	Stop(t, ctr)

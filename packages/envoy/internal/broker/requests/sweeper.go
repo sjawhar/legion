@@ -9,9 +9,9 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/machine"
 )
 
-// Sweeper is the one thing that moves pending state now that every decision comes from a
+// Sweeper is the one thing that moves pending state, since every decision comes from a
 // WebAuthn assertion rather than a Dispatch ask (AGENTC-393 v9): every tick it expires overdue
-// pending agent_secret requests (waking each one's owner, the wake seam poller.go used to own),
+// pending agent_secret requests (waking each one's owner),
 // overdue pending machine logins, and abandoned WebAuthn registration/endorsement ceremonies —
 // all read fresh from Postgres, never from memory, so a restart resumes exactly where the rows
 // are.

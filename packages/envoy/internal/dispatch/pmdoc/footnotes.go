@@ -180,7 +180,7 @@ func definitionsInPlace(root ast.Node, context parser.Context) {
 
 // Open reads the definition's opener without the padding a tab split by the containers' prefix
 // leaves ahead of it: goldmark's parser measures where the definition's text starts from the line
-// without that padding, so it took the label's first characters as the text (`]: def`).
+// without that padding, so it would take the label's first characters as the text (`]: def`).
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	_, segment := reader.PeekLine()
 	offset := pc.BlockOffset()

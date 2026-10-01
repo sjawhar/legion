@@ -323,10 +323,10 @@ func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 	}
 }
 
-// TestRevokeRefusesWrongOperator is the regression for the review's Critical finding: Revoke had
-// no ownership check at all, so any live launcher credential could revoke any enrollment by
-// guessing or knowing its id. An operator A credential must not be able to revoke operator B's
-// enrollment, and the enrollment must remain untouched (still live) afterward.
+// TestRevokeRefusesWrongOperator is the regression for the review's Critical finding: without an
+// ownership check in Revoke, any live launcher credential could revoke any enrollment by guessing
+// or knowing its id. An operator A credential must not be able to revoke operator B's enrollment,
+// and the enrollment must remain untouched (still live) afterward.
 func TestRevokeRefusesWrongOperator(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()

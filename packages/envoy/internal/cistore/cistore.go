@@ -223,7 +223,7 @@ func (state *State) UnmarshalJSON(data []byte) error {
 }
 
 // retiredHeadKind marks the head record an earlier listener kept per pull request under its own
-// key, to settle only a pull request's head. Settlements no longer depend on the head, so nothing
+// key, to settle only a pull request's head. Settlements do not depend on the head, so nothing
 // writes or reads one; a record left in the bucket waits out its TTL uncached.
 const retiredHeadKind = "head"
 

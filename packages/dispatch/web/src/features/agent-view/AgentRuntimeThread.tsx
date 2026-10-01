@@ -15,10 +15,10 @@ import { dispatchMetadata } from "./dispatch-marks";
  * Everything that reads the conversation, in one component so a boundary can be put around it.
  *
  * assistant-ui converts every message while the runtime is built, so a message it refuses throws
- * from `useExternalStoreRuntime` — in the render of whichever component calls it. While that was
- * the page, no boundary the page rendered could catch it and a bad frame took the header and the
- * delivery controls with the thread. Here, a boundary the page puts around this component does
- * catch it, and the page's own render never touches a frame.
+ * from `useExternalStoreRuntime` — in the render of whichever component calls it. Called from the
+ * page, it would throw where no boundary the page renders can catch it, and a bad frame would take
+ * the header and the delivery controls with the thread. Here, a boundary the page puts around this
+ * component does catch it, and the page's own render never touches a frame.
  */
 export function AgentRuntimeThread({
   conversation,

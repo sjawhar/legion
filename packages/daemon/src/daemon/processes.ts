@@ -342,6 +342,26 @@ export function addressingFragment(
   );
 }
 
+/** The packaged role prompt parts a phase worker or sub-architect is launched with, in order.
+ * The merger has no core: its job is the tail end of the merge queue's own skill. A sub-architect
+ * keeps its single file. Every other phase role composes the shared opening (core/common.md), its
+ * core, headless, and its residue. */
+export function workerPromptPaths(
+  rolesDir: string,
+  role: LegionRole
+): readonly [string, ...string[]] {
+  const headless = path.join(rolesDir, "mechanics", "headless.md");
+  const residue = path.join(rolesDir, `${role}.md`);
+  if (role === "merger") return [headless, residue];
+  if (role === "architect") return [residue];
+  return [
+    path.join(rolesDir, "core", "common.md"),
+    path.join(rolesDir, "core", `${role}.md`),
+    headless,
+    residue,
+  ];
+}
+
 /** The one sentence a root architect's system prompt carries after the addressing sentence:
  * whether this project arms the design gate (`config.gates.design`). The daemon's reply to
  * `/process/started` carries the same value, but the extension never shows it to the model, so
@@ -4527,23 +4547,7 @@ export class ProcessManager {
     const releaseSecret = this.holdProcessSecret(token);
     try {
       const identity = await this.workerIdentityEnv(issue, role);
-      const rolesDir = this.deps.rolePromptsDir;
-      const headless = path.join(rolesDir, "mechanics", "headless.md");
-      const residue = path.join(rolesDir, `${role}.md`);
-      // The merger has no core: its job is the tail end of the merge queue's own skill.
-      // A sub-architect keeps its single file. Every other phase role composes the shared
-      // opening (core/common.md) + its core + headless + residue.
-      const promptPaths: readonly [string, ...string[]] =
-        role === "merger"
-          ? [headless, residue]
-          : role === "architect"
-            ? [residue]
-            : [
-                path.join(rolesDir, "core", "common.md"),
-                path.join(rolesDir, "core", `${role}.md`),
-                headless,
-                residue,
-              ];
+      const promptPaths = workerPromptPaths(this.deps.rolePromptsDir, role);
       const recordedSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
       const workspaceLost = pendingWorkerWorkspaceRecovery(
         this.deps.state.trees[treeKey]?.workspaceLost,

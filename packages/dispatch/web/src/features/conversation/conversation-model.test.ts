@@ -574,8 +574,8 @@ test("Conversation owns anchored and unanchored comment threads with delivery st
 });
 
 test("comment events recorded before mentions and deliveries existed still build a thread", () => {
-  // The payload shape of a comment event written before 2026-09-18 (#1188), as retained on
-  // production (OPS-56, seq 7): no `mentions`, no `deliveries`.
+  // The payload shape of a comment event written before 2026-09-18 (#1188): no `mentions`, no
+  // `deliveries`.
   const historical = (id: string, overrides: object = {}) => ({
     anchor: null,
     artifact_id: null,

@@ -283,8 +283,8 @@ func (s *server) storeArtifact(
 	// has not locked it: the issue branch above locks its issue, but this one only read its
 	// project. Every writer that takes the owner row at all takes it before the room lock -
 	// the durable writers never take it - and the event this upload appends takes it after the
-	// document write has taken the room. Without this line the upload ran room -> owner against
-	// a settlement's owner -> room, and Postgres broke the cycle with a 500.
+	// document write has taken the room. Without this line the upload would run room -> owner
+	// against a settlement's owner -> room, and Postgres would break the cycle with a 500.
 	if target.IssueKey == nil && !created {
 		if err := s.requireOpenOwner(r.Context(), tx, ownerForArtifact(artifact)); err != nil {
 			s.writeHandlerError(w, err)
@@ -727,8 +727,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var written *docs.VersionResult
 	var published []model.Event
-	// A batch that left the document as it was names no version, however deliberate its summary:
-	// AGENTC-193 grew seven versions, five of them byte-identical, from edits that changed nothing.
+	// A batch that left the document as it was names no version, however deliberate its summary,
+	// so edits that change nothing never pile up byte-identical versions.
 	if edit.Changed {
 		summary := strings.TrimSpace(input.Summary)
 		if summary != "" {
