@@ -2991,6 +2991,38 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
   }, 60_000);
 
+  test("excludes .codegraph/ from every workspace of the clone, so a codegraph init's own tracked .gitignore never reaches jj status", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, jj, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const excludePath = path.join(repoCloneDir, ".git", "info", "exclude");
+    const before = await readFile(excludePath, "utf8");
+    expect(before.split("\n"), name).toContain(".codegraph/");
+
+    // A second provisioning of a different issue on the same clone writes the line again only
+    // if it is missing; with it already present, the file does not grow.
+    await provisionIssueWorkspace("WIDGETS-91", deps);
+    const after = await readFile(excludePath, "utf8");
+    expect(after, name).toBe(before);
+
+    // No global git or jj configuration anywhere a real `jj status` below could read one: the
+    // bug this guards against only shows on a host with no global ignore for `.codegraph/`.
+    const isolatedHome = await temporaryDirectory();
+    for (const dir of [
+      workspaceDir,
+      path.join(stateDir, "workspaces", "acme", "widgets", "widgets-91"),
+    ]) {
+      await mkdir(path.join(dir, ".codegraph"), { recursive: true });
+      await writeFile(path.join(dir, ".codegraph", ".gitignore"), "*\n!.gitignore\n", "utf8");
+      const status = await jj(["status"], {
+        cwd: dir,
+        env: { HOME: isolatedHome, XDG_CONFIG_HOME: isolatedHome },
+      });
+      expect(status.stdout, `${name}: ${dir}`).not.toContain("codegraph");
+    }
+  }, 60_000);
+
   test("finds its own git worktree through a symlinked repos directory: locks it, re-adds the workspace after its directory went, and removal deletes it", async () => {
     // git writes a relative worktree pointer between real paths.
     const [{ name, command }] = JJ_BINARIES;

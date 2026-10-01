@@ -116,8 +116,7 @@ func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, usage string, s
 // run where the provisioning token is pointed at: this is the process that runs git and jj against what every
 // agent of the tree can write. Then it installs the gh shim, creates the directories the main
 // container mounts, holds a resume to the same agent, and provisions from the feed under the
-// repository lock. It builds no CodeGraph index: this container runs on the pod's registration
-// path, and a first index of a large repository outlasts the registration deadline.
+// repository lock, which it holds until it returns.
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
