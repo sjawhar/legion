@@ -1465,21 +1465,21 @@ enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a p
 service-account token). A live enrollment is unique per launcher credential, runtime id and slot:
 `POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400
 INVALID_SLOT`, and a slot on a box or host is refused the same way) naming one of several
-independent identities in one pod — the Legion daemon derives `<role>-g<generation>` from its own
-claim and never takes one from the pod — so each role of a pod holds its own key, lease, requests
-and grants, while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the
-runtime's one enrollment, every box's and host's. The same key in the same slot gets its live
-enrollment back (200), a different key in a live slot is `409 ALREADY_ENROLLED`, and the rules
-never see the slot: every slot of a pod matches on its verified service account alone. Migration
-0007 is forward-only: an older broker binary's conflict lookup reads one live row per runtime id,
-unsafe once a pod holds two slots, so the binary is never rolled back past it once a slotted
-enrollment exists. `internal/broker/rules` evaluates `agent-secret-rules.yaml` policy per
-request (the AGENTC-393 overview document, contract v9, is its contract; a file that still has an
-`approvers:` section is refused, naming the removal); `internal/broker/proof` authenticates a
-session's or a launcher's signed request against its live enrollment or credential;
-`internal/broker/machine` decides typed-code machine logins and mints the launcher credentials
-they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets Manager, or a
-fake local file for development.
+independent identities in one pod. The launcher whose proof authenticates the enrollment chooses
+the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`). So each slot of a pod
+holds its own key, lease, requests and grants, while a pod's `runtime_id` stays the pod UID its
+token proves. Omitted or `""` is the runtime's one enrollment, every box's and host's. The same key
+in the same slot gets its live enrollment back (200), a different key in a live slot is `409
+ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
+service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
+reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
+back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
+`agent-secret-rules.yaml` policy per request (the AGENTC-393 overview document is its contract; a
+file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
+authenticates a session's or a launcher's signed request against its live enrollment or
+credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
+credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
+Manager, or a fake local file for development.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1588,7 +1588,7 @@ local-dev-only path. The broker takes no flags, and refuses any flag it is given
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
-contract for every row is the AGENTC-393 overview document (contract v9). Each row's handler is
+contract for every row is the AGENTC-393 overview document. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer

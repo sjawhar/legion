@@ -8,10 +8,11 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// createEnrollmentBody is POST /v1/enrollments's exact contract v9 shape: the v8 "approver" field
-// is gone — the rules pick a request's approver at request time, never at enrollment. slot is
-// optional and pod-only: omitted or "" is the runtime's one enrollment, and a slot names one of
-// several independent enrollments of the same pod (enroll.Enrollment.Slot).
+// createEnrollmentBody is POST /v1/enrollments's body (the AGENTC-393 overview document's
+// enrollment route). It names no approver: the rules pick a request's approver at request time,
+// never at enrollment. slot is optional and pod-only: omitted or "" is the runtime's one
+// enrollment, and a slot names one of several independent enrollments of the same pod
+// (enroll.Enrollment.Slot), chosen by the launcher whose proof authenticates the call.
 type createEnrollmentBody struct {
 	Kind       string  `json:"kind"`
 	RuntimeID  string  `json:"runtime_id"`

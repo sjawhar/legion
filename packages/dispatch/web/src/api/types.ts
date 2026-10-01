@@ -124,9 +124,9 @@ export type {
   Version,
 } from "@legion/contracts";
 
-// Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (contract v9's "UI
-// routes" section). These have no reason to live in the shared @legion/contracts package,
-// which is for Envoy event contracts.
+// Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (the "UI routes" section
+// of the AGENTC-393 overview document). These have no reason to live in the shared
+// @legion/contracts package, which is for Envoy event contracts.
 export type CredentialRequestKind = "agent_secret" | "launcher_credential";
 export type CredentialRequestState =
   | "pending"
@@ -150,8 +150,8 @@ export interface CredentialEnrollment {
   kind: string;
   runtime_id: string;
   operator: string | null;
-  /** A pod enrollment's slot: one of several independent identities in one pod, which Legion
-   *  names `<role>-g<generation>`. Null for every enrollment without one. */
+  /** A pod enrollment's slot: one of several independent identities in one pod, chosen by the
+   *  launcher that enrolled it. Null for every enrollment without one. */
   slot: string | null;
 }
 export interface CredentialDecisionEvent {
