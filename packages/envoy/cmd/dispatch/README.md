@@ -225,8 +225,10 @@ The runner records a migration by its version alone, so before it touches the da
 the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every
 file concerned, when two migrations share a version (it would apply the first and skip the rest as
 already applied; keep the number on the file that merged to `main` first and renumber the rest),
-when a file is named other than `<version>_<name>.up.sql` or `<version>_<name>.down.sql` (a
-`.down.sql` is a rollback script an operator runs by hand, and needs its `.up.sql`), when a version
+when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.down.sql` or
+`<version>_<name>.census.sql` (a `.down.sql` is a rollback script an operator runs by hand, and a
+`.census.sql` is the migration's census, "Pre-deploy census" below; each needs its `.up.sql`),
+when a census is not one `select` or calls a function it may not (below), when a version
 is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
 embedded with `all:`, so a name beginning with `_` or `.` is refused like any other, and an editor's
 swap file left in the directory fails a local build's tests until it is gone. Versions are applied
@@ -247,6 +249,62 @@ Migration `0009_project_artifacts` deletes malformed derived artifact references
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
 it backfills each artifact's project and generated `ref_key`.
+
+### Pre-deploy census
+
+Before a deployment rolls a new image, it runs `envoy-dispatch census` with the service's
+`DATABASE_URL`, as a one-off task under the service's own database credentials:
+
+```bash
+DATABASE_URL=postgres://... envoy-dispatch census
+```
+
+The census is one `repeatable read, read only` transaction over the migrations this binary carries
+that the database has not applied: every migration above the highest version in
+`schema_migrations` (a database without that table is at version 0, so everything is pending). For
+each it prints the tables the migration's statements touch (`pgmigrate.TouchedTables`: the targets
+of `alter table`, `create index … on`, `drop table`, `truncate`, `create trigger … on`, `update`,
+`delete from`, `insert into`, `lock table`, and a foreign key's `references`; a dropped or altered
+index is resolved to its table), with each table's row count and total size, and the sessions
+holding locks on them; the transactions open longer than a minute anywhere in the database; and the
+count the migration's own census answers. It refuses:
+
+- a migration whose census answers non-zero, naming the migration, the count and the census file;
+- a touched table above 1 GiB (`pgmigrate.CensusTableLimit`, table, indexes and TOAST): a
+  migration that locks a table that size needs another shape (`CONCURRENTLY`, batches);
+- a session holding a lock on a touched table whose transaction has been open at least a minute
+  (`pgmigrate.CensusLongTransaction`): the migration would give up on that lock during the rollout;
+- a touched table the census cannot read within five seconds (`pgmigrate.LockTimeout`), because
+  another session holds a lock every read waits behind, naming the holders;
+- a census that fails or answers anything but one integer in one row.
+
+A migration declares its census in `<version>_<name>.census.sql` beside it: one `select` (or
+`with … select`) answering one integer, how many existing rows the migration would refuse (a
+validating constraint's violators) or rewrite. Every migration from `censusRequiredFrom`
+(`internal/dispatch/store/store_test.go`) on declares one; one that cannot refuse or rewrite a row
+says so with `select 0` and a comment (`0054_message_delivery_acceptance.census.sql`;
+`0053_asks_approval_kind_check.census.sql`, the check's own predicate negated, is the other
+shape). A census that names a table or column the database does not have yet refuses nothing when
+an earlier pending migration exists, since that migration may create it; for the first pending
+migration it was written against exactly this schema, so the name is a defect and refuses. The
+runner never runs a census. Exit 0 passes, 1 refuses (every reason is in the report), 2 the census
+could not be taken (no `DATABASE_URL`, no connection, a migration set `pgmigrate.Load` refuses).
+
+**A census is production-executed code, reviewed like the migration beside it.** It runs as the
+service's own database role. The read-only transaction stops every write, and the census's
+statement is sent through the extended protocol whatever the connection string asks for, so it
+cannot carry a second statement (a `commit` of its own, then a write). Read-only does not stop
+`pg_terminate_backend` (which, as that role, ends the service's own sessions), `pg_cancel_backend`,
+advisory locks or `pg_sleep`: `pgmigrate.Load` refuses a census naming any of them, and review is
+the control past that, since any non-zero integer a census answers is printed.
+
+**What the report prints:** counts, sizes, versions, file names and session metadata (pid, role,
+application name, state, transaction age; never query text). For a census that fails, its file
+name and the SQLSTATE; Postgres's own message only for class 42 (syntax and access-rule errors,
+which quote the census's own text and identifiers, the two "does not exist" codes among them) —
+never for a data exception, whose message quotes the row value that failed to cast. The census
+writes nothing. An argument `envoy-dispatch` does not know is refused with exit 2, never served, so
+an image that predates a subcommand cannot boot and migrate when a deployment asks it for one.
 
 ## Reference graph
 

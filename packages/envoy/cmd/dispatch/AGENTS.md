@@ -14,6 +14,11 @@ the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
 migrations"), then starts HTTP serving. The Postgres store contains users,
 native issues, artifacts, document updates, and the event outbox.
+`envoy-dispatch census` (`cmd/dispatch/census.go`, `store.Census` over
+`pgmigrate.Census`) is a deployment's pre-deploy census of the migrations the
+database has not applied, read-only, run before the service rolls (README
+"Pre-deploy census"); `runSubcommand` refuses an argument it does not know with
+exit 2 instead of serving, since serving migrates.
 
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through
