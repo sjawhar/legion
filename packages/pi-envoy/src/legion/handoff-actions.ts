@@ -70,7 +70,7 @@ const ROLE_HANDOFF_PHASE: Readonly<Record<string, string>> = {
   reviewer: "review",
 };
 
-/** The bash tool's default timeout, which bounded these commands when they ran through bash. */
+/** The bash tool's default timeout, so an action is bounded as the same command run in bash is. */
 const COMMAND_TIMEOUT_MS = 300_000;
 
 function required(parameters: Record<string, unknown>, operation: string, name: string): string {

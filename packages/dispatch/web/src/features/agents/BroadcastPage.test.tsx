@@ -113,9 +113,9 @@ test("a recipient whose send is still outstanding offers no retry at all", async
   }
 });
 
-// The other half: a process that died mid-delivery leaves a pending attempt nobody holds, and
-// that recipient could previously only be moved by a delivery in a DIFFERENT mode - a second
-// frame wherever the first landed. Its own mode is the only one offered, and it is offered.
+// The other half: a process that died mid-delivery leaves a pending attempt nobody holds. Moving
+// that recipient only by a delivery in a DIFFERENT mode would put a second frame wherever the
+// first landed, so its own mode is the only one offered, and it is offered.
 test("a pending attempt nobody is carrying offers a same-mode retry and no mode change", async () => {
   const stranded = attempt({ created_at: new Date(Date.now() - 5 * 60_000).toISOString() });
   const page = renderBroadcast(broadcast([stranded]));

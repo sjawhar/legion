@@ -55,6 +55,9 @@ type OperatorClaim struct {
 	UncertainStreak int              `json:"uncertainStreak"`
 	// Pending is the task the claim holds, until the turn it started ends.
 	Pending *DeliveryView `json:"pending,omitempty"`
+	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
+	// holdSuspension); absent when none is.
+	SuspensionHeld bool `json:"suspensionHeld,omitempty"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -116,6 +119,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 			PromptRetires:  c.Budgets.PromptRetires,
 		},
 		UncertainStreak: c.UncertainStreak,
+		SuspensionHeld:  c.SuspensionHeld,
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{
@@ -203,7 +207,9 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 }
 
 // claimRequest is one operator request on an existing claim: event builds the request the claim's
-// machine is posted, or answers the caller itself and reports false.
+// machine is posted, or answers the caller itself and reports false. A suspension the machine holds
+// for the agent's turn (supervise.ErrSuspendHeld) is not a refusal: it answers 202 with the claim as
+// it is, still working.
 func (s *server) claimRequest(request string, event func(http.ResponseWriter, *http.Request, supervise.Claim) (supervise.Event, bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := claim.Token(r.PathValue("token"))
@@ -216,11 +222,14 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 		if !ok {
 			return
 		}
-		if err := m.Handle(context.WithoutCancel(r.Context()), ev); err != nil {
+		status := http.StatusOK
+		if err := m.Handle(context.WithoutCancel(r.Context()), ev); errors.Is(err, supervise.ErrSuspendHeld) {
+			status = http.StatusAccepted
+		} else if err != nil {
 			s.operatorFailure(w, request, token, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, operatorView(m.Claim()))
+		writeJSON(w, status, operatorView(m.Claim()))
 	}
 }
 
@@ -307,7 +316,9 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, operatorView(root.Claim()))
 }
 
-// list answers every claim the daemon supervises, in token order.
+// list answers every claim the daemon supervises, in token order: as its machine holds it now, or,
+// for a claim no machine supervises, as the store holds it. The machine's is what knows whether a
+// suspension is held.
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
@@ -318,6 +329,9 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(claims, func(i, j int) bool { return claims[i].Token < claims[j].Token })
 	views := make([]OperatorClaim, len(claims))
 	for i, c := range claims {
+		if m, ok := s.supervisor.Machine(c.Token); ok {
+			c = m.Claim()
+		}
 		views[i] = operatorView(c)
 	}
 	writeJSON(w, http.StatusOK, OperatorClaims{Claims: views})

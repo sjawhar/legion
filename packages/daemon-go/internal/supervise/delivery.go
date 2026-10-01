@@ -128,7 +128,8 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 // again only after the agent says it is not already in a turn; if it is, that turn is taken as the
 // delivery's.
 func (m *Machine) sendPending(ctx context.Context) error {
-	if state := m.claim.State; state != StateReady && state != StateIdle {
+	// A claim holding a suspension is handed nothing (holdSuspension).
+	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
 		return nil
 	}
 	p := m.claim.Pending

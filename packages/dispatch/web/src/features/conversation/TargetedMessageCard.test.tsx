@@ -125,9 +125,9 @@ test("an ordinary sent attempt still reads as sent", () => {
   }
 });
 
-// LEGION-271's own defect, displaced by three days. The stream recognises a repeated delivery
-// for exactly its duplicate window; past that a same-mode retry publishes a second frame. The
-// card must stop promising otherwise, and must stop offering the button the promise describes.
+// LEGION-271. The stream recognises a repeated delivery for exactly its duplicate window; past
+// that a same-mode retry publishes a second frame. The card promises a safe retry, and offers the
+// button the promise describes, only inside that window.
 test("a failed attempt inside the duplicate window promises a safe retry and offers it", () => {
   const view = render(card({ attempts: [attempt({ error: "no live session s1" })] }));
   try {

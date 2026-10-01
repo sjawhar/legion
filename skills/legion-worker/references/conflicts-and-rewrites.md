@@ -8,8 +8,7 @@ Every path it cites is in sjawhar/legion.
 ## Reintegrating the base
 
 - **Reintegrate the base only on a real conflict, except after a base retarget — and with a
-  merge, never `jj rebase`.** Sami, 2026-09-11, verbatim:
-  "Please don't do unnecessary rebases (i.e. unless there are merge conflicts). The CI queue is too long and slow."
+  merge, never `jj rebase`.**
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
   because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
   pick up `main` or refresh CI (a single failed CI job is re-run on its own: *A red CI job* in
@@ -24,8 +23,7 @@ Every path it cites is in sjawhar/legion.
   jj always rebases every descendant of any commit it rewrites — a revset naming the root of your
   own chain and rewriting it in place also rewrites whatever another tree has stacked on that root,
   whichever selector chose it (`-s`, `-b`, and `-r` all rewrite descendants; `-r` only re-parents
-  them to fill the hole, which is worse). This is what happened in LEGION-118: one issue's own
-  conflict step moved a second issue's twelve commits and its bookmark onto a conflicted copy.
+  them to fill the hole, which is worse).
   Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
   bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
   built on your prior commits, in this tree or another, ever moves:
@@ -91,7 +89,8 @@ and the new head; the merger never computes a fingerprint — it uses the `--sum
 ## Rewriting pushed commits
 
 **Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
-rewrite of a commit you already pushed — is the LEGION-118 hazard in a second shape: jj rebases
+rewrite of a commit you already pushed — is the hazard *Reintegrating the base* describes, in a
+second shape: jj rebases
 every descendant of any commit it rewrites, and in the one shared repository a descendant can be
 another tree's branch stacked on your pushed commit, which then moves, with its bookmark, onto a
 rewritten copy. So look for a descendant outside your own chain first, and record the pushed tip
@@ -115,9 +114,7 @@ cd -- "$LEGION_WORKSPACE" && \
 `descendants(<commit>) ~ ::@` is everything built on the commit you are about to rewrite that is
 not on your own chain. Non-empty means the rewrite would move work that is not yours: do not
 rewrite it. Put the change in a new commit on top instead, and report the listed commits to the
-architect. On a two-workspace rig of this shape a `jj squash --into` a pushed commit reported
-`Rebased 13 descendant commits` and moved a second issue's twelve commits and its bookmark; the
-check above listed those thirteen and refused before anything moved.
+architect.
 
 Then rewrite, resolve, and push with the one push procedure (*Every role pushes its own commits*
 in `skill://legion-worker`). It lets the remote branch sit on the

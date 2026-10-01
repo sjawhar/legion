@@ -307,9 +307,9 @@ export class AgentStreamPublisher {
    * relay arms the session before it asks (`Watch` then `Replay` on one connection, in that
    * order), so a genuine viewer is never refused.
    *
-   * The budget is UTF-8 bytes, which is what NATS measures. Counting UTF-16 code units let a
-   * history of box-drawing tool output or CJK text build a reply three times its measured size
-   * and over the server's 1 MiB `max_payload`, which the publish then threw on.
+   * The budget is UTF-8 bytes, which is what NATS measures. Counting UTF-16 code units would let
+   * a history of box-drawing tool output or CJK text build a reply three times its measured size,
+   * over the server's 1 MiB `max_payload`, and the publish would throw.
    */
   replay(sessionID: string): AgentStreamReplay {
     if (!this.watched) return { frames: [], session_id: sessionID, v: AGENT_STREAM_PROTOCOL };

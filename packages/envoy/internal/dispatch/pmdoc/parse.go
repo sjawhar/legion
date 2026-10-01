@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"html"
@@ -95,7 +96,13 @@ func ParseRendering(markdown string) (*Node, error) {
 }
 
 func parseStamped(markdown string, budget *TablePaddingBudget) (*Node, error) {
-	doc, err := parseUnstamped(markdown, true, budget)
+	return parseStampedAt(markdown, 1, budget)
+}
+
+// parseStampedAt is parseStamped of markdown whose first line is line firstLine of what the caller
+// wrote, so a refusal names the caller's line.
+func parseStampedAt(markdown string, firstLine int, budget *TablePaddingBudget) (*Node, error) {
+	doc, err := parseUnstamped(markdown, firstLine, true, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +138,7 @@ func ParseFragment(markdown string, opensDocument bool, budget *TablePaddingBudg
 }
 
 func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *TablePaddingBudget) (*Node, error) {
-	doc, err := parseUnstamped(LineFeeds(markdown), readFrontmatter, budget)
+	doc, err := parseUnstamped(LineFeeds(markdown), 1, readFrontmatter, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -191,8 +198,9 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
-// as the blocks its lines make.
-func parseUnstamped(markdown string, readFrontmatter bool, budget *TablePaddingBudget) (doc *Node, err error) {
+// as the blocks its lines make. firstLine is the number markdown's first line has in what the
+// caller wrote, which a refusal's line number counts from.
+func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget *TablePaddingBudget) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
@@ -200,6 +208,7 @@ func parseUnstamped(markdown string, readFrontmatter bool, budget *TablePaddingB
 	if readFrontmatter {
 		var rest int
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
+		firstLine += bytes.Count(source[:rest], []byte("\n"))
 		source = source[rest:]
 	}
 	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
@@ -209,7 +218,7 @@ func parseUnstamped(markdown string, readFrontmatter bool, budget *TablePaddingB
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
-	doc, err = convert(root, source, footnoteLabels(root))
+	doc, err = convert(root, source, firstLine, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +286,7 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
 	}
-	paragraph, err := convert(first, source, footnoteLabels(root))
+	paragraph, err := convert(first, source, 1, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +329,7 @@ func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error
 	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
 		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
 	}
-	paragraph, err := convert(root.FirstChild(), source, nil)
+	paragraph, err := convert(root.FirstChild(), source, 1, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +453,12 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 		}
 	}
 
-	parsed, err := parseStamped(syntheticTableHeader(width)+markdown[start:end]+"\n", budget)
+	// The parse reads the caller's rows under two header lines the caller never wrote, after the
+	// blank lines skipped above, so it numbers its lines from the caller's: a refusal names the line
+	// in the insert's own markdown.
+	header := syntheticTableHeader(width)
+	firstLine := 1 + strings.Count(markdown[:start], "\n") - strings.Count(header, "\n")
+	parsed, err := parseStampedAt(header+markdown[start:end]+"\n", firstLine, budget)
 	// The parse opens with the header written above, so the table under it is the one document-level
 	// table with nothing before it; any other is the fragment's own and keeps its own refusal.
 	if wide := (wideRow{}); errors.As(err, &wide) && wide.firstBlock {
@@ -544,10 +558,10 @@ func footnoteLabels(root ast.Node) map[int]string {
 }
 
 // convert is the one way into the tree's conversion: every block refusal first, in document order
-// (refuseBlocks), and then the conversion, which reads what they leave on the tree
-// (typedDirective.values).
-func convert(node ast.Node, source []byte, footnotes map[int]string) (*Node, error) {
-	if err := refuseBlocks(node, source); err != nil {
+// (refuseBlocks, which numbers source's lines from firstLine), and then the conversion, which reads
+// what they leave on the tree (typedDirective.values).
+func convert(node ast.Node, source []byte, firstLine int, footnotes map[int]string) (*Node, error) {
+	if err := refuseBlocks(node, source, firstLine); err != nil {
 		return nil, err
 	}
 	return parseBlock(node, source, footnotes)
@@ -853,7 +867,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				} else {
 					// The browser editor's parser reads the spaces and tabs a line ends with, which
 					// trimLineSuffixes took off, as a hard break only where they are two spaces
-					// or more and no tab; goldmark broke hard at any two spaces ending the line.
+					// or more and no tab; goldmark breaks hard at any two spaces ending the line.
 					value = strings.TrimSuffix(value, "\n")
 					hard = len(run) >= 2 && !strings.Contains(run, "\t")
 					soft = !hard

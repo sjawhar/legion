@@ -77,8 +77,15 @@ passed — never as a fresh identity.
 
 Deployment instructions, when present, are the operator's standing rules for this repository —
 required checks, deploy/smoke commands, code-owner expectations, standing roles you may consult,
-the merge credential. They override this skill's defaults where they conflict; they never
-override a Sami ruling quoted here.
+the merge credential. They override this skill's defaults where they conflict, except four rules
+they never override: no deferrals (*PR body, review, and the merge gate*, below); bringing the base
+into the branch only on a real conflict or a retarget
+(`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the
+implementer's own proof on a production-like surface at the head that merges, an applied simplify
+head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`,
+`skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the
+implementer's production check after the merge
+(`skill://legion-worker/references/merge-gate.md#after-the-human-merge`).
 
 ## Asking another role
 
@@ -145,8 +152,7 @@ new work.
 
 **Shared operation safety:** Every Legion issue workspace is a `jj workspace` of one shared
 clone, so they all share one operation log: `jj undo`, `jj abandon`, and
-`jj op restore|revert|abandon|undo` rewrite it for every tree at once (on 2026-09-12 one
-worker's `jj undo` rewrote nine of another tree's commits). The extension refuses them in every
+`jj op restore|revert|abandon|undo` rewrite it for every tree at once. The extension refuses them in every
 phase-worker pane before they run — a `bash` command in any position of a pipeline or `&&`
 chain, with or without `-R`, judged on the whole argument list; `eval` code; and a `hub`
 process start — from your own tool calls and from any `task` subagent you spawn (it runs in
@@ -196,7 +202,7 @@ committer at all, and the one rewrite still open to you (*Rewriting pushed commi
 reference) resets the committer only of commits on your own chain that descend from the commit
 you named, after its guard cleared. Another role's commit
 carrying you as committer, which you did not rewrite that way, is evidence that something
-rewrote commits it should not have — the observable symptom of LEGION-118. Stop and send the
+rewrote commits it should not have. Stop and send the
 architect that log; do not accept it as a side effect. A wrong identity on your own commit, the
 other App or none, is a pane-environment problem to report to the architect, not something to
 pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
@@ -220,7 +226,7 @@ subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `u
 GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation
 comments live on that path too, so edit them with `gh pr comment`) — printing
 `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <your LEGION_ISSUE>`:
-Legion never reads or writes a GitHub issue (LEGION-78). `pr comment`, `pr review`,
+Legion never reads or writes a GitHub issue. `pr comment`, `pr review`,
 `api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
 through the file `$LEGION_GRANT_FILE` names, written by the extension before each of your bash
 commands, each `github` tool call, and each `read`/`grep` of a `pr://` or `issue://` URL (and by
@@ -294,7 +300,7 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
   runs `legion threads resolve` before every push that answers a review, and the merger before
   READY: `skill://legion-worker/references/review-threads.md`.
-- **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." A finding that changes
+- **No deferrals.** A finding that changes
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
   or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
 - **A red CI job** that failed on its own is re-run with
@@ -329,7 +335,9 @@ with. With `--data` omitted, `legion handoff write` reads the JSON object from s
 
 `handoff_write` validates the payload against the phase's schema before writing: an
 implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
-carries no `proof` of its own, exits 1 naming the field and writes nothing.
+carries no `proof` of its own, exits 1 naming the field and writes nothing. Each `proof` entry, in
+either phase, is an object of six non-empty strings: `criterion` (the acceptance line it proves),
+`surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
 
 Then verify the durable artifact exists:
 

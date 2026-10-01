@@ -182,3 +182,9 @@ deletion cannot undo a removal.
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
 an existing paragraph is the question that should become a decision.
+
+An ask block has two ids: the block id, shown as `:::ask{#<id> …}` in the rendered document and
+taken bare by `move`/`delete` in `block` (the `block:<id>` form is only for `before`/`after`
+anchors), and the ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read`
+and `dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
+`not found`.

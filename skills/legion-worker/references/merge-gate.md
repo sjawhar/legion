@@ -82,15 +82,13 @@ completion leaves the issue in reviewing until you finish.
 
 ## After the human merge
 
-- **After a human merges, the implementer verifies in production.** Sami, 2026-09-13,
-  verbatim: "the agent that developed it should be responsible for testing in production."
+- **After a human merges, the implementer verifies in production.**
   The architect sends the implementer back once the merge lands; the implementer watches the
   deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
   drives the changed path in production through the user's own access path, and records the
   observation on the PR and the issue before the architect signs off. A staging pass is not
-  this: on 2026-09-12 a slot's entire staging gate passed at 00:02Z and its production-apply
-  failed at 00:12Z on a resource staging never runs. If the slot fails on the change, the
-  implementer owns the fix and the next slot.
+  this, since a staging gate does not run every resource production does. If the slot fails on
+  the change, the implementer owns the fix and the next slot.
   The record has three places: the PR body's `Production:` line, one pull-request comment
   carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not

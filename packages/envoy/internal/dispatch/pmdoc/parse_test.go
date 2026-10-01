@@ -190,7 +190,8 @@ func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
 	}
 }
 
-// The fix must not cost a closed front-matter block, which stays the document's own first node.
+// Reading an unclosed `---` as a rule must not cost a closed front-matter block, which stays the
+// document's own first node.
 func TestParseKeepsClosedFrontmatter(t *testing.T) {
 	const markdown = "---\ntitle: x\n---\n\nBody.\n"
 	tree, err := Parse(markdown)
@@ -283,8 +284,8 @@ func TestParseReadsAFootnoteDefinitionEndingInABlock(t *testing.T) {
 // A reference goldmark's exact match leaves unresolved is looked up among the definitions by its
 // label's key once, not compared with every definition: with 2,000 definitions and 2,000 such
 // references a document parses in about the time it takes with the definitions written as plain
-// paragraphs, where comparing each pair took over a hundred times as long. The two timings are
-// taken in the same run, so a slow machine slows both.
+// paragraphs, where comparing each pair would take over a hundred times as long. The two timings
+// are taken in the same run, so a slow machine slows both.
 func TestParseResolvesUnmatchedReferencesWithoutComparingEveryDefinition(t *testing.T) {
 	document := func(definitions bool) string {
 		var markdown strings.Builder
@@ -334,7 +335,7 @@ func TestAPanicWhileReadingIsAnInternalErrorNotARefusal(t *testing.T) {
 // A run that can both open and close pairs by the lengths it has left once a pair used part of
 // it, as the browser editor's parser pairs it: after the strong pair, `***Note:****&#32;see
 // below*` leaves the closer's other `**` as text, and the opener's last `*` pairs with the final
-// one. Goldmark judged the lengths the runs were written with and paired that `*` with the
+// one. Goldmark judges the lengths the runs were written with and pairs that `*` with the
 // closer, reading " see below" as emphasis alone.
 func TestParsePairsARunByTheLengthsItHasLeft(t *testing.T) {
 	nodes, err := ParseInline("***Note:****&#32;see below*")
@@ -411,7 +412,7 @@ func TestParseRejectsTablePaddingBudgetAcrossTables(t *testing.T) {
 // A paragraph's text is its lines and the soft breaks between them, and each run under one set of
 // marks is joined once: a 40,000-byte paragraph of 20,000 lines reads as one text node of its
 // lines joined by spaces, at about a kibibyte a line, where joining each line to the text before
-// it copied that text again for every line.
+// it would copy that text again for every line.
 func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
 	const lines = 20_000
 	markdown := strings.Repeat("x\n", lines)
