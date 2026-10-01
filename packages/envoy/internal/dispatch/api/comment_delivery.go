@@ -62,12 +62,19 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 // the envelope it minted, whether the stream already held the message, and the failure to
 // record otherwise.
 //
+// Every failure comes with a nil envelope. The dashboard reads a failed attempt row that carries
+// an envelope id as one its session answered with an error (rowAnsweredWithError in
+// packages/dispatch/web/src/features/conversation/delivery.ts), which gets no same-mode Retry, so
+// an envelope returned beside a failure would read as the session's answer
+// (TestSendResolvedDeliveryReportsNoEnvelopeWithAnyFailure).
+//
 // A receipt timeout is worded differently from every other failure, and only here. The listener
 // publishes the envelope before it answers, so a send whose answer missed the window may have
 // landed. What the row records is only that CAUSE. Whether retrying is safe depends on how old
-// the attempt is - the stream recognises the repeat for exactly as long as its duplicate window
-// - so that guidance is composed at render time against the attempt's age, never frozen into
-// the row here. A row written today would otherwise still promise a safe retry next week.
+// the attempt is - a repeat is recognised only inside DELIVERY_DUPLICATE_WINDOW_MS, whose doc in
+// packages/contracts states the promise - so that guidance is composed at render time against
+// the attempt's age, never frozen into the row here. A row written today would otherwise still
+// promise a safe retry next week.
 func (s *server) sendResolvedDelivery(
 	ctx context.Context, target ResolvedMention, body, idempotencyKey string, urgency *string, frame []byte,
 ) (*string, bool, string) {
@@ -413,7 +420,8 @@ func (s *server) deliverResolvedCommentMention(
 		return model.CommentDelivery{}, fmt.Errorf("encode comment mention delivery frame: %w", err)
 	}
 	// The key is scoped to the mention's target and mode, stable across every attempt of that
-	// triple, so a retry of a send that already landed is a duplicate the stream drops.
+	// triple, so a retry of a send that already landed repeats its dedupe key and is recognised as
+	// the repeat it is (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts says by what).
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
 		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+target.Delivery, nil, frame,
 	)

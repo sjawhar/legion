@@ -1,5 +1,6 @@
 import type { Actor, Ask, CommentDelivery, CommentMention, Event } from "../../api/types";
 import { actorLabel, describeAskResolution, shortSessionId } from "../refs/actor";
+import { receiptAnsweredWithError, rowAnsweredWithError } from "./delivery";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -47,8 +48,9 @@ export interface ThreadReply {
   seq: number;
   deliveries: MessageDeliveryEvent[];
 }
-/** Stored initial delivery rows include `pending`; later delivery events replace their row. */
-export type CommentDeliveryAttempt = CommentDelivery;
+/** Stored initial delivery rows include `pending`; later delivery events replace their row.
+ *  `answeredWithError` is read off whichever of the two it came from (`DeliveryOutcome`). */
+export type CommentDeliveryAttempt = CommentDelivery & { readonly answeredWithError: boolean };
 
 /** A message turn owns its thread: the replies beneath it and when the thread last moved. The
  *  turn sits in the conversation at `lastSeq`, so a reply on an old thread brings the thread to
@@ -161,8 +163,11 @@ export function commentMentions(payload: CommentEvent["payload"]): readonly Comm
   return payload.mentions ?? [];
 }
 
-export function commentDeliveries(payload: CommentEvent["payload"]): CommentDelivery[] {
-  return payload.deliveries === undefined ? [] : [...payload.deliveries];
+export function commentDeliveries(payload: CommentEvent["payload"]): CommentDeliveryAttempt[] {
+  return (payload.deliveries ?? []).map((row) => ({
+    ...row,
+    answeredWithError: rowAnsweredWithError(row),
+  }));
 }
 
 /** Whether two actors are the same writer: one session id, or one human login. */
@@ -411,6 +416,7 @@ export function buildConversationItems({
       const root = commentThreadOf.get(event.payload.comment_id);
       if (node !== undefined && root !== undefined) {
         const attempt: CommentDeliveryAttempt = {
+          answeredWithError: receiptAnsweredWithError(event),
           attempt: event.payload.attempt,
           comment_id: event.payload.comment_id,
           created_at: event.created_at,

@@ -37040,6 +37040,23 @@ var EnvelopeSchema = exports_external.object({
   urgency: exports_external.enum(["low", "med", "high", "blocking"]).optional(),
   expects_reply: exports_external.enum(["none", "optional", "required"]).optional()
 });
+var MINTED_DEDUPE_KEY_PATTERN = "^(?:envoy\\.role\\.forward\\.)?(?:publish|agent\\.[^.]+)\\.(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$";
+var mintedDedupeKey = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+function dedupeKeyNamesItsEvent(envelope) {
+  const key = envelope.dedupe_key;
+  if (key === undefined)
+    return false;
+  if (envelope.source === "dispatch" || mintedDedupeKey.test(key))
+    return true;
+  switch (envelope.source) {
+    case "github":
+    case "slack":
+    case "ghostwispr":
+      return envelope.source_event_id !== undefined && envelope.source_event_id !== "" && key === `${envelope.source}.${envelope.source_event_id}`;
+    default:
+      return false;
+  }
+}
 // ../contracts/src/handoff-schema.ts
 var HANDOFF_SCHEMA_VERSION = 1;
 var HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"];
@@ -38151,6 +38168,7 @@ var InboundSenderSchema = exports_external.object({
 var InboundEnvelopeSchema = exports_external.object({
   event_id: exports_external.string().optional(),
   source: exports_external.string(),
+  source_event_id: exports_external.string().optional(),
   source_session: exports_external.string().optional(),
   topic: exports_external.string().optional(),
   dedupe_key: exports_external.string().optional(),
@@ -38194,13 +38212,72 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
-function rememberBounded(seen, key, limit) {
-  seen.add(key);
-  if (seen.size > limit) {
-    const oldest = seen.values().next();
-    if (!oldest.done)
-      seen.delete(oldest.value);
-  }
+var DedupeIdentitySchema = exports_external.object({
+  event_id: exports_external.string().min(1).optional(),
+  dedupe_key: exports_external.string().min(1).optional(),
+  source: exports_external.string().optional(),
+  source_event_id: exports_external.string().optional()
+});
+var DELIVERY_DEDUPE_KEY_LIMIT = 250000;
+var DELIVERY_EVENT_ID_LIMIT = 1e4;
+function createDeliveryDedupe(now = Date.now) {
+  const keys = new Map;
+  let events = new Map;
+  let olderEvents = new Map;
+  let claims = 0;
+  return {
+    claim(frame) {
+      const eventId = frame?.event_id;
+      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
+        return;
+      }
+      const key = frame?.dedupe_key;
+      const named = frame !== undefined && key !== undefined && dedupeKeyNamesItsEvent(frame);
+      const at = now();
+      if (named) {
+        const claimedAt = keys.get(key);
+        if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) {
+          return;
+        }
+        for (const [oldest, deliveredAt] of keys) {
+          if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
+            break;
+          keys.delete(oldest);
+        }
+        keys.delete(key);
+        if (keys.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+          const oldest = keys.keys().next();
+          if (oldest.done !== true)
+            keys.delete(oldest.value);
+        }
+        keys.set(key, at);
+      }
+      const claim = ++claims;
+      if (eventId !== undefined) {
+        if (events.size >= DELIVERY_EVENT_ID_LIMIT / 2) {
+          olderEvents = events;
+          events = new Map;
+        }
+        events.set(eventId, claim);
+      }
+      let released = false;
+      return {
+        release() {
+          if (released)
+            return;
+          released = true;
+          if (named && keys.get(key) === at)
+            keys.delete(key);
+          if (eventId === undefined)
+            return;
+          if (events.get(eventId) === claim)
+            events.delete(eventId);
+          if (olderEvents.get(eventId) === claim)
+            olderEvents.delete(eventId);
+        }
+      };
+    }
+  };
 }
 function isCommentTargetedDelivery(delivery) {
   return "comment_id" in delivery;
@@ -44063,16 +44140,13 @@ class StdioServerTransport {
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
-var version2 = "0.6.0";
+var version2 = "0.6.1";
 
 // src/channel-forwarder.ts
-var DeliveryIdentity = exports_external.object({
-  event_id: exports_external.string().min(1).optional(),
-  dedupe_key: exports_external.string().min(1).optional(),
+var DeliveryIdentity = DedupeIdentitySchema.extend({
   topic: exports_external.string().min(1).optional()
 });
 var decoder = new TextDecoder;
-var SEEN_KEYS_LIMIT = 1000;
 var DEFAULT_DRAIN_TIMEOUT_MS = 1000;
 function deliveryIdentity(raw) {
   let parsed;
@@ -44090,19 +44164,17 @@ function report(what, error48) {
 }
 function createChannelForwarder(connection, options) {
   const following = new Map;
-  const seen = new Set;
+  const dedupe = createDeliveryDedupe();
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   const deliver = async (topic, subscription) => {
     try {
       for await (const message of subscription) {
+        const raw = decoder.decode(message.data);
+        const identity = deliveryIdentity(raw);
+        const claim = dedupe.claim(identity);
+        const duplicate = claim === undefined;
         try {
-          const raw = decoder.decode(message.data);
-          const identity = deliveryIdentity(raw);
-          const key = identity?.event_id ?? identity?.dedupe_key;
-          const duplicate = key !== undefined && seen.has(key);
-          if (key !== undefined && !duplicate)
-            rememberBounded(seen, key, SEEN_KEYS_LIMIT);
-          await options.deliver({
+          const handed = await options.deliver({
             subject: message.subject,
             data: message.data,
             raw,
@@ -44110,7 +44182,10 @@ function createChannelForwarder(connection, options) {
             ...identity?.topic === undefined ? {} : { envelopeTopic: identity.topic },
             ...duplicate ? { duplicate: true } : {}
           });
+          if (!handed)
+            claim?.release();
         } catch (error48) {
+          claim?.release();
           report(`could not deliver a message on ${message.subject}`, error48);
         }
       }
@@ -44359,22 +44434,23 @@ function createChannelDelivery(input) {
     enqueue({ subject: subject2, raw }) {
       const rendered = renderInbound(raw, input.identity.id, subject2);
       if (rendered.skip)
-        return tail;
+        return tail.then(() => false);
       if (rendered.rejectedDelivery !== undefined) {
         const rejected = rendered.rejectedDelivery;
         process.stderr.write(`envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.id}
 `);
         return postDispatchReply(input.identity, rejected, {
           error: "Invalid Dispatch targeted delivery frame"
-        }).catch((error48) => {
+        }).then(() => false, (error48) => {
           process.stderr.write(`envoy-channel: could not report the rejected delivery to Dispatch \u2014 ${messageFor(error48)}
 `);
+          return false;
         });
       }
       if (rendered.malformedDelivery === true) {
         process.stderr.write(`envoy-channel: dropping malformed Dispatch targeted delivery without a reply address
 `);
-        return tail;
+        return tail.then(() => false);
       }
       const envelope2 = rendered.envelope;
       if (envelope2 !== undefined) {
@@ -44387,7 +44463,7 @@ function createChannelDelivery(input) {
         if (inbox.length > CHANNEL_INBOX_LIMIT)
           inbox.pop();
       }
-      return queue({
+      const queued = queue({
         method: CHANNEL_NOTIFICATION_METHOD,
         params: {
           content: rendered.content,
@@ -44403,6 +44479,7 @@ function createChannelDelivery(input) {
           })
         }
       });
+      return queued.then(() => true);
     },
     announceFollow(details) {
       return announce(details) ?? tail;
@@ -44426,7 +44503,7 @@ async function writePersistedRole(roleFile, state) {
 `);
 }
 async function enqueueChannelMessage(delivery, connection, directSubject, message) {
-  const queued = message.duplicate ? Promise.resolve() : delivery.enqueue({ subject: message.subject, raw: message.raw });
+  const queued = message.duplicate ? Promise.resolve(false) : delivery.enqueue({ subject: message.subject, raw: message.raw });
   const lane = {
     subject: message.subject,
     directSubject,
@@ -44435,7 +44512,7 @@ async function enqueueChannelMessage(delivery, connection, directSubject, messag
   };
   if (expectsLaneReceipt(lane))
     connection.publish(lane.reply, EMPTY_RECEIPT);
-  await queued;
+  return queued;
 }
 async function startChannelSession(options) {
   const { identity } = options;
@@ -44469,7 +44546,7 @@ async function startChannelSession(options) {
 `);
         });
       }
-      await enqueueChannelMessage(delivery, options.connection, directSubject, message);
+      return enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
   function dropFromForwarderAndRegistry(topics) {
@@ -44812,7 +44889,7 @@ async function runEnvoyChannelServer() {
   const stateDirectory = pluginStateDirectory();
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id is the dedupe identity, urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
   });
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch });
   let runtime;
