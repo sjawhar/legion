@@ -757,6 +757,32 @@ func TestAnAcceptedSuggestionStaysInsideTheCommentAroundIt(t *testing.T) {
 	}
 }
 
+// Two suggestions over the same word are two marks of one type on it. Accepting one writes its text
+// inside every mark that covers all of the word, the other suggestion's included, so that one stays
+// anchored on the new text rather than losing its anchor to the first one's mark.
+func TestAcceptingOneOfTwoSuggestionsOverAWordKeepsTheOther(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	for _, id := range []string{"earlier", "later"} {
+		if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+			Kind: MarkSuggestion, ID: id, By: model.Actor{Kind: "session", ID: "s1"},
+		}, "fox", nil); err != nil {
+			t.Fatalf("mark suggestion %s: %v", id, err)
+		}
+	}
+	if err := service.AcceptSuggestion(context.Background(), artifactID, "later", "dog", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept the later suggestion: %v", err)
+	}
+	tree := liveTree(t, service, artifactID)
+	if _, quote, found := pmdoc.FindMark(tree, string(MarkSuggestion), "earlier"); !found || quote != "dog" {
+		t.Fatalf("earlier suggestion after the accept = %q found=%t, want %q", quote, found, "dog")
+	}
+	if _, _, found := pmdoc.FindMark(tree, string(MarkSuggestion), "later"); found {
+		t.Fatal("the accepted suggestion's mark is still in the document")
+	}
+}
+
 type storedAnchor struct {
 	ArtifactID string `json:"artifact_id"`
 	MarkID     string `json:"mark_id"`
