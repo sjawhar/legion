@@ -570,7 +570,7 @@ create_providers_secret() {
   fi
   [ -s "$seed_file" ] || fail "the operator's NATS nkey seed is empty"
   op create secret generic "$providers_secret" --from-file=NATS_NKEY_SEED="$seed_file" \
-    --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+    --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create Secret $providers_secret"
   rm -f "$seed_file"
   note "[operator] Secret $providers_secret: NATS_NKEY_SEED from the operator's seed, label legion.dev/project=$run_label"
