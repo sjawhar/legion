@@ -126,13 +126,14 @@ func (b *Broker) Operator() string {
 	return strings.TrimSpace(string(data))
 }
 
-// launcherCredentialsRequest is POST /v1/launcher-credentials's exact contract v9 request shape
-// (handlers_launcher.go's machineLoginBody): a signed request object under "request".
+// launcherCredentialsRequest is POST /v1/launcher-credentials's exact request shape in the shared
+// broker contract (dispatch://AGENTC-393/artifact/plan-overview-md; handlers_launcher.go's
+// machineLoginBody): a signed request object under "request".
 type launcherCredentialsRequest struct {
 	Request string `json:"request"`
 }
 
-// launcherCredentialsResponse is that route's exact contract v9 response shape
+// launcherCredentialsResponse is that route's exact response shape in the shared broker contract
 // (handlers_launcher.go's machineLoginResponse): the opaque pending id and the human-facing
 // confirmation code under "code".
 type launcherCredentialsResponse struct {
@@ -309,8 +310,8 @@ func (b *Broker) readLoginStatus(ctx context.Context, pendingID string) (state, 
 	return out.State, out.CredentialID, true
 }
 
-// enrollBody is POST /v1/enrollments's contract v9 shape (the v8 "approver" field is gone: the
-// broker's rules pick a request's approver, never the enrollment).
+// enrollBody is POST /v1/enrollments's shape in the shared broker contract (the v8 "approver"
+// field is gone: the broker's rules pick a request's approver, never the enrollment).
 type enrollBody struct {
 	Kind       string  `json:"kind"`
 	RuntimeID  string  `json:"runtime_id"`

@@ -41,6 +41,28 @@
 
 ### Changed
 
+- The stream stores an envelope under a MsgId, and so recognises its repeat, when its dedupe key was
+  minted once for its message: the listener's own `publish.<id>` and `agent.<session>.<id>`, and the
+  same around the shared transport's UUID idempotency key (`contracts.MintedDedupeKeyPattern`,
+  generated from `MINTED_DEDUPE_KEY_PATTERN` in `packages/contracts`). Only a re-send of that
+  message repeats such a key: the transport's retry of a send whose answer was lost, which now
+  answers `duplicate: true` and is stored once, and the Legion daemon's copy of a role-lane notice
+  (LEGION-108). Before, only Dispatch and webhook delivery-id keys earned a MsgId. The same rule,
+  `dedupeKeyNamesItsEvent`, now decides what a core-NATS host drops.
+- The Dispatch dashboard no longer offers a same-mode **Retry** for a targeted message or comment
+  mention its session answered with an error (a BTW whose side turn failed, a frame its host
+  refused). The stream already stored that attempt's frame under the Retry's key, so a session the
+  listener pushes to from the stream was never handed the Retry, and the attempt then read
+  "Delivered by an earlier attempt". The card now says the session answered with an error and
+  points at its mode-change actions; the mention list points at a new comment. Sending that Retry
+  under a new key is LEGION-431. On a closed issue the mention list, like the card, no longer
+  promises "Retry won't deliver it twice" beside a failure it offers no Retry for.
+- `POST /v1/messages/publish` refuses a `dedupe_key` on a `source: "dispatch"` envelope with a 400
+  naming `dedupe_key`. Every host drops a repeat of a Dispatch key, and Dispatch's outbox numbers
+  its keys in sequence (`dispatch-<event id>`), so any holder of the listener bearer could publish
+  `dispatch-<next id>` on a topic someone follows and make that host drop the real event when it
+  arrived. Dispatch never set one there: its outbox publishes to the bus directly, and its sends
+  go through `/v1/messages/send`, whose key the listener makes.
 - Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the

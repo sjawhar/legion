@@ -282,7 +282,8 @@ func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
 	return key
 }
 
-// --- wire-shape mirrors (contract v9), the fields this test actually reads ---
+// --- wire-shape mirrors of the shared broker contract
+// (dispatch://AGENTC-393/artifact/plan-overview-md), the fields this test actually reads ---
 
 type wireError struct {
 	Code  string `json:"code"`

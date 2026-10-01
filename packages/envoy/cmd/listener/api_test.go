@@ -1777,6 +1777,55 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 	}
 }
 
+// A dispatch envelope's dedupe key is recognised by every host as the Dispatch event it names, and
+// Dispatch's outbox numbers its keys in sequence, so a key a caller chose there would make a host
+// drop the real event when it arrives. The key is still the caller's on any other source.
+func TestPublishHandler_RefusesAChosenKeyOnADispatchEnvelope(t *testing.T) {
+	client := setupPublishTestClient(t)
+	state := &listenerDeps{client: client}
+	const topic = "notifications.dispatch.issue.SQUAT-1.comment.created"
+	probe, err := client.Conn.SubscribeSync(topic)
+	if err != nil {
+		t.Fatalf("subscribe topic probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	publish := func(body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(body)))
+		return recorder
+	}
+
+	refused := publish(`{"topic":"` + topic + `","source":"dispatch","message":"squat","dedupe_key":"dispatch-1000"}`)
+	if refused.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", refused.Code, refused.Body.String())
+	}
+	var response apiError
+	if err := json.NewDecoder(refused.Body).Decode(&response); err != nil {
+		t.Fatalf("decode 400 body: %v", err)
+	}
+	if response.Error != "dedupe_key cannot be chosen for a dispatch envelope" || len(response.Expected) != 1 || response.Expected[0] != "dedupe_key" {
+		t.Fatalf("400 body = %+v", response)
+	}
+	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("a refused publish must publish nothing: %v", err)
+	}
+
+	for _, body := range []string{
+		`{"topic":"` + topic + `","source":"dispatch","message":"no chosen key"}`,
+		`{"topic":"` + topic + `","source":"agent","message":"a re-send","dedupe_key":"dispatch-1000"}`,
+	} {
+		if recorder := publish(body); recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body = %s", body, recorder.Code, recorder.Body.String())
+		}
+		if _, err := probe.NextMsg(5 * time.Second); err != nil {
+			t.Fatalf("%s: read published envelope: %v", body, err)
+		}
+	}
+}
+
 // The mutual-exclusion rule is publish's alone: send ignores dedupe_key as it
 // ignores any field it does not read, so a body carrying both keys is still a
 // send keyed by its idempotency_key (LEGION-108, architect ruling).
@@ -1823,9 +1872,10 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 
 // LEGION-271. The send handler publishes before it answers, so a caller whose window expires
 // cannot tell whether the message landed. Its retry under the same idempotency key is a
-// JetStream duplicate and reaches the agent no second time; the answer has to say so, or
+// JetStream duplicate, which the stream stores no second time; the answer has to say so, or
 // Dispatch records the retry as an ordinary send and the attempt history claims a delivery that
-// never happened. An agent-sourced send carries no MsgId, so it can never be one.
+// never happened. A send under a key its caller chose carries no MsgId, so it can never be one;
+// a key minted once for its message can.
 func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
@@ -1864,11 +1914,22 @@ func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 		t.Fatalf("a different idempotency key must not answer duplicate: %+v", fresh)
 	}
 
-	// An agent-sourced send carries no MsgId, so the stream cannot recognise a repeat.
+	// An agent-sourced send under a key its caller chose carries no MsgId, so the stream cannot
+	// recognise a repeat.
 	const agentSend = `{"target_session":"ses_target","source":"agent","message":"ship it","idempotency_key":"agent-dup:steer"}`
 	send(t, agentSend)
 	if repeated := send(t, agentSend); repeated.Duplicate {
-		t.Fatalf("an agent-sourced send cannot be a duplicate: %+v", repeated)
+		t.Fatalf("an agent-sourced send under its caller's own key cannot be a duplicate: %+v", repeated)
+	}
+
+	// The shared transport mints a UUID idempotency key once per message and re-sends under it only
+	// when the answer to a send that landed was lost, so that key names its event.
+	const transportSend = `{"target_session":"ses_target","source":"agent","message":"ship it","idempotency_key":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}`
+	if first := send(t, transportSend); first.Duplicate {
+		t.Fatalf("first transport send reported a duplicate; the stream held nothing")
+	}
+	if repeated := send(t, transportSend); !repeated.Duplicate {
+		t.Fatalf("the transport's re-send under its minted key must answer duplicate: %+v", repeated)
 	}
 }
 func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {

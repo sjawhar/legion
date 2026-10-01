@@ -451,6 +451,26 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	}
 }
 
+// The document websocket takes a bearer's session actor only when the bearer is the shared agent
+// token; one byte off, the same actor is refused.
+func TestDocumentBearerMustBeTheSharedToken(t *testing.T) {
+	service := &Service{agentToken: "doc-agent-token"}
+	for _, test := range []struct {
+		authorization string
+		admitted      bool
+	}{
+		{authorization: "Bearer doc-agent-token", admitted: true},
+		{authorization: "Bearer doc-agent-tokem", admitted: false},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
+		request.Header.Set("Authorization", test.authorization)
+		request.Header.Set("X-Dispatch-Actor", `{"kind":"session","id":"session-0123456789abcdef"}`)
+		if _, err := service.requestActor(request); (err == nil) != test.admitted {
+			t.Errorf("requestActor(Authorization %q) err = %v, want admitted %t", test.authorization, err, test.admitted)
+		}
+	}
+}
+
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 	service, _ := newTestService(t)
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))

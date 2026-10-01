@@ -69,7 +69,8 @@ type apiRoute struct {
 }
 
 // routes is the one list of the broker's routes; a new route is a new row here, never a bare
-// mux.HandleFunc. The contract for every row is the AGENTC-393 overview document (contract v9).
+// mux.HandleFunc. The contract for every row is the shared broker contract
+// (dispatch://AGENTC-393/artifact/plan-overview-md).
 func routes() []apiRoute {
 	return []apiRoute{
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},

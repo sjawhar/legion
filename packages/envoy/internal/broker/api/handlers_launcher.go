@@ -9,8 +9,9 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
-// machineLoginBody is POST /v1/launcher-credentials's exact contract v9 shape: a machine request
-// object naming login_hint (the approving operator) and one launcher_credential detail.
+// machineLoginBody is POST /v1/launcher-credentials's exact shape in the shared broker contract
+// (dispatch://AGENTC-393/artifact/plan-overview-md): a machine request object naming login_hint
+// (the approving operator) and one launcher_credential detail.
 type machineLoginBody struct {
 	Request string `json:"request"`
 }
