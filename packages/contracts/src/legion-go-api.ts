@@ -285,6 +285,8 @@ export const LegionGoOperatorClaimResponse = z.strictObject({
   }),
   uncertainStreak: z.number().int().nonnegative(),
   pending: legionGoDeliveryView.optional(),
+  /** A suspension the claim's machine holds for the agent's turn to end; absent when none is. */
+  suspensionHeld: z.literal(true).optional(),
 });
 
 export type LegionGoOperatorClaim = z.output<typeof LegionGoOperatorClaimResponse>;

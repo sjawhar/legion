@@ -131,6 +131,94 @@ func TestSuspendingAClaimThatRunsNothingIsDone(t *testing.T) {
 	}
 }
 
+// A worker reports its phase complete from a tool call inside its turn, and the transition that
+// records the report suspends it. The suspend row waits for that turn to end rather than stopping
+// the worker in the middle of the call (LEGION-283): it is retried while the claim answers that the
+// suspension is held, and finished once the turn's end has suspended the worker.
+func TestAPhaseCompletionsSuspendWaitsForTheWorkersTurnToEnd(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	planner, err := claim.NewToken("legion", issue.Key, claim.RolePlanner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: planner, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RolePlanner, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup.deps.Conns.(*fake.Conns).Register(planner, fake.NewConn())
+	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: planner}); err != nil {
+		t.Fatalf("spawn the planner: %v", err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: planner, Generation: generation},
+		supervise.RequestRegister{Claim: planner, Generation: generation, Session: "ses-plan", SessionFile: "/tmp/plan.jsonl"},
+		supervise.RequestReady{Claim: planner, Generation: generation, Session: "ses-plan"},
+		supervise.RequestDeliver{Claim: planner, Task: "Continue Workflow. Issue: LEGION-208. Phase: planning.", Phase: phase.Planning, Generation: 1},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	machine.Wait()
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner}); err != nil {
+		t.Fatalf("start the planning turn: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	clock := time.Now()
+	runner := &outbox{
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "in_progress"}}, notices: &outboxPublisher{},
+		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+	}
+	// suspendRow is the planner's suspend rows left unfinished, and the most attempts one has had.
+	suspendRow := func() (rows, attempts int) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, "select count(*), coalesce(max(attempts), 0) from outbox where kind = 'supervise' and payload->>'op' = 'suspend' and payload->>'role' = 'planner'").
+			Scan(&rows, &attempts); err != nil {
+			t.Fatalf("read the planner's suspend rows: %v", err)
+		}
+		return rows, attempts
+	}
+
+	// Inside that turn the planner reports planning complete, and the issue moves to implementing.
+	if result, err := intake.ApplyFact(ctx, pool, "api", "handoff:planner:planning", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RolePlanner, Claim: planner, Commit: "plan-1"}, engine); err != nil || result.Refusal != nil {
+		t.Fatalf("complete planning = %+v, %v", result.Refusal, err)
+	}
+	clock = time.Now().Add(time.Second)
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the transition's effects: %v", err)
+	}
+	if rows, attempts := suspendRow(); machine.Claim().State != supervise.StateWorking || rows != 1 || attempts != 1 || len(rt.CallsOf("Suspend")) != 0 {
+		t.Fatalf("while its turn runs the planner is %s with %d suspend rows run %d times and %d suspensions, want working, the row run once and waiting, none",
+			machine.Claim().State, rows, attempts, len(rt.CallsOf("Suspend")))
+	}
+
+	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: planner}); err != nil {
+		t.Fatalf("end the planning turn: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateSuspended || len(rt.CallsOf("Suspend")) != 1 {
+		t.Fatalf("after its turn the planner is %s with %d suspensions, want suspended once", got, len(rt.CallsOf("Suspend")))
+	}
+	clock = clock.Add(time.Hour)
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the waiting suspend: %v", err)
+	}
+	if rows, _ := suspendRow(); rows != 0 || len(rt.CallsOf("Suspend")) != 1 {
+		t.Fatalf("after the retry the planner's suspend rows left = %d and suspensions %d, want the row finished and one suspension",
+			rows, len(rt.CallsOf("Suspend")))
+	}
+}
+
 func unfinishedSuperviseRows(t *testing.T, pool *pgxpool.Pool) int {
 	t.Helper()
 	var rows int

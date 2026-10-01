@@ -639,7 +639,11 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 			}
 			if tc.relaunch {
 				// The claim's own launch counter moves — a crash relaunch, a resume — while the
-				// run it is serving does not.
+				// run it is serving does not. A suspension is held for the agent's turn, so the turn
+				// ends first.
+				if err := machine.Handle(context.Background(), supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
+					t.Fatalf("end the turn: %v", err)
+				}
 				if err := machine.Handle(context.Background(), supervise.RequestSuspend{Claim: tester.token}); err != nil {
 					t.Fatalf("suspend: %v", err)
 				}
