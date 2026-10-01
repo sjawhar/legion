@@ -204,9 +204,13 @@ want of a model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
-and removes the work directory when the run passed (keeping it, with `daemon.log`,
-`deadline.log`, `listener.log`, `model-gateway/hawk-token.log` and each refusal's log, when it did
-not).
+and removes the work directory when the run passed (keeping it, with `transcript.log` (the whole
+run), `daemon.log`, `deadline.log`, `listener.log`, `model-gateway/hawk-token.log` and each
+refusal's log, when it did not). The trap still runs when whoever reads the run's output goes
+first, for example a supervised launcher's own `tee` stopped with the run, and a stop follows: the
+run's output goes through [`lib/transcript.sh`](#libtranscriptsh)'s `tee`, which outlives the
+reader. The transcript is in the work directory, whose processes the teardown kills by path, so
+the script opens it on fd 8 and calls `transcript_to /dev/fd/8`.
 
 Three things the run had to learn about its surface:
 
@@ -765,11 +769,14 @@ bash scripts/e2e/controller-start-tmux.sh
 
 Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
 run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
-profile, both tmux servers, and its Postgres and NATS containers. `CONTROLLER_START_EVIDENCE_DIR`
-keeps the daemon and listener logs and, under `checks/`, each check's own output (the controllers'
-stderr and exit codes, the refusal, the route answers, the prober's log) and both controller panes
-as they were at exit, so a failed run keeps what failed; it defaults to a fresh `/tmp` directory,
-which is printed. No secret is written there.
+profile, both tmux servers, and its Postgres and NATS containers, also when whoever reads the run's
+output goes first and a stop follows: the run's output goes through
+[`lib/transcript.sh`](#libtranscriptsh)'s `tee`, which outlives the reader.
+`CONTROLLER_START_EVIDENCE_DIR` keeps `transcript.log` (the whole run), the daemon and listener
+logs and, under `checks/`, each check's own output (the controllers' stderr and exit codes, the
+refusal, the route answers, the prober's log) and both controller panes as they were at exit, so a
+failed run keeps what failed; it defaults to a fresh `/tmp` directory, which is printed. No secret
+is written there.
 
 | check | what it holds, and 4b.5's acceptance item |
 | :--- | :--- |
@@ -953,10 +960,11 @@ directory, never beside `package.json`, so an interrupted run strands no `tmp.js
 
 The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
 way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
-dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
-itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
-`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
-the checkout.
+dies halfway never leaves the rewrite for jj to snapshot. The script ignores SIGPIPE, so this holds
+when whoever read its stderr has gone too: bash's `Terminated` notice for an interrupted pack would
+otherwise kill it before the trap ran. It keeps the run's status; if the copy back itself fails, it
+says where the saved bytes are, leaves them there, and exits non-zero. Afterwards `jj status` is as
+it was before the run: `dist/` is gitignored, and nothing else is written inside the checkout.
 
 Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
 itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
@@ -1267,8 +1275,8 @@ refusal exits 2.
 
 ## lib/transcript.sh
 
-The stage proof's transcript. Stage 3, Stage 4a, Stage 4b and `stage3-4b13b-acceptance.sh` source
-it before their first output.
+The stage proof's transcript. Stage 2, Stage 3, Stage 4a, Stage 4b, `stage3-4b13b-acceptance.sh`
+and `controller-start-tmux.sh` source it before their first output.
 
 ```sh
 . "$root/scripts/e2e/lib/transcript.sh"     # sourced, never run
@@ -1281,7 +1289,9 @@ SIGPIPE.
 
 - A signal to the process group, a reader that goes first (a supervised launcher's own `tee`,
   stopped with the run), or a full disk under `FILE` each cost `tee` at most the outputs they break.
-  The driver and its cleanup never fail on a write.
+  The driver and its cleanup never fail on a write. Without it, a group TERM after the reader had
+  gone would end a driver with a TERM trap before its `EXIT` trap ran: bash writes its `Terminated`
+  notice for the interrupted command to the dead pipe first.
 - GNU `tee` stops once every output has failed and never reopens one. `/dev/null`, an output that
   never fails, is what keeps it draining once both the reader and `FILE` have failed.
 - busybox `tee` keeps writing every output and reports errors at EOF, so it picks `FILE` up again
@@ -1289,7 +1299,7 @@ SIGPIPE.
 - The `tee` is one of the run's processes: its argv names `FILE`, and its working directory is the
   caller's at the call. [`lib/rig.sh`](#librigsh)'s `run_processes` matches `$work` in either, so a
   caller keeps both outside `$work`, or opens `FILE` on a descriptor and passes `/dev/fd/N`, as
-  `stage3-4b13b-acceptance.sh` does with its evidence under `$work`.
+  Stage 2 and `stage3-4b13b-acceptance.sh` do with their transcript under `$work`.
 
 ## lib/rig.sh
 
