@@ -34,7 +34,7 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		c.connEvents++
 	}
 	c.mu.Unlock()
-	restoreErr := c.restoreSubscriptions()
+	pending, restoreErr := c.restoreSubscriptions()
 	if errors.Is(restoreErr, errStopped) {
 		// Stopped between the check above and the re-subscribe: same as that branch.
 		nc.Close()
@@ -63,9 +63,10 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		}
 		slog.Error("envoy nats reconnect hook failed", slog.String("error", hookErr.Error()))
 	}
-	// The recovery binds what the restore left unbound and runs the hooks again after a failed run;
-	// until the next connection event nothing else does either.
-	if restoreErr != nil || hookErr != nil {
+	// The recovery binds what the restore left unbound, a registration it left to its bind in flight
+	// should that bind fail, and runs the hooks again after a failed run; until the next connection
+	// event nothing else does either.
+	if pending || restoreErr != nil || hookErr != nil {
 		go c.recover()
 	}
 }
@@ -172,10 +173,11 @@ func (c *Client) recoverUntilHealthy() {
 		}
 		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
 		failure := "envoy nats recovery reconnect failed"
+		pending := false
 		err := c.ensureConnWithContext(ctx)
 		if err == nil {
 			failure = "envoy nats recovery resubscribe failed"
-			err = c.restoreSubscriptions()
+			pending, err = c.restoreSubscriptions()
 			// The hooks move onto a connection they have not reached whatever the restore returned,
 			// as onReconnect runs them, and only while they are due: a durable a listener waits out
 			// keeps the restore failing, attempt after attempt, while the hooks' state is already
@@ -195,11 +197,15 @@ func (c *Client) recoverUntilHealthy() {
 			}
 			return
 		}
-		if err == nil {
+		if err == nil && !pending {
 			slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
 			return
 		}
-		slog.Error(failure, slog.Int("attempt", attempt), slog.String("error", err.Error()))
+		// A registration left to its bind in flight is no failure: the restore logged it at INFO,
+		// and the next attempt finds it bound or binds it.
+		if err != nil {
+			slog.Error(failure, slog.Int("attempt", attempt), slog.String("error", err.Error()))
+		}
 		select {
 		case <-c.stopCh:
 			slog.Info("envoy nats recovery cancelled")
@@ -224,10 +230,11 @@ func (c *Client) subscriptionsHealthy() bool {
 	return connOK
 }
 
-// errBindInFlight is a restore's report of a registration it left to the bind in flight for it.
-var errBindInFlight = errors.New("bus: the subscription's bind is still in flight")
-
-func (c *Client) restoreSubscriptions() error {
+// restoreSubscriptions binds again every registered subscription the connection lost, and reports
+// apart from its error whether it left one pending: a registration whose bind is in flight is that
+// bind's, which installs it when it ends. Nothing failed there, so it is logged at INFO, and the
+// caller's recovery binds the registration should that bind fail.
+func (c *Client) restoreSubscriptions() (pending bool, err error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
 	c.mu.Unlock()
@@ -236,13 +243,14 @@ func (c *Client) restoreSubscriptions() error {
 	// a recovery that reaches here after it re-subscribes nothing.
 	if c.stopped() {
 		c.subscriptionsMu.Unlock()
-		return errStopped
+		return false, errStopped
 	}
 	// Every subscription is attempted, so one that cannot be restored leaves the others delivering: a
 	// listener waiting out the task that holds its durable has an unbound JetStream subscription
 	// beside a core role lane that is already a member of its machine's queue group.
 	var errs []error
 	var restoring []*recoverableSubscription
+	var pendingSubjects []string
 	for index := range c.subscriptions {
 		subscription := &c.subscriptions[index]
 		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
@@ -254,10 +262,9 @@ func (c *Client) restoreSubscriptions() error {
 		}
 		// A registration whose bind is in flight (the listener's bind attempt, whose lookup a
 		// reconnect can lose, to be waited out for JetStream's 10 s) is that bind's: a second bind
-		// beside it could leave the registration bound twice. It reads as not restored, so the
-		// caller's recovery binds it should that bind fail.
+		// beside it could leave the registration bound twice.
 		if subscription.binding != nil {
-			errs = append(errs, errBindInFlight)
+			pendingSubjects = append(pendingSubjects, subscription.subject)
 			continue
 		}
 		subscription.binding = make(chan struct{})
@@ -268,6 +275,9 @@ func (c *Client) restoreSubscriptions() error {
 		registrations[index] = *subscription
 	}
 	c.subscriptionsMu.Unlock()
+	for _, subject := range pendingSubjects {
+		slog.Info("envoy nats resubscribe left to the bind in flight", slog.String("subject", subject))
+	}
 	for index, subscription := range restoring {
 		slog.Info("envoy nats resubscribing", slog.String("subject", registrations[index].subject))
 		sub, err := bind(registrations[index], conn, js)
@@ -275,5 +285,5 @@ func (c *Client) restoreSubscriptions() error {
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	return len(pendingSubjects) > 0, errors.Join(errs...)
 }

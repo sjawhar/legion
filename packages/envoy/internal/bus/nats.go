@@ -74,11 +74,15 @@ type Client struct {
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
-	// subscriptionsMu guards subscriptions. It is held to read and write them, never across a
-	// bind's request to the server, so a reconnect's restore and the health reads never wait out a
-	// request the reconnect lost.
+	// subscriptionsMu guards subscriptions and drainCollected. It is held to read and write them,
+	// never across a bind's request to the server, so a reconnect's restore, the health reads and
+	// Drain never wait out a request the reconnect lost.
 	subscriptionsMu sync.Mutex
 	subscriptions   [subscriptionCount]recoverableSubscription
+	// drainCollected is set once Drain has taken the last of the subscriptions it drains itself,
+	// just before it drains the connection. A bind that ends before then installs its subscription
+	// for Drain to take, and one that ends after drains what it bound (endBind).
+	drainCollected bool
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
@@ -368,7 +372,9 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues .
 
 // registerSubscription makes next the transport's subscription and binds it. The registration
 // stays when the bind fails, so a later restore binds it. A bind of the transport's subscription
-// already in flight, a restore's or another registration's, is waited for first.
+// already in flight, a restore's or another registration's, is waited for first. Once Drain or
+// Close has stopped the client it registers nothing, as a restore binds nothing: replacing the
+// transport's subscription would unsubscribe one the drain is letting finish.
 func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
 	c.subscriptionsMu.Lock()
 	subscription := &c.subscriptions[next.transport]
@@ -377,6 +383,10 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 		c.subscriptionsMu.Unlock()
 		<-inFlight
 		c.subscriptionsMu.Lock()
+	}
+	if c.stopped() {
+		c.subscriptionsMu.Unlock()
+		return nil, errStopped
 	}
 	// Registering replaces the transport's subscription, so the one it replaces stops delivering:
 	// the listener's self-health rebuild re-registers after its durable consumer was lost, and the
@@ -410,20 +420,21 @@ func bind(registration recoverableSubscription, conn *nats.Conn, js nats.JetStre
 }
 
 // endBind ends the bind in flight of the registration subscription holds, installing sub unless
-// the bind failed or the client stopped meanwhile. Drain collects the subscriptions to drain under
-// subscriptionsMu once it has stopped the client, so a bind that ends after the stop installs
-// nothing and closes what it bound, as a restore that starts after the stop binds nothing.
+// the bind failed. A bind that ends after Drain stopped the client still installs sub while Drain
+// is taking the subscriptions it drains, so the deliveries the server already routed to it finish
+// with the rest's; one that ends once Drain has taken its last drains sub itself, which the
+// connection's drain then waits for, so none of them is discarded.
 func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscription, err error) error {
 	c.subscriptionsMu.Lock()
 	close(subscription.binding)
 	subscription.binding = nil
-	stopped := err == nil && c.stopped()
-	if err == nil && !stopped {
+	late := err == nil && c.drainCollected
+	if err == nil && !late {
 		subscription.active = sub
 	}
 	c.subscriptionsMu.Unlock()
-	if stopped {
-		_ = sub.Unsubscribe()
+	if late {
+		_ = sub.Drain()
 		return errStopped
 	}
 	return err
@@ -478,17 +489,12 @@ func (c *Client) Close() {
 // connection refuses. Only then does it drain the connection, whose Drain only starts the drain,
 // and wait for it to close itself. A connection that is reconnecting is closed at once: nothing it
 // sends reaches the server, so no subscription would drain and a reconnect would re-send them.
+// A bind in flight at the stop is not waited for: one that ends while the subscriptions drain
+// installs its own, which the next pass drains, and one that ends after the last pass drains its
+// own, which the connection's drain takes (endBind). The close ends one still in flight.
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	c.stop()
-	c.subscriptionsMu.Lock()
-	var delivering []*nats.Subscription
-	for _, subscription := range c.subscriptions {
-		if subscription.active != nil && subscription.active.IsValid() {
-			delivering = append(delivering, subscription.active)
-		}
-	}
-	c.subscriptionsMu.Unlock()
 	c.mu.Lock()
 	conn := c.Conn
 	c.mu.Unlock()
@@ -505,20 +511,41 @@ func (c *Client) Drain(timeout time.Duration) error {
 		}
 		return nil
 	}
-	for _, subscription := range delivering {
-		if err := subscription.Drain(); err != nil {
-			return err
+	for {
+		delivering := c.deliveringSubscriptions()
+		if len(delivering) == 0 {
+			break
 		}
-	}
-	for _, subscription := range delivering {
-		if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
-			return err
+		for _, subscription := range delivering {
+			if err := subscription.Drain(); err != nil {
+				return err
+			}
+		}
+		for _, subscription := range delivering {
+			if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
+				return err
+			}
 		}
 	}
 	if err := conn.Drain(); err != nil {
 		return err
 	}
 	return waitUntil(conn.IsClosed)
+}
+
+// deliveringSubscriptions returns the installed subscriptions that are still valid, those a pass
+// of Drain has yet to drain. Finding none, it records that Drain has taken its last (drainCollected).
+func (c *Client) deliveringSubscriptions() []*nats.Subscription {
+	c.subscriptionsMu.Lock()
+	defer c.subscriptionsMu.Unlock()
+	var delivering []*nats.Subscription
+	for _, subscription := range c.subscriptions {
+		if subscription.active != nil && subscription.active.IsValid() {
+			delivering = append(delivering, subscription.active)
+		}
+	}
+	c.drainCollected = len(delivering) == 0
+	return delivering
 }
 
 func (c *Client) ensureConn() error {

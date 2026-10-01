@@ -1,14 +1,10 @@
 package bus_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"net"
-	"net/url"
-	"sync"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -203,7 +199,7 @@ func TestACoreSubscriptionRecoversWhileTheJetStreamOneCannotBind(t *testing.T) {
 // run once at each reconnect and on each replacement connection whatever that restore returned:
 // gated on it, a replaced connection left every store on the closed one until the durable bound.
 // Recovery keeps retrying the durable's restore, and does not run the hooks again for a connection
-// they already moved to.
+// they already moved to. The refused restore is a failure, so it stays an ERROR.
 func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -228,7 +224,7 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 				hooked <- conn
 				return nil
 			})
-
+			logs := captureBusLogs(t)
 			if err := tc.reconnect(client); err != nil {
 				t.Fatalf("reconnect: %v", err)
 			}
@@ -247,6 +243,9 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 			time.Sleep(2500 * time.Millisecond)
 			if runs := len(hooked); runs != 0 {
 				t.Fatalf("the reconnect hook ran %d more time(s) for one reconnect", runs)
+			}
+			if line := logs.lineAt("ERROR", "consumer is already bound"); !strings.Contains(line, "resubscribe failed") {
+				t.Fatalf("the refused restore was not logged as a resubscribe failure at ERROR; first ERROR line: %q", logs.errorLine())
 			}
 		})
 	}
@@ -403,11 +402,13 @@ func TestAConnectionThatClosesAsARecoveryEndsIsRecovered(t *testing.T) {
 // out for 10 s, and a listener's bind attempts run every 2 s through its bind wait; a restore that
 // waited for the bind left the stores /v1 and the role lane read on the old watchers for those 10 s.
 // The registration that bind leaves is not lost and not bound twice: the recovery the reconnect
-// starts binds it once the bind in flight has failed, and a message reaches its handler once.
+// starts binds it once the bind in flight has failed, and a message reaches its handler once. A
+// registration left to its bind in flight is the design working, not a failure, so nothing on the
+// way logs an ERROR.
 func TestAnInPlaceReconnectDoesNotWaitForABindInFlight(t *testing.T) {
 	_, uri := startNATS(t)
-	proxy, relayed := startSwallowingProxy(t, uri, "$JS.API.CONSUMER.INFO.")
-	client, err := bus.ConnectOwningStream([]string{relayed})
+	proxy := startRelayProxy(t, uri)
+	client, err := bus.ConnectOwningStream([]string{proxy.url()})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -433,7 +434,8 @@ func TestAnInPlaceReconnectDoesNotWaitForABindInFlight(t *testing.T) {
 	}
 	bound := make(chan bindResult, 1)
 
-	proxy.arm()
+	logs := captureBusLogs(t)
+	proxy.arm("$JS.API.CONSUMER.INFO.")
 	go func() {
 		_, err := client.Subscribe("", func(msg *natsgo.Msg) {
 			delivered.Add(1)
@@ -479,118 +481,12 @@ func TestAnInPlaceReconnectDoesNotWaitForABindInFlight(t *testing.T) {
 	if count := delivered.Load(); count != 1 {
 		t.Fatalf("the message reached the handler %d times; want once, from one binding", count)
 	}
-}
-
-// swallowingProxy relays NATS connections to a server. Once armed, it forwards nothing more the
-// client sends on the connections it relays at that moment, and reports on swallowed when what it
-// held back carried its trigger: a request the client wrote is lost on its way to the server, as
-// one in flight when a link fails is. drop closes those connections, so nats.go reconnects in place,
-// through a relay that forwards again.
-type swallowingProxy struct {
-	listener  net.Listener
-	target    string
-	trigger   []byte
-	swallowed chan struct{}
-
-	mu    sync.Mutex
-	links []*swallowedLink
-}
-
-type swallowedLink struct {
-	client, server net.Conn
-	swallow        atomic.Bool
-}
-
-// startSwallowingProxy relays to the server uri names and returns the proxy with uri pointed at it.
-func startSwallowingProxy(t *testing.T, uri, trigger string) (*swallowingProxy, string) {
-	t.Helper()
-	server, err := url.Parse(uri)
-	if err != nil {
-		t.Fatalf("parse %q: %v", uri, err)
+	if line := logs.errorLine(); line != "" {
+		t.Fatalf("a reconnect that left a registration to its bind in flight logged an error: %s", line)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("proxy listen: %v", err)
+	if line := logs.lineAt("INFO", "envoy nats resubscribe left to the bind in flight"); line == "" {
+		t.Fatal("the restore never logged the registration it left to the bind in flight")
 	}
-	p := &swallowingProxy{listener: listener, target: server.Host, trigger: []byte(trigger), swallowed: make(chan struct{}, 1)}
-	t.Cleanup(p.close)
-	go p.serve()
-	relayed := *server
-	relayed.Host = listener.Addr().String()
-	return p, relayed.String()
-}
-
-func (p *swallowingProxy) serve() {
-	for {
-		client, err := p.listener.Accept()
-		if err != nil {
-			return
-		}
-		server, err := net.Dial("tcp", p.target)
-		if err != nil {
-			_ = client.Close()
-			continue
-		}
-		link := &swallowedLink{client: client, server: server}
-		p.mu.Lock()
-		p.links = append(p.links, link)
-		p.mu.Unlock()
-		go func() {
-			_, _ = io.Copy(client, server)
-			_ = client.Close()
-		}()
-		go p.forward(link)
-	}
-}
-
-// forward copies what the client sends to the server until either side ends, holding it back
-// while the link swallows.
-func (p *swallowingProxy) forward(link *swallowedLink) {
-	defer func() { _ = link.server.Close() }()
-	buf := make([]byte, 32*1024)
-	var held []byte
-	for {
-		n, err := link.client.Read(buf)
-		if n > 0 {
-			if link.swallow.Load() {
-				held = append(held, buf[:n]...)
-				if bytes.Contains(held, p.trigger) {
-					select {
-					case p.swallowed <- struct{}{}:
-					default:
-					}
-				}
-			} else if _, err := link.server.Write(buf[:n]); err != nil {
-				return
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
-func (p *swallowingProxy) arm() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, link := range p.links {
-		link.swallow.Store(true)
-	}
-}
-
-func (p *swallowingProxy) drop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, link := range p.links {
-		_ = link.client.Close()
-		_ = link.server.Close()
-	}
-	p.links = nil
-}
-
-func (p *swallowingProxy) close() {
-	_ = p.listener.Close()
-	p.drop()
 }
 
 // waitOutHeldDurable puts client where a listener waiting out the task that holds its durable is:
