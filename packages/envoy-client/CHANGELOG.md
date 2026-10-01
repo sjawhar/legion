@@ -52,13 +52,14 @@
   session still ran.
 - `dispatch_issues` asks Dispatch for its page, sending `limit` and `offset` on
   `GET /api/v1/issues` through `DispatchClient.listIssuePage`, which replaces `listIssues`
-  (LEGION-406). The hosts release this client when it merges while Dispatch deploys on its own
-  schedule, so the client negotiates the answer's version rather than falling back: a Dispatch that
-  pages answers `{issues, total, limit, offset}`, which is used as served; one that predates paging
-  ignores both parameters and answers every matching issue as an array, which the client pages as
-  it always has; any other answer, a page missing one of its four fields included, is refused. The
-  tool's answer is the same either way, down to its `showing A-B of N`. The array arm goes once
-  every Dispatch the hosts reach, the production deploy included, runs this change.
+  (LEGION-406), and uses the page Dispatch serves, `{issues, total, limit, offset}`, as it is.
+  Any other answer, a page missing one of its four fields included, is refused, naming the
+  Dispatch and the request it was sent and what arrived. A JSON answer that is not a page comes
+  back the same, so the refusal says a retry will not help; text in its place looks like a proxy or
+  gateway page, so it says a retry may succeed. A bare array answered to the paged request, which a
+  Dispatch older than #1612 sends, was paged by the client itself until every Dispatch the hosts
+  reach, the production deploy included, ran #1612. It is now refused, naming a Dispatch older than
+  that change or a regression of it.
 - The `envoy_subscribe` description says a `pr.<n>.checks` settlement is published for every
   commit of the pull request whose checks settle, the head or not, and names its `sha`
   (LEGION-208).
