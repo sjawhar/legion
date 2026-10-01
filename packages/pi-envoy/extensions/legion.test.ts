@@ -4691,7 +4691,7 @@ describe("Legion OMP extension", () => {
 
     // A person's Send or Aside from Dispatch's Agents page reaches the session as its own user
     // turn (extensions/envoy.ts), a user message exactly like the daemon's assignment. It is an
-    // inbound event, as its Envoy card was before: it never opens a phase, and it wakes a stall
+    // inbound event, as its Envoy card was before: it does not open a phase, and it wakes a stall
     // that already had its follow-up or a WAITING reply.
     const personsMessage = {
       message: {

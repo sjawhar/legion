@@ -91,8 +91,10 @@
   after a restart, while a person's retry of that Send can still be their turn. Anything else, a
   refused accept, an error, a timeout or a Dispatch configuration that no longer resolves, keeps
   its card and posts nothing. The live stream tags that user message with `dispatchMessageId`, so
-  Dispatch's conversation view shows it once. In a Legion phase worker it counts as an inbound
-  event, as its card did, and never opens a phase.
+  Dispatch's conversation view shows it once, and in a Legion phase worker it counts as an inbound
+  event, as its card did, except a Send or an Aside sent in between the run's last queue or aside
+  poll and its `agent_end`, which the host runs as a turn of its own: that one shows twice and
+  counts as an assignment (`packages/pi-envoy/AGENTS.md`).
 - `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
   not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
   which the load balancer in front of production Dispatch answers with a bare HTML `414` when it

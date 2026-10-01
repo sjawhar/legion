@@ -46,7 +46,8 @@ the injected user message with the message id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
 message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the
 first user message with the sent text, remembered under its host timestamp, forgotten at the run's
-`agent_end`).
+`agent_end`, so one sent in between the run's last queue or aside poll and that `agent_end` is missed
+and shows twice; the phase-worker section below says what that costs a phase worker).
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own
@@ -291,9 +292,10 @@ tracks the phase: the daemon's assignment (a user message) opens it, the tool's 
 own turn is a user message too, and counts as an Envoy delivery rather than an assignment: the
 Envoy extension records each body it sends in, process-wide, and legion.ts asks that record at
 `message_start` (`matchInjectedUserTurn`). The record is forgotten at the run's `agent_end`, so a
-Send that arrives after the run's last queue poll, which the host then runs as a turn of its own
-after `agent_end`, matches nothing: it counts as an assignment, which opens even a closed phase,
-and the dashboard shows it twice. When a run is about to settle (`session_stop`) with the phase still
+Send or an Aside sent in after the run's last queue or aside poll and before that `agent_end`,
+which the host then runs as a turn of its own, matches nothing: it counts as an assignment, which
+opens even a closed phase, and the dashboard shows it twice. One sent in after that `agent_end`
+starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
 message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a
