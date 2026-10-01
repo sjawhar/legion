@@ -9,30 +9,46 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
 
-// codegraphTimeout bounds each codegraph invocation independently, the same budget Provision's own
-// commands get from the Runner.
-const codegraphTimeout = CommandTimeout
+// codegraphTimeout bounds each codegraph invocation independently. The warm-up runs only in the
+// background, so nothing waits on it; a first index of a large repository (tens of thousands of
+// files) takes longer than Provision's own command budget.
+const codegraphTimeout = 30 * time.Minute
+
+// warming holds the workspace directories with a background warm-up in flight in this process.
+var warming sync.Map
+
+// WarmCodegraphIndexInBackground starts WarmCodegraphIndex for dir in its own goroutine and
+// returns at once, so no launch ever waits on an index build; a second call for a directory whose
+// warm-up is still running does nothing. Only a long-lived process calls it (the Go daemon's host
+// provisioning for tmux panes, internal/daemon/outbox.go): the pod init container builds no index,
+// since it runs on the pod's registration path and its goroutines die with it.
+func WarmCodegraphIndexInBackground(dir string) {
+	if _, busy := warming.LoadOrStore(dir, struct{}{}); busy {
+		return
+	}
+	go func() {
+		defer warming.Delete(dir)
+		WarmCodegraphIndex(context.Background(), dir)
+	}()
+}
 
 // WarmCodegraphIndex mirrors the TypeScript daemon's ensureCodegraphIndex (research report
 // AGENTC-1305 §7): the tester's `affected` and the reviewer's `impact`/`callers` queries need an
-// index already built, not one built on first use. Each caller (the pod init container,
-// cmd/legion/workspace_init.go, after its repository flock is released; the Go daemon's host
-// provisioning for tmux panes, internal/daemon/outbox.go, after Provision returns) runs this
-// outside its own provisioning serialization — indexing reads only the issue's own workspace
-// directory, so holding a repository-wide lock across it would queue every other issue's pod or
-// pane behind one potentially slow index build for no correctness reason; Provision itself never
-// calls it. codegraph is deliberately not one of the tools Runner requires — the daemon and the
-// pod init container must still boot where it is absent (the tmux runtime's host provisioning
+// index already built, not one built on first use. Callers run it through
+// WarmCodegraphIndexInBackground, outside any provisioning serialization: indexing reads only the
+// issue's own workspace directory. codegraph is deliberately not one of the tools Runner
+// requires — the daemon must still boot where it is absent (the tmux runtime's host provisioning
 // never installs it) — so this resolves it from PATH on its own, directly with os/exec, and never
 // fails provisioning: a missing CLI, a non-zero exit, or a timeout is logged loudly to stderr,
 // exactly as the TypeScript daemon's console.error does, and never through Request.Log (reserved
-// for the one structured provisioning message createWorkspace writes; cmd/legion/
-// workspace_init.go and tests assert its stdout exactly). Warming simply does not happen when the
-// CLI is missing or fails; the worker falls back to grep, per its role prompt. Every codegraph
-// invocation gets a minimal, explicit environment — PATH, HOME, TMPDIR when set, and
-// DO_NOT_TRACK=1 — never the process's full environment: a provisioning caller may hold a
+// for the one structured provisioning message createWorkspace writes). Warming simply does not
+// happen when the CLI is missing or fails; the worker falls back to grep, per its role prompt.
+// Every codegraph invocation gets a minimal, explicit environment — PATH, HOME, TMPDIR when set,
+// and DO_NOT_TRACK=1 — never the process's full environment: a provisioning caller may hold a
 // one-shot GitHub token or other secrets in its own environment, and codegraph gets none of them.
 // DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its bundled docs rank
 // DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on), so an automatic,

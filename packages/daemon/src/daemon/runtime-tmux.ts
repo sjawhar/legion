@@ -40,6 +40,10 @@ const TMUX_OWN_GLOBALS: Record<string, true> = { PWD: true, SHLVL: true };
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 
+/** Each background `codegraph` invocation's bound. Nothing waits on the warm-up, and a first index
+ * of a large repository (tens of thousands of files) takes far longer than a launch command. */
+const CODEGRAPH_WARM_TIMEOUT_MS = 30 * 60_000;
+
 /** `codegraph status --json`'s `initialized` field (AGENTC-1305 §7): `codegraph status` exits 0
  * whether or not the project has ever been indexed, so only the parsed body tells the two apart.
  * Anything that fails to parse as that shape — a missing CLI's empty output, a version whose
@@ -472,17 +476,29 @@ export class TmuxRuntime implements Runtime {
     );
   }
 
+  /** Workspace directories with a background CodeGraph warm-up in flight in this daemon. */
+  private readonly codegraphWarming = new Set<string>();
+
+  /** Starts `ensureCodegraphIndex` for the workspace and returns at once, so a launch never waits
+   * on an index build (a first index of a large repository takes many minutes); a second call for
+   * a workspace whose warm-up is still running does nothing. */
+  private warmCodegraphIndexInBackground(workspaceDir: string): void {
+    if (this.codegraphWarming.has(workspaceDir)) return;
+    this.codegraphWarming.add(workspaceDir);
+    void this.ensureCodegraphIndex(workspaceDir).finally(() =>
+      this.codegraphWarming.delete(workspaceDir)
+    );
+  }
+
   /** Warms `@bopstack/pi-codegraph`'s index for the issue's working copy (research report
    * AGENTC-1305 §7): the tester's `affected` and the reviewer's `impact`/`callers` queries need
-   * one already built, not one built on first use. Runs after `provisionWorkspace` releases the
-   * per-repository provisioning lock (`this.provisionQueue`): indexing reads the issue's own
-   * workspace directory, not the shared clone that lock protects, so holding it across indexing
-   * would serialize every other issue of the repository behind one potentially slow index build
-   * for no correctness reason. `codegraph status` is a fast no-op on an already-indexed
-   * directory, so provisioning the same workspace again for a later phase worker of the same
-   * issue costs one quick check, not a re-index. A missing CLI or a failed build is logged
-   * loudly — never silently swallowed — but never fails the provision: a worker without an index
-   * falls back to grep, per its role prompt, rather than being wedged by an optional tool. */
+   * one already built, not one built on first use. It runs only in the background
+   * (`warmCodegraphIndexInBackground`), outside the per-repository provisioning lock: indexing
+   * reads the issue's own workspace directory, not the shared clone that lock protects.
+   * `codegraph status` is a fast no-op on an already-indexed directory, so a later phase worker of
+   * the same issue costs one quick check, not a re-index. A missing CLI or a failed build is
+   * logged loudly — never silently swallowed — and never fails or delays the launch: a worker
+   * without an index falls back to grep, per its role prompt. */
   private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
     // createDaemonRunner merges `{ ...environment.paneEnv, ...options?.env }`, so an `env` option
     // here can only add variables, never remove the ones paneEnv already carries (which may
@@ -502,13 +518,13 @@ export class TmuxRuntime implements Runtime {
         ["sh", "-c", codegraphShell, "codegraph", "status", "--json"],
         {
           cwd: workspaceDir,
-          timeoutMs: this.deps.slowCommandTimeoutMs,
+          timeoutMs: CODEGRAPH_WARM_TIMEOUT_MS,
         }
       );
       if (status.exitCode === 0 && isCodegraphInitialized(status.stdout)) return;
       const result = await this.deps.run(["sh", "-c", codegraphShell, "codegraph", "init"], {
         cwd: workspaceDir,
-        timeoutMs: this.deps.slowCommandTimeoutMs,
+        timeoutMs: CODEGRAPH_WARM_TIMEOUT_MS,
       });
       if (result.exitCode !== 0) {
         console.error(
@@ -563,10 +579,10 @@ export class TmuxRuntime implements Runtime {
     secrets: Array<[string, string]>
   ): Promise<TmuxLocator> {
     // Today's order, kept: provision, then the prompt stat and session-file stat inside the
-    // command assembly, then the socket, secret file, and tmux argv. Codegraph indexing runs
-    // after provisioning releases the per-repository lock (see `ensureCodegraphIndex`'s doc).
+    // command assembly, then the socket, secret file, and tmux argv. The CodeGraph warm-up starts
+    // in the background after provisioning and never holds the launch.
     const workspace = await this.provisionWorkspace(issue);
-    await this.ensureCodegraphIndex(workspace.workspaceDir);
+    this.warmCodegraphIndexInBackground(workspace.workspaceDir);
     const innerCommand = await this.issueInnerCommand(
       issue,
       spec.launch,

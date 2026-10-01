@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubCodegraph puts a fake `codegraph` executable first on PATH. Its `status --json` reports
@@ -68,6 +69,67 @@ func TestWarmCodegraphIndexBuildsAnIndexWhenTheCliIsOnPath(t *testing.T) {
 	if len(lines) != before+1 || !strings.HasPrefix(lines[len(lines)-1], "status --json\t") {
 		t.Fatalf("codegraph calls after a second warm-up = %v, want exactly one more status --json call", lines)
 	}
+}
+
+// TestWarmCodegraphIndexInBackgroundNeverWaitsAndBuildsOncePerWorkspace pins what a launch needs:
+// the call returns while `codegraph init` is still running, and a second call for the same
+// workspace during that build starts no second one.
+func TestWarmCodegraphIndexInBackgroundNeverWaitsAndBuildsOncePerWorkspace(t *testing.T) {
+	scratch := t.TempDir()
+	callLog := filepath.Join(scratch, "calls.log")
+	release := filepath.Join(scratch, "release")
+	bin := filepath.Join(scratch, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+echo "$1" >> '` + callLog + `'
+case "$1" in
+status) echo '{"initialized":false}' ;;
+init) while [ ! -f '` + release + `' ]; do sleep 0.05; done ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "codegraph"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := t.TempDir()
+
+	start := time.Now()
+	WarmCodegraphIndexInBackground(dir)
+	WarmCodegraphIndexInBackground(dir)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("WarmCodegraphIndexInBackground blocked for %s; it must return at once", elapsed)
+	}
+	waitFor(t, func() bool {
+		calls, _ := os.ReadFile(callLog)
+		return strings.Contains(string(calls), "init")
+	}, "codegraph init to start")
+	WarmCodegraphIndexInBackground(dir)
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		_, busy := warming.Load(dir)
+		return !busy
+	}, "the background warm-up to finish")
+	calls, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(calls), "init"); got != 1 {
+		t.Fatalf("codegraph init ran %d times for one workspace, want 1; calls: %q", got, calls)
+	}
+}
+
+func waitFor(t *testing.T, done func() bool, what string) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if done() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 // TestWarmCodegraphIndexNeverFailsWhenTheCliIsMissing proves the acceptance criterion directly:
