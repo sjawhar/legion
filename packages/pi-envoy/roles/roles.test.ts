@@ -225,17 +225,17 @@ describe("the planner's plan checks", () => {
       const line = residue.split("\n").find((text) => text.startsWith(`- \`${field}\`:`));
       if (!line) throw new Error(`planner.md shows no ${field}`);
       return [...line.matchAll(/`(\{.*?\})`(?=[ ,;.]|$)/g)].map(
-        (match) => JSON.parse(match[1].replaceAll("…", "x").replaceAll(": N", ": 1")) as object
+        (match) =>
+          JSON.parse(match[1].replaceAll("…", "x").replaceAll(": N", ": 1")) as Record<
+            string,
+            unknown
+          >
       );
     };
     const gapAnalyses = shapes("gapAnalysis");
     const planReviews = shapes("planReview");
     expect(gapAnalyses).toHaveLength(2);
-    expect(planReviews.map((review) => (review as { verdict: string }).verdict)).toEqual([
-      "approved",
-      "rejected",
-      "failed",
-    ]);
+    expect(planReviews.map((review) => review.verdict)).toEqual(["approved", "rejected", "failed"]);
     expect(planReviews[1]).toMatchObject({ rounds: PLAN_REVIEW_MAX_ROUNDS });
     const requiredSkills = { implement: ["none: x"], test: ["none: x"], review: ["none: x"] };
     for (const gapAnalysis of gapAnalyses)

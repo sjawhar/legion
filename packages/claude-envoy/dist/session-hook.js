@@ -14642,21 +14642,20 @@ var reviewSchema = baseHandoffSchema.extend({
   keyFindings: exports_external.array(exports_external.object({ severity: exports_external.string(), file: exports_external.string(), description: exports_external.string() }).passthrough()).optional()
 });
 var nonEmptySkillList = exports_external.array(exports_external.string().trim().min(1)).min(1);
-var recordedText = exports_external.string().trim().min(1);
 var recorded = (shape, whatToRecord) => exports_external.object(shape, {
   error: (issue2) => issue2.input === undefined ? `missing \u2014 record ${whatToRecord}` : undefined
 }).passthrough();
 var gapAnalysisWriteSchema = recorded({
-  findings: exports_external.array(exports_external.object({ finding: recordedText, answer: recordedText }).passthrough()).optional(),
-  error: recordedText.optional()
+  findings: exports_external.array(exports_external.object({ finding: nonEmpty, answer: nonEmpty }).passthrough()).optional(),
+  error: nonEmpty.optional()
 }, "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`").refine((analysis) => analysis.findings === undefined !== (analysis.error === undefined), {
   message: "record either `findings` or the failed call's `error`, not both"
 });
 var planReviewWriteSchema = recorded({
   verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
   rounds: exports_external.number().int().min(1).max(PLAN_REVIEW_MAX_ROUNDS),
-  remainingIssues: exports_external.array(exports_external.object({ issue: recordedText, evidence: recordedText }).passthrough()).optional(),
-  error: recordedText.optional()
+  remainingIssues: exports_external.array(exports_external.object({ issue: nonEmpty, evidence: nonEmpty }).passthrough()).optional(),
+  error: nonEmpty.optional()
 }, "the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed").superRefine((review, ctx) => {
   const remaining = review.remainingIssues?.length ?? 0;
   if (review.verdict === "rejected" && remaining === 0) {

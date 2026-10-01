@@ -111,9 +111,9 @@ export interface PlanHandoff extends BaseHandoff {
   concerns?: string[];
   workflowRecommendation?: string;
   requiredSkills?: RequiredSkills;
-  /** Required at write time; optional at read, so plans committed before LEGION-421 still load. */
+  /** Required at write time; optional at read, so plans committed before the checks still load. */
   gapAnalysis?: GapAnalysis;
-  /** Required at write time; optional at read, so plans committed before LEGION-421 still load. */
+  /** Required at write time; optional at read, so plans committed before the checks still load. */
   planReview?: PlanReview;
 }
 
@@ -318,8 +318,6 @@ const reviewSchema = baseHandoffSchema.extend({
 
 const nonEmptySkillList = z.array(z.string().trim().min(1)).min(1);
 
-const recordedText = z.string().trim().min(1);
-
 /** A write-time plan check: the object is required, and its absence is named with what to record. */
 const recorded = <Shape extends z.ZodRawShape>(shape: Shape, whatToRecord: string) =>
   z
@@ -333,10 +331,8 @@ const recorded = <Shape extends z.ZodRawShape>(shape: Shape, whatToRecord: strin
  * failed call's error, never both. */
 const gapAnalysisWriteSchema = recorded(
   {
-    findings: z
-      .array(z.object({ finding: recordedText, answer: recordedText }).passthrough())
-      .optional(),
-    error: recordedText.optional(),
+    findings: z.array(z.object({ finding: nonEmpty, answer: nonEmpty }).passthrough()).optional(),
+    error: nonEmpty.optional(),
   },
   "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`"
 ).refine((analysis) => (analysis.findings === undefined) !== (analysis.error === undefined), {
@@ -350,9 +346,9 @@ const planReviewWriteSchema = recorded(
     verdict: z.enum(PLAN_REVIEW_VERDICTS),
     rounds: z.number().int().min(1).max(PLAN_REVIEW_MAX_ROUNDS),
     remainingIssues: z
-      .array(z.object({ issue: recordedText, evidence: recordedText }).passthrough())
+      .array(z.object({ issue: nonEmpty, evidence: nonEmpty }).passthrough())
       .optional(),
-    error: recordedText.optional(),
+    error: nonEmpty.optional(),
   },
   "the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed"
 ).superRefine((review, ctx) => {
