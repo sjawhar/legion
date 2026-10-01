@@ -20,6 +20,7 @@ import {
   documentTransport,
   marginCard,
   markSpan,
+  placeCaret,
   selectEditorText,
 } from "./editor";
 import { resetDatabase, setCommentAuthorService } from "./seed";
@@ -196,6 +197,170 @@ test("the selection bar comments, suggests, and asks on marks that both users se
       expectMark(alicePage, ask.ask.anchor.mark_id, "fox"),
       expectMark(bobPage, ask.ask.anchor.mark_id, "fox"),
     ]);
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("switching an anchored composer from Comment to Ask asks about the selected text", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Switch kinds",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
+    await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
+    await expect(documentEditor(bobPage)).toContainText(initialMarkdown);
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+    const askMarks = (page: Page) =>
+      documentEditor(page).locator('span[data-dispatch="ask"][data-id]');
+    const proofMarks = (page: Page) => documentEditor(page).locator("span[data-proof][data-id]");
+    const composer = alicePage.getByRole("form", { name: "Comment composer" });
+    const switchToAsk = () =>
+      composer
+        .getByRole("group", { name: "Kind" })
+        .getByRole("button", { exact: true, name: "Ask" });
+
+    // Switching the kind retypes the provisional mark: both browsers now hold an ask mark over the
+    // selection and no comment mark.
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Comment");
+    await expect(composer).toContainText("brown");
+    await switchToAsk().click();
+    await expect(switchToAsk()).toHaveAttribute("aria-pressed", "true");
+    await expect(askMarks(alicePage)).toHaveText(["brown"]);
+    await expect(askMarks(bobPage)).toHaveText(["brown"]);
+    await expect(proofMarks(alicePage)).toHaveCount(0);
+    await expect(proofMarks(bobPage)).toHaveCount(0);
+
+    // The composer's own marks are never undo steps: undo, undo, redo in the editor change no mark
+    // in either browser - the comment mark does not come back and the ask mark does not go.
+    await placeCaret(alicePage, "after", "fox");
+    await alicePage.keyboard.press("ControlOrMeta+z");
+    await alicePage.keyboard.press("ControlOrMeta+z");
+    await alicePage.keyboard.press("ControlOrMeta+Shift+z");
+    await expect(askMarks(alicePage)).toHaveText(["brown"]);
+    await expect(askMarks(bobPage)).toHaveText(["brown"]);
+    await expect(proofMarks(alicePage)).toHaveCount(0);
+    await expect(proofMarks(bobPage)).toHaveCount(0);
+
+    // Cancelling after the switch leaves no provisional mark in either browser. Escape is handled
+    // on the composer's form, so focus goes back there after the editor took it for the undo.
+    await composer.getByLabel("Question").focus();
+    await alicePage.keyboard.press("Escape");
+    await expect(documentEditor(alicePage).locator("span[data-id]")).toHaveCount(0);
+    await expect(documentEditor(bobPage).locator("span[data-id]")).toHaveCount(0);
+
+    // A bar Comment that is cancelled stays cancelled through undo and redo.
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Comment");
+    await expect(composer).toContainText("brown");
+    await alicePage.keyboard.press("Escape");
+    await expect(documentEditor(alicePage).locator("span[data-id]")).toHaveCount(0);
+    await placeCaret(alicePage, "after", "fox");
+    await alicePage.keyboard.press("ControlOrMeta+z");
+    await alicePage.keyboard.press("ControlOrMeta+Shift+z");
+    await expect(documentEditor(alicePage).locator("span[data-id]")).toHaveCount(0);
+    await expect(documentEditor(bobPage).locator("span[data-id]")).toHaveCount(0);
+
+    // A switch the editor refuses says why and leaves the kind alone: the bar's Comment accepts a
+    // mid-word selection, and a suggestion over it is one upstream will not write.
+    await selectEditorText(alicePage, "ick");
+    await barAction(alicePage, "Comment");
+    await expect(composer).toContainText("ick");
+    const kinds = composer.getByRole("group", { name: "Kind" });
+    await kinds.getByRole("button", { exact: true, name: "Suggest" }).click();
+    await expect(composer.getByRole("status")).toHaveText(
+      "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again."
+    );
+    await expect(kinds.getByRole("button", { exact: true, name: "Comment" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expect(kinds.getByRole("button", { exact: true, name: "Suggest" })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+    await expect(proofMarks(alicePage)).toHaveText(["ick"]);
+    await alicePage.keyboard.press("Escape");
+    await expect(documentEditor(alicePage).locator("span[data-id]")).toHaveCount(0);
+
+    // A switch that would cut into someone else's comment is refused and leaves that comment
+    // whole: Bob's recorded comment covers "quick brown"; Alice asks about "brown" inside it and
+    // switches to Comment.
+    const bobsComment = await createComment(
+      issue.key,
+      { anchor: { artifact: "spec", quote: "quick brown" }, body: "whole phrase" },
+      { login: "bob" }
+    );
+    if (bobsComment.anchor === null) {
+      throw new Error("Bob's comment has no anchor.");
+    }
+    await expectMark(alicePage, bobsComment.anchor.mark_id, "quick brown");
+    await selectEditorText(alicePage, "brown");
+    await barAction(alicePage, "Ask");
+    await expect(composer).toContainText("brown");
+    await kinds.getByRole("button", { exact: true, name: "Comment" }).click();
+    await expect(composer.getByRole("status")).toHaveText(
+      "Someone else's comment already covers part of this text. Close this composer and select text outside it."
+    );
+    await expect(kinds.getByRole("button", { exact: true, name: "Ask" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expectMark(alicePage, bobsComment.anchor.mark_id, "quick brown");
+    await expectMark(bobPage, bobsComment.anchor.mark_id, "quick brown");
+    await alicePage.keyboard.press("Escape");
+    await expect(askMarks(alicePage)).toHaveCount(0);
+    await expectMark(alicePage, bobsComment.anchor.mark_id, "quick brown");
+    await expect
+      .poll(() => listComments(issue.key, artifactId).then((items) => items[0]?.anchor?.quote))
+      .toBe("quick brown");
+
+    // Sending after the switch creates an ask anchored to the selected text, and nothing else
+    // ("fox" sits outside Bob's comment, so the bar's Comment displaces nothing: LEGION-458).
+    await selectEditorText(alicePage, "fox");
+    await barAction(alicePage, "Comment");
+    await switchToAsk().click();
+    await composer.getByLabel("Question").fill("Why fox?");
+    await composer.locator('button[type="submit"]').click();
+    const askCard = alicePage
+      .getByRole("region", { name: "Needs you" })
+      .locator("[data-margin-item]")
+      .filter({ hasText: "Why fox?" });
+    await expect(askCard).toBeVisible();
+    const askId = await askCard.getAttribute("data-margin-item");
+    if (askId === null) {
+      throw new Error("The switched ask has no margin id.");
+    }
+    const ask = await getAsk(askId);
+    if (ask.ask.anchor === null) {
+      throw new Error("The switched ask has no anchor.");
+    }
+    expect(ask.ask.anchor.quote).toBe("fox");
+    await Promise.all([
+      expectMark(alicePage, ask.ask.anchor.mark_id, "fox"),
+      expectMark(bobPage, ask.ask.anchor.mark_id, "fox"),
+    ]);
+    await expect(proofMarks(alicePage)).toHaveText(["quick brown"]);
+    await expect(proofMarks(bobPage)).toHaveText(["quick brown"]);
+    const comments = await listComments(issue.key, artifactId);
+    expect(comments.map((item) => item.id)).toEqual([bobsComment.id]);
   } finally {
     await bob.close();
     await alice.close();
