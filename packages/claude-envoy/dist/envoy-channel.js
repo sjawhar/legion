@@ -40332,7 +40332,7 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   if (removed.size === 0)
     return;
   const asks = await blockAsks(client, resolved, "open");
-  const open = asks.filter((ask) => ask.state === "open" && removed.has(ask.block_id));
+  const open = asks.filter((ask) => removed.has(ask.block_id));
   if (open.length === 0)
     return;
   const [what, question] = open.length === 1 ? ["a decision block whose ask is", "question"] : [`${open.length} decision blocks whose asks are`, "questions"];
