@@ -208,6 +208,12 @@ type SuperviseRequest struct {
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
 	ResumeTask bool `json:"resumeTask,omitempty"`
+	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
+	// red while it tested, or reviewed a round it had not completed (workflow's TriggerChecksRed). The
+	// start acts only once that role's claim is out of its turn (supervise.Machine.Quiesce), so the
+	// two never write the shared workspace together. It is empty for every other start, which a
+	// completion or a person's move hands the phase, and for every other operation.
+	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -405,6 +411,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
+		}
+		if value.Quiesce != "" && (value.Op != "start" || value.Quiesce == value.Role) {
+			return fmt.Errorf("a supervise quiesce names another role than its start's, and only a start carries one")
 		}
 	case MergeQueuePublish:
 		if value.Role == "" {

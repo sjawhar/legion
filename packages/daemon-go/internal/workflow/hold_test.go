@@ -50,7 +50,9 @@ func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 // architect is told in a worker-died naming the role and saying the phase is not its, and the
 // issue's phase stands: nothing is held for a role that holds no phase, and the controller is not
 // told of a phase that is not stalled. A lingering tree and a child that left the workflow tell
-// nobody, since their claims were suspended.
+// nobody, since their claims were suspended. A child's sub-architect works no phase and nothing in
+// the workflow starts it, so its failure holds nothing and tells nobody: the child's notices go to
+// the architect above it, and the operator who started it relaunches it.
 func TestAFinishedRolesFailedClaimIsNoticedAndHoldsNothing(t *testing.T) {
 	root := "LEGION-208"
 	until := time.Date(2026, 9, 26, 13, 0, 0, 0, time.UTC)
@@ -98,6 +100,12 @@ func TestAFinishedRolesFailedClaimIsNoticedAndHoldsNothing(t *testing.T) {
 			root:  record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
 			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "V"},
 			role:  claim.RoleTester, wantPhase: phase.Done,
+		},
+		{
+			name:  "a child's sub-architect while the child's implementer works",
+			root:  record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"},
+			child: record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"},
+			role:  claim.RoleArchitect, wantPhase: phase.Implementing,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

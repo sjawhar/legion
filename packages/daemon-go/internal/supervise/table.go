@@ -780,10 +780,12 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 
 // turnEnded is the turn over: the delivery it confirmed retires, and one queued meanwhile goes —
 // unless a suspension is held for this turn (holdSuspension), which runs instead; a stop the
-// runtime refuses leaves the claim idle, still holding it. The agent just said where it is, so
+// runtime refuses leaves the claim idle, still holding it. A turn interrupted for a start that takes
+// over the issue's phase lets that start go on (Quiesce). The agent just said where it is, so
 // nothing is left to ask it after a restart.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
+	m.interruptOver()
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
 			if m.held == nil {

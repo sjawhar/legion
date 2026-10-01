@@ -39,9 +39,13 @@
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
 #   repository carries none of them, and the run never prints them.
-# - LEGION_E2E_DISPATCH_TOKEN_SECRET_ID and LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) are the
-#   Secrets Manager ids of the production Dispatch agents' bearer and the production Envoy listener's
-#   API token. The repository carries neither.
+# - LEGION_E2E_DISPATCH_TOKEN_FILE (required) names a file only its owner can read (no group or
+#   other permission bits) holding a bearer of the Dispatch agents' client, the one an agent
+#   session's Dispatch configuration resolves (DISPATCH_TOKEN_FILE, DISPATCH_TOKEN, or envoy.json's
+#   dispatch.token). Dispatch answers it as an agent session actor, which its HTTP routes and the
+#   document websocket require.
+# - LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) is the Secrets Manager id of the production Envoy
+#   listener's API token. The repository carries neither credential.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -53,12 +57,12 @@
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
-# The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
-# into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
-# reads them from header files), and never in the evidence. One run at a time: the project, the NATS
-# durable consumer names, ports 13372/13373 and the namespace label are shared, so the run takes a
-# lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
-# it did not create.
+# The production bearers are copied, the Dispatch one from its file and the Envoy one read from
+# Secrets Manager with the devbox admin role, into 0600 files under the run's scratch directory.
+# They are never printed, never in an argv (curl reads them from header files), and never in the
+# evidence. One run at a time: the project, the NATS durable consumer names, ports 13372/13373 and
+# the namespace label are shared, so the run takes a lock and refuses to start while another holds
+# it, or while LEGSMOKE has pods, Sandboxes or claims it did not create.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -85,7 +89,7 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
-dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
+dispatch_token_file=${LEGION_E2E_DISPATCH_TOKEN_FILE:-}
 envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
@@ -244,6 +248,39 @@ resident_kept() {
 # resident_lost ISSUE ROLE says how ROLE's claim differs from the session and pod it first had.
 resident_lost() {
   printf 'now %s, first %s' "$(claim_view "$1" "$2" | jq -c '{state, session, incarnation: .locator.incarnation}')" "$(cat "$work/resident-$1-$2.json")"
+}
+resident_idle() { resident_kept "$1" "$2" && issue_worker_state "$1" "$2" idle; }
+# pod_commands POD prints the command line of every process in POD's worker container, one a line:
+# the image has no ps, so /proc is read.
+pod_commands() {
+  # shellcheck disable=SC2016  # expanded by the pod's shell
+  pod_exec "$1" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " <"$f" 2>/dev/null; echo; done'
+}
+pod_runs() { pod_commands "$1" | grep -qF -- "$2"; }
+pod_file() { pod_exec "$1" test -s "$2"; }
+# takeover_lines ROW TESTER prints the daemon log's lines of a CI-red takeover, one JSON object a
+# line: the implementer's start, outbox row ROW, held and going on, and the tester's claim TESTER
+# interrupted for it and its turn over.
+takeover_held="outbox start is held for the turn of the role it takes the phase from"
+takeover_goes_on="outbox start goes on: the claim it takes the phase from is out of its turn"
+takeover_interrupted="supervise: interrupted the agent's turn: a start takes over its issue's phase"
+takeover_over="supervise: the interrupted turn is over"
+takeover_lines() {
+  jq -R -c --argjson row "$1" --arg tester "$2" --arg held "$takeover_held" --arg on "$takeover_goes_on" \
+    --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" \
+    'fromjson? | select(.row == $row and ((.msg == $held or .msg == $on) or ((.msg == $interrupted or .msg == $over) and .claim == $tester)))' "$daemon_log"
+}
+# takeover_ordered FILE TASK_AT: the takeover's lines FILE (takeover_lines) hold the start held and
+# the tester's turn interrupted, both before that turn was over, the start going on only after it,
+# and the implementer's task, which reached its session at TASK_AT, after it too.
+takeover_ordered() {
+  jq -s -e --arg task "$2" --arg held "$takeover_held" --arg on "$takeover_goes_on" \
+    --arg interrupted "$takeover_interrupted" --arg over "$takeover_over" '
+    def secs: (.[0:19] + "Z" | fromdateiso8601) + (.[19:] | rtrimstr("Z") | if . == "" then 0 else "0" + . | tonumber end);
+    def at($m): map(select(.msg == $m) | .time | secs) | first;
+    at($held) as $h | at($interrupted) as $i | at($over) as $o | at($on) as $g
+    | $h != null and $i != null and $o != null and $g != null
+      and $h <= $o and $i <= $o and $o <= $g and $o <= ($task | secs)' "$1" >/dev/null
 }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
@@ -425,14 +462,15 @@ pod_endpoint_mismatch() {
 
 read_bearers() {
   (umask 077 &&
-    aws secretsmanager get-secret-value --secret-id "$dispatch_token_secret_id" --query SecretString --output text >"$work/dispatch-token" &&
+    tr -d '[:space:]' <"$dispatch_token_file" >"$work/dispatch-token" &&
     aws secretsmanager get-secret-value --secret-id "$envoy_token_secret_id" --query SecretString --output text >"$work/envoy-token" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
     cp "$work/dispatch-auth-header" "$work/dispatch-human-header" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
-  [ -s "$work/dispatch-token" ] && [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer"
+  [ -s "$work/dispatch-token" ] || fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which holds no bearer"
+  [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer for LEGION_E2E_ENVOY_TOKEN_SECRET_ID"
 }
 # scrub replaces each production service's host with the variable that names it: the run prints
 # none of them, and a tool's error (a refused connection, an unresolved name) may carry one.
@@ -1393,8 +1431,19 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
-[[ $dispatch_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
-  fail "LEGION_E2E_DISPATCH_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
+# The Dispatch bearer's file is named, never read into the transcript: a refusal names the variable
+# and the path, never what the file holds.
+[ -n "$dispatch_token_file" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE is unset: it names the file holding the Dispatch agents' bearer"
+[ -f "$dispatch_token_file" ] && [ -r "$dispatch_token_file" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which is not a readable file"
+dispatch_token_mode=$(stat -c %a -- "$dispatch_token_file")
+case $dispatch_token_mode in
+  *00) ;;
+  *) fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, whose group or others have access (mode $dispatch_token_mode): make it 0600" ;;
+esac
+[ -n "$(tr -d '[:space:]' <"$dispatch_token_file")" ] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_FILE names $dispatch_token_file, which holds no bearer"
 [[ $envoy_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
   fail "LEGION_E2E_ENVOY_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
 # The gateway's health endpoint is at its origin.
@@ -1462,6 +1511,16 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
   jq -c '[.spec.template.spec.requirements[] | select(.key == "karpenter.k8s.aws/instance-cpu")]')
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
+# The run's Dispatch bearer authenticates as an agent session, the actor Dispatch's routes and its
+# document websocket require, and the read is what says so: the same read with an invalid bearer
+# is refused 401.
+whoami=$(dispatch_get whoami 2>&1) || fail "production Dispatch refused the LEGION_E2E_DISPATCH_TOKEN_FILE bearer: $(scrub <<<"$whoami" | head -c 300)"
+jq -e '.kind == "agent"' <<<"$whoami" >/dev/null ||
+  fail "the LEGION_E2E_DISPATCH_TOKEN_FILE bearer authenticates as $(jq -c '{kind}' <<<"$whoami" 2>/dev/null), not an agent session"
+refused=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer stage4b-invalid-$RANDOM$RANDOM" "$(dispatch_url)/api/v1/whoami" 2>&1) ||
+  fail "production Dispatch did not answer the invalid-bearer control: $(scrub <<<"$refused")"
+[ "$refused" = 401 ] || fail "production Dispatch answered $refused to an invalid bearer, not 401, so the bearer's read proves nothing"
+note "[dispatch] the run's bearer reads whoami as an agent session; an invalid bearer is refused 401"
 # LEGSMOKE's stale todo roots would be admitted at boot ahead of the run's own.
 stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
 for key in $stale; do
@@ -1795,6 +1854,58 @@ adoption=$(workspace_jj "$tree1" log -r '@|@-' --no-graph -T 'if(empty, "empty",
 note "after the tester's adoption: $(tr '\n' ' ' <<<"$adoption")"
 [ "$(sed -n 1p <<<"$adoption")" = "empty|legion-reviewer[bot]" ] || fail "the tester's adoption left @ as '$(sed -n 1p <<<"$adoption")', want a new empty change authored by legion-reviewer[bot]"
 [ "$(sed -n 2p <<<"$adoption" | cut -d'|' -f2)" = "legion-implementer[bot]" ] || fail "the adoption rewrote the implementer's commit author: '$(sed -n 2p <<<"$adoption")'"
+pass
+
+begin ci-red-takeover
+# CI settling red while the tester is in its turn takes the phase back without the tester's
+# completion (workflow's TriggerChecksRed). The tester runs a command that writes a file once its
+# sleep ends; the proof human commits .fail-me to the pull request's branch, and the smoke
+# repository's fail-on-demand check fails on that head. The daemon moves tree 1 back to
+# implementing and interrupts the tester's turn: the command's process ends and its file is never
+# written, the tester stays live on its session in its first pod, and the implementer's start,
+# held meanwhile, acts and hands the implementer its task only once that turn is over
+# (supervise.Machine.Quiesce). The control: the same command with a shorter sleep, which nothing
+# interrupts, writes its file.
+tester_pod=$(claim_sandbox "$tree1" tester) || fail "tree 1's tester has no Sandbox"
+witness=/tmp/stage4b-takeover-witness control=/tmp/stage4b-takeover-control
+send_agent "$tree1" tester "Stage 4b proof control operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 20 && date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."
+until_true 300 "the tester's control command to write $control" pod_file "$tester_pod" "$control"
+until_true 300 "tree 1's tester to go idle after the control" resident_idle "$tree1" tester
+note "the control: the tester's uninterrupted /usr/bin/sleep 20 chain wrote $control in pod $tester_pod"
+send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 1207 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Wait for it to finish."
+until_true 300 "the tester's witness command to run in its pod" pod_runs "$tester_pod" "/usr/bin/sleep 1207"
+issue_worker_state "$tree1" tester working || fail "the tester runs its witness command while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
+fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b CI-red takeover\n' | base64 -w0)" \
+  '{message: "Stage 4b proof: fail-on-demand", content: $content, branch: $branch}' |
+  timeout 60 gh api --method PUT "repos/$repo/contents/.fail-me" --input - --jq .commit.sha) ||
+  fail "the proof human could not commit .fail-me to legion/$tree1"
+note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness command ran"
+wait_for_phase "$tree1" implementing 900
+until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
+! pod_runs "$tester_pod" "/usr/bin/sleep 1207" || fail "the tester's witness command still runs after its turn was interrupted"
+! pod_file "$tester_pod" "$witness" || fail "the tester's interrupted witness command wrote $witness"
+takeover_row=$(log_lines "$takeover_held" | jq -s -r --arg issue "$tree1" 'map(select(.issue == $issue)) | last | .row // empty')
+[ -n "$takeover_row" ] || fail "the daemon log holds no implementer start of $tree1 held for the tester's turn"
+until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
+task_at=$(claim_session_text "$tree1" implementer | jq -R -s -r '[split("\n")[] | fromjson? |
+  select(.type == "message" and .message.role == "user" and (tostring | contains("Reason: CI is red at"))) | .timestamp] | first // empty')
+[ -n "$task_at" ] || fail "the implementer's session holds no CI-red task"
+takeover_lines "$takeover_row" "$(claim_token "$tree1" tester)" >"$evidence/ci-red-takeover-log.jsonl"
+takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$task_at" ||
+  fail "the takeover's order does not hold: the tester's turn interrupted and over before the implementer's start went on and its task arrived at $task_at ($evidence/ci-red-takeover-log.jsonl)"
+# The control: the implementer's task arriving as the tester's turn was interrupted, before it was
+# over, fails the order.
+interrupted_at=$(jq -s -r --arg m "$takeover_interrupted" 'map(select(.msg == $m)) | first | .time' "$evidence/ci-red-takeover-log.jsonl")
+expect_failure takeover-task-before-turn-over takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$interrupted_at"
+note "start row $takeover_row was held, the tester's turn interrupted and over, and only then did the start go on; the implementer's task reached it at $task_at ($evidence/ci-red-takeover-log.jsonl); no witness, the tester idle in its first pod"
+send_agent "$tree1" implementer "Stage 4b proof CI-red operation: CI on pull request #$pr_number is red because the proof committed the file .fail-me to legion/$tree1, which the smoke repository's fail-on-demand check fails on. Fetch the branch, start a new change on top of legion/$tree1@origin, delete .fail-me and change nothing else, commit it and push it with legion push, record the required implementation handoff, then call the legion tool's handoff_complete. Do not merge."
+wait_for_phase "$tree1" testing 1800
+until_true 300 "tree 1's tester to be handed testing again in its first pod and session" resident_kept "$tree1" tester
+! pod_file "$tester_pod" "$witness" || fail "the tester's interrupted witness command wrote $witness after all"
+note "the implementer removed .fail-me and $tree1 is back in testing; the tester, in its first pod and session, still never wrote $witness"
+pass
+
+begin tree-reviewed
 send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
 wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
@@ -1866,7 +1977,6 @@ begin completion-closed
 # records the phase stall `closed` after the call that succeeded: the 4b.13b acceptance's stall
 # check (completion_verdict), which a stop inside the call fails. The implementer, handed retro in
 # that same session, is where a session holding an unanswered report would report again.
-resident_idle() { resident_kept "$1" "$2" && issue_worker_state "$1" "$2" idle; }
 for role in planner implementer tester reviewer; do
   resident_kept "$tree1" "$role" || fail "$role on $tree1 did not stay live in the pod and session it first registered with after its phase: $(resident_lost "$tree1" "$role")"
   until_true 300 "$role on $tree1 to go idle in the pod and session it first registered with" resident_idle "$tree1" "$role"
@@ -1904,7 +2014,7 @@ begin review-pair
 # an accepted yield, every turn on the review target. A missing agent is refused to the model
 # as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No model
 # selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
-# the same from outside. tree-moved recorded the dispatches (record_pair); each failure below
+# the same from outside. tree-reviewed recorded the dispatches (record_pair); each failure below
 # quotes them.
 stem=$(cat "$evidence/review-pair/session-stem")
 # Both agents declare @review, which the operator's overlay maps. The task executor runs a subagent

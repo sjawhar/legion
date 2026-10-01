@@ -584,10 +584,15 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // guard. The row sent to the architect's own role finishes undelivered once its claim has failed
 // (the daemon's notice executor).
 //
-// A role that finished its phase stays live until its issue closes, so its claim can fail while
-// another role works the issue's phase, or while the issue waits on a person: the architect is told
-// in a worker-died of that role, its reason saying the role does not work the issue's phase, and
-// nothing is held, since the phase is not that role's. A later start of the role relaunches its
+// A child's sub-architect works no phase and holds none: the operator starts it, and no transition
+// or admission ever starts an architect below the tree's root. Its claim failing holds nothing and
+// tells nobody, and the child's notices go to the architect above it, since the failed claim no
+// longer runs (the daemon's owningArchitect); whoever started it relaunches it.
+//
+// A phase role that finished its phase stays live until its issue closes, so its claim can fail
+// while another role works the issue's phase, or while the issue waits on a person: the architect
+// is told in a worker-died of that role, its reason saying the role does not work the issue's phase,
+// and nothing is held, since the phase is not that role's. A later start of the role relaunches its
 // session (the outbox executor's retry of a failed claim). An issue that left the workflow (done)
 // suspended every claim it held, and a lingering tree holds its members where they stood, so
 // neither tells anyone.
@@ -598,6 +603,9 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	}
 	if claim.IsTreeArchitect(fact.Role, issue.Key, issue.Tree) {
 		return intake.Result{}, e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: issue.Phase})
+	}
+	if fact.Role == claim.RoleArchitect {
+		return intake.Result{}, nil
 	}
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers || issue.Phase == phase.Done {
 		return intake.Result{}, err
@@ -675,7 +683,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 			reason += ": " + r.reason
 		}
 	}
-	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, reason))
+	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, reason), "")
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {
@@ -760,9 +768,15 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// the finished role answers questions read-only: a completion it reports is refused, since it no
 	// longer works the issue's phase (handoff), and a task queued for a phase the issue has left is
 	// dropped rather than sent (supervise.Deps's PhaseHolds). A move between two phases of one role
-	// hands the running worker the new phase's task once its turn is over.
+	// hands the running worker the new phase's task once its turn is over. A move no completion
+	// records — CI settling red while the role at work had not completed (takenOver) — waits for that
+	// role's turn instead: the next role's start interrupts it and acts once it is over.
 	starting := RoleFor(row.To)
-	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason)); err != nil {
+	quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from)
+	if err != nil {
+		return err
+	}
+	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), quiesce); err != nil {
 		return err
 	}
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {
@@ -789,6 +803,23 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 		return record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}
 	}
 	return record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}
+}
+
+// takenOver is the role a transition on trigger out of from takes the phase from while that role
+// may still be at work in it: CI settled red in testing, or in reviewing before the reviewer
+// completed its round. Every other move is a completion's (the outgoing worker's turn reports it
+// once its handoff is committed and pushed), the outgoing role's own request (a backward move from
+// inside its turn), or a reviewer's round it already completed, and takes over from nobody.
+func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from phase.Phase) (claim.Role, error) {
+	if trigger != TriggerChecksRed {
+		return "", nil
+	}
+	leaving := RoleFor(from)
+	row, err := e.phaseRow(ctx, tx, issue, leaving)
+	if err != nil || row.HandoffCommit != "" {
+		return "", err
+	}
+	return leaving, nil
 }
 
 func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, snapshot Snapshot) (Row, bool) {
