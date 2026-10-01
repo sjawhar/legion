@@ -46,6 +46,14 @@
   `agentstream.<session id>.control`, and a session that hears nothing for thirty seconds goes
   quiet — and a viewer's replay is answered from a bounded in-memory ring (200 messages, 512 KiB)
   that never leaves the process. Nothing about it is written to Dispatch's database.
+- The dispatch skill's documents reference says a `|` in a table cell, inside inline code and
+  links too, is written `\|`, and that a row holding text in a cell past its table's width is
+  refused on every write path rather than stored short, naming each path's error code. Its
+  document-edits reference says how an insert at a table-cell quote decides it holds table rows,
+  in three steps: every line yields a cell and an unescaped `|` and none is a delimiter row of
+  three hyphens or more a cell; what the rows parse refuses is refused; and the rows are inserted
+  only when that parse reads one table holding every line. Any other fragment, such as
+  `- | a | b |`, is read on its own as blocks.
 
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask
@@ -85,6 +93,11 @@
   its card and posts nothing. The live stream tags that user message with `dispatchMessageId`, so
   Dispatch's conversation view shows it once. In a Legion phase worker it counts as an inbound
   event, as its card did, and never opens a phase.
+- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
+  not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
+  which the load balancer in front of production Dispatch answers with a bare HTML `414` when it
+  is too long, so this refusal is what stops a pasted passage from becoming that error; a
+  lowercased key, which used to come back as no results, is now refused by name.
 - The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
   in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
   threshold, where the 75 KB single file used to reach agents with its middle cut out.

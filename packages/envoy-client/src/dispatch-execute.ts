@@ -42,6 +42,7 @@ import {
   dispatchToolSpecs,
   itemFromSearch,
   overCapMessage,
+  PROJECT_KEY_PATTERN,
   serviceSubjectLabel,
   snippetText,
   zodSchemaApi,
@@ -859,7 +860,7 @@ async function resolveOwnerArguments(
     problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
-    if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
+    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push("project must be a project key such as CORE");
     }
     const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;

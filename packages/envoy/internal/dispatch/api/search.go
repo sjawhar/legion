@@ -91,11 +91,17 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "q must be at least 2 characters")
 		return
 	}
-	// Counted in UTF-16 units, as dispatch_search counts before it sends anything; the limit keeps
-	// the URL under the load balancer's request-line quota (contracts.SearchQueryMax).
+	// q is capped as dispatch_search caps it, counted after trimming so a query the tool sends is
+	// never refused here, and a project must be a key (an empty one searches every project). Both
+	// ride in the URL; packages/contracts/AGENTS.md "Search limits" says what keeps it short.
 	if length := len16(searchText); length > contracts.SearchQueryMax {
 		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
 		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchQueryHint)
+		return
+	}
+	project := strings.TrimSpace(query.Get("project"))
+	if project != "" && !projectKeyPattern.MatchString(project) {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project must be a project key such as CORE")
 		return
 	}
 
@@ -120,7 +126,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, strings.TrimSpace(query.Get("project")), limit, firstTerm(searchText), headlineOptions)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, project, limit, firstTerm(searchText), headlineOptions)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

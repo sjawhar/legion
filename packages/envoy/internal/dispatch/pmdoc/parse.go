@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"reflect"
@@ -409,27 +410,46 @@ func textOutside(paragraph ast.Node, source []byte) string {
 	return rest
 }
 
+// parseTableRows reads markdown as body rows of a table width cells wide, under a header it writes
+// itself, and reports false when it is not table rows alone. Whether a row is too wide is decided
+// by the parse, as for a whole document (markWideRows), so one row gets one answer on every write
+// path; here that refusal is ErrTableWidth.
 func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*Node, bool, error) {
 	if width == 0 {
 		return nil, false, nil
 	}
-	fragment := strings.TrimSpace(markdown)
-	if fragment == "" {
+	// Blank lines at either end are no rows, and nothing else is trimmed. goldmark's table
+	// transformer trims a row with the Segment trims, whose set is IsSpace's (tab, line feed,
+	// carriage return and space) and not the byte-slice util.TrimLeftSpace's, so a vertical tab, a
+	// form feed or a space outside ASCII is a cell's text; and the first row's indentation decides
+	// whether it is a row at all (markBlockRows), as on every other line.
+	lines := strings.Split(markdown, "\n")
+	blank := func(line string) bool { return strings.Trim(line, rowSpace) == "" }
+	start, end := 0, len(markdown)
+	for len(lines) > 0 && blank(lines[0]) {
+		start += len(lines[0]) + 1
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && blank(lines[len(lines)-1]) {
+		end -= len(lines[len(lines)-1]) + 1
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
 		return nil, false, nil
 	}
-
-	lines := strings.Split(fragment, "\n")
 	for _, line := range lines {
 		cells, ok := tableRowCells(line)
 		if !ok || tableDelimiterRow(cells) {
 			return nil, false, nil
 		}
-		if len(cells) > width {
-			return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, len(cells), width)
-		}
 	}
 
-	parsed, err := parseStamped(syntheticTableHeader(width)+fragment+"\n", budget)
+	parsed, err := parseStamped(syntheticTableHeader(width)+markdown[start:end]+"\n", budget)
+	// The parse opens with the header written above, so the table under it is the one document-level
+	// table with nothing before it; any other is the fragment's own and keeps its own refusal.
+	if wide := (wideRow{}); errors.As(err, &wide) && wide.firstBlock {
+		return nil, true, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, wide.cells, wide.width)
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -453,33 +473,32 @@ func syntheticTableHeader(width int) string {
 	return "| " + strings.Join(headers, " | ") + " |\n| " + strings.Join(delimiters, " | ") + " |\n"
 }
 
+// rowSpace is what goldmark's table transformer trims from a row and its cells (util.IsSpace: tab,
+// line feed, carriage return, space). A vertical tab, a form feed or a space outside ASCII is a
+// cell's text to it, so the bare-row line check trims no more.
+const rowSpace = " \t\n\r"
+
+// tableRowCells splits a fragment line into cells, trimmed of rowSpace alone.
 func tableRowCells(line string) ([]string, bool) {
-	line = strings.TrimSpace(line)
+	line = strings.Trim(line, rowSpace)
 	if line == "" {
 		return nil, false
 	}
 
 	cells := make([]string, 0, 2)
 	var cell strings.Builder
-	escaped := false
 	separatorCount := 0
 	endsWithSeparator := false
-	for _, char := range line {
-		switch {
-		case char == '\\':
-			cell.WriteRune(char)
-			escaped = !escaped
-			endsWithSeparator = false
-		case char == '|' && !escaped:
+	for index, char := range line {
+		if char == '|' && !escapedByBackslashes(line, index) {
 			cells = append(cells, cell.String())
 			cell.Reset()
 			separatorCount++
 			endsWithSeparator = true
-		default:
-			cell.WriteRune(char)
-			escaped = false
-			endsWithSeparator = false
+			continue
 		}
+		cell.WriteRune(char)
+		endsWithSeparator = false
 	}
 	cells = append(cells, cell.String())
 	if separatorCount == 0 {
@@ -499,7 +518,7 @@ func tableRowCells(line string) ([]string, bool) {
 
 func tableDelimiterRow(cells []string) bool {
 	for _, cell := range cells {
-		value := strings.TrimSpace(cell)
+		value := strings.Trim(cell, rowSpace)
 		value = strings.TrimPrefix(value, ":")
 		value = strings.TrimSuffix(value, ":")
 		if len(value) < 3 || strings.Trim(value, "-") != "" {

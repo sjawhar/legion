@@ -2178,6 +2178,79 @@ func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
 	}
 }
 
+// A fragment that passes the line check is parsed as rows of the table it lands in, as a
+// whole-document write of the same rows is, whatever one- or two-hyphen rows it holds, and what that
+// parse refuses is refused; a table the fragment makes itself keeps its own refusal, and a fragment
+// that parse does not read as one table is the block path's, read as a document of its own.
+func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
+	const three = "| K | V | W |\n| --- | --- | --- |\n| a | b | c |\n"
+	const two = "| K | V |\n| --- | --- |\n| a | c |\n"
+	for _, test := range []struct {
+		name, table, markdown string
+		// code is the error code the insert answers, or "" where it stores the rows as the
+		// whole-document write of the table and the markdown does.
+		code string
+	}{
+		{"dash row under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |", ""},
+		{"dash row of one cell under three columns", three, "| A11 |\n| - |\n| A12 | y |", ""},
+		{"dash row above a wide row", two, "| A11 | x |\n| - | - |\n| A12 | y | z |", "TABLE_WIDTH"},
+		{"wide row", two, "| A11 | x |\n| A12 | y | z |", "TABLE_WIDTH"},
+		{"wide row in a list's own table", two, "- | h |\n  | - |\n  | a | b |", "INVALID_OP"},
+		{"wide row in a table after a heading", two, "# h | x\n| a |\n| - |\n| b | c |", "INVALID_OP"},
+		// U+00A0 is a cell's text to goldmark's row trim, so `|` before one is no lone `|`: the line
+		// is a row, and a dash cell beside one is no delimiter row.
+		{"lone pipe and U+00A0 after a wide row", two, "| A11 | x | y |\n|\u00a0", "TABLE_WIDTH"},
+		{"lone pipe and U+00A0", two, "| A11 | x |\n|\u00a0", ""},
+		{"dash cell and U+00A0", two, "| A11 | x |\n| --- |\u00a0", ""},
+		// The rows parse refuses before it asks whether it read one table, so a heading after a wide
+		// row is answered for the row, where the block path alone would store a paragraph and a heading.
+		{"wide row then a heading", two, "| a | b | c |\n# h | x", "TABLE_WIDTH"},
+		// The only case the block path answers: the heading after the rows makes it read the fragment
+		// as a document of its own, whose dash row makes a table of its first row. Refused at that
+		// table's width, where main stored it with `z` dropped and an upload stores the rows.
+		{"dash row and a heading under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |\n# h | q", "INVALID_OP"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.table)
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch, err := applyOperations(tree, []model.EditOp{{Op: "insert", Markdown: test.markdown, After: "c"}})
+			switch test.code {
+			case "INVALID_OP":
+				var invalid *ErrInvalidOp
+				if !errors.As(err, &invalid) || errors.Is(err, pmdoc.ErrTableWidth) {
+					t.Fatalf("insert = %v, want INVALID_OP and not TABLE_WIDTH", err)
+				}
+			case "TABLE_WIDTH":
+				var invalid *ErrInvalidOp
+				if !errors.Is(err, pmdoc.ErrTableWidth) || errors.As(err, &invalid) {
+					t.Fatalf("insert = %v, want TABLE_WIDTH and not INVALID_OP", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("insert = %v, want the rows stored", err)
+				}
+				written, err := pmdoc.ParseForWrite(test.table+test.markdown+"\n", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := pmdoc.Render(batch.tree)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := pmdoc.Render(written)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Fatalf("insert stored %q, the document write %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // blockAskHarness seeds a document with the ask fixture, settles it, and returns the ask's
 // id plus helpers that settle the room and count the events on that ask.
 func blockAskHarness(t *testing.T) (*Service, string, string, func(), func() int) {
