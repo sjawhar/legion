@@ -15,6 +15,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
+| `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
 
@@ -815,6 +816,54 @@ is written there.
 | `second-start-revokes-the-first` | a second start takes the role and the locator, the daemon logs mints 1 and 2, the first capability's registration is refused 403, and a grant minted before the second start, which redeemed then (500 `DISPATCH_UNAVAILABLE`, past the grant check), is refused 403 `GRANT_UNAVAILABLE` after it (a second start revokes the first's capability) |
 | `liveness-probe-against-the-listener` | `controller.Prober` on the live listener calls the second session alive and the first gone |
 | `exit-code-is-oh-my-pis` | Ctrl-D quits Oh My Pi cleanly and the command exits 0, as Oh My Pi did. A non-zero code is carried through too; the stub-omp unit test (`cmd/legion/controller_test.go`, exit 3) holds that |
+
+## dispatch-user-turns.sh
+
+LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the
+session's own user turn, and everything else keeps its Envoy card. One real session — the pinned
+Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with this checkout's plugin in an isolated
+profile, launched with `controller-start-tmux.sh`'s `operator_env` line, its cwd under `/tmp` —
+registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
+its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
+conversation page as the person the header names. The session's model turns go through the model
+gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+
+```bash
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0, in six to eleven minutes (the listener's drop of the stopped session is most of the spread)
+```
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `DISPATCH_USER_TURNS_OMP` | the pinned build, `github:sjawhar/oh-my-pi@$(mise current github:sjawhar/oh-my-pi)` | another Oh My Pi, as a mise tool spec |
+| `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots and the session's pane at exit) and `session.jsonl`, the session's transcript |
+
+Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
+run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
+profile under the HOME it gives Oh My Pi, its tmux server, its listener and Dispatch, and its
+Postgres and NATS containers; a run that finds another's leftovers refuses to start
+([`lib/leftovers.sh`](#libleftoverssh)).
+
+| check | what it holds |
+| :--- | :--- |
+| `session-registers` | the session registers with the listener from its cwd and advertises `aside`, `btw` and `steer` |
+| `send-is-the-persons-own-turn` | the page's composer opens on Send and offers Send, Aside and BTW; a Send typed there is one user message in the session's transcript that is exactly the body, and no card; the session answers it |
+| `aside-is-the-persons-own-turn` | the same for an Aside |
+| `btw-is-a-side-question` | a BTW is answered in Dispatch and is no user message |
+| `a-session-forging-a-person-gets-a-card` | holding the listener token and a Dispatch bearer, as any session does, the driver stores a session's message on an issue and publishes a frame naming it that claims a person wrote it, on no issue: a card, no user message |
+| `a-broadcast-gets-a-card` | a person's broadcast to the session: a card, no user message |
+| `an-issue-message-gets-a-card` | a person's issue message targeted at the session: a card, no user message |
+| `a-legion-notice-gets-a-card` | the Go daemon's `phase-finished` notice on a role topic the session holds: a card, no user message |
+| `a-session-re-sending-a-persons-btw-gets-a-card` | as any bearer may, the driver retries the person's BTW to the session as a steer (`POST /api/v1/messages/{id}/deliveries` with a session actor), an attempt whose `requested_by` is that session: it arrives as a card, no user message (the refusal itself is `message_accept_test.go`'s) |
+| `a-carded-send-and-a-frame-forged-for-it-inside-the-minute-get-cards` | with the session's Dispatch token file made wrong, the person's Send arrives as a card, since the session cannot accept it; with the token restored, a frame forged with the listener token names that attempt within 45 s of the Send, while Dispatch would still accept it: the session's own record of the attempts it delivered keeps it a card, with neither the Send's text nor the forged text a user message, and Dispatch records no acceptance |
+| `a-persons-retry-of-a-carded-send-is-their-turn` | the person retries that Send as an Aside (`POST /api/v1/messages/{id}/deliveries`, attempt 2), an attempt the session never delivered: one user message that is exactly the body, and Dispatch records attempt 2 accepted |
+| `the-page-shows-each-message-once` | a fresh page, opened while the session's stream still holds the turns it tagged (the ring lives in the process, so the restart below empties it): the replay the page is served carries the Send, the Aside and the retried Send as user messages tagged with their Dispatch message ids, beside their stored copies, and the page shows each person's message once |
+| `the-session-stops` | the Send's own envelope is read back from the notification stream; Oh My Pi is killed and the listener drops the session |
+| `a-send-while-the-session-is-down-fails` | the person sends the stopped session a Send, which Dispatch records as one failed attempt naming it |
+| `a-replay-after-restart-gets-a-card` | once Oh My Pi is continued (`--continue`, the same session), the Send's own envelope is sent again: a card, and the Send is still one user message |
+| `a-frame-forged-after-the-restart-naming-an-old-send-gets-a-card` | once the Send made while the session was down, which Dispatch recorded as failed, is more than a minute old, a frame forged with the listener token names it as a person's steer: it arrives as a card, with neither its stored nor its forged text a user message |
+| `a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card` | the listener drops the session's registration (`DELETE /v1/sessions/{id}`), so the person's Send to it fails with no frame sent, and within 45 s a bare bus client publishes a frame naming that failed attempt straight onto the session's agent subject: it arrives as a card, with neither text a user message |
+| `dispatch-records-only-the-turns-the-session-took` | Dispatch's thread read, which the Agents page reads, records the Send and the Aside accepted at attempt 1 and the carded Send at its retry, attempt 2, and never the BTW, the Send made while the session was down or the Send made while the listener listed no session |
 
 ## verifiers-staging-token.sh
 

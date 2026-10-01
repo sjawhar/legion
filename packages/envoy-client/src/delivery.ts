@@ -87,6 +87,9 @@ export type DispatchDelivery = {
   readonly replyFields: Readonly<Record<string, string>>;
   readonly issueKey: string | null;
   readonly body: string;
+  /** The broadcast a message frame says its message is one recipient's copy of, when it names
+   *  one. The frame is untrusted: this can only rule a user turn out, never in. */
+  readonly broadcastId?: string;
 };
 
 function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): string {
@@ -693,6 +696,9 @@ export function renderInbound(
               replyFields: {},
               issueKey: frame.event.issue_key,
               body: message.data.body,
+              ...(typeof message.data.broadcast_id === "string"
+                ? { broadcastId: message.data.broadcast_id }
+                : {}),
             };
             // A human's direct message to this session carries no issue key, and
             // `dispatch_message` answers it with `in_reply_to` alone; every other targeted

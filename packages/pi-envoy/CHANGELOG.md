@@ -143,6 +143,24 @@
 
 ### Changed
 
+- A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
+  turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
+  (LEGION-394). The extension asks Dispatch, with its own bearer, to accept the frame's attempt
+  (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`, which takes only a person's own fresh
+  Send or Aside to this session; its conditions are that route's row in
+  `packages/envoy/cmd/dispatch/AGENTS.md`), and only on that 200 sends the body Dispatch stored,
+  never the frame's text: Send (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`), as
+  the accepted attempt says. Its own checks can only keep a card: it never accepts an attempt it
+  already delivered, as a card or as a turn, recording each one in the session's transcript
+  (`envoy-dispatch-handled-attempt`) before it goes out and reading every such entry back on
+  restore, so a replayed frame, or one forged for a Send that arrived as a card, is a card, even
+  after a restart, while a person's retry of that Send can still be their turn. Anything else, a
+  refused accept, an error, a timeout or a Dispatch configuration that no longer resolves, keeps
+  its card and posts nothing. The live stream tags that user message with `dispatchMessageId`, so
+  Dispatch's conversation view shows it once, and in a Legion phase worker it counts as an inbound
+  event, as its card did, except a Send or an Aside sent in between the run's last queue or aside
+  poll and its `agent_end`, which the host runs as a turn of its own: that one shows twice and
+  counts as an assignment (`packages/pi-envoy/AGENTS.md`).
 - The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
   quote or attribution that came with it; every rule, command and example stays, and a decision
   keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules

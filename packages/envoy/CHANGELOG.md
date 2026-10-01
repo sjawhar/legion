@@ -10,9 +10,38 @@
 - Added the native Dispatch workspace API, persisted documents and events, retained Dispatch notifications, and daily Postgres backups.
 - `POST /v1/roles/set` accepts `"soft": true`: the claim lands only if the role is unheld, held by a session that is no longer live, or held by the declared `previous_session_id`; any other live holder answers 409 with its id.
 - Dispatch redelivers the GitHub App webhook's failed deliveries, which GitHub never redelivers on its own. Every two minutes it lists the webhook's attempts whose status is not OK and asks GitHub to redeliver each one the listener answered 5xx or GitHub could not complete. A failed or refused redelivery is retried after a doubling backoff, at most five times, and a 4xx is never redelivered. Requests go a second apart, and a GitHub rate limit stops the sweep until the time GitHub gives. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep over a chosen window.
+- Every Dispatch message read returns `broadcast_id`, the broadcast the message is one
+  recipient's copy of, or null: the thread read (`GET /api/v1/messages/{id}`), the Agents page's
+  conversation list, each reply, and every message event (LEGION-394).
+- `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: the attempt's session records, once
+  per message, that it took a person's fresh, latest attempt of a direct message to it, requested
+  by the message's own author, as its user's own turn, and is answered that attempt with the
+  message's stored `body`. Anything else is refused with a 409 naming the check
+  (`ACCEPT_NOT_DIRECT` for a message on an issue, a broadcast's copy or a reply in a broadcast's
+  thread, `ACCEPT_NOT_WRITTEN_BY_PERSON`, `ACCEPT_NOT_ASIDE_OR_STEER` for a BTW,
+  `ACCEPT_ALREADY_ACCEPTED`, `ACCEPT_SUPERSEDED`, `ACCEPT_NOT_REQUESTED_BY_PERSON`,
+  `ACCEPT_NOT_REQUESTED_BY_AUTHOR` for another person's retry, `ACCEPT_FAILED` for an attempt
+  Dispatch recorded as failed, `ACCEPT_STALE`) or 403
+  `ACCEPT_FORBIDDEN`. It appends `message.accepted`, which reaches the dashboard's event stream
+  and never NATS, since the outbox publishes no issue-less event. Every delivery attempt now reads
+  `requested_by` (who asked for it, kept on a resume, null before migration 0054), `accepted_at`
+  and `accepted_as` (LEGION-394).
 
 ### Changed
 
+- Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
+  session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
+  person's message that an Oh My Pi session took as its own user turn shows once, where the
+  session took it, still naming its author, and only when the streamed text is the stored one;
+  one the session took between a run's last queue or aside poll and its `agent_end` reaches the
+  stream untagged and shows twice (`packages/pi-envoy/AGENTS.md`). The Agents page shows an
+  attempt the session accepted as delivered to the session's
+  conversation, with no retry, even after a later `failed`; every other attempt keeps its states
+  (LEGION-394). Every label the dashboard composes for a mode now uses the composer's names (Send,
+  Aside, BTW), the card's mode-change buttons included ("Use BTW instead", "Use Send instead",
+  which read "Send as BTW instead" and "Send normally instead"). A delivery error or broadcast
+  exclusion reason Dispatch stored keeps its wire name (`does not advertise steer`), as agents and
+  scripts read it (LEGION-394).
 - `GET /api/v1/issues` pages with `limit` (1–250) and `offset` (0 or more; `offset` alone pages
   50), answering `{issues, total, limit, offset}` with `total` counting every issue the filters
   match; without either parameter it answers the whole listing as an array, as before. It used to
@@ -62,6 +91,9 @@
 
 ### Fixed
 
+- A targeted message's delivery claim no longer deadlocks with the session's reply to the same
+  message: it takes the message row `FOR NO KEY UPDATE`, as the new accept does, which the
+  reply's foreign-key `FOR KEY SHARE` does not wait for (LEGION-394).
 - Dispatch no longer stores a table row without its last cells. A cell ends at every `|` not
   written `\|`, inside code and links too, and the parser dropped the cells a body row held past
   its delimiter row's, which the browser editor's parser keeps: a spec, upload or version whose

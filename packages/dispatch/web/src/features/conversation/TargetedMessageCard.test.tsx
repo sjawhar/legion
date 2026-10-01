@@ -62,7 +62,7 @@ test("Retry re-sends a steer attempt as a steer, and the mode changes stay avail
   );
   try {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    fireEvent.click(screen.getByRole("button", { name: "Send as BTW instead" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use BTW instead" }));
     expect(sent).toEqual(["steer", "btw"]);
   } finally {
     view.unmount();
@@ -77,11 +77,28 @@ test("Retry is disabled with a visible reason when the recipient dropped the att
   );
   try {
     expect(screen.getByRole("button", { name: "Retry" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText("planner does not support aside.")).toBeTruthy();
+    expect(screen.getByText("planner does not support Aside.")).toBeTruthy();
   } finally {
     view.unmount();
   }
 });
+
+// A reason that names a way out names only one the session takes: an aside-only session (a
+// Claude Code session) refuses a BTW as well, so its "Use Send instead" is not told to use
+// BTW, while a session that takes BTW is.
+for (const [capabilities, reason] of [
+  [["aside"], "planner does not support Send."],
+  [["aside", "btw"], "planner does not support Send — use BTW."],
+] as const) {
+  test(`a session advertising ${capabilities.join(" and ")} reads "${reason}"`, () => {
+    const view = render(card({ attempts: [attempt({ delivery: "aside" })], capabilities }));
+    try {
+      expect(screen.getByText(reason)).toBeTruthy();
+    } finally {
+      view.unmount();
+    }
+  });
+}
 
 // LEGION-271, acceptance 7's duplicate half. An attempt that reached the listener and changed
 // nothing must not read as an ordinary send, or the history claims a delivery that never
@@ -102,7 +119,7 @@ test("a duplicate attempt says the listener already had the message", () => {
 test("an ordinary sent attempt still reads as sent", () => {
   const view = render(card({ attempts: [attempt({ delivery: "steer", state: "sent" })] }));
   try {
-    expect(screen.getByText("Sent to planner (steer)")).toBeTruthy();
+    expect(screen.getByText("Sent to planner (Send)")).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -150,7 +167,7 @@ test("a failed attempt past the duplicate window makes no promise and offers no 
     expect(screen.getByText("Failed: no live session s1")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     // The mode-change actions stay: they are a different key and genuinely deliver.
-    expect(screen.getByRole("button", { name: "Send as BTW instead" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Use BTW instead" })).toBeTruthy();
   } finally {
     view.unmount();
   }

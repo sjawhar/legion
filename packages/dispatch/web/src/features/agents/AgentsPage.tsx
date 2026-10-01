@@ -51,6 +51,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import { capabilityLabel, MODE_LABELS } from "../conversation/delivery";
 import type { CarriedDraft } from "../conversation/MentionComposer";
 import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
@@ -250,6 +251,7 @@ function AgentExchangeReply({
   const answer = read.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
+  const capabilities = capabilitiesForTarget(read.message.target, liveAgents);
   return (
     <ReplyTurn
       at={reply.created_at}
@@ -267,14 +269,9 @@ function AgentExchangeReply({
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
               attempts: deliveryAttempts(reply.deliveries, label),
               retry: {
-                canAside:
-                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("aside") !==
-                  false,
-                canBtw:
-                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !== false,
-                canSteer:
-                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !==
-                  false,
+                canAside: capabilities?.includes("aside") !== false,
+                canBtw: capabilities?.includes("btw") !== false,
+                canSteer: capabilities?.includes("steer") !== false,
                 onRetry: retry.mutate,
                 retrying: retry.isPending,
               },
@@ -934,7 +931,7 @@ function AgentRow({
             className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
           >
             {agent.capabilities.map((capability) => (
-              <span key={capability}>{capability}</span>
+              <span key={capability}>{capabilityLabel(capability)}</span>
             ))}
             <span>
               Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
@@ -1232,7 +1229,7 @@ function BroadcastComposer({
         >
           {DELIVERY_CAPABILITIES.map((mode) => (
             <option key={mode} value={mode}>
-              {mode}
+              {MODE_LABELS[mode]}
             </option>
           ))}
         </select>

@@ -11,6 +11,7 @@ import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { matchInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
@@ -48,6 +49,7 @@ type SessionContext = {
     readonly getSessionId: () => string;
     readonly getSessionName?: () => string | undefined;
     readonly getBranch?: () => readonly unknown[];
+    readonly getEntries: () => readonly unknown[];
     readonly getSessionFile: () => string | undefined;
     readonly ensureOnDisk: () => Promise<void>;
   };
@@ -90,6 +92,7 @@ type TestPi = {
     message: { readonly content: string; readonly customType?: string; readonly display?: boolean },
     options: unknown
   ) => void;
+  readonly sendUserMessage: (content: string, options?: unknown) => void;
   readonly askEphemeral?: (input: {
     readonly prompt: string;
     readonly signal?: AbortSignal;
@@ -227,7 +230,10 @@ mock.module("nats", () => ({
       },
     };
   },
-  StringCodec: () => ({ decode: (data: Uint8Array) => new TextDecoder().decode(data) }),
+  StringCodec: () => ({
+    decode: (data: Uint8Array) => new TextDecoder().decode(data),
+    encode: (text: string) => new TextEncoder().encode(text),
+  }),
 }));
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
@@ -262,6 +268,7 @@ beforeEach(() => {
   // instance reports.
   resetLegionBootstrappedSessionForTests();
   resetEnvoySessionsForTests();
+  resetInjectedUserTurnsForTests();
   testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
@@ -325,7 +332,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
     readonly display?: boolean;
     readonly options: unknown;
   }[] = [];
-  // Persisted custom entries, in the shape a later `getBranch()` returns them.
+  // User turns the extension started, in the order it sent them.
+  const userMessages: { readonly content: string; readonly options: unknown }[] = [];
+  // Persisted custom entries, in the shape a later `getBranch()` or `getEntries()` returns them.
   const entries: {
     readonly type: "custom";
     readonly customType: string;
@@ -347,6 +356,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
         options,
       });
     },
+    sendUserMessage: (content, options) => {
+      userMessages.push({ content, options });
+    },
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
     },
@@ -361,6 +373,7 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
     pi,
     renderers,
     tools,
+    userMessages,
   };
 }
 
@@ -373,6 +386,7 @@ const contextTimers: Promise<void>[] = [];
 const topLevelSession = {
   getSessionFile: (): string | undefined => undefined,
   ensureOnDisk: async (): Promise<void> => undefined,
+  getEntries: (): readonly unknown[] => [],
 };
 
 function sessionContext(sessionID = "ses_omp", hasUI = true): SessionContext {
@@ -484,6 +498,213 @@ function targetedCommentEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: str
     topic: "notifications.agent.ses_delivery",
     trace_id: dedupeKey,
   });
+}
+
+const DIRECT_MESSAGE_ID = "44444444-4444-4444-8444-444444444444";
+const DIRECT_MESSAGE_BODY = "Where is the dashboard?";
+
+/**
+ * A person's direct message to ses_delivery from Dispatch's Agents page, as the listener hands the
+ * session its delivery frame: no issue, the person as the event's actor, `attempt` (1 unless
+ * given) in `mode`. `actor` is who the frame claims sent it and `body` what it claims the message
+ * says, which any publisher on the subject can write.
+ */
+function directDispatchEnvelope(
+  mode: "aside" | "btw" | "steer",
+  dedupeKey: string,
+  frame: {
+    readonly actor?: { readonly kind: string; readonly id: string };
+    readonly attempt?: number;
+    readonly body?: string;
+    readonly broadcastID?: string;
+  } = {}
+): string {
+  const actor = frame.actor ?? { id: "alice", kind: "user" };
+  const body = frame.body ?? DIRECT_MESSAGE_BODY;
+  return JSON.stringify({
+    dedupe_key: dedupeKey,
+    event_id: `dispatch-${dedupeKey}`,
+    issued_at: 1,
+    payload: JSON.stringify({
+      event: {
+        actor,
+        issue_key: null,
+        payload: {
+          author: actor,
+          body,
+          ...(frame.broadcastID === undefined ? {} : { broadcast_id: frame.broadcastID }),
+          created_at: "2026-09-30T00:00:00Z",
+          deliveries: [],
+          id: DIRECT_MESSAGE_ID,
+          in_reply_to: null,
+          issue_key: null,
+          target: "session:ses_delivery",
+        },
+        type: "message.created",
+      },
+      delivery: { attempt: frame.attempt ?? 1, mode },
+    }),
+    payload_summary: body,
+    source: "dispatch",
+    source_event_id: "1",
+    topic: "notifications.agent.ses_delivery",
+    trace_id: dedupeKey,
+  });
+}
+
+/** One delivery attempt of the direct message, as Dispatch stores it. */
+function storedAttempt(
+  attempt: number,
+  mode: "aside" | "btw" | "steer",
+  requestedBy: { readonly kind: string; readonly id: string } = { id: "alice", kind: "user" }
+) {
+  return {
+    accepted_as: null,
+    accepted_at: null,
+    attempt,
+    created_at: "2026-09-30T00:00:00Z",
+    delivery: mode,
+    duplicate: false,
+    envelope_id: null,
+    error: null,
+    message_id: DIRECT_MESSAGE_ID,
+    reply_id: null,
+    requested_by: requestedBy,
+    session_id: "ses_delivery",
+    state: "pending",
+  };
+}
+
+/** What Dispatch answers an accept with: 200 with the accepted attempt and the stored body (a
+ *  Send of DIRECT_MESSAGE_BODY unless given; `body: null` answers none), a refusal, or a request
+ *  that never arrives. */
+type AcceptAnswer =
+  | {
+      readonly accepted: true;
+      readonly delivery?: "aside" | "steer";
+      readonly body?: string | null;
+    }
+  | { readonly status: number; readonly code?: string }
+  | { readonly reject: string };
+
+/** Dispatch's own rule for one message: the first accept succeeds and every later one is
+ *  refused, since a message is taken at most once. */
+const acceptOnce = (count: number): AcceptAnswer =>
+  count === 1 ? { accepted: true } : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
+
+/** The accept route's response for `answer` to an accept of `attempt`. */
+function acceptResponse(attempt: number, answer: AcceptAnswer): Response {
+  if ("reject" in answer) throw new TypeError(answer.reject);
+  if (!("accepted" in answer)) {
+    return new Response(JSON.stringify({ code: answer.code, error: "refused" }), {
+      headers: { "content-type": "application/json" },
+      status: answer.status,
+    });
+  }
+  const accepted = {
+    ...storedAttempt(attempt, answer.delivery ?? "steer"),
+    accepted_as: "user_turn",
+  };
+  const body = answer.body === undefined ? DIRECT_MESSAGE_BODY : answer.body;
+  return new Response(JSON.stringify(body === null ? accepted : { ...accepted, body }), {
+    headers: { "content-type": "application/json" },
+    status: 200,
+  });
+}
+
+/**
+ * Boots ses_delivery against a Dispatch whose accept answers `accept` for the nth accept
+ * (Dispatch's own once-only rule by default), recording every accept and every other Dispatch
+ * message call. `entries` are what the session's file already holds, as a restarted session reads
+ * them, and `branch` its active branch (the entries by default); every entry the session appends
+ * is read back with them. `delivered(n)` resolves once the session has taken `n` deliveries, cards
+ * and user turns together, and `recordedWhenDelivered` says how many entries the session had
+ * appended when each went out.
+ */
+async function bootDirectSession(
+  query: string,
+  options: {
+    readonly accept?: (count: number) => AcceptAnswer;
+    readonly entries?: readonly unknown[];
+    readonly branch?: readonly unknown[];
+  } = {}
+) {
+  process.env.DISPATCH_URL = "http://dispatch.test";
+  process.env.DISPATCH_TOKEN = "dispatch-token";
+  const accepts: {
+    readonly path: string;
+    readonly authorization: string | null;
+    readonly body: unknown;
+  }[] = [];
+  const posts: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(input.toString());
+    if (url.pathname.startsWith("/api/v1/messages/")) {
+      const authorization = new Headers(init?.headers).get("Authorization");
+      if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/accept")) {
+        accepts.push({
+          authorization,
+          body: JSON.parse(init?.body?.toString() ?? "null"),
+          path: url.pathname,
+        });
+        return acceptResponse(
+          Number(url.pathname.split("/").at(-2)),
+          (options.accept ?? acceptOnce)(accepts.length)
+        );
+      }
+      // The session asks Dispatch nothing else about a direct message: any other call is recorded
+      // and refused, so a read-back would keep the card.
+      posts.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      return new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 });
+    }
+    return responseWithRegistration(input, init, {});
+  };
+  // Query-string isolation gives each caller its own instance of this stateful extension, and a
+  // restart its second one; the specifier is the caller's, so it cannot be a static import.
+  const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+  const fixture = createPi();
+  const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
+  const recordedWhenDelivered: number[] = [];
+  const taken = () => {
+    const count = fixture.deliveries.length + fixture.userMessages.length;
+    for (const waiter of waiters.splice(0)) {
+      if (count >= waiter.count) waiter.resolve();
+      else waiters.push(waiter);
+    }
+  };
+  envoyExtension({
+    ...fixture.pi,
+    sendMessage: (message: never, sendOptions: unknown) => {
+      recordedWhenDelivered.push(fixture.entries.length);
+      fixture.pi.sendMessage(message, sendOptions);
+      taken();
+    },
+    sendUserMessage: (content: string, sendOptions?: unknown) => {
+      recordedWhenDelivered.push(fixture.entries.length);
+      fixture.pi.sendUserMessage(content, sendOptions);
+      taken();
+    },
+  });
+  const prior = options.entries ?? [];
+  const base = sessionContext("ses_delivery");
+  const context: SessionContext = {
+    ...base,
+    sessionManager: {
+      ...base.sessionManager,
+      getBranch: () => options.branch ?? [...prior, ...fixture.entries],
+      getEntries: () => [...prior, ...fixture.entries],
+    },
+  };
+  await fixture.handlers.get("session_start")?.({}, context);
+  const agent = natsState.controls.get("notifications.agent.ses_delivery");
+  if (agent === undefined) throw new Error("agent subject was not subscribed");
+  const delivered = (count: number): Promise<void> => {
+    const waiter = Promise.withResolvers<void>();
+    waiters.push({ count, resolve: waiter.resolve });
+    taken();
+    return waiter.promise;
+  };
+  return { accepts, agent, context, delivered, fixture, posts, recordedWhenDelivered };
 }
 
 function response(body: unknown): Response {
@@ -4432,6 +4653,359 @@ describe("envoy OMP extension", () => {
       { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "steer", triggerTurn: true },
     ]);
+  });
+
+  // A person's Send or Aside from the Agents page is the user's own turn, as if typed at the
+  // terminal. The frame saying "a person wrote this" is not the proof - the listener takes its
+  // source from the caller - so the session takes it only once Dispatch records the one
+  // acceptance of that attempt, and injects what Dispatch's answer says was stored.
+  describe("a person's direct message", () => {
+    test("is accepted with Dispatch and arrives as the user's own turn, recorded first, with nothing posted", async () => {
+      const { accepts, agent, delivered, fixture, posts, recordedWhenDelivered } =
+        await bootDirectSession("direct-send");
+
+      agent.push(directDispatchEnvelope("steer", "direct-send"));
+      await delivered(1);
+
+      expect(accepts).toEqual([
+        {
+          authorization: "Bearer dispatch-token",
+          body: { actor: { id: "ses_delivery", kind: "session" } },
+          path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        },
+      ]);
+      expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options: undefined }]);
+      expect(fixture.deliveries).toEqual([]);
+      expect(posts).toEqual([]);
+      // The attempt is in the transcript before the turn goes out, so no crash in between leaves
+      // a delivered attempt a forged frame could still have accepted.
+      expect(fixture.entries).toEqual([
+        {
+          customType: "envoy-dispatch-handled-attempt",
+          data: { attempt: 1, message_id: DIRECT_MESSAGE_ID },
+          type: "custom",
+        },
+      ]);
+      expect(recordedWhenDelivered).toEqual([1]);
+      // Legion's phase-stall check reads this: the user message it starts is the person's, never
+      // the daemon's assignment.
+      const turn = {
+        content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }],
+        role: "user",
+        timestamp: 10,
+      };
+      expect(matchInjectedUserTurn("ses_delivery", turn)).toBe(DIRECT_MESSAGE_ID);
+    });
+
+    // Send is Enter at the terminal (no deliverAs); Aside lands at the next step. The frame's
+    // mode and text are what any publisher wrote, so Dispatch's answer decides both.
+    for (const [index, [frameMode, storedMode, options]] of (
+      [
+        ["steer", "steer", undefined],
+        ["aside", "aside", { deliverAs: "aside" }],
+        ["steer", "aside", { deliverAs: "aside" }],
+        ["aside", "steer", undefined],
+      ] as const
+    ).entries()) {
+      test(`a frame saying ${frameMode} whose stored attempt is ${storedMode} is delivered as ${storedMode}`, async () => {
+        const { agent, delivered, fixture } = await bootDirectSession(`direct-mode-${index}`, {
+          accept: () => ({ accepted: true, delivery: storedMode }),
+        });
+
+        agent.push(
+          directDispatchEnvelope(frameMode, `direct-mode-${index}`, { body: "a forger's text" })
+        );
+        await delivered(1);
+
+        expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options }]);
+      });
+    }
+
+    // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
+    // keeps the card, and the session posts nothing and injects nothing.
+    for (const [name, answer] of [
+      ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }],
+      ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }],
+      ["it names another session's attempt", { code: "ACCEPT_FORBIDDEN", status: 403 }],
+      ["it is no direct message to this session", { code: "ACCEPT_NOT_DIRECT", status: 409 }],
+      ["a session wrote it", { code: "ACCEPT_NOT_WRITTEN_BY_PERSON", status: 409 }],
+      ["its attempt is a BTW", { code: "ACCEPT_NOT_ASIDE_OR_STEER", status: 409 }],
+      ["Dispatch refuses the session's token", { code: "UNAUTHORIZED", status: 401 }],
+      ["Dispatch predates the accept route", { status: 404 }],
+      ["Dispatch fails", { status: 500 }],
+      ["the accept never reaches Dispatch", { reject: "fetch failed" }],
+      // A 200 that carries no stored body has nothing to inject.
+      ["Dispatch accepts it without the stored body", { accepted: true, body: null }],
+    ] as const satisfies readonly (readonly [string, AcceptAnswer])[]) {
+      test(`stays a card when ${name}`, async () => {
+        const { accepts, agent, delivered, fixture, posts, recordedWhenDelivered } =
+          await bootDirectSession(`direct-accept-refused-${name}`, { accept: () => answer });
+
+        agent.push(directDispatchEnvelope("steer", `direct-accept-refused-${name}`));
+        await delivered(1);
+
+        expect(accepts).toHaveLength(1);
+        expect(fixture.userMessages).toEqual([]);
+        expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
+          "envoy-message",
+        ]);
+        expect(posts).toEqual([]);
+        // The card is a delivery too: the attempt is recorded before it goes out.
+        expect(recordedWhenDelivered).toEqual([1]);
+      });
+    }
+
+    // The ways a session could otherwise make a person's message a fresh user turn (Deep's
+    // reviews of #1592): Dispatch refuses the first three, and the session itself the rest.
+    test("a person's earlier message a session re-sent through the retry route stays a card", async () => {
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-bearer-retry",
+        {
+          accept: () => ({ code: "ACCEPT_NOT_REQUESTED_BY_PERSON", status: 409 }),
+        }
+      );
+
+      agent.push(directDispatchEnvelope("steer", "direct-bearer-retry", { attempt: 2 }));
+      await delivered(1);
+
+      expect(accepts.map((accept) => accept.path)).toEqual([
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/2/accept`,
+      ]);
+      expect(fixture.userMessages).toEqual([]);
+      expect(fixture.deliveries).toHaveLength(1);
+    });
+
+    test("a frame forged after a restart naming a person's Send of long ago stays a card", async () => {
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-forged-after-restart",
+        { accept: () => ({ code: "ACCEPT_STALE", status: 409 }) }
+      );
+
+      agent.push(
+        directDispatchEnvelope("steer", "direct-forged-after-restart", { body: "forger text" })
+      );
+      await delivered(1);
+
+      expect(accepts).toHaveLength(1);
+      expect(fixture.userMessages).toEqual([]);
+      expect(fixture.deliveries).toHaveLength(1);
+    });
+
+    test("a frame forged for a Send Dispatch recorded as failed stays a card", async () => {
+      // The session was down when the person sent it, so no frame of it ever reached the session.
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-forged-failed",
+        {
+          accept: () => ({ code: "ACCEPT_FAILED", status: 409 }),
+        }
+      );
+
+      agent.push(directDispatchEnvelope("steer", "direct-forged-failed", { body: "forger text" }));
+      await delivered(1);
+
+      expect(accepts).toHaveLength(1);
+      expect(fixture.userMessages).toEqual([]);
+      expect(fixture.deliveries).toHaveLength(1);
+    });
+
+    test("a Send that arrived as a card when Dispatch refused the token stays a card when a frame forged for it arrives once the token works", async () => {
+      // The acceptance run's sequence at add7ac87: the accept is refused on the session's token, so
+      // the Send arrives as a card; the token is restored, and a frame forged with the listener
+      // token names that attempt inside its minute, which Dispatch would accept.
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-carded-forged",
+        {
+          accept: (count) =>
+            count === 1 ? { code: "UNAUTHORIZED", status: 401 } : { accepted: true },
+        }
+      );
+
+      agent.push(directDispatchEnvelope("steer", "direct-carded"));
+      await delivered(1);
+      agent.push(directDispatchEnvelope("steer", "direct-carded-forged", { body: "forger text" }));
+      await delivered(2);
+
+      expect(accepts).toHaveLength(1);
+      expect(fixture.userMessages).toEqual([]);
+      expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
+        "envoy-message",
+        "envoy-message",
+      ]);
+    });
+
+    test("a person's retry of a Send that arrived as a card is a user turn", async () => {
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-carded-retry",
+        {
+          accept: (count) =>
+            count === 1 ? { reject: "fetch failed" } : { accepted: true, delivery: "aside" },
+        }
+      );
+
+      agent.push(directDispatchEnvelope("steer", "direct-carded-retry-1"));
+      await delivered(1);
+      // The person's retry is an attempt of its own, which the session has not delivered.
+      agent.push(directDispatchEnvelope("aside", "direct-carded-retry-2", { attempt: 2 }));
+      await delivered(2);
+
+      expect(accepts.map((accept) => accept.path)).toEqual([
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/2/accept`,
+      ]);
+      expect(fixture.deliveries).toHaveLength(1);
+      expect(fixture.userMessages).toEqual([
+        { content: DIRECT_MESSAGE_BODY, options: { deliverAs: "aside" } },
+      ]);
+    });
+
+    test("is one user turn however often it is delivered, and no replay is accepted again", async () => {
+      const { accepts, agent, delivered, fixture } = await bootDirectSession("direct-replay", {
+        // Dispatch would take any of them: only the session keeps the replays cards.
+        accept: () => ({ accepted: true }),
+      });
+
+      agent.push(directDispatchEnvelope("steer", "direct-replay"));
+      await delivered(1);
+      // The same attempt again under another envelope: the dedupe key does not catch it.
+      agent.push(directDispatchEnvelope("steer", "direct-replay-again"));
+      await delivered(2);
+
+      expect(accepts).toHaveLength(1);
+      expect(fixture.userMessages).toHaveLength(1);
+      expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual(["envoy-message"]);
+    });
+
+    // What a restarted session knows is its file's entries, every branch of them: a tree switch
+    // before the restart leaves the delivered attempt off the active branch, not out of the file.
+    for (const [name, onActiveBranch] of [
+      ["on its active branch", true],
+      ["on another branch of its tree", false],
+    ] as const) {
+      test(`a frame naming an attempt a restarted session delivered, ${name}, is a card with no accept`, async () => {
+        const first = await bootDirectSession(`direct-restart-first-${onActiveBranch}`, {
+          accept: () => ({ code: "UNAUTHORIZED", status: 401 }),
+        });
+        first.agent.push(directDispatchEnvelope("steer", "direct-restart"));
+        await first.delivered(1);
+        expect(first.fixture.deliveries).toHaveLength(1);
+
+        const restarted = await bootDirectSession(`direct-restart-second-${onActiveBranch}`, {
+          accept: () => ({ accepted: true }),
+          branch: onActiveBranch ? first.fixture.entries : [],
+          entries: first.fixture.entries,
+        });
+        restarted.agent.push(
+          directDispatchEnvelope("steer", "direct-restart-forged", { body: "forger text" })
+        );
+        await restarted.delivered(1);
+
+        expect(restarted.accepts).toEqual([]);
+        expect(restarted.fixture.userMessages).toEqual([]);
+        expect(restarted.fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
+          "envoy-message",
+        ]);
+      });
+    }
+
+    // Every other frame keeps its envelope without costing a Dispatch call: an issue message and a
+    // comment mention reply on the issue, a session's message is no person's, and a frame naming a
+    // broadcast yields a card whether or not the claim is true.
+    for (const [name, envelope] of [
+      ["an issue message", targetedDispatchEnvelope("steer", "scope-issue")],
+      ["a comment mention", targetedCommentEnvelope("aside", "scope-comment")],
+      [
+        "a direct message a session sent",
+        directDispatchEnvelope("steer", "scope-session", {
+          actor: { id: "ses_peer", kind: "session" },
+        }),
+      ],
+      [
+        "a frame naming a broadcast",
+        directDispatchEnvelope("steer", "scope-broadcast", {
+          broadcastID: "55555555-5555-4555-8555-555555555555",
+        }),
+      ],
+    ] as const) {
+      test(`${name} keeps its card and is never accepted`, async () => {
+        const { accepts, agent, delivered, fixture } = await bootDirectSession(
+          `direct-scope-${name}`
+        );
+
+        agent.push(envelope);
+        await delivered(1);
+
+        expect(accepts).toEqual([]);
+        expect(fixture.userMessages).toEqual([]);
+        expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
+          "envoy-message",
+        ]);
+      });
+    }
+
+    // A Dispatch configuration that no longer resolves cannot accept anything, and must not lose
+    // the message either: it arrives as the card it was before any of this.
+    test("stays a card, accepted by nobody, when the Dispatch token file cannot be read", async () => {
+      const { accepts, agent, delivered, fixture } =
+        await bootDirectSession("direct-broken-config");
+      process.env.DISPATCH_TOKEN_FILE = join(tmpdir(), "legion-394-no-such-token-file");
+
+      agent.push(directDispatchEnvelope("steer", "direct-broken-config"));
+      await delivered(1);
+
+      expect(accepts).toEqual([]);
+      expect(fixture.userMessages).toEqual([]);
+      expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual(["envoy-message"]);
+    });
+
+    // The viewer shows Dispatch's stored copy until the turn's own frame names it. The run's end
+    // clears the record under the id the turn was noted under, even while the host's own id still
+    // differs from it, as a fresh terminal's does until the registration heartbeat heals it.
+    for (const [name, runEndsFirst, liveID, tag] of [
+      ["tags the user turn it became on the live stream", false, "ses_delivery", DIRECT_MESSAGE_ID],
+      ["tags nothing once the run it was sent into has ended", true, "ses_delivery", undefined],
+      [
+        "tags nothing once the run it was sent into has ended under a host id not yet healed",
+        true,
+        "ses_host_drift",
+        undefined,
+      ],
+    ] as const) {
+      test(name, async () => {
+        const { agent, context, delivered, fixture } = await bootDirectSession(
+          `direct-stream-${runEndsFirst}-${liveID}`
+        );
+        natsState.controls
+          .get("agentstream.ses_delivery.control")
+          ?.push(JSON.stringify({ type: "watch", v: 1 }));
+
+        agent.push(directDispatchEnvelope("steer", `direct-stream-${runEndsFirst}-${liveID}`));
+        await delivered(1);
+        if (runEndsFirst) {
+          await fixture.handlers.get("agent_end")?.(
+            { messages: [] },
+            {
+              ...context,
+              sessionManager: { ...context.sessionManager, getSessionId: () => liveID },
+            }
+          );
+        }
+        const message = {
+          content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }],
+          role: "user",
+          timestamp: 10,
+        };
+        await fixture.handlers.get("message_start")?.({ message }, context);
+        await fixture.handlers.get("message_end")?.({ message }, context);
+
+        const frames = natsState.published
+          .filter((published) => published.subject === "agentstream.ses_delivery.frames")
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)));
+        expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
+          ["u10", tag],
+          ["u10", tag],
+        ]);
+      });
+    }
   });
 
   test("deduplicates targeted Dispatch frames by dedupe key", async () => {

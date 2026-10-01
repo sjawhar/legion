@@ -101,7 +101,7 @@ test("an unsupported selected mode warns but does not prevent Send", async ({ br
     await page.goto(`/issues/${issue.key}/conversation`);
     await selectMention(page, "/aside @", "worker");
     await expect(
-      page.getByText("worker does not advertise Aside; Send will record the failed attempt.")
+      page.getByText("worker does not advertise Aside, so sending it records a failed attempt.")
     ).toBeVisible();
     await setSessionSendStatus("s2", 404);
     expect(await post(page)).toEqual({

@@ -39,6 +39,7 @@ type Context = {
     readonly getSessionId: () => string;
     readonly getSessionFile: () => string | undefined;
     readonly ensureOnDisk: () => Promise<void>;
+    readonly getEntries: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: {
@@ -161,6 +162,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
       getSessionId: () => sessionID,
       getSessionFile: () => "/tmp/legion-root.jsonl",
       ensureOnDisk: async () => undefined,
+      getEntries: () => [],
     },
     setInterval: (callback) => intervals.push(callback),
     ui: {

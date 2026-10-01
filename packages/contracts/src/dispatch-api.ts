@@ -868,6 +868,29 @@ export interface MessageDelivery {
   readonly error: string | null;
   readonly reply_id: string | null;
   readonly created_at: string;
+  /**
+   * Whoever's send opened the attempt: the person who wrote or retried the message, or the session
+   * a bearer's retry named. A resume keeps it. Null on an attempt written before Dispatch recorded
+   * it, and absent from a Dispatch older than the field.
+   */
+  readonly requested_by?: Actor | null;
+  /**
+   * The attempt's session took the message as its user's own turn
+   * (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), and when. At most one attempt of
+   * a message is ever accepted; null on every other attempt, absent from a Dispatch older than the
+   * fields. The session said it took the message, so this outranks a `failed` state the send
+   * recorded afterwards.
+   */
+  readonly accepted_as?: "user_turn" | null;
+  readonly accepted_at?: string | null;
+}
+
+/**
+ * `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`'s answer: the attempt it accepted, and
+ * the body of the message as Dispatch stored it.
+ */
+export interface AcceptedMessageDelivery extends MessageDelivery {
+  readonly body: string;
 }
 
 export interface Message {
@@ -877,6 +900,11 @@ export interface Message {
   readonly body: string;
   readonly target: string | null;
   readonly in_reply_to: string | null;
+  /**
+   * The broadcast this message is one recipient's copy of; null for every other message, and
+   * absent from a Dispatch older than the field.
+   */
+  readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
 }
@@ -918,6 +946,17 @@ export interface MessageDeliveryEventPayload {
    *  it reached the listener and put nothing new on the session's subject. Absent means false. */
   readonly duplicate?: boolean;
   readonly error?: string;
+}
+
+/** `message.accepted`: the session an attempt went to took the message as its user's own turn.
+ *  It is never a second `message.delivery` receipt; the send still appends its own. `target` is
+ *  the message's own, `session:<recipient>` for a direct message. */
+export interface MessageAcceptedEventPayload {
+  readonly message_id: string;
+  readonly attempt: number;
+  readonly session_id: string;
+  readonly accepted_as: "user_turn";
+  readonly target: string;
 }
 
 export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
@@ -1365,6 +1404,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "message.delivery";
       readonly payload: MessageDeliveryEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "message.accepted";
+      readonly payload: MessageAcceptedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "message.answered";
@@ -1975,6 +2018,9 @@ export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.ex
   body: z.string(),
   target: z.string(),
   in_reply_to: z.string().nullable(),
+  // The broadcast a frame's message is one recipient's copy of, as the frame claims it: a frame is
+  // untrusted, so neither its value nor its absence proves anything.
+  broadcast_id: z.string().nullish(),
   deliveries: z.array(z.unknown()),
   created_at: z.string(),
 });
