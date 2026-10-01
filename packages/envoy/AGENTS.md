@@ -1567,7 +1567,9 @@ record's id, refusing any login but the record's approver whatever the record's 
 writing the decision event (which records the deciding login), the request transition and the
 audit row in one transaction; a non-pending record, and one past its expiry that the sweeper has
 not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
-nothing). `Values` releases a
+nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
+answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
+that it was decided. `Values` releases a
 live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
@@ -1598,8 +1600,10 @@ update`, which an event insert's foreign-key check does not wait on), refuses an
 record's own approver (`403 NOT_APPROVER`) whatever the record's state, answers a record that
 already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
 expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
-answers, so a second click, a concurrent one and a late one all get it, and, on approval, mints
-the launcher
+answers, so a second click, a concurrent one and a late one all get it — but a record past its
+expiry, whether recorded expired by the sweeper or not, answers with a message saying it expired
+before its approver acted (`machine.ErrLoginExpired`), never that it was decided, and, on
+approval, mints the launcher
 credential in the same transaction: bound to the request object's own key (its thumbprint and
 embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
 from the decision, so a crash between minting and recording the decision never orphans a
