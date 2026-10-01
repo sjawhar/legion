@@ -566,6 +566,14 @@ test("a mention its session answered with an error is pointed at a new comment, 
       `session:reviewer · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
     );
     expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+    unmount();
+
+    // A closed issue shows no Retry and takes no new comment, so neither sentence is said: the
+    // same rule the card follows, where each sentence names a control in the retry row.
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient, true)).unmount;
+    await screen.findByText("session:worker · failed · worker failed");
+    screen.getByText("session:reviewer · failed · reviewer failed");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;

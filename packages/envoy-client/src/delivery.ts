@@ -155,11 +155,24 @@ export function expectsLaneReceipt<
   );
 }
 
-/** The part of an inbound frame a host recognises a repeat by: its `dedupe_key`, never its `event_id`. */
-export interface DedupeIdentity {
-  readonly dedupe_key?: string | undefined;
-  readonly source?: string | undefined;
-  readonly source_event_id?: string | undefined;
+/**
+ * The part of an inbound frame a host recognises a repeat by: its `dedupe_key`, which a re-send
+ * shares with the frame that came first, and its `event_id`, which only copies of one publish
+ * share (the listener mints a new one for every send). Hosts parse it with this schema, so a field
+ * the rule reads cannot go missing from one host's parse.
+ */
+export const DedupeIdentitySchema = z.object({
+  event_id: z.string().min(1).optional(),
+  dedupe_key: z.string().min(1).optional(),
+  source: z.string().optional(),
+  source_event_id: z.string().optional(),
+});
+
+export type DedupeIdentity = z.infer<typeof DedupeIdentitySchema>;
+
+/** What one claim recorded. `release` undoes exactly that, and only once. */
+export interface DeliveryClaim {
+  release(): void;
 }
 
 /**
@@ -176,30 +189,41 @@ export interface DedupeIdentity {
  */
 export interface DeliveryDedupe {
   /**
-   * Records the frame's dedupe key and answers whether the agent should be handed it: `false` for
-   * a key that names its event and was claimed inside the window, `true` for any other frame.
+   * Records the frame and answers whether the agent should be handed it: `undefined` for a repeat
+   * (a key that names its event and was claimed inside the window, or the event id of a copy
+   * claimed already), otherwise the claim, whose `release` undoes what this call recorded.
    */
-  claim(frame: DedupeIdentity | undefined): boolean;
-  /**
-   * Undoes the claim of a frame the agent was not handed, so it still arrives when it is sent
-   * again.
-   */
-  release(frame: DedupeIdentity | undefined): void;
+  claim(frame: DedupeIdentity | undefined): DeliveryClaim | undefined;
 }
 
 /**
- * The most keys a host's record holds. Past it a claim forgets the oldest key first, so a producer
- * that floods a followed topic with fresh keys cannot grow a host's memory without bound. It is
- * set above what the whole production notification stream stored in one duplicate window
- * (100,028 messages over 72 hours, 2026-09-30), so a host reaches it only when it is handed more
- * keys that name their events than that, and then the oldest repeat passes as new.
+ * The most keys a host's record holds. Past it a claim forgets the oldest key first, so a host's
+ * memory stays bounded however many fresh keys a followed topic carries, and a re-send of a
+ * forgotten key reaches the agent again: one of the places the promise fails
+ * (`DELIVERY_DUPLICATE_WINDOW_MS`). The stream bounds its own record by the window alone. This
+ * bound is two and a half times what the whole production stream stored in one 72-hour window
+ * (100,028 messages, 2026-09-30), and the stream carries every subject a host follows but the role
+ * lanes, so a host reaches it only once traffic grows past that. Full, the record holds about
+ * 70 MB of heap (up to 272 bytes a key across the key shapes measured, Bun 1.3.14).
  */
-export const DELIVERY_DEDUPE_KEY_LIMIT = 100_000;
+export const DELIVERY_DEDUPE_KEY_LIMIT = 250_000;
 
 /**
- * Only a key that names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`) is recorded,
+ * How many event ids a host's record holds at most, in two generations: when the newer one fills
+ * to half of this it becomes the older one, and the older one is dropped whole, so a claim costs
+ * the same however long the host has run. Copies of one publish arrive together, one per
+ * overlapping subscription, so a copy is recognised unless more than half this many other frames
+ * were claimed between them. The ids are held apart from the keys and spend none of
+ * `DELIVERY_DEDUPE_KEY_LIMIT`.
+ */
+const DELIVERY_EVENT_ID_LIMIT = 10_000;
+
+/**
+ * A key is recorded only when it names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`),
  * for `DELIVERY_DUPLICATE_WINDOW_MS`, the window the retry promise is made for. Any other key is not
- * a dedupe key, and dropping on it would lose a distinct event that shares it.
+ * a dedupe key, and dropping on it would lose a distinct event that shares it. A frame's event id
+ * is recorded whatever its key: distinct events never share one, so it recognises the second copy
+ * of a frame that arrived on two subscriptions, which a key that does not name its event cannot.
  *
  * A key is kept no longer than the window, because a repeat never refreshes it and every claim
  * first evicts the keys past the window, so the record holds at most the keys the host was handed
@@ -207,30 +231,57 @@ export const DELIVERY_DEDUPE_KEY_LIMIT = 100_000;
  * backwards keeps a key longer by the size of the step.
  */
 export function createDeliveryDedupe(now: () => number = Date.now): DeliveryDedupe {
-  // Insertion order is delivery order, so the entries past the window, and the oldest entry the
-  // limit evicts, are always at the front.
-  const claimed = new Map<string, number>();
+  // Insertion order is claim order, so the keys past the window, and the oldest key the limit
+  // evicts, are always at the front. A key maps to when it was claimed, an event id to the number
+  // of the claim that recorded it, so a release removes neither once another claim took it.
+  const keys = new Map<string, number>();
+  let events = new Map<string, number>();
+  let olderEvents = new Map<string, number>();
+  let claims = 0;
   return {
     claim(frame) {
+      const eventId = frame?.event_id;
+      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
+        return undefined;
+      }
       const key = frame?.dedupe_key;
-      if (frame === undefined || key === undefined || !dedupeKeyNamesItsEvent(frame)) return true;
+      const named = frame !== undefined && key !== undefined && dedupeKeyNamesItsEvent(frame);
       const at = now();
-      const claimedAt = claimed.get(key);
-      if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) return false;
-      for (const [oldest, deliveredAt] of claimed) {
-        if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS) break;
-        claimed.delete(oldest);
+      if (named) {
+        const claimedAt = keys.get(key);
+        if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) {
+          return undefined;
+        }
+        for (const [oldest, deliveredAt] of keys) {
+          if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS) break;
+          keys.delete(oldest);
+        }
+        keys.delete(key);
+        if (keys.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+          const oldest = keys.keys().next();
+          if (oldest.done !== true) keys.delete(oldest.value);
+        }
+        keys.set(key, at);
       }
-      claimed.delete(key);
-      if (claimed.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
-        const oldest = claimed.keys().next();
-        if (oldest.done !== true) claimed.delete(oldest.value);
+      const claim = ++claims;
+      if (eventId !== undefined) {
+        if (events.size >= DELIVERY_EVENT_ID_LIMIT / 2) {
+          olderEvents = events;
+          events = new Map();
+        }
+        events.set(eventId, claim);
       }
-      claimed.set(key, at);
-      return true;
-    },
-    release(frame) {
-      if (frame?.dedupe_key !== undefined) claimed.delete(frame.dedupe_key);
+      let released = false;
+      return {
+        release() {
+          if (released) return;
+          released = true;
+          if (named && keys.get(key) === at) keys.delete(key);
+          if (eventId === undefined) return;
+          if (events.get(eventId) === claim) events.delete(eventId);
+          if (olderEvents.get(eventId) === claim) olderEvents.delete(eventId);
+        },
+      };
     },
   };
 }

@@ -55,7 +55,8 @@
   listener pushes to from the stream was never handed the Retry, and the attempt then read
   "Delivered by an earlier attempt". The card now says the session answered with an error and
   points at its mode-change actions; the mention list points at a new comment. Sending that Retry
-  under a new key is LEGION-431.
+  under a new key is LEGION-431. On a closed issue the mention list, like the card, no longer
+  promises "Retry won't deliver it twice" beside a failure it offers no Retry for.
 - `POST /v1/messages/publish` refuses a `dedupe_key` on a `source: "dispatch"` envelope with a 400
   naming `dedupe_key`. Every host drops a repeat of a Dispatch key, and Dispatch's outbox numbers
   its keys in sequence (`dispatch-<event id>`), so any holder of the listener bearer could publish

@@ -1,4 +1,4 @@
-import { createDeliveryDedupe } from "@legion/envoy-client/delivery"
+import { createDeliveryDedupe, DedupeIdentitySchema } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
 import { z } from "zod"
@@ -65,13 +65,9 @@ interface Following {
   readonly done: Promise<void>
 }
 
-// `dedupe_key` is the identity a repeat shares with the frame that came first: the listener mints a
-// new `event_id` for every send, so a Dispatch Retry or any other re-send differs from the first
-// send there and only there (`createDeliveryDedupe`).
-const DeliveryIdentity = z.object({
-  dedupe_key: z.string().min(1).optional(),
-  source: z.string().optional(),
-  source_event_id: z.string().optional(),
+// The identity `createDeliveryDedupe` recognises a repeat by (its own schema, so no field the rule
+// reads can go missing here), and the topic the envelope names.
+const DeliveryIdentity = DedupeIdentitySchema.extend({
   topic: z.string().min(1).optional(),
 })
 
@@ -95,9 +91,9 @@ function report(what: string, error: unknown): void {
 
 /**
  * One channel process receives both its direct Envoy route and every followed
- * topic. It deduplicates at the broker boundary by dedupe key, so an event covered
- * by several patterns, and a re-send of one already delivered, still becomes one
- * Claude Code channel notification.
+ * topic. It deduplicates at the broker boundary, by event id and by dedupe key,
+ * so an event covered by several patterns, and a re-send of one already
+ * delivered, still becomes one Claude Code channel notification.
  */
 export function createChannelForwarder(
   connection: ChannelForwarderConnection,
@@ -112,7 +108,8 @@ export function createChannelForwarder(
       for await (const message of subscription) {
         const raw = decoder.decode(message.data)
         const identity = deliveryIdentity(raw)
-        const duplicate = !dedupe.claim(identity)
+        const claim = dedupe.claim(identity)
+        const duplicate = claim === undefined
         try {
           // A nats.js Msg exposes subject/data/reply through prototype getters,
           // which an object spread would silently drop; copy the fields by name.
@@ -125,9 +122,9 @@ export function createChannelForwarder(
             ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),
             ...(duplicate ? { duplicate: true } : {}),
           })
-          if (!handed && !duplicate) dedupe.release(identity)
+          if (!handed) claim?.release()
         } catch (error) {
-          if (!duplicate) dedupe.release(identity)
+          claim?.release()
           report(`could not deliver a message on ${message.subject}`, error)
         }
       }

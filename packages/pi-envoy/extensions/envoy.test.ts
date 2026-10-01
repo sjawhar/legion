@@ -6795,6 +6795,55 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  // Following a pull request's thread and its checks holds two subscriptions for the checks
+  // subject, so one CI settlement arrives on both. Its key does not name its event, so only the
+  // event id the two copies share makes the second one the first again.
+  test("injects one publish once when two followed subscriptions both carry it", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-overlapping-copies");
+    const fixture = createPi();
+    const following = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (message.content.includes("the next publish proves the copy was skipped")) {
+          following.resolve();
+        }
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_overlap"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const pr = "notifications.github.acme.widgets.pr.7.>";
+    const checks = "notifications.github.acme.widgets.pr.7.checks";
+    await subscribeTool.execute("", { topics: [pr, checks] });
+    const wildcard = natsState.controls.get(pr);
+    const exact = natsState.controls.get(checks);
+    if (wildcard === undefined || exact === undefined) throw new Error("topics were not followed");
+
+    const settlement = (eventID: string, summary: string) =>
+      JSON.stringify({
+        event_id: eventID,
+        source: "github",
+        source_event_id: `ci-${eventID}`,
+        topic: checks,
+        dedupe_key: "github.checks.acme.widgets.pr.7.0a1b2c3.g1",
+        issued_at: 1,
+        payload_summary: summary,
+        trace_id: `trace-${eventID}`,
+      });
+    wildcard.push(settlement("evt-checks-1", "checks settled once"));
+    exact.push(settlement("evt-checks-1", "checks settled once"));
+    exact.push(settlement("evt-checks-2", "the next publish proves the copy was skipped"));
+    await following.promise;
+
+    expect(
+      fixture.messages.filter((message) => message.includes("checks settled once"))
+    ).toHaveLength(1);
+  });
+
   test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
     const { default: envoyExtension } = await import("./envoy.ts?deliver-as-steer");

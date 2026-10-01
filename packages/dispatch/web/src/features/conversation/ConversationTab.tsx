@@ -74,12 +74,11 @@ import {
   visibleConversationItems,
 } from "./conversation-model";
 import {
-  answeredWithErrorGuidance,
   duplicateText,
+  failureGuidance,
   isSafeRetry,
   MODE_LABELS,
   receiptAnsweredWithError,
-  safeRetryGuidance,
   withGuidance,
 } from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
@@ -470,19 +469,15 @@ function CommentDeliveryList({
           createdAt: delivery.created_at,
           duplicate: delivery.duplicate,
           answeredWithError: delivery.answeredWithError,
+          error: delivery.error,
         };
         // The same rule the targeted-message card applies: a mention's Retry re-sends its own
-        // mode under its own key, so it can only be offered while the stream would still
-        // recognise the repeat, and never for an attempt the session answered with an error. The
-        // list offers no mode-change action, so its guidance says nothing about one; an error
-        // answer is pointed at a new comment instead, while the issue is open to take one.
+        // mode under its own key, so it is offered only while `isSafeRetry` holds, and the
+        // guidance beside it names that Retry or a new comment, so a closed issue, which takes
+        // neither, says nothing about one.
         const safeRetry = isSafeRetry(outcome);
         const canRetry = capabilities === undefined || capabilities.includes(delivery.delivery);
-        const guidance = safeRetry
-          ? safeRetryGuidance("mention", delivery.error)
-          : delivery.answeredWithError === true && !disabled
-            ? answeredWithErrorGuidance("mention")
-            : undefined;
+        const guidance = disabled ? undefined : failureGuidance(outcome, "mention");
         return (
           <li
             className="flex flex-wrap items-center gap-x-2"

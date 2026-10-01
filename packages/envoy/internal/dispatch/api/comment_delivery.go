@@ -62,6 +62,12 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 // the envelope it minted, whether the stream already held the message, and the failure to
 // record otherwise.
 //
+// Every failure comes with a nil envelope. The dashboard reads a failed attempt row that carries
+// an envelope id as one its session answered with an error (rowAnsweredWithError in
+// packages/dispatch/web/src/features/conversation/delivery.ts), which gets no same-mode Retry, so
+// an envelope returned beside a failure would read as the session's answer
+// (TestSendResolvedDeliveryReportsNoEnvelopeWithAnyFailure).
+//
 // A receipt timeout is worded differently from every other failure, and only here. The listener
 // publishes the envelope before it answers, so a send whose answer missed the window may have
 // landed. What the row records is only that CAUSE. Whether retrying is safe depends on how old

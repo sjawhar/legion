@@ -836,18 +836,20 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  *   hands its agent at most one frame per such key inside this window, through
  *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. A frame the host answered with an
  *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
- *   key and a same-mode re-send of it reaches the agent. A host keeps at most
- *   `DELIVERY_DEDUPE_KEY_LIMIT` keys and forgets the oldest past it, a bound set above what the
- *   whole stream stores in this window, so only a flood of fresh keys reaches it.
+ *   key and a same-mode re-send of it reaches the agent.
  *
- * It fails in two places. A host holds its keys in memory, so one that restarts after the first
+ * It fails in three places. A host holds its keys in memory, so one that restarts after the first
  * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
  * not rare: `claude --resume` starts a new channel process on the same conversation, and a
- * Sandbox pod resumes its session in a new process. And the stream stores a re-send of an attempt
- * the session answered with an error no more than any other repeat, so a session the listener
- * pushes to never receives it, and its attempt reads as a duplicate. The dashboard therefore
- * offers no same-mode Retry for such an attempt and points at a mode change, which is a new key;
- * sending that Retry under a new key is LEGION-431.
+ * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
+ * session answered with an error no more than any other repeat, so a session the listener pushes
+ * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
+ * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
+ * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
+ * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
+ * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * one window when it was set, so a host reaches it only once traffic grows past that or a
+ * producer floods a topic it follows.
  *
  * Past the window neither remembers the key, and a same-mode retry is a second delivery, so the
  * dashboard makes the promise only inside it, and names the restart

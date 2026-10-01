@@ -159,6 +159,22 @@ export function answeredWithErrorGuidance(surface: "card" | "mention"): string {
 }
 
 /**
+ * The guidance a failed attempt's retry row adds to its cause, decided here once for every surface
+ * that shows one: the promise to the same-mode Retry while `isSafeRetry` holds, the pointer at a
+ * new key for an attempt its session answered with an error (which gets no Retry), and nothing
+ * otherwise. Each sentence names a control in that row, so a surface asks only while it shows it.
+ */
+export function failureGuidance(
+  attempt: DeliveryOutcome & { readonly error?: string | null },
+  surface: "card" | "mention",
+  now: number = Date.now()
+): string | undefined {
+  if (isSafeRetry(attempt, now)) return safeRetryGuidance(surface, attempt.error);
+  if (attempt.answeredWithError === true) return answeredWithErrorGuidance(surface);
+  return undefined;
+}
+
+/**
  * What the broadcast page says under the Retry of a send nobody is carrying: a pending attempt
  * whose claim lapsed, made at `createdAt`, or a recipient no attempt was recorded for at all
  * (`createdAt` undefined), which has nothing to repeat. The Retry re-sends in `mode`, the

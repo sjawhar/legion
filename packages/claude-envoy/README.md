@@ -78,8 +78,8 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 | --- | --- |
 | `producer` | Envoy producer, or `unknown` for a malformed envelope (`source` is Claude Code's own attribute, naming the channel). |
 | `topic` | NATS subject that delivered the event. |
-| `event_id` | Envoy event identity of this delivery; the listener mints a new one for every send. |
-| `dedupe_key` | Identity a repeat shares with the first delivery; used for channel-side deduplication. |
+| `event_id` | Envoy event identity of this publish; the listener mints a new one for every send. The channel uses it to deliver one copy of a publish that arrives on two overlapping subscriptions. |
+| `dedupe_key` | Identity a re-send shares with the first delivery; the channel uses it to drop the re-send. |
 | `urgency` | Optional Envoy priority. |
 | `from_session` | Optional source session identifier. |
 | `expects_reply` | Optional Envoy reply expectation. |

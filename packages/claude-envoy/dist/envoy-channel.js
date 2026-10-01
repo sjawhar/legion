@@ -38212,35 +38212,70 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
-var DELIVERY_DEDUPE_KEY_LIMIT = 1e5;
+var DedupeIdentitySchema = exports_external.object({
+  event_id: exports_external.string().min(1).optional(),
+  dedupe_key: exports_external.string().min(1).optional(),
+  source: exports_external.string().optional(),
+  source_event_id: exports_external.string().optional()
+});
+var DELIVERY_DEDUPE_KEY_LIMIT = 250000;
+var DELIVERY_EVENT_ID_LIMIT = 1e4;
 function createDeliveryDedupe(now = Date.now) {
-  const claimed = new Map;
+  const keys = new Map;
+  let events = new Map;
+  let olderEvents = new Map;
+  let claims = 0;
   return {
     claim(frame) {
+      const eventId = frame?.event_id;
+      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
+        return;
+      }
       const key = frame?.dedupe_key;
-      if (frame === undefined || key === undefined || !dedupeKeyNamesItsEvent(frame))
-        return true;
+      const named = frame !== undefined && key !== undefined && dedupeKeyNamesItsEvent(frame);
       const at = now();
-      const claimedAt = claimed.get(key);
-      if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS)
-        return false;
-      for (const [oldest, deliveredAt] of claimed) {
-        if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
-          break;
-        claimed.delete(oldest);
+      if (named) {
+        const claimedAt = keys.get(key);
+        if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) {
+          return;
+        }
+        for (const [oldest, deliveredAt] of keys) {
+          if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
+            break;
+          keys.delete(oldest);
+        }
+        keys.delete(key);
+        if (keys.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+          const oldest = keys.keys().next();
+          if (oldest.done !== true)
+            keys.delete(oldest.value);
+        }
+        keys.set(key, at);
       }
-      claimed.delete(key);
-      if (claimed.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
-        const oldest = claimed.keys().next();
-        if (oldest.done !== true)
-          claimed.delete(oldest.value);
+      const claim = ++claims;
+      if (eventId !== undefined) {
+        if (events.size >= DELIVERY_EVENT_ID_LIMIT / 2) {
+          olderEvents = events;
+          events = new Map;
+        }
+        events.set(eventId, claim);
       }
-      claimed.set(key, at);
-      return true;
-    },
-    release(frame) {
-      if (frame?.dedupe_key !== undefined)
-        claimed.delete(frame.dedupe_key);
+      let released = false;
+      return {
+        release() {
+          if (released)
+            return;
+          released = true;
+          if (named && keys.get(key) === at)
+            keys.delete(key);
+          if (eventId === undefined)
+            return;
+          if (events.get(eventId) === claim)
+            events.delete(eventId);
+          if (olderEvents.get(eventId) === claim)
+            olderEvents.delete(eventId);
+        }
+      };
     }
   };
 }
@@ -44108,10 +44143,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var version2 = "0.6.1";
 
 // src/channel-forwarder.ts
-var DeliveryIdentity = exports_external.object({
-  dedupe_key: exports_external.string().min(1).optional(),
-  source: exports_external.string().optional(),
-  source_event_id: exports_external.string().optional(),
+var DeliveryIdentity = DedupeIdentitySchema.extend({
   topic: exports_external.string().min(1).optional()
 });
 var decoder = new TextDecoder;
@@ -44139,7 +44171,8 @@ function createChannelForwarder(connection, options) {
       for await (const message of subscription) {
         const raw = decoder.decode(message.data);
         const identity = deliveryIdentity(raw);
-        const duplicate = !dedupe.claim(identity);
+        const claim = dedupe.claim(identity);
+        const duplicate = claim === undefined;
         try {
           const handed = await options.deliver({
             subject: message.subject,
@@ -44149,11 +44182,10 @@ function createChannelForwarder(connection, options) {
             ...identity?.topic === undefined ? {} : { envelopeTopic: identity.topic },
             ...duplicate ? { duplicate: true } : {}
           });
-          if (!handed && !duplicate)
-            dedupe.release(identity);
+          if (!handed)
+            claim?.release();
         } catch (error48) {
-          if (!duplicate)
-            dedupe.release(identity);
+          claim?.release();
           report(`could not deliver a message on ${message.subject}`, error48);
         }
       }

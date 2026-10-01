@@ -644,7 +644,8 @@ export default function envoyExtension(pi: PiApi): void {
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    if (!rendered.skip && delivered.claim(rendered.envelope)) {
+    const claim = rendered.skip ? undefined : delivered.claim(rendered.envelope);
+    if (claim !== undefined) {
       const envelope = rendered.envelope;
       if (envelope !== undefined) {
         inbox.unshift({
@@ -660,7 +661,7 @@ export default function envoyExtension(pi: PiApi): void {
       // released before the reply goes out. A BTW side turn adds nothing to the transcript, so
       // running it again for that re-send repeats no work the session kept.
       const refuse = async (delivery: DispatchDelivery, error: string): Promise<void> => {
-        delivered.release(envelope);
+        claim.release();
         await postDispatchReply(delivery, { error });
       };
       try {
@@ -708,7 +709,7 @@ export default function envoyExtension(pi: PiApi): void {
           }
         }
       } catch (error) {
-        delivered.release(rendered.envelope);
+        claim.release();
         console.warn(
           `[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`,
           error

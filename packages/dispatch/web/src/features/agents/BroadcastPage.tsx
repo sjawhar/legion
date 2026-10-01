@@ -30,7 +30,6 @@ import {
   capabilitiesForTarget,
   DeliveryRetry,
   DeliveryStatus,
-  offersSafeRetry,
 } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
@@ -106,16 +105,15 @@ function BroadcastRecipientRow({
         />
       )}
       {answeredBy !== undefined || latest?.state === "sent" ? null : latest?.state === "failed" ? (
-        // A failure is settled news: the same-mode retry, whose promise is `offersSafeRetry`'s,
-        // and, since nothing is outstanding, the mode-change sends too.
+        // A failure is settled news: the same-mode retry, which `DeliveryRetry` offers on the
+        // attempt's own `isSafeRetry`, and, since nothing is outstanding, the mode-change sends too.
         <DeliveryRetry
           canAside={capabilities?.includes("aside") !== false}
           canBtw={capabilities?.includes("btw") !== false}
           canSteer={capabilities?.includes("steer") !== false}
-          mode={latest.delivery}
+          latest={latest}
           onRetry={retry.mutate}
           retrying={retry.isPending}
-          sameModeRetry={offersSafeRetry(attempts, true)}
           targetName={label}
         />
       ) : latest === undefined || stranded ? (
