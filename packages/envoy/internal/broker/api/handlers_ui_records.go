@@ -23,10 +23,12 @@ type recordEnrollmentResp struct {
 	Operator  string `json:"operator"`
 }
 
+// recordDecisionResp is a decided record's terminal event. CredentialID is null unless the
+// decision minted a launcher credential: an agent_secret record's approval names none.
 type recordDecisionResp struct {
 	Event        string    `json:"event"`
 	At           time.Time `json:"at"`
-	CredentialID string    `json:"credential_id"`
+	CredentialID *string   `json:"credential_id"`
 }
 
 type recordResponse struct {
@@ -58,7 +60,7 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	}
 	resp.Service = strPtr(detail.Service)
 	if detail.Decided != nil {
-		resp.Decided = &recordDecisionResp{Event: detail.Decided.Event, At: detail.Decided.At, CredentialID: detail.Decided.CredentialID}
+		resp.Decided = &recordDecisionResp{Event: detail.Decided.Event, At: detail.Decided.At, CredentialID: strPtr(detail.Decided.CredentialID)}
 	}
 	return resp
 }

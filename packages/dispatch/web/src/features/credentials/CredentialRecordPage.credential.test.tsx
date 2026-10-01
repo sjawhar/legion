@@ -10,7 +10,7 @@ import { CredentialRecordPage } from "./CredentialRecordPage";
 function decidedSecretRecord(): CredentialRecord {
   return {
     approver: "sami",
-    decided: { at: "2026-09-27T00:05:00Z", credential_id: "", event: "approved" },
+    decided: { at: "2026-09-27T00:05:00Z", credential_id: null, event: "approved" },
     enrollment: { kind: "box", operator: "sami", runtime_id: "box-1" },
     expires_at: "2026-09-27T12:00:00Z",
     identifiers: ["DEEL_API_KEY"],
@@ -25,9 +25,9 @@ function decidedSecretRecord(): CredentialRecord {
   };
 }
 
-// The broker answers a decided agent_secret record with credential_id "", which names no
-// credential, so the page must not print a bare "Credential" line under the decision.
-test("a decided secret record whose credential id is empty shows no Credential line", async () => {
+// The broker answers a decided agent_secret record with credential_id null, since its approval
+// minted no launcher credential, so the page must not print a bare "Credential" line under it.
+test("a decided secret record with no credential shows no Credential line", async () => {
   const getRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(decidedSecretRecord());
   try {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

@@ -222,7 +222,7 @@ type wireEnrollmentInfo struct {
 type wireDecided struct {
 	Event        string    `json:"event"`
 	At           time.Time `json:"at"`
-	CredentialID string    `json:"credential_id"`
+	CredentialID *string   `json:"credential_id"`
 }
 
 type wireRecord struct {
@@ -505,6 +505,10 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 	if issuedRead.State != "issued" || issuedRead.CredentialID != credentialID {
 		t.Fatalf("issued read = %+v, want state=issued credential_id=%s", issuedRead, credentialID)
 	}
+	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+looked.RecordID, nil)
+	if decided := decode[wireRecord](t, body).Decided; decided == nil || decided.CredentialID == nil || *decided.CredentialID != credentialID {
+		t.Fatalf("decided machine record = %+v, want its decision to name credential %s", decided, credentialID)
+	}
 
 	// The minted launcher credential now authenticates POST /v1/enrollments and DELETE
 	// /v1/enrollments/{id} via a launcher proof signed by the machine's own key.
@@ -720,8 +724,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		t.Fatalf("GET /v1/credential-requests/{id} (after approval) = %d: %s", status, body)
 	}
 	decidedRead := decode[wireRecord](t, body)
-	if decidedRead.State != "approved" || decidedRead.Decided == nil || decidedRead.Decided.Event != "approved" {
-		t.Fatalf("decided record read = %+v, want state=approved with its approved event", decidedRead)
+	if decidedRead.State != "approved" || decidedRead.Decided == nil || decidedRead.Decided.Event != "approved" || decidedRead.Decided.CredentialID != nil {
+		t.Fatalf("decided record read = %+v, want state=approved with its approved event and a null credential_id", decidedRead)
 	}
 
 	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
