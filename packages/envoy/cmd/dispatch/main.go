@@ -72,6 +72,9 @@ type bootConfig struct {
 	// (required when AgentSecretsURL is set).
 	AgentSecretsURL   string
 	AgentSecretsToken string
+	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
+	ListenAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the fence
 	// resolveBootConfig and routes.BuildAppContext apply; the signing key is then per process.
 	DevSignIn bool
@@ -107,7 +110,7 @@ func main() {
 		serverURL = envoyConfig.Dispatch.ServerURL
 	}
 	if boot.DevSignIn {
-		if err := routes.DevSignInOrigin(serverURL); err != nil {
+		if _, err := routes.DevSignInOrigin(serverURL); err != nil {
 			slog.Error("dispatch: dev sign-in", "error", err)
 			os.Exit(1)
 		}
@@ -299,23 +302,24 @@ func main() {
 	go architecture.Run(ctx, appCtx.Architecture())
 
 	handler := dispatchHandler(routes.New(appCtx), database, natsClient, buildCommit)
-	listenAddr, err := listenAddress()
-	if err != nil {
-		slog.Error("dispatch: resolve listen address", "error", err)
-		os.Exit(1)
-	}
 	server := &http.Server{
-		Addr:              listenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		// WriteTimeout remains zero because the event stream is long-lived.
 	}
-
+	// Bound before serving, so an address that cannot be taken ends the process with 1: a
+	// supervisor must not read a port clash as a clean stop.
+	listener, err := net.Listen("tcp", boot.ListenAddr)
+	if err != nil {
+		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
+		os.Exit(1)
+	}
+	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("dispatch: listening", "addr", listenAddr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("dispatch: listen", "error", err)
+		slog.Info("dispatch: listening", "addr", boot.ListenAddr)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
 			cancel()
 		}
 	}()
@@ -329,6 +333,12 @@ func main() {
 	}
 	if err := documentService.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("dispatch: shutdown document service", "error", err)
+	}
+	select {
+	case err := <-serveErr:
+		slog.Error("dispatch: serve", "error", err)
+		os.Exit(1)
+	default:
 	}
 }
 
@@ -420,6 +430,11 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	if boot.AgentToken == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
 	}
+	listenAddr, err := listenAddress(getenv)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.ListenAddr = listenAddr
 
 	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
 	case mode == "" || mode == "cookie":
@@ -436,25 +451,6 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		}
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
-	}
-	switch flag := getenv("DISPATCH_DEV_SIGNIN"); flag {
-	case "":
-	case "1":
-		if boot.IdentityHeader != "" {
-			return bootConfig{}, errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
-		}
-		if _, ok := routes.LoopbackIP(strings.TrimSpace(getenv("DISPATCH_LISTEN_HOST"))); !ok {
-			return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q must be 127.0.0.1 or [::1]", getenv("DISPATCH_LISTEN_HOST"))
-		}
-		if err := loopbackDatabase(boot.DatabaseURL); err != nil {
-			return bootConfig{}, err
-		}
-		if getenv("DISPATCH_SIGNING_KEY") != "" {
-			return bootConfig{}, errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
-		}
-		boot.DevSignIn = true
-	default:
-		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
 	}
 	envoyURL := strings.TrimSpace(getenv("ENVOY_URL"))
 	if envoyURL == "" {
@@ -491,7 +487,45 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		}
 	}
 
+	switch flag := getenv("DISPATCH_DEV_SIGNIN"); flag {
+	case "":
+	case "1":
+		if err := devSignInFence(boot, getenv); err != nil {
+			return bootConfig{}, err
+		}
+		boot.DevSignIn = true
+	default:
+		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
+	}
 	return boot, nil
+}
+
+// devSignInFence is DISPATCH_DEV_SIGNIN=1's boot half. With the flag any loopback client signs in
+// as any allowlisted login, so the process must listen, keep its data and reach the services that
+// act on a human's word on this machine alone, and sign its cookies with a key no other process
+// holds. routes.BuildAppContext checks the dashboard origin.
+func devSignInFence(boot bootConfig, getenv func(string) string) error {
+	if boot.IdentityHeader != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
+	}
+	if host, _, err := net.SplitHostPort(boot.ListenAddr); err != nil || !routes.LoopbackIP(host) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", getenv("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
+	}
+	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
+		return err
+	}
+	if getenv("DISPATCH_SIGNING_KEY") != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
+	}
+	if !boot.NATSDisabled && getenv(bus.AllowRemoteEnvVar) == "1" {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
+	}
+	if boot.AgentSecretsURL != "" {
+		if parsed, err := url.Parse(boot.AgentSecretsURL); err != nil || !routes.LoopbackName(parsed.Hostname()) {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
+		}
+	}
+	return nil
 }
 
 // loopbackDatabase refuses a DATABASE_URL with a host that is not this machine: the data a
@@ -507,10 +541,7 @@ func loopbackDatabase(databaseURL string) error {
 		hosts = append(hosts, fallback.Host)
 	}
 	for _, host := range hosts {
-		if strings.HasPrefix(host, "/") || strings.EqualFold(host, "localhost") {
-			continue
-		}
-		if _, ok := routes.LoopbackIP(host); !ok {
+		if !strings.HasPrefix(host, "/") && !routes.LoopbackName(host) {
 			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 serves a loopback database only: DATABASE_URL names host %q", host)
 		}
 	}
@@ -667,12 +698,12 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 // when unset). An empty host binds every interface (the containerized production default);
 // local compose deployments set 127.0.0.1. An IPv6 host may be written with or without brackets:
 // one pair comes off here and JoinHostPort puts it back.
-func listenAddress() (string, error) {
-	host := strings.TrimSpace(os.Getenv("DISPATCH_LISTEN_HOST"))
+func listenAddress(getenv func(string) string) (string, error) {
+	host := strings.TrimSpace(getenv("DISPATCH_LISTEN_HOST"))
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = host[1 : len(host)-1]
 	}
-	port := strings.TrimSpace(os.Getenv("DISPATCH_PORT"))
+	port := strings.TrimSpace(getenv("DISPATCH_PORT"))
 	if port == "" {
 		port = defaultListenPort
 	} else {

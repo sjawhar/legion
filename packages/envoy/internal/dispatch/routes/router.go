@@ -15,9 +15,7 @@ import (
 	"html"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -53,14 +51,15 @@ type AppContext struct {
 	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
-	// DevSignIn is AppContextOptions.DevSignIn: the dev sign-in route is mounted and every
-	// request must carry the dashboard origin as its Host.
-	DevSignIn  bool
-	HTTPClient auth.HTTPClient
-	apiDeps    api.Deps
-	app        *auth.AppConfig // nil ⇒ not configured
-	appSource  string          // "env" | "file:<path>" | "" — for diagnostic logs
-	appMu      sync.RWMutex
+	HTTPClient     auth.HTTPClient
+	apiDeps        api.Deps
+	app            *auth.AppConfig // nil ⇒ not configured
+	appSource      string          // "env" | "file:<path>" | "" — for diagnostic logs
+	appMu          sync.RWMutex
+	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
+	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
+	// turn the route on without the origin check.
+	devSignInHost string
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
@@ -110,13 +109,16 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
 	}
+	var devSignInHost string
 	if opts.DevSignIn {
 		if opts.Sessions == nil {
 			return nil, fmt.Errorf("BuildAppContext: DevSignIn requires a Sessions store")
 		}
-		if err := DevSignInOrigin(opts.ServerURL); err != nil {
+		host, err := DevSignInOrigin(opts.ServerURL)
+		if err != nil {
 			return nil, fmt.Errorf("BuildAppContext: %w", err)
 		}
+		devSignInHost = host
 	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
 		Store:             opts.Store,
@@ -153,45 +155,11 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		RepoProjects:   opts.RepoProjects,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
-		DevSignIn:      opts.DevSignIn,
+		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
 		app:            opts.App,
 		appSource:      opts.AppSource,
 	}, nil
-}
-
-// DevSignInOrigin refuses the dev sign-in route unless the browser origin names this machine: a
-// deployment's DISPATCH_SERVER_URL is its public origin, so the flag cannot take effect there.
-// The host must be a loopback IP literal (no zone, not IPv4-mapped) or "localhost".
-func DevSignInOrigin(serverURL string) error {
-	parsed, err := url.Parse(serverURL)
-	if err != nil || parsed.Host == "" || !isLoopbackName(parsed.Hostname()) {
-		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback origin only: DISPATCH_SERVER_URL=%q must name 127.0.0.1, [::1] or localhost", serverURL)
-	}
-	return nil
-}
-
-// isLoopbackName accepts "localhost" in any case, or what LoopbackIP accepts.
-func isLoopbackName(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	_, ok := LoopbackIP(host)
-	return ok
-}
-
-// LoopbackIP parses host, with at most one pair of brackets around it, as an IP literal and
-// reports whether it is a loopback address with no zone and not an IPv4-mapped IPv6 address.
-// Nothing is resolved: a name that happens to point at this machine does not count.
-func LoopbackIP(host string) (netip.Addr, bool) {
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		host = host[1 : len(host)-1]
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil || addr.Zone() != "" || addr.Is4In6() || !addr.IsLoopback() {
-		return netip.Addr{}, false
-	}
-	return addr, true
 }
 
 // App returns the loaded Envoy App credentials, or nil if app.json is missing
@@ -239,15 +207,12 @@ func New(ctx *AppContext) http.Handler {
 	mux.HandleFunc("/api/github/rest/", r.apiGithubRest)
 	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
 	api.Register(mux, r.ctx.apiDeps)
-	if ctx.DevSignIn {
-		mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
-	}
 	mux.HandleFunc("/", r.staticHandler)
-	var handler http.Handler = r.enforceCookieOrigin(mux)
-	if ctx.DevSignIn {
-		handler = r.requireDashboardHost(handler)
+	if ctx.devSignInHost == "" {
+		return r.enforceCookieOrigin(mux)
 	}
-	return handler
+	mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux))
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────
@@ -318,61 +283,28 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "persist user")
 		return
 	}
-	generation := int64(0)
-	if r.ctx.Sessions != nil {
-		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), user.Login)
-		if err != nil {
-			slog.Error("dispatch: ensure session generation failed", "login", user.Login, "error", err)
-			writeError(w, http.StatusInternalServerError, "session generation")
-			return
-		}
+	if !r.issueSession(w, req, user.Login) {
+		return
 	}
-	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(user.Login, generation, r.ctx.SigningKey))
 	http.Redirect(w, req, pending.next, http.StatusFound)
 }
 
-// forwardingHeaders are the headers a proxy adds to a request it relays. The dev sign-in route
-// refuses a request carrying any of them, whatever its value: the peer it sees is then the proxy,
-// not the browser.
-var forwardingHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Via"}
-
-// authDevSignIn is the local workflow's sign-in: authCallback's allowlist check, session
-// generation and cookie, with GitHub's code exchange left out, so the browser leaves with the
-// cookie a GitHub sign-in issues. The allowlist is checked as the callback checks it and the
-// spelling requested is minted, so a test can sign in as GitHub spells a login. No User row is
-// written, so the GitHub proxy answers GITHUB_TOKEN_UNAVAILABLE for this login. Only a loopback
-// peer that no proxy forwarded is served; the cookie it gets is signed with this process's key.
-func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if _, loopback := LoopbackIP(host); err != nil || !loopback {
-		writeCodeError(w, http.StatusForbidden, fmt.Sprintf("dev sign-in serves loopback peers only, not %s", req.RemoteAddr), "DEV_SIGNIN_FORBIDDEN")
-		return
-	}
-	for _, name := range forwardingHeaders {
-		if _, present := req.Header[http.CanonicalHeaderKey(name)]; present {
-			writeCodeError(w, http.StatusForbidden, "dev sign-in refuses a forwarded request: "+name+" is set", "DEV_SIGNIN_FORBIDDEN")
-			return
+// issueSession ensures login's session generation and sets the session cookie a sign-in issues,
+// answering 500 when the generation cannot be recorded. authCallback and authDevSignIn both mint
+// through it, so a local dev sign-in carries exactly the cookie a GitHub sign-in does.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, login string) bool {
+	generation := int64(0)
+	if r.ctx.Sessions != nil {
+		var err error
+		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), login)
+		if err != nil {
+			slog.Error("dispatch: ensure session generation failed", "login", login, "error", err)
+			writeError(w, http.StatusInternalServerError, "session generation")
+			return false
 		}
 	}
-	login := strings.TrimSpace(req.URL.Query().Get("login"))
-	if login == "" {
-		writeCodeError(w, http.StatusBadRequest, "login query parameter required", "DEV_SIGNIN_INPUT")
-		return
-	}
-	if _, allowed := r.ctx.AllowedLogins[strings.ToLower(login)]; !allowed {
-		identity.WriteError(w, identity.ErrLoginNotAllowed)
-		return
-	}
-	generation, err := r.ctx.Sessions.EnsureSession(req.Context(), login)
-	if err != nil {
-		slog.Error("dispatch: dev sign-in: ensure session generation failed", "login", login, "error", err)
-		writeError(w, http.StatusInternalServerError, "session generation")
-		return
-	}
-	slog.Warn("dispatch: dev sign-in minted a session cookie", "login", login, "remote_addr", req.RemoteAddr)
 	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(login, generation, r.ctx.SigningKey))
-	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, req, sanitizeNext(req.URL.Query().Get("next")), http.StatusFound)
+	return true
 }
 
 func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
@@ -422,6 +354,12 @@ func (r *router) apiGithubGraphql(w http.ResponseWriter, req *http.Request) {
 func (r *router) requireUser(w http.ResponseWriter, req *http.Request) *auth.User {
 	login, ok := r.login(w, req)
 	if !ok {
+		return nil
+	}
+	if r.ctx.devSignInHost != "" {
+		// Any loopback client can mint any allowlisted login here, so no stored token pair is
+		// used: one a GitHub sign-in stored, or one in a database another server shares.
+		writeCodeError(w, http.StatusServiceUnavailable, "github token unavailable: a dev sign-in server never uses a stored GitHub token", "GITHUB_TOKEN_UNAVAILABLE")
 		return nil
 	}
 	user, err := r.ctx.Users.Read(req.Context(), login)
@@ -621,23 +559,6 @@ func (r *router) enforceCookieOrigin(next http.Handler) http.Handler {
 			return
 		}
 		writeError(w, http.StatusForbidden, "invalid request origin")
-	})
-}
-
-// requireDashboardHost refuses every request whose Host is not the configured origin's host:port.
-// A browser that reached this server through another name (a DNS-rebinding page, a tunnel) is
-// told so instead of being answered as the dashboard.
-func (r *router) requireDashboardHost(next http.Handler) http.Handler {
-	expected := ""
-	if parsed, err := url.Parse(r.ctx.ServerURL); err == nil {
-		expected = parsed.Host
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if !strings.EqualFold(req.Host, expected) {
-			writeCodeError(w, http.StatusMisdirectedRequest, fmt.Sprintf("request Host %q is not the dashboard origin %q", req.Host, expected), "HOST_MISMATCH")
-			return
-		}
-		next.ServeHTTP(w, req)
 	})
 }
 

@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -709,17 +708,43 @@ func TestResolveBootConfigDevSignInRequiresCookieIdentity(t *testing.T) {
 	}
 }
 
-func TestResolveBootConfigDevSignInRequiresALoopbackListenHost(t *testing.T) {
-	for _, host := range []string{"", "0.0.0.0", "10.0.0.5", "localhost", "::ffff:127.0.0.1", "[::1%lo]", "]]::1[["} {
-		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host}))
+// The fence checks the address the server binds, not a second reading of the variable: every
+// spelling it accepts yields boot.ListenAddr, listenAddress's one value, which main binds.
+func TestResolveBootConfigDevSignInChecksTheAddressItBinds(t *testing.T) {
+	for _, host := range []string{"", "0.0.0.0", "::", "10.0.0.5", "localhost", "::ffff:127.0.0.1", "[::1%lo]", "]]::1[[", "[[::1]]", "127.0.0.1:9000", "[::1]:9000"} {
+		boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host}))
 		if err == nil || !strings.Contains(err.Error(), "DISPATCH_LISTEN_HOST") {
-			t.Errorf("DISPATCH_LISTEN_HOST=%q: err = %v, want a refusal naming DISPATCH_LISTEN_HOST", host, err)
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: listen address %q, err = %v; want a refusal naming DISPATCH_LISTEN_HOST", host, boot.ListenAddr, err)
 		}
 	}
-	for _, host := range []string{"127.0.0.1", "::1", "[::1]"} {
-		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host})); err != nil {
-			t.Errorf("DISPATCH_LISTEN_HOST=%q: %v, want a loopback host accepted", host, err)
+	for host, want := range map[string]string{
+		"127.0.0.1":       "127.0.0.1:8799",
+		" 127.0.0.1 ":     "127.0.0.1:8799",
+		"[127.0.0.1]":     "127.0.0.1:8799",
+		"127.255.255.254": "127.255.255.254:8799",
+		"::1":             "[::1]:8799",
+		"[::1]":           "[::1]:8799",
+		"0:0:0:0:0:0:0:1": "[0:0:0:0:0:0:0:1]:8799",
+	} {
+		environment := devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host, "DISPATCH_PORT": "8799"})
+		bound, err := listenAddress(environment)
+		if err != nil || bound != want {
+			t.Fatalf("DISPATCH_LISTEN_HOST=%q: listenAddress = %q, %v; want %q", host, bound, err, want)
 		}
+		boot, err := resolveBootConfig(environment)
+		if err != nil || boot.ListenAddr != bound {
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: ListenAddr = %q, %v; want the bound %q accepted", host, boot.ListenAddr, err, bound)
+		}
+	}
+
+	// Without the flag the same field carries the address, so main binds one value either way, and
+	// a bad port is refused before anything connects.
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": "8799"}))
+	if err != nil || boot.ListenAddr != ":8799" {
+		t.Errorf("without the flag: ListenAddr = %q, %v; want \":8799\"", boot.ListenAddr, err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_PORT": "70000"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
+		t.Errorf("DISPATCH_PORT=70000: err = %v, want a refusal naming DISPATCH_PORT", err)
 	}
 }
 
@@ -763,6 +788,43 @@ func TestResolveBootConfigDevSignInRefusesAConfiguredSigningKey(t *testing.T) {
 	}
 }
 
+// With the flag a loopback client acts as any allowlisted human, so the process may not publish
+// into another machine's NATS.
+func TestResolveBootConfigDevSignInRefusesRemoteNATS(t *testing.T) {
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1"})); err == nil || !strings.Contains(err.Error(), "ENVOY_ALLOW_REMOTE_NATS") {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 with NATS on: err = %v, want a refusal naming ENVOY_ALLOW_REMOTE_NATS", err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "DISPATCH_NATS_DISABLED": "1"})); err != nil {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 with NATS off: %v, want accepted", err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 without the flag: %v, want accepted", err)
+	}
+}
+
+// With the flag a loopback client acts as any allowlisted human, so the process may not decide
+// another machine's secrets broker requests as one.
+func TestResolveBootConfigDevSignInRefusesARemoteAgentSecretsBroker(t *testing.T) {
+	broker := func(brokerURL string) map[string]string {
+		return map[string]string{"DISPATCH_AGENT_SECRETS_URL": brokerURL, "DISPATCH_AGENT_SECRETS_TOKEN": "ui-token"}
+	}
+	for _, brokerURL := range []string{"https://broker.example.com", "http://10.0.0.5:13380"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(broker(brokerURL))); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_URL") {
+			t.Errorf("DISPATCH_AGENT_SECRETS_URL=%s: err = %v, want a refusal naming DISPATCH_AGENT_SECRETS_URL", brokerURL, err)
+		}
+	}
+	for _, brokerURL := range []string{"http://127.0.0.1:13380", "http://localhost:13380", "http://[::1]:13380"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(broker(brokerURL))); err != nil {
+			t.Errorf("DISPATCH_AGENT_SECRETS_URL=%s: %v, want a loopback broker accepted", brokerURL, err)
+		}
+	}
+	withoutFlag := broker("https://broker.example.com")
+	withoutFlag["DISPATCH_DEV_SIGNIN"] = ""
+	if _, err := resolveBootConfig(devSignInEnvironment(withoutFlag)); err != nil {
+		t.Errorf("a remote broker without the flag: %v, want accepted", err)
+	}
+}
+
 func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 	for _, tc := range []struct{ host, port, want string }{
 		{host: "::1", port: "", want: "[::1]:8766"},
@@ -774,28 +836,14 @@ func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
 		{host: "", port: "", want: ":8766"},
 		{host: "", port: "8799", want: ":8799"},
 	} {
-		t.Setenv("DISPATCH_LISTEN_HOST", tc.host)
-		t.Setenv("DISPATCH_PORT", tc.port)
-		got, err := listenAddress()
+		got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": tc.host, "DISPATCH_PORT": tc.port}))
 		if err != nil || got != tc.want {
-			t.Errorf("host %q port %q: listenAddress() = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
+			t.Errorf("host %q port %q: listenAddress = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
 		}
 	}
 	for _, port := range []string{"0", "70000"} {
-		t.Setenv("DISPATCH_LISTEN_HOST", "127.0.0.1")
-		t.Setenv("DISPATCH_PORT", port)
-		if got, err := listenAddress(); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
-			t.Errorf("port %q: listenAddress() = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
+		if got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
+			t.Errorf("port %q: listenAddress = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
 		}
 	}
-
-	// The bracketed form JoinHostPort writes binds the IPv6 loopback on this machine.
-	listener, err := net.Listen("tcp", "[::1]:0")
-	if errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.ENETUNREACH) {
-		t.Skipf("no IPv6 loopback on this machine: %v", err)
-	}
-	if err != nil {
-		t.Fatalf("listen on [::1]:0: %v", err)
-	}
-	_ = listener.Close()
 }

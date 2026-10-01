@@ -107,19 +107,29 @@ users through `Identity.Login` and write identity errors with
   a trusted proxy header. When GitHub OAuth credentials are configured, it also
   requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
 - `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>`
-  (`routes.authDevSignIn`), which issues the cookie identity's own session
-  cookie for an allowlisted login with no GitHub exchange and no stored token
-  pair. `resolveBootConfig` refuses it unless identity is cookie,
-  `DISPATCH_LISTEN_HOST` is a loopback IP literal (`routes.LoopbackIP`), every
-  `DATABASE_URL` host `pgx.ParseConfig` finds is loopback or a unix socket, and
-  `DISPATCH_SIGNING_KEY` is unset; `routes.BuildAppContext` (and `main`, before
-  any connection) refuses a `DISPATCH_SERVER_URL` that is not `127.0.0.1`,
-  `[::1]` or `localhost` (`routes.DevSignInOrigin`). The signing key is then
+  (`routes/devsignin.go`, which holds everything that can mint a cookie without
+  GitHub), which issues the cookie identity's own session cookie for an
+  allowlisted login through the callback's `issueSession`, with no GitHub
+  exchange. `devSignInFence` (`cmd/dispatch/main.go`, run by
+  `resolveBootConfig`) refuses it unless identity is cookie, the host of
+  `boot.ListenAddr` (the one address `main` binds) is a loopback IP literal
+  (`routes.LoopbackIP`), every `DATABASE_URL` host `pgx.ParseConfig` finds is
+  loopback or a unix socket (`routes.LoopbackName`), `DISPATCH_SIGNING_KEY` is
+  unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, and a set
+  `DISPATCH_AGENT_SECRETS_URL` names a loopback host. `routes.BuildAppContext`
+  (and `main`, before any connection) refuses a dashboard origin that is not
+  `127.0.0.1`, `[::1]` or `localhost` (`routes.DevSignInOrigin`) and stores the
+  origin's host in the unexported `devSignInHost`, the only switch `New` reads,
+  so no caller can mount the route without that check. The signing key is then
   `auth.NewSigningKey`, generated per process and never the data-dir file, so a
   cookie it mints dies with the process. While it is on, the whole router
   answers a request whose `Host` is not the dashboard origin's
-  `421 HOST_MISMATCH` (`requireDashboardHost`), and the route serves only a
-  loopback peer with no forwarding header and logs every mint at WARN.
+  `421 HOST_MISMATCH` (`requireHost`), the route serves only a loopback peer
+  with no forwarding header and logs every mint at WARN, and `requireUser`
+  answers `503 GITHUB_TOKEN_UNAVAILABLE` before it reads a stored token pair.
+  The key bounds the cookie only: a `dsp_` token a dev session mints, and the
+  session and token rows its sign-out changes, are rows every server on the
+  same database acts on, so a dev-sign-in server needs a database of its own.
 - GitHub OAuth credentials come from `DISPATCH_APP_CLIENT_ID` and
   `DISPATCH_APP_CLIENT_SECRET`, or the Dispatch app credentials file.
 - Agents normally authenticate as a `session` actor with a personal `dsp_` token

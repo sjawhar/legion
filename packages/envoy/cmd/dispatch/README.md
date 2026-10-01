@@ -15,7 +15,7 @@ application state in Postgres.
 | `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection, and `POST /api/v1/artifacts/_test/quiesce`, which closes every live document and waits for the settlements in flight. Test/e2e only — leave unset in every real deployment. |
-| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<login>&next=<path>`, which signs an allowlisted login in with no GitHub step, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, `DISPATCH_LISTEN_HOST` is a loopback IP literal, `DISPATCH_SERVER_URL` names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, and `DISPATCH_SIGNING_KEY` is unset; the cookies it mints are signed with a key generated for that process alone, so they are worthless on any other server, and while it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). A loopback database address can still be a tunnel you opened to another machine's database; do not point a dev-sign-in server at one. Any value other than `1` or unset is refused. |
+| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<login>&next=<path>`, which signs an allowlisted login in with no GitHub step, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, and `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`), and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` for every login. The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the login's session generation and deletes its stored GitHub token pair, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 | `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. |
 | `DISPATCH_OIDC_ISSUER` | OIDC issuer whose projected service-account tokens authenticate as agents. Set with `DISPATCH_OIDC_AUDIENCE` or not at all. |
 | `DISPATCH_OIDC_AUDIENCE` | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
@@ -150,13 +150,17 @@ testing. Do not use it on an HTTPS deployment.
 `DISPATCH_DEV_SIGNIN=1` adds a second way to get the cookie on a local
 instance: `GET /auth/_dev/signin?login=<login>` checks the allowlist as the
 OAuth callback does (lowercase, minting the spelling requested) and issues the
-same session cookie with no GitHub exchange and no stored token pair, so the
-GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` for that login. It serves
-only a loopback peer whose request carries no forwarding header, logs every mint
-at WARN, and boots only behind the fence the configuration table lists. A
-request that reaches the process looking local (`ssh -L`, `socat`, a proxy that
-rewrites `Host` and adds nothing) is indistinguishable from one that is; what
-still holds is that the cookie is signed with that process's own key.
+same session cookie with no GitHub exchange. The GitHub proxy then answers
+`503 GITHUB_TOKEN_UNAVAILABLE` for every login, even one with a stored token
+pair. The route serves only a loopback peer whose request carries no forwarding
+header, logs every mint at WARN, and boots only behind the fence the
+configuration table lists. A request that reaches the process looking local
+(`ssh -L`, `socat`, a proxy that rewrites `Host` and adds nothing) is
+indistinguishable from one that is. The per-process key bounds the cookie, not
+every credential a dev session can write: a `dsp_` token it mints, and the
+session and token rows its sign-out changes, live in the database, and every
+server that reads that database acts on them. A dev-sign-in server therefore
+needs a database of its own.
 
 ## Local Postgres
 
@@ -205,7 +209,9 @@ go run ./cmd/dispatch
 
 The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 `DISPATCH_PORT` to change it; `DISPATCH_LISTEN_HOST` may be an IPv6 literal
-with or without brackets (`::1` or `[::1]`).
+with or without brackets (`::1` or `[::1]`). A bad `DISPATCH_PORT` refuses the
+boot before anything connects, and an address the server cannot bind ends the
+process with exit status 1.
 
 ## Database migrations
 
