@@ -67,11 +67,9 @@ type Registry struct {
 type OpenOption func(*openOpts)
 
 type openOpts struct {
-	replicas       int
-	interestBucket string
-	roleBucket     string
-	now            func() time.Time
-	log            *slog.Logger
+	replicas int
+	now      func() time.Time
+	log      *slog.Logger
 }
 
 // WithLogger sets the logger the registry and its cache watcher write through. The listener passes
@@ -100,7 +98,7 @@ func WithClock(now func() time.Time) OpenOption {
 }
 
 func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
-	opts := openOpts{replicas: 1, interestBucket: Bucket, roleBucket: RoleBucket, now: time.Now, log: slog.Default()}
+	opts := openOpts{replicas: 1, now: time.Now, log: slog.Default()}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -108,11 +106,11 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.interestBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: Bucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
-	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.roleBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: RoleBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}

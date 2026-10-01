@@ -50,15 +50,15 @@ func setRegistryRoleKV(t *testing.T, registry *store.Registry, kv natsgo.KeyValu
 	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(bus.KeyValue{KeyValue: kv}))
 }
 
-// TestCoreRoleDeliveryReresolvesSupersededLapsedHolder is the regression test
-// for the core (synchronous) role-lane delivery path's counterpart to the
-// HTTP handlers' CAS-truthfulness fix: ReleaseExpiredRoleClaim's conditional
-// Delete can lose a race to a fresh SetRole and come back ErrKeyExists
+// TestCoreRoleDeliveryReresolvesSupersededLapsedHolder covers the core
+// (synchronous) role-lane delivery path's counterpart to the HTTP handlers'
+// CAS-truthful release: ReleaseExpiredRoleClaim's conditional Delete can lose
+// a race to a fresh SetRole and come back ErrKeyExists
 // (store.ExpiredRoleClaimSuperseded) after another writer has already
 // installed a live replacement claim. roleTopicDelivery must re-resolve to
 // that replacement and forward to it, not report delivery_failed about the
-// session the fresh claim already superseded -- exactly the "told something
-// false about role state" failure this PR exists to eliminate.
+// session the fresh claim already superseded, which would tell the sender
+// something false about role state.
 func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const (

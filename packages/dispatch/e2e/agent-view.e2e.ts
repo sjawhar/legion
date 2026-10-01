@@ -383,8 +383,8 @@ test("a session's replies to a direct message are unread until the live view sho
 });
 
 // The unread count is over every direct message the human sent, while the conversation list is a
-// window of the fifty that moved last. A reply outside that window used to be counted, never
-// rendered, and then marked read by the mark this view writes - so the live view has to show it.
+// window of the fifty that moved last. A reply outside that window is counted, and the mark this
+// view writes marks it read, so the live view has to show it or it is read without being seen.
 test("the live view shows an unread reply from outside the fifty most active conversations", async ({
   browser,
 }) => {

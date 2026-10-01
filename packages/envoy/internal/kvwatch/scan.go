@@ -11,9 +11,8 @@ import (
 
 // KeyScan counts what one pass over a bucket's existing keys delivered, as disjoint fields: Puts is
 // the live keys (entries whose operation is a PUT), Markers the delete markers the pass streamed
-// past to find them. They must not be reported as one total of "keys": production's 9 role claims
-// beside 766 subjects reads as 757 claims left unrestored, which is the misreading LEGION-360 itself
-// was filed on.
+// past to find them. They must not be reported as one total of "keys": a few claims beside many
+// subjects would read as claims left unrestored (LEGION-360).
 type KeyScan struct {
 	Puts    int
 	Markers int

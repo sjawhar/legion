@@ -39,21 +39,11 @@ type documentPreconditionConflict struct {
 	Mismatches []documentPreconditionMismatch `json:"mismatches"`
 }
 
-func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, *docs.Service) {
+// preconditionTestHandler is newTestServer with settlement held back for the test's duration.
+func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, docs.API) {
 	t.Helper()
-	var service *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		service = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			if err := service.Shutdown(ctx); err != nil {
-				t.Errorf("shutdown document service: %v", err)
-			}
-		})
-		return service
-	})
-	return handler, database, service
+	handler, database, deps := newTestServer(t, testServerOptions{settle: time.Hour})
+	return handler, database, deps.Docs
 }
 
 func readDocumentPrecondition(t *testing.T, handler http.Handler, artifactID string) documentPreconditionRead {
@@ -212,8 +202,8 @@ func guardedDocumentEdit(t *testing.T, handler http.Handler, artifactID, find, w
 }
 
 // A chain of guarded edits reads the document once: each edit returns the token of the tree its
-// own transaction wrote, which is the next edit's precondition. AGENTC-393 paid for eleven spec
-// edits with six full re-reads of a 30 KB document to learn tokens the edits had just minted.
+// own transaction wrote, which is the next edit's precondition, so no edit re-reads the document
+// to learn a token the edit before it just minted.
 func TestDocumentEditReturnsTheTokenItProduced(t *testing.T) {
 	handler, _, _ := preconditionTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Chained document edits", "before")

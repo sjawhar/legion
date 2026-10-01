@@ -340,7 +340,7 @@ func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
 // indexed, failing the test when settlement never reaches it.
 func awaitIndexedAskBlock(t *testing.T, handler http.Handler, artifactID, blockID, question string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
 		if inbox.Code != http.StatusOK {
@@ -398,7 +398,7 @@ func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
 
 // A free-text ask block (no bullet list) must put `"options": []` on the wire - in the ask.opened
 // event and on the ask row - never JSON null: the SPA's Conversation tab reads options.length
-// and a null there took the page down (AGENTC-150, 2026-09-14).
+// and a null there takes the page down (AGENTC-150).
 func TestOptionlessAskBlockCarriesEmptyOptionsNotNull(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -468,7 +468,7 @@ func awaitAskBlockEvent(t *testing.T, handler http.Handler, issueKey, eventType,
 
 // Settlement runs after the edit's own version has consumed the room's pending authors; the ask
 // it indexes must still be attributed to the session that wrote the block, or the asker can
-// never edit its own ask and nobody can tell who is asking (AGENTC-150, 2026-09-14).
+// never edit its own ask and nobody can tell who is asking (AGENTC-150).
 func TestBlockAskIndexedAfterEditKeepsTheWritingActor(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {

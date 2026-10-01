@@ -296,8 +296,8 @@ cell's content. Tab-separated text pasted onto selected cells fills them one val
 HTML one line each (`htmlLineCells`), so a list fills them item by item, as paragraphs do, and
 repeats from its first item across a wider selection. Every cell is retyped for the row it lands in
 and kept to one line (`fitCells`). The retyping is because Milkdown's header row holds only
-`table_header` cells and a body row only `table_cell` ones, and prosemirror-tables' own insert threw
-on a paste that put header cells in a body row or reached the header row. A cell holding more than
+`table_header` cells and a body row only `table_cell` ones, and prosemirror-tables' own insert throws
+on a paste that puts header cells in a body row or reaches the header row. A cell holding more than
 one block or a line break (a `<br>`, a code block's newline) is flattened as the caret path
 flattens, because a hard break stored in a table ends its row. A line, in both, is a textblock or a
 run of inline content that parsed HTML leaves beside blocks (`textLines`), such as a Gmail copy's
@@ -305,9 +305,9 @@ first line before its `<div>`s or text before a list in a cell, so that text is 
 patches keep a pasted table's rows.
 `patches/prosemirror-tables@1.8.5.patch` makes `fixTables` fill a row with no cells with the cell
 type that row holds, since the default body cell doesn't fit Milkdown's header row and the fix
-repeated forever. A hunk in `patches/@milkdown%2Fpreset-gfm@7.22.1.patch` makes preset-gfm's table
-paste rule count a pasted table's columns in its widest row, where it counted the last row and
-dropped a table whose last row was empty. `e2e/read-back.ts` reads a stored document back through Go
+would repeat forever. A hunk in `patches/@milkdown%2Fpreset-gfm@7.22.1.patch` makes preset-gfm's
+table paste rule count a pasted table's columns in its widest row, where upstream counts the last
+row and drops a table whose last row is empty. `e2e/read-back.ts` reads a stored document back through Go
 and through the headless engine (`e2e/engine-tables.ts`, run with bun). Each patch applies to one
 installed version, and bun ignores a `patchedDependencies` entry for a version that isn't installed
 without a word. So raising `@milkdown/plugin-clipboard` or `@milkdown/preset-gfm` means carrying its
@@ -347,9 +347,9 @@ be `error`**, because it decides the exit code and nothing else: with a planted 
 prints both diagnostics and still exits 0, which is a guard that cannot fail a build. And
 **do not add `linter.domains.project`** — `biome explain noImportCycles` names `project` as the
 rule's domain, which reads like a requirement, but the rule works without it and switching it
-on turns up 506 errors and 1,240 warnings from every other project-domain rule, whose volume
-pushes the cycle past Biome's 20-diagnostic cap: measured with a planted cycle, `domains` on
-reports the cycle 0 times at either severity, while `domains` off reports it twice at both.
+on turns up hundreds of errors and warnings from every other project-domain rule, whose volume
+pushes the cycle past Biome's 20-diagnostic cap: with `domains` on, a planted cycle is reported 0
+times at either severity, while `domains` off reports it twice at both.
 
 `packages/claude-envoy/biome.json` carries `"root": false` for this: it is a nested
 config under the root one, and without that line any invocation that starts Biome's project
@@ -369,9 +369,9 @@ By convention — enforced by review, since nothing fails when it is omitted —
 `biome.json` declares `"extends": "//"`** (claude-envoy's predates this and repeats the one
 rule instead, to avoid inheriting the root formatter over its ten files). Without it the file replaces the
 root's rule set for its subtree rather than adding to it, cycle detection included, and does
-so quietly: measured on 2.4.11, a `web/biome.json` that is a faithful copy of the root minus
-its `suspicious` block reports 0 cycle diagnostics and exits 0 over a planted `web/src` cycle
-the root config reports 2 errors for; adding `"extends": "//"` to that same file brings both
+so quietly: a `web/biome.json` that is a faithful copy of the root minus its `suspicious` block
+reports 0 cycle diagnostics and exits 0 over a planted `web/src` cycle the root config reports 2
+errors for; adding `"extends": "//"` to that same file brings both
 back. `extends` works with or without `"root": false`.
 
 Proven on Biome **2.4.11**, the version `bun.lock` resolves (`package.json`'s `^2.3.14` is only

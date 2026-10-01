@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,10 @@ type testWriteAdvice struct {
 	SessionWritesSinceHuman int             `json:"session_writes_since_human"`
 	YourOpenAsks            []testAdviceAsk `json:"your_open_asks"`
 	DecisionBlocks          *int            `json:"decision_blocks"`
+	UnparsedOpeners         *struct {
+		Count    int      `json:"count"`
+		Examples []string `json:"examples"`
+	} `json:"unparsed_openers"`
 }
 
 type testAdviceEnvelope struct {
@@ -156,14 +161,13 @@ Which transport?
 }
 
 func TestWriteAdviceOmitsDecisionBlocksWhenMarkdownCannotBeParsed(t *testing.T) {
-	decisionBlocks := countAskBlocks(":::callout{#broken}\nUnclosed\n")
-	if decisionBlocks != nil {
-		t.Fatalf("invalid markdown decision_blocks = %d, want absent", *decisionBlocks)
+	blocks := readDocumentBlocks(":::callout{#broken}\nUnclosed\n")
+	if blocks != nil {
+		t.Fatalf("invalid markdown document blocks = %#v, want absent", blocks)
 	}
-	encoded, err := json.Marshal(withAdvice(
-		map[string]bool{"ok": true},
-		&writeAdvice{IssueStatus: "triage", YourOpenAsks: []adviceAsk{}, DecisionBlocks: decisionBlocks},
-	))
+	encoded, err := json.Marshal(withAdvice(map[string]bool{"ok": true}, &writeAdvice{
+		IssueStatus: "triage", YourOpenAsks: []adviceAsk{}, documentBlocks: blocks,
+	}))
 	if err != nil {
 		t.Fatalf("marshal advice: %v", err)
 	}
@@ -175,8 +179,64 @@ func TestWriteAdviceOmitsDecisionBlocksWhenMarkdownCannotBeParsed(t *testing.T) 
 	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
 		t.Fatalf("decode advice: %v", err)
 	}
-	if _, exists := rawAdvice["decision_blocks"]; exists {
-		t.Fatalf("parse failure emitted decision_blocks: %s", encoded)
+	for _, field := range []string{"decision_blocks", "unparsed_openers"} {
+		if _, exists := rawAdvice[field]; exists {
+			t.Fatalf("parse failure emitted %s: %s", field, encoded)
+		}
+	}
+}
+
+// A code block before an ask - a spec that shows a snippet, then asks about it - neither hides the
+// ask from the count nor adds the opening quoted in the code to the openings stored as text.
+func TestReadDocumentBlocksReadsPastCode(t *testing.T) {
+	blocks := readDocumentBlocks("Context\n\n```md\n:::ask{urgency=\"med\"}\n```\n\n:::ask{urgency=\"med\"}\nShip it?\n:::\n\nThen write :::callout{kind=\"note\"} as text.\n")
+	if blocks == nil || blocks.DecisionBlocks != 1 || blocks.UnparsedOpeners == nil || blocks.UnparsedOpeners.Count != 1 {
+		t.Fatalf("blocks = %#v (unparsed %#v), want one ask block and the one opening after it", blocks, blocks.UnparsedOpeners)
+	}
+}
+
+// An opening longer than the stretch an example quotes - a long name, or a long run of colons - is
+// quoted whole rather than taking the write's response down after the write committed.
+func TestReadDocumentBlocksQuotesLongOpenings(t *testing.T) {
+	name := strings.Repeat("n", 90)
+	colons := strings.Repeat(":", 90)
+	blocks := readDocumentBlocks("Write :::" + name + "{a=\"b\"} and " + colons + "ask{} as text.\n")
+	if blocks == nil || blocks.UnparsedOpeners == nil || blocks.UnparsedOpeners.Count != 2 ||
+		!strings.Contains(blocks.UnparsedOpeners.Examples[0], ":::"+name+"{") || !strings.Contains(blocks.UnparsedOpeners.Examples[1], colons+"ask{") {
+		t.Fatalf("blocks = %#v, want both long openings quoted whole", blocks)
+	}
+}
+
+// A typed block opening a document stores as text - inside a line, where the parser cannot make
+// it a block - is reported beside the decision-block count, so a writer who meant a block hears
+// that it is text rather than only that the document holds no decisions (LEGION-416). A mention
+// in code is not an opening, and a document whose openings all became blocks reports none.
+func TestWriteAdviceReportsTypedBlockOpeningsStoredAsText(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "OPENERS")
+
+	asText := "Intro 27::::ask{urgency=\"med\"} Ship it? 33:::: 57::::ask{urgency=\"low\"} Later?\n\nThe syntax is `:::ask{urgency=\"med\"}`.\n"
+	created := createAdviceIssue(t, handler, "OPENERS", "Openings as text", &asText)
+	if created.Advice == nil || created.Advice.DecisionBlocks == nil || *created.Advice.DecisionBlocks != 0 {
+		t.Fatalf("advice = %#v, want decision_blocks 0", created.Advice)
+	}
+	openers := created.Advice.UnparsedOpeners
+	if openers == nil || openers.Count != 2 || len(openers.Examples) != 2 ||
+		!strings.Contains(openers.Examples[0], `::::ask{urgency="med"}`) || !strings.Contains(openers.Examples[1], `::::ask{urgency="low"}`) {
+		t.Fatalf("unparsed_openers = %#v, want the two openings inside the line and not the one in code", openers)
+	}
+
+	asBlock := "Context\n\n:::ask{urgency=\"med\"}\nShip it?\n:::\n\nThe syntax is `:::ask{urgency=\"med\"}`.\n"
+	parsed := createAdviceIssue(t, handler, "OPENERS", "Opening as a block", &asBlock)
+	if parsed.Advice == nil || parsed.Advice.DecisionBlocks == nil || *parsed.Advice.DecisionBlocks != 1 || parsed.Advice.UnparsedOpeners != nil {
+		t.Fatalf("advice = %#v, want one decision block and no unparsed_openers", parsed.Advice)
+	}
+
+	projectUpload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/OPENERS/artifacts", map[string]string{
+		"name": "notes.md", "content": asText,
+	}, "alice")
+	if projectAdvice := adviceFromResponse(t, projectUpload.Code, projectUpload.Body.String()); projectAdvice.UnparsedOpeners == nil || projectAdvice.UnparsedOpeners.Count != 2 {
+		t.Fatalf("project document advice = %#v, want two unparsed openers", projectAdvice)
 	}
 }
 

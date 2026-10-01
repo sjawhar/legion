@@ -394,11 +394,10 @@ const REQUIRED_SKILLS_PROBLEM =
  * tolerant so plans committed before each rule still load:
  * - every downstream role's skill list is present and non-empty, so a plan that names no skills
  *   is refused before it reaches the branch. A legitimate "nothing applies" is the single entry
- *   `none: <what was looked through and why nothing fits>` (Sami, AGENTC-370, 2026-09-18: a
- *   nascent project may have no agent skills yet).
+ *   `none: <what was looked through and why nothing fits>`, since a nascent project may have no
+ *   agent skills yet.
  * - the gap analysis before the draft and the plan review after it are both recorded, a failed
- *   call as its error, since a missing check never blocks the plan (LEGION-421, restoring the two
- *   checks Sami chose on LEGION-414). */
+ *   call as its error, since a missing check never blocks the plan. */
 const planWriteSchema = planSchema.extend({
   requiredSkills: z
     .object({

@@ -971,8 +971,7 @@ describe("envoy OMP extension", () => {
     expect(session.fixture.deliveries).toMatchObject([
       { customType: "dispatch-ask-reminder", options: { deliverAs: "steer", triggerTurn: true } },
     ]);
-    // The self-check goes out in the /btw wrapper `pi.askEphemeral` used to add, with the
-    // extension's own abort signal.
+    // The self-check goes out in the /btw wrapper, with the extension's own abort signal.
     expect(session.asked.map((ask) => ask.prompt)).toEqual([
       expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
     ]);

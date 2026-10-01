@@ -219,9 +219,15 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, body, int
 	return nil
 }
 
-func daemonActor(key string) actor {
+// DaemonSession is the session the daemon writes every Dispatch status and message of the issue key
+// under: legion-daemon:<PROJECT>, PROJECT being the key's.
+func DaemonSession(key string) string {
 	project, _, _ := strings.Cut(key, "-")
-	return actor{Kind: "session", ID: "legion-daemon:" + project}
+	return "legion-daemon:" + project
+}
+
+func daemonActor(key string) actor {
+	return actor{Kind: "session", ID: DaemonSession(key)}
 }
 
 func dispatchError(status int, statusText string, payload []byte) *Error {

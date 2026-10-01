@@ -105,7 +105,7 @@ async function runPane(
   options: PaneOptions = {}
 ): Promise<Pane> {
   const legionPane = options.legion ?? true;
-  const { root, home, workspace, sessions } = await ompRoot("legion-phase-stall-", cleanup);
+  const { root, home, workspace, sessions } = await ompRoot(binary, "legion-phase-stall-", cleanup);
   const state = path.join(root, "state");
   const bin = path.join(root, "bin");
   const legionLog = path.join(root, "legion.log");

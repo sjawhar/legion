@@ -1,3 +1,4 @@
+import { DEFAULT_ISSUE_PAGE_LIMIT, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -183,8 +184,9 @@ export const ASK_QUESTION_MAX = 800;
 
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
- * query travels in the URL; percent-encoded at up to 9 bytes a unit, 1,000 stays under the load
- * balancer's 16 K request-line limit. Generated into Go as `contracts.SearchQueryMax`, which the
+ * query rides in the URL beside `project` and `limit`, so this refusal and `project`'s key rule
+ * are what keep the tool's URL under the load balancer's limit; `packages/contracts/AGENTS.md`
+ * "Search limits" owns that budget. Generated into Go as `contracts.SearchQueryMax`, which the
  * server enforces.
  */
 export const SEARCH_QUERY_MAX = 1000;
@@ -192,6 +194,10 @@ export const SEARCH_QUERY_MAX = 1000;
 /** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
  *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
 export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
+/** A whole project key, as the Dispatch server creates them (`projectKeyPattern`, and the
+ *  `projects.key` check constraint). */
+export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
@@ -932,6 +938,14 @@ export const dispatchToolSpecs = [
         .describe("Maximum results, 1-50; default 20.")
         .optional(),
     }),
+    // An empty project searches every project, as the server reads it.
+    validation: {
+      check: (value) => {
+        const { project } = value as { readonly project?: unknown };
+        return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: "project must be a project key such as CORE",
+    },
   },
   {
     name: "dispatch_issues",
@@ -946,9 +960,12 @@ export const dispatchToolSpecs = [
       "session that is not running at the moment of the read, whatever its priority. A restarting " +
       "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
       "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
-      "Rows are paged after the server returns the full response: limit sets the page size (default 50, " +
-      "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " +
-      "enumerate every matching issue.",
+      "Dispatch pages the list: limit sets the page size (default " +
+      `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` +
+      "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
+      "walk every matching issue. A walk is exact only while the list does not change: an issue " +
+      "that enters or leaves what the filters match, or whose status or rank changes, between two " +
+      "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -974,8 +991,8 @@ export const dispatchToolSpecs = [
         )
         .optional(),
       limit: z
-        .number({ int: true, min: 1, max: 250 })
-        .describe("Maximum rows, 1-250; default 50.")
+        .number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT })
+        .describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`)
         .optional(),
       offset: z
         .number({ int: true, min: 0 })

@@ -1019,12 +1019,12 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	}
 	// Settlement writes a version only when the document now reads differently from the latest
 	// one. Indexing an ask block writes an `asks` row and an `ask.opened` event over words the
-	// edit that wrote the block already versioned, and settlement used to version the document
-	// for that event alone: a byte-identical version credited to nobody, which staled an
-	// approval pinned to what an agent had just written (LEGION-273). Its tree writes - stamping
-	// block ids, restoring an ask block's server-owned attributes - move the stored Proof state
-	// and often render the same markdown, and a version for one of those repeated the version
-	// before it too (LEGION-229 requirement 2).
+	// edit that wrote the block already versioned, so a version for that event alone would be
+	// byte-identical, credited to nobody, and stale an approval pinned to what an agent had just
+	// written (LEGION-273). Its tree writes - stamping block ids, restoring an ask block's
+	// server-owned attributes - move the stored Proof state and often render the same markdown,
+	// and a version for one of those would repeat the version before it too (LEGION-229
+	// requirement 2).
 	// contentChanged stays the first half of the test: a version an older renderer wrote is not
 	// this settlement's to canonicalise when nothing has touched the document since.
 	contentChanged, err := contentChangedSinceVersion(ctx, tx, room, latest.docUpdateVersion)
@@ -1108,6 +1108,9 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if stamped > 0 {
 		s.finishSuppressedPersistence(slot, update)
 	}
+	// This release runs before the publish below, the order Ledger.Commit keeps for every other
+	// version write, so a subscriber acting on this version's artifact.version event acts after
+	// it. Publishing first would let that subscriber's write be credited to these authors again.
 	state.mu.Lock()
 	if state.gen == generation {
 		state.settleFailures = 0

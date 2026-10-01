@@ -15,6 +15,25 @@
   and are read-only: the gap analyst runs on the operator's `@oracle` role and the reviewer on
   `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the reviewer's
   pair.
+- The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
+  `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
+  (`@deep`): given a goal, the workspace and files in scope, the skills to follow and the checks
+  that must pass, it makes the change, runs the checks and reports what it changed. Its prompt
+  tells it to make no commit, push or GitHub write. Nothing enforces that: the implementer's
+  review of each result can catch a worker's commit, but not a push or a GitHub write
+  (LEGION-428). The implementer's role text plans the change as todos,
+  hands each coding task (the plan's change and each review round's fixes) to
+  `task(agent="deep-worker")` one at a time, and verifies every result itself, running the plan's
+  checks and reading the diff, before it builds on or commits it; the commits, pushes, pull
+  request, review-thread answers and production check stay the implementer's. The Go daemon's
+  boot gate resolves `deep-worker` as it does the other shipped agents, so an operator route that
+  gives `deep` no model (`modelRoles.deep`, or a `task.agentModelOverrides` entry) refuses the
+  boot, naming `deep-worker`; the TypeScript daemon has no such gate, and there Oh My Pi runs an
+  unmapped `deep-worker` on the implementer's own model. Map `deep` in the operator route first,
+  then install the worker image built from this release, then the Go daemon build; the refusal
+  comes from that daemon build's own role prompts, which dispatch `deep-worker`, so a new daemon
+  build on an older image is refused, since that image's plugin ships no `deep-worker`, and an old
+  daemon build on the new image boots.
 - Every session with the Dispatch tools, Legion panes and `task` subagents included, now carries the
   `dispatch-first` skill in every model request: search Dispatch before planning, filing, asking or
   starting work; extend the issue that already tracks the work; cite the decision a human already
@@ -38,6 +57,14 @@
   `agentstream.<session id>.control`, and a session that hears nothing for thirty seconds goes
   quiet — and a viewer's replay is answered from a bounded in-memory ring (200 messages, 512 KiB)
   that never leaves the process. Nothing about it is written to Dispatch's database.
+- The dispatch skill's documents reference says a `|` in a table cell, inside inline code and
+  links too, is written `\|`, and that a row holding text in a cell past its table's width is
+  refused on every write path rather than stored short, naming each path's error code. Its
+  document-edits reference says how an insert at a table-cell quote decides it holds table rows,
+  in three steps: every line yields a cell and an unescaped `|` and none is a delimiter row of
+  three hyphens or more a cell; what the rows parse refuses is refused; and the rows are inserted
+  only when that parse reads one table holding every line. Any other fragment, such as
+  `- | a | b |`, is read on its own as blocks.
 
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask
@@ -61,6 +88,34 @@
 
 ### Changed
 
+- The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
+  quote or attribution that came with it; every rule, command and example stays, and a decision
+  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules
+  deployment instructions never override: no deferrals, bringing the base in only on a real
+  conflict or a retarget, the implementer's own proof on a production-like surface at the head
+  that merges (an applied simplify head included), and the implementer's production check after
+  the merge.
+- The `dispatch` skill's gate 2 states as instructions what only its deleted story implied: put
+  the measurement and the size of the affected population in the ask, and when the measurement
+  shows one fix cannot repair most of that population and another fix can, drop the first rather
+  than offer it cut down to the part it reaches; an option not to act, such as a permission ask's
+  Hold, is not a fix and stays (LEGION-386). On the skill scenario rig, an agent asked which of
+  three options to take, where an export shows one reaches 18 of 430, left it out in 7 of 10 runs
+  with the rule's first wording ("drops an option the measurement shows cannot work"), against 1
+  of 10 with the story and 0 of 10 with gate 2's sentences deleted. With this final wording it
+  left the option out in 10 of 10 runs, five run by the implementer and five independently by the
+  acceptance tester. That is no improvement over the first wording's 7 of 10 (one-sided Fisher
+  p ≈ 0.11), and it says nothing about the clause that keeps an option not to act, which no
+  scenario exercises (LEGION-444).
+- The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
+  `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
+  `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found
+  them in the implement handoff it read or in the CLI's refusal of its write.
+- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
+  not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
+  which the load balancer in front of production Dispatch answers with a bare HTML `414` when it
+  is too long, so this refusal is what stops a pasted passage from becoming that error; a
+  lowercased key, which used to come back as no results, is now refused by name.
 - The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
   in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
   threshold, where the 75 KB single file used to reach agents with its middle cut out.

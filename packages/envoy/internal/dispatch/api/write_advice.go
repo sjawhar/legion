@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"slices"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -21,7 +25,8 @@ type writeAdvice struct {
 	IssueStatus             string      `json:"issue_status"`
 	SessionWritesSinceHuman int         `json:"session_writes_since_human"`
 	YourOpenAsks            []adviceAsk `json:"your_open_asks"`
-	DecisionBlocks          *int        `json:"decision_blocks,omitempty"`
+	// documentBlocks is set by a document write whose document reads; nil omits its fields.
+	*documentBlocks
 }
 
 type adviceQueryError struct {
@@ -149,22 +154,106 @@ func (s *server) logAdviceError(route, issueKey, query string, err error) {
 	slog.Warn("dispatch: write advice omitted", "route", route, "issue", issueKey, "query", query, "error", err)
 }
 
-// countAskBlocks counts the ask blocks in markdown, a document's canonical markdown: the rendering a
-// write stored, read back (pmdoc.ParseRendering).
-func countAskBlocks(markdown string) *int {
+// documentBlocks is what a document write's advice reports about the typed blocks in the document
+// it stored: how many ask blocks it holds, and the typed block openings it holds as text.
+type documentBlocks struct {
+	DecisionBlocks  int              `json:"decision_blocks"`
+	UnparsedOpeners *unparsedOpeners `json:"unparsed_openers,omitempty"`
+}
+
+// unparsedOpeners is the typed block openings (`:::ask{…}`) a document holds as text rather than
+// as blocks, outside code: written inside a line, or escaped. A writer who
+// meant a block would otherwise hear only that the document holds none (LEGION-416). A mention of
+// the syntax in prose is reported too, and harmlessly: it is never refused.
+type unparsedOpeners struct {
+	Count    int      `json:"count"`
+	Examples []string `json:"examples"`
+}
+
+const (
+	// unparsedOpenerExamples is how many openings the advice quotes.
+	unparsedOpenerExamples = 3
+	// unparsedOpenerContext is how many bytes of the text before an opening its example quotes,
+	// and unparsedOpenerSpan how far past its start the example runs looking for its closing brace.
+	unparsedOpenerContext = 16
+	unparsedOpenerSpan    = 80
+)
+
+// typedOpening matches a typed block's opening as text: three or more colons, a name, and a brace.
+var typedOpening = regexp.MustCompile(`:{3,}[A-Za-z0-9_-]+\{`)
+
+// readDocumentBlocks reads markdown, a document's canonical markdown - the rendering a write
+// stored, read back (pmdoc.ParseRendering) - for its advice, or nil when it does not read.
+func readDocumentBlocks(markdown string) *documentBlocks {
 	tree, err := pmdoc.ParseRendering(markdown)
 	if err != nil {
 		slog.Warn("dispatch: decision block count failed", "error", err)
 		return nil
 	}
-	count := 0
+	blocks := &documentBlocks{}
 	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-		if node.Type == "ask" {
-			count++
+		switch node.Type {
+		case "ask":
+			blocks.DecisionBlocks++
+		case "code_block":
+			// Code is text on purpose, and its children are text nodes, whose own visits read
+			// nothing, so the walk moves on past it: pmdoc.Walk's false stops the whole
+			// traversal, which would leave every block after the code uncounted.
+			return true
 		}
+		blocks.readOpenersAsText(node)
 		return true
 	})
-	return &count
+	return blocks
+}
+
+// readOpenersAsText records the typed block openings in node's own text: its text children outside
+// inline code, read as runs that any other inline node ends.
+func (blocks *documentBlocks) readOpenersAsText(node *pmdoc.Node) {
+	var run strings.Builder
+	flush := func() {
+		text := run.String()
+		run.Reset()
+		for _, match := range typedOpening.FindAllStringIndex(text, -1) {
+			if blocks.UnparsedOpeners == nil {
+				blocks.UnparsedOpeners = &unparsedOpeners{Examples: []string{}}
+			}
+			blocks.UnparsedOpeners.Count++
+			if len(blocks.UnparsedOpeners.Examples) < unparsedOpenerExamples {
+				blocks.UnparsedOpeners.Examples = append(blocks.UnparsedOpeners.Examples, openerExample(text, match[0], match[1]))
+			}
+		}
+	}
+	for _, child := range node.Children {
+		if child.Type == "text" && !slices.ContainsFunc(child.Marks, func(mark pmdoc.Mark) bool { return mark.Type == "inlineCode" }) {
+			run.WriteString(child.Text)
+			continue
+		}
+		flush()
+	}
+	flush()
+}
+
+// openerExample quotes the opening text[start:end] with a little of the text before it and the
+// rest of its attributes, up to its closing brace within unparsedOpenerSpan bytes, on rune
+// boundaries.
+func openerExample(text string, start, end int) string {
+	from := max(0, start-unparsedOpenerContext)
+	for from > 0 && !utf8.RuneStart(text[from]) {
+		from--
+	}
+	to := min(len(text), max(end, start+unparsedOpenerSpan))
+	if brace := strings.IndexByte(text[end:to], '}'); brace >= 0 {
+		to = end + brace + 1
+	}
+	for to < len(text) && !utf8.RuneStart(text[to]) {
+		to++
+	}
+	example := text[from:to]
+	if from > 0 {
+		example = "…" + example
+	}
+	return example
 }
 
 // advisedResponse keeps advice on the HTTP response: the underlying models are also event
@@ -204,6 +293,8 @@ func withAdvice(payload any, advice *writeAdvice) any {
 	return advisedResponse{payload: payload, advice: advice}
 }
 
-func withDecisionBlockAdvice(payload any, decisionBlocks int) any {
-	return advisedResponse{payload: payload, advice: map[string]int{"decision_blocks": decisionBlocks}}
+// withDocumentBlockAdvice is a project document write's response: its advice is only what it read
+// of the document's typed blocks, since a project document has no issue state to report.
+func withDocumentBlockAdvice(payload any, blocks *documentBlocks) any {
+	return advisedResponse{payload: payload, advice: blocks}
 }

@@ -191,6 +191,12 @@ export interface WriteAdvice {
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   readonly decision_blocks?: number;
+  /**
+   * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
+   * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
+   * little of the text before each. Omitted when there are none.
+   */
+  readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -271,6 +277,31 @@ export interface IssueSummary
     IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
+}
+
+/**
+ * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
+ * as `contracts.MaxIssuePageLimit`, which the server enforces, and the `dispatch_issues` tool's
+ * `limit` takes the same bound, so the two ends agree.
+ */
+export const MAX_ISSUE_PAGE_LIMIT = 250;
+
+/**
+ * The page size of `GET /api/v1/issues` when a caller pages with `offset` alone, and of
+ * `dispatch_issues` when it names no `limit`. Generated into Go as `contracts.DefaultIssuePageLimit`.
+ */
+export const DEFAULT_ISSUE_PAGE_LIMIT = 50;
+
+/**
+ * `GET /api/v1/issues?limit=&offset=`: one page of the filtered listing in its order, with `total`,
+ * how many issues the filters matched, and the `limit` and `offset` that chose the page. Without
+ * either parameter the route answers the plain `IssueSummary[]`.
+ */
+export interface IssueSummaryPage {
+  readonly issues: IssueSummary[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
 }
 
 export interface IssueChild {
@@ -1921,8 +1952,8 @@ export const CommentEventPayloadSchema = z
   // clients are known to read today, but the wire payload always carries every
   // field the server model has. .passthrough() keeps a field this schema hasn't
   // caught up to riding along instead of silently vanishing when a consumer that
-  // reads it is added later — the failure mode that dropped ask_waiting_on/turn
-  // from a comment.created reply without any test catching it.
+  // reads it is added later, as ask_waiting_on and turn would vanish from a
+  // comment.created reply with no test to catch it.
   .passthrough();
 
 export const MessageEventPayloadSchema = z.object({

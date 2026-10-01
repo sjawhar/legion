@@ -36238,6 +36238,8 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var MAX_ISSUE_PAGE_LIMIT = 250;
+var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
@@ -36639,6 +36641,7 @@ var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+var PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -36958,12 +36961,19 @@ var dispatchToolSpecs = [
       }).describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z2.string().describe("Optional project key to search within.").optional(),
       limit: z2.number({ int: true, min: 1, max: 50 }).describe("Maximum results, 1-50; default 20.").optional()
-    })
+    }),
+    validation: {
+      check: (value) => {
+        const { project } = value;
+        return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: "project must be a project key such as CORE"
+    }
   },
   {
     name: "dispatch_issues",
     example: { project: "AGENTC", limit: 250, offset: 250 },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are paged after the server returns the full response: limit sets the page size (default 50, " + "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " + "enumerate every matching issue.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -36972,7 +36982,7 @@ var dispatchToolSpecs = [
       priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
-      limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional(),
+      limit: z2.number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT }).describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`).optional(),
       offset: z2.number({ int: true, min: 0 }).describe("Rows to skip before the page; nonnegative integer; default 0.").optional()
     })
   },
@@ -38943,8 +38953,26 @@ class DispatchClient {
   async resolveIssue(issueReference) {
     return this.#resolveIssue(issueReference);
   }
-  async listIssues(options = {}) {
-    return this.#json("GET", ["api", "v1", "issues"], undefined, options);
+  async listIssuePage(options, page) {
+    const answer = await this.#json("GET", ["api", "v1", "issues"], undefined, {
+      ...options,
+      limit: page.limit,
+      offset: page.offset
+    });
+    if (Array.isArray(answer)) {
+      const issues = answer;
+      return {
+        issues: issues.slice(page.offset, page.offset + page.limit),
+        total: issues.length,
+        limit: page.limit,
+        offset: page.offset
+      };
+    }
+    const served = answer;
+    if (typeof served !== "object" || served === null || !Array.isArray(served.issues) || typeof served.total !== "number" || typeof served.limit !== "number" || typeof served.offset !== "number") {
+      throw new Error("GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues");
+    }
+    return served;
   }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
@@ -39369,8 +39397,14 @@ function renderAdvice(tool, key, advice, opts) {
   const openAsks = advice.your_open_asks;
   const writesSinceHuman = advice.session_writes_since_human;
   const lines = [];
+  const unparsed = advice.unparsed_openers;
+  if (unparsed !== undefined && unparsed.count > 0 && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
+    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
+    const subject2 = unparsed.count === 1 ? "1 typed-block opening in this document is text, not a block" : `${unparsed.count} typed-block openings in this document are text, not blocks`;
+    lines.push(`${subject2}: ${quoted}. An opening like \`:::ask{\u2026}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`);
+  }
   if (advice.decision_blocks === 0 && opts.isPrimarySpec === true && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
-    lines.push('No decision blocks in this spec \u2014 nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
+    lines.push('This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
   }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
     const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
@@ -39829,7 +39863,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
     problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
-    if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
+    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push("project must be a project key such as CORE");
     }
     const refDocument = ref?.owner.kind === "project" ? ref.artifact ?? ref.id : undefined;
@@ -40591,9 +40625,7 @@ async function executeDispatchTool(input) {
       const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const routeStatus = optionalString(args, "route_status");
-      const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
-      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
-      const issues = await client.listIssues({
+      const page = await client.listIssuePage({
         project,
         ...status === undefined ? {} : { status },
         ...parent === undefined ? {} : { parent },
@@ -40601,9 +40633,12 @@ async function executeDispatchTool(input) {
         ...priority === undefined ? {} : { priority },
         ...updatedSince === undefined ? {} : { updated_since: updatedSince },
         ...routeStatus === undefined ? {} : { route_status: routeStatus }
+      }, {
+        limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+        offset: optionalNumber(args, "offset") ?? 0
       });
-      const total = issues.length;
-      const rows = issues.slice(offset, offset + limit).map((row) => ({
+      const { total, limit, offset } = page;
+      const rows = page.issues.map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
