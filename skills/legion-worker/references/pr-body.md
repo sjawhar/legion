@@ -10,6 +10,18 @@ The implementer writes the PR body in the READY format from the moment the PR op
 later phase keeps it current rather than replacing it:
 
 ```
+## For the reviewer
+
+**Outcome:** <one sentence a user of this repository would recognise: what someone can now do, or what stops going wrong>
+**Why:** <the problem, one or two sentences, ending with the Dispatch key in parentheses — the key only, never a URL>
+**Change:**
+- <two to five bullets, each one behaviour a user or operator meets, never a file name>
+**Look at first:** <one to three `path:line` places where a wrong decision would hurt> (the reviewer writes this line)
+**Proven by:** <the `E2E (implementer)` line's surface and run, one line>
+**Not proven / risk:**
+- <one line per claim recorded as unproven before READY>, or the single word `none` (the reviewer writes this line; `none` is invalid while such a claim stands)
+**Size:** <files changed, +added/−removed>
+
 ## Verification
 
 **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
@@ -41,6 +53,22 @@ Verified the implementer's proof by <re-running its command | driving the same s
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
+
+## The brief for the human
+
+`## For the reviewer` is written for the person who merges; `## Verification` below it stays the
+ledger the reviewer and merger check against GitHub. The implementer writes `Outcome`, `Why`,
+`Change`, `Proven by`, and `Size` when the pull request opens, and keeps them true after every
+push; `Outcome` is a sentence a user of the repository would recognise, never "fix bug" or a file
+name, and `Why` ends with the Dispatch key, never a URL. The reviewer writes `Look at first` and
+`Not proven / risk` at each round, into the live body (`legion gh -- api
+repos/{owner}/{repo}/pulls/{number} --jq .body`, edit, then `--method PATCH ... -F body=@body.md`);
+`Not proven / risk` copies every claim recorded as unproven before READY — the tester's
+`failures`, the reviewer's own review, any proof-check comment already on the pull request —
+word for word, and `none` is a finding while one stands. The merger quotes `Outcome` and
+`Not proven / risk` from the body at the published head in the READY packet
+(*The READY packet* in `skill://legion-worker/references/merge-gate.md`); a stale `Outcome` that no
+longer describes the diff is a finding against the implementer, not a line the merger rewrites.
 
 ## What a proof is
 

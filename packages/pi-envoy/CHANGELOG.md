@@ -4,6 +4,13 @@
 
 ### Added
 
+- Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
+  `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
+  ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`
+  lines quoted from the published head (AGENTC-1305). The implementer writes the brief when the
+  PR opens and keeps it true; the reviewer fills `Look at first` and `Not proven / risk` each
+  round; a body with no brief still publishes, with one line saying so.
+
 - The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
   `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
   (`@deep`): given a goal, the workspace and files in scope, the skills to follow and the checks
