@@ -3636,7 +3636,7 @@ describe("executeDispatchTool", () => {
         expect((await outcome).split("\n")).toEqual([
           "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace or relocate it with move, which keep it.",
         ]);
         expect(edits).toEqual([]);
       }
