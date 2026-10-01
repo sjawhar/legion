@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"reflect"
@@ -19,62 +18,17 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-var (
-	sharedNATSOnce sync.Once
-	sharedNATSURI  string
-	sharedNATSErr  error
-	// sharedNATSContainer is the container the tests share, which TestMain terminates.
-	sharedNATSContainer *tcnats.NATSContainer
-)
-
-func sharedTestNATSURI(t *testing.T) string {
-	t.Helper()
-	sharedNATSOnce.Do(func() {
-		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, testnats.Image)
-		if err != nil {
-			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(ctx)
-		if sharedNATSErr != nil {
-			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedNATSContainer = ctr
-	})
-	if sharedNATSErr != nil {
-		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
-	}
-	return sharedNATSURI
-}
-
-func clearSessionBucket(t *testing.T, conn *natsgo.Conn) {
-	t.Helper()
-	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("failed to open JetStream: %v", err)
-	}
-	// Delete the entire bucket so OpenSessionRegistry can recreate it with the
-	// correct TTL. Merely clearing keys preserves the original bucket config,
-	// which causes TTL-sensitive tests to inherit the wrong TTL.
-	if err := js.DeleteKeyValue(SessionBucket); err != nil && !errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
-		t.Fatalf("failed to delete session bucket: %v", err)
-	}
-}
-
+// setupNATS connects t to the package's shared NATS server, in the JetStream account testnats.URL
+// hands t, where no earlier test made a session bucket.
 func setupNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	client, err := bus.ConnectOwningStream([]string{sharedTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	clearSessionBucket(t, client.Conn)
 	return client
 }
 
@@ -476,17 +430,5 @@ func (b *lockedBuffer) String() string {
 	return b.buffer.String()
 }
 
-// TestMain terminates the NATS container this package's tests share once they have all run.
-// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedNATSContainer != nil {
-		if err := testcontainers.TerminateContainer(sharedNATSContainer); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
-	os.Exit(code)
-}
+// TestMain removes the NATS server the package's tests share (testnats.Main).
+func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }

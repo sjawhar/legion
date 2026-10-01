@@ -34,8 +34,7 @@ type ResponseSchema<T> = { parse(value: unknown): T };
 type FetchCall = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 /** Waits between rejected spawn requests, sized for the daemon's restart window (boot to API
- * bind) as measured on the smoke rig (LEGION-102, step 10); adjust these delays if that window
- * is longer. */
+ * bind, LEGION-102); adjust these delays if that window is longer. */
 export const SPAWN_WORKER_RETRY_DELAYS_MS = [2_000, 5_000] as const;
 
 /** The initial request plus one retry per configured delay. */

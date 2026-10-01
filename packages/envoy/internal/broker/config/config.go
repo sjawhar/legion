@@ -17,7 +17,6 @@ type Config struct {
 	ListenAddr         string
 	DatabaseURL        string
 	PublicURL          string
-	UIOrigin           string
 	UIToken            string
 	RulesFile          string
 	RulesS3URI         string
@@ -42,15 +41,20 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
-// removedVars are AGENTC-393 v9's removed Dispatch environment variables: the broker holds no
-// Dispatch credential and asks/issues nothing, so a stale deployment still setting one of these
-// must fail loudly rather than silently running with a Dispatch dependency it no longer has.
-var removedVars = []string{
-	"BROKER_DISPATCH_URL",
-	"BROKER_DISPATCH_TOKEN",
-	"BROKER_DISPATCH_TOKEN_FILE",
-	"BROKER_DISPATCH_PROJECT",
-	"BROKER_ASK_POLL_SECONDS",
+// noDispatchCredential is why AGENTC-393 v9 removed the broker's Dispatch variables: it asks and
+// issues nothing in Dispatch.
+const noDispatchCredential = "the broker holds no Dispatch credential (AGENTC-393 v9)"
+
+// removedVars are environment variables the broker no longer reads. A stale deployment still
+// setting one must fail loudly rather than silently running on configuration that means nothing
+// any more.
+var removedVars = []struct{ name, reason string }{
+	{"BROKER_DISPATCH_URL", noDispatchCredential},
+	{"BROKER_DISPATCH_TOKEN", noDispatchCredential},
+	{"BROKER_DISPATCH_TOKEN_FILE", noDispatchCredential},
+	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
+	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
+	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin (AGENTC-393)"},
 }
 
 // databasePasswordPlaceholder is substituted in BROKER_DATABASE_URL with the URL-escaped value of
@@ -77,9 +81,9 @@ func substituteDatabasePassword(rawURL string, getenv func(string) string) (stri
 }
 
 func Load(getenv func(string) string) (Config, error) {
-	for _, name := range removedVars {
-		if getenv(name) != "" {
-			return Config{}, fmt.Errorf("%s is removed; the broker holds no Dispatch credential (AGENTC-393 v9)", name)
+	for _, removed := range removedVars {
+		if getenv(removed.name) != "" {
+			return Config{}, fmt.Errorf("%s is removed; %s", removed.name, removed.reason)
 		}
 	}
 	databaseURL, err := substituteDatabasePassword(getenv("BROKER_DATABASE_URL"), getenv)
@@ -90,7 +94,6 @@ func Load(getenv func(string) string) (Config, error) {
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
 		DatabaseURL:        databaseURL,
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
-		UIOrigin:           getenv("BROKER_UI_ORIGIN"),
 		RulesFile:          getenv("BROKER_RULES_FILE"),
 		RulesS3URI:         getenv("BROKER_RULES_S3_URI"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
@@ -99,19 +102,14 @@ func Load(getenv func(string) string) (Config, error) {
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
 	}
 	for _, req := range []struct{ name, value string }{
-		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL}, {"BROKER_UI_ORIGIN", cfg.UIOrigin},
+		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
 	} {
 		if strings.TrimSpace(req.value) == "" {
 			return Config{}, fmt.Errorf("%s is required", req.name)
 		}
 	}
-	for _, u := range []struct{ name, value string }{
-		{"BROKER_PUBLIC_URL", cfg.PublicURL}, {"BROKER_UI_ORIGIN", cfg.UIOrigin},
-	} {
-		parsed, err := url.Parse(u.value)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
-			return Config{}, fmt.Errorf("%s must be an absolute URL with no path: %q", u.name, u.value)
-		}
+	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
+		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
 	}
 	if (cfg.RulesFile == "") == (cfg.RulesS3URI == "") {
 		return Config{}, fmt.Errorf("exactly one of BROKER_RULES_FILE and BROKER_RULES_S3_URI must be set")

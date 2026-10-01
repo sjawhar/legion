@@ -1,4 +1,5 @@
 import type {
+  AcceptedMessageDelivery,
   Actor,
   Advised,
   Agent,
@@ -33,7 +34,7 @@ import type {
   IssueRead,
   IssueReferences,
   IssueRouteStatus,
-  IssueSummary,
+  IssueSummaryPage,
   Message,
   MessageRead,
   MessageReplyInput,
@@ -83,6 +84,12 @@ export interface ListIssuesOptions {
   readonly route_status?: IssueRouteStatus;
 }
 
+/** The page `listIssuePage` asks for: `limit` issues from position `offset` of the listing. */
+export interface IssuePageRequest {
+  readonly limit: number;
+  readonly offset: number;
+}
+
 export interface SearchOptions {
   readonly project?: string;
   readonly limit?: number;
@@ -101,6 +108,44 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 }
+
+/**
+ * Why `answer` is not the page `listIssuePage` asked for, and whether asking again can change
+ * that; undefined when it is one. A JSON answer that is not a page is Dispatch's own and comes back
+ * the same; text (`#response` returns a body it could not read as JSON as its text) looks like a
+ * proxy or gateway in the way, which a retry can get past.
+ */
+function whyNotAPage(answer: unknown): string | undefined {
+  if (typeof answer === "string") {
+    return (
+      "text that is not a JSON page, which looks like a proxy or gateway page rather than " +
+      "Dispatch's own answer, so a retry may succeed."
+    );
+  }
+  let what: string;
+  if (Array.isArray(answer)) {
+    what =
+      `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` +
+      "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer as Partial<Record<keyof IssueSummaryPage, unknown>>;
+    const lacking = [
+      ...(Array.isArray(fields.issues) ? [] : ["an issues array"]),
+      ...(["total", "limit", "offset"] as const)
+        .filter((name) => typeof fields[name] !== "number")
+        .map((name) => `a numeric ${name}`),
+    ];
+    if (lacking.length === 0) return undefined;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return (
+    `${what}. Retrying will not help: the same request gets the same answer until that ` +
+    "Dispatch is upgraded or fixed."
+  );
+}
+
 /** JSON HTTP client for Dispatch's native-tool API. */
 export class DispatchClient {
   readonly #baseUrl: string;
@@ -126,8 +171,25 @@ export class DispatchClient {
     return this.#resolveIssue(issueReference);
   }
 
-  async listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
-    return this.#json("GET", ["api", "v1", "issues"], undefined, options);
+  /**
+   * One page of `GET /api/v1/issues?limit=&offset=`, used as Dispatch served it: `IssueSummaryPage`
+   * (sjawhar/legion#1612). Any other answer is refused, naming the request sent, what arrived and
+   * whether a retry can help; a bare array answered to this paged request means a Dispatch older
+   * than that change or a regression of it.
+   */
+  async listIssuePage(
+    options: ListIssuesOptions,
+    page: IssuePageRequest
+  ): Promise<IssueSummaryPage> {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer: unknown = await this.#json("GET", path, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined) return answer as IssueSummaryPage;
+    throw new Error(
+      `GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` +
+        refusal
+    );
   }
 
   async listProjectArtifacts(project: string, unlinked = false): Promise<Artifact[]> {
@@ -268,12 +330,14 @@ export class DispatchClient {
   }
 
   /**
-   * Opens (or returns the open) approval ask for a document at its latest version. When that
-   * version is already approved, `ask` is null and `approval` carries the standing approval.
+   * Opens an approval ask for a document at its latest version, its question the document, the
+   * version and `summary`. An open ask at that version is returned unchanged; one naming an older
+   * version is retracted and replaced. When that version is already approved, `ask` is null and
+   * `approval` carries the standing approval.
    */
   async requestApproval(
     artifactID: string,
-    input: { actor: Actor }
+    input: { actor: Actor; summary: string }
   ): Promise<{
     ask: Ask | null;
     artifact_id: string;
@@ -404,6 +468,24 @@ export class DispatchClient {
    *  threads a session may read is the route's rule (`GET /api/v1` describes it). */
   async getMessageThread(id: string, session: string): Promise<MessageRead> {
     return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+
+  /** `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: this session records that it took
+   *  that attempt of the message as its user's own turn, and gets back the attempt with the
+   *  message's stored body, which is what it injects. Dispatch allows one acceptance per message,
+   *  of a person's own direct Send or Aside to this session (no issue, no broadcast), of its
+   *  latest attempt, which a person asked for within the last minute and which did not fail; any
+   *  refusal throws a `DispatchServiceError` naming the check. */
+  async acceptMessageDelivery(
+    id: string,
+    attempt: number,
+    input: { readonly actor: Actor }
+  ): Promise<AcceptedMessageDelivery> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"],
+      input
+    );
   }
 
   async artifact(

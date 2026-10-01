@@ -20,6 +20,11 @@ const proof = {
   negativeControl: "the same payload without proof -> exit 1",
 };
 const implementerProof = { verdict: "verified", how: "re-ran its command" };
+// A plan handoff is written only with both plan checks recorded (LEGION-421).
+const planChecks = {
+  gapAnalysis: { findings: [{ finding: "no criterion checks it", answer: "task 2's check" }] },
+  planReview: { verdict: "approved", rounds: 1 },
+};
 
 describe("handoff ledger", () => {
   let workspaceDir: string | null = null;
@@ -35,6 +40,7 @@ describe("handoff ledger", () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 
     writePhaseHandoff(workspaceDir, "plan", {
+      ...planChecks,
       requiredSkills: { implement: ["using-jj"], test: ["testing"], review: ["testing"] },
       concerns: ["need test parallelism"],
       independentTasks: 2,
@@ -59,6 +65,7 @@ describe("handoff ledger", () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 
     writePhaseHandoff(workspaceDir, "plan", {
+      ...planChecks,
       taskCount: 5,
       independentTasks: 3,
       requiredSkills: {
@@ -86,6 +93,7 @@ describe("handoff ledger", () => {
 
     expect(() =>
       writePhaseHandoff(dir, "plan", {
+        ...planChecks,
         taskCount: 2,
         requiredSkills: { implement: ["some-skill"] },
       })
@@ -94,10 +102,11 @@ describe("handoff ledger", () => {
     );
     expect(() =>
       writePhaseHandoff(dir, "plan", {
+        ...planChecks,
         requiredSkills: { implement: ["a"], test: [], review: ["   "] },
       })
     ).toThrow(/none: <what you looked through and why nothing fits>/);
-    expect(() => writePhaseHandoff(dir, "plan", { taskCount: 3 })).toThrow(
+    expect(() => writePhaseHandoff(dir, "plan", { ...planChecks, taskCount: 3 })).toThrow(
       /requiredSkills: missing or empty/
     );
     expect(existsSync(path.join(getLegionDir(dir), "plan.json"))).toBe(false);
@@ -107,6 +116,7 @@ describe("handoff ledger", () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 
     writePhaseHandoff(workspaceDir, "plan", {
+      ...planChecks,
       taskCount: 3,
       concerns: ["no skills needed"],
       requiredSkills: {
@@ -169,6 +179,7 @@ describe("handoff ledger", () => {
 
     // Write with a reserved field smuggled in — schemaVersion should be overwritten by writePhaseHandoff
     writePhaseHandoff(workspaceDir, "plan", {
+      ...planChecks,
       schemaVersion: 99,
       taskCount: 3,
       requiredSkills: { implement: ["using-jj"], test: ["testing"], review: ["testing"] },
@@ -243,6 +254,7 @@ describe("handoff ledger", () => {
       {
         phase: "plan" as const,
         extra: {
+          ...planChecks,
           taskCount: 3,
           requiredSkills: { implement: ["using-jj"], test: ["testing"], review: ["testing"] },
         },

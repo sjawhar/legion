@@ -209,6 +209,15 @@ type IssueSummary struct {
 	OpenAsks  int       `json:"open_asks"`
 }
 
+// IssueSummaryPage is one page of GET /api/v1/issues?limit=&offset=: the issues at [offset,
+// offset+limit) of the filtered listing, in its order, and Total, how many the filters matched.
+type IssueSummaryPage struct {
+	Issues []IssueSummary `json:"issues"`
+	Total  int            `json:"total"`
+	Limit  int            `json:"limit"`
+	Offset int            `json:"offset"`
+}
+
 // SearchOwner identifies the issue or standalone project document that owns a search result.
 // An issue owner carries Key, Title and Status; a document owner carries Project, Slug,
 // ArtifactID and Name.
@@ -843,17 +852,20 @@ type CommentEventPayload struct {
 
 // Message is a short update, optionally linked to an issue and threaded under another message.
 type Message struct {
-	ID         string            `json:"id"`
-	IssueKey   *string           `json:"issue_key"`
-	Author     Actor             `json:"author"`
-	Body       string            `json:"body"`
-	Target     *string           `json:"target"`
-	InReplyTo  *string           `json:"in_reply_to"`
-	CreatedAt  time.Time         `json:"created_at"`
-	Deliveries []MessageDelivery `json:"deliveries"`
+	ID        string  `json:"id"`
+	IssueKey  *string `json:"issue_key"`
+	Author    Actor   `json:"author"`
+	Body      string  `json:"body"`
+	Target    *string `json:"target"`
+	InReplyTo *string `json:"in_reply_to"`
+	// BroadcastID names the broadcast this message is one recipient's copy of, and is null for
+	// every other message.
+	BroadcastID *string           `json:"broadcast_id"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Deliveries  []MessageDelivery `json:"deliveries"`
 }
 
-// MessageDelivery records one human-requested attempt to reach a live agent.
+// MessageDelivery records one attempt to reach a live agent with a targeted message.
 type MessageDelivery struct {
 	MessageID  string  `json:"message_id"`
 	Attempt    int     `json:"attempt"`
@@ -868,6 +880,15 @@ type MessageDelivery struct {
 	Error     *string   `json:"error"`
 	ReplyID   *string   `json:"reply_id"`
 	CreatedAt time.Time `json:"created_at"`
+	// RequestedBy is the actor whose send opened the attempt: the person who wrote or retried
+	// the message, or the session a bearer's retry named. A resume keeps it. Nil on an attempt
+	// written before Dispatch recorded it, which is never read as a person's.
+	RequestedBy *Actor `json:"requested_by"`
+	// AcceptedAt and AcceptedAs record that the attempt's session took the message
+	// (POST /api/v1/messages/{id}/deliveries/{attempt}/accept), and as what: "user_turn", the
+	// session's own user turn. At most one attempt of a message is ever accepted.
+	AcceptedAt *time.Time `json:"accepted_at"`
+	AcceptedAs *string    `json:"accepted_as"`
 }
 
 // MessageEventPayload wraps a Message with the reply target's body preview (first 160
@@ -909,6 +930,18 @@ type MessageDeliveryEventPayload struct {
 	// nothing from this attempt. Absent means false.
 	Duplicate bool   `json:"duplicate,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+// MessageAcceptedEventPayload is `message.accepted`: the session an attempt went to took the
+// message as AcceptedAs. It is never a second `message.delivery` receipt; the attempt's send
+// still appends its own. Target is the message's own, `session:<recipient>` for a direct
+// message, which is where an issue-less event takes its owner from.
+type MessageAcceptedEventPayload struct {
+	MessageID  string `json:"message_id"`
+	Attempt    int    `json:"attempt"`
+	SessionID  string `json:"session_id"`
+	AcceptedAs string `json:"accepted_as"`
+	Target     string `json:"target"`
 }
 
 // ReferencedBy identifies a post or artifact that mentions an artifact.

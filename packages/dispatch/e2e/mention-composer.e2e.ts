@@ -165,11 +165,11 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
   }
 });
 
-// LEGION-271. A mention retried in its own mode inside the stream's duplicate window reaches the
-// agent no second time: Dispatch records the attempt `sent` with `duplicate`, and the row must
-// say so. Reading the state alone would tell a human the mention was delivered when nothing left
-// the listener - the same false "it was delivered" the targeted-message card was changed to
-// avoid. The stand-in listener models the stream's suppression, so this renders the real path.
+// LEGION-271. A mention retried in its own mode inside the stream's duplicate window is one the
+// stream already held: it stores nothing new, and the publish still reaches the agent's subject.
+// Dispatch records the attempt `sent` with `duplicate`, and the row must say so, since the state
+// alone would read as a fresh delivery. The stand-in listener answers `duplicate` for a repeated
+// key as the listener does, so this renders the real path.
 test("a duplicated mention delivery says the listener already had it, and offers no safe retry", async ({
   browser,
 }) => {

@@ -1,7 +1,6 @@
 import { canonicalRepo } from "@legion/contracts/repo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { Link } from "react-router-dom";
 
 import { api, isCredentialFeatureOff } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
@@ -11,8 +10,6 @@ import {
   borderDefault,
   dangerHoverText,
   dangerText,
-  linkHoverText,
-  linkText,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnCanvas,
@@ -20,6 +17,7 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { GrantsSection } from "../credentials/GrantsSection";
 import { credentialPendingQuery } from "../credentials/pending";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentTokensSection } from "./AgentTokensSection";
@@ -130,24 +128,7 @@ export function SettingsPage(): ReactNode {
         <AgentTokensSection />
         {credentialsAvailable.isPending ||
         isCredentialFeatureOff(credentialsAvailable.error) ? null : (
-          <section aria-labelledby="approver-keys-heading">
-            <h2
-              className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
-              id="approver-keys-heading"
-            >
-              Approver keys
-            </h2>
-            <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-              Register or endorse the WebAuthn keys the broker trusts you to approve credential
-              requests with, and review your live grants.
-            </p>
-            <Link
-              className={`mt-2 inline-block text-sm font-medium ${linkText} ${linkHoverText}`}
-              to="/credentials/keys"
-            >
-              Manage approver keys →
-            </Link>
-          </section>
+          <GrantsSection />
         )}
         <section aria-labelledby="repository-projects-heading">
           <h2

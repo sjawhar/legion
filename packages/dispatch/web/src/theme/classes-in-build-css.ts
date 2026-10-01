@@ -52,8 +52,8 @@ function collectClassTokens(): Set<string> {
  * A class name as the stylesheet spells it: a CSS identifier escapes every character outside
  * `[A-Za-z0-9_-]`, which for Tailwind's output is the colon of a variant, the slash of an
  * opacity, and every bracket, paren, comma, hash and percent an arbitrary property carries.
- * Escaping only `:` and `/` looked for `[mask-image:linear-gradient(...)]` verbatim and never
- * found the rule Tailwind had emitted.
+ * Escaping only `:` and `/` would look for `[mask-image:linear-gradient(...)]` verbatim and never
+ * find the rule Tailwind emits.
  */
 function escapeClassName(token: string): string {
   return token.replace(/[^A-Za-z0-9_-]/g, "\\$&");

@@ -1,19 +1,24 @@
 import { expect, spyOn, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type {
   Agent,
+  CreateBroadcastInput,
   InboxRow,
   IssueSummary,
   Message,
+  MessageDelivery,
+  MessageDeliveryMode,
   MessageRead,
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
 import { orderAgents, partitionAgents } from "./AgentsPage";
+import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -856,7 +861,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
+    const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(false);
     const sameMode = within(planner).getByRole("button", { name: "Retry" });
     expect(sameMode.hasAttribute("disabled")).toBe(false);
@@ -876,7 +881,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
   }
 });
 
-test("Send normally disables when the target does not advertise steer", async () => {
+test("Use Send instead is disabled when the target does not advertise steer", async () => {
   const root = message("Can this ship?", {
     deliveries: [
       {
@@ -898,10 +903,10 @@ test("Send normally disables when the target does not advertise steer", async ()
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
+    const retry = await within(planner).findByRole("button", { name: "Use Send instead" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     expect(retry.hasAttribute("title")).toBe(false);
-    await within(planner).findByText("Planner does not support normal delivery — use BTW.");
+    await within(planner).findByText("Planner does not support Send — use BTW.");
     expect(within(planner).getByRole("button", { name: "Retry" }).hasAttribute("disabled")).toBe(
       false
     );
@@ -910,6 +915,134 @@ test("Send normally disables when the target does not advertise steer", async ()
     page.restore();
   }
 });
+
+/** One attempt of `messageID` to `sessionID` in `delivery` mode, sent. */
+function sentAttempt(
+  messageID: string,
+  delivery: "aside" | "btw" | "steer",
+  overrides: Partial<MessageDelivery> = {}
+): MessageDelivery {
+  return {
+    attempt: 1,
+    created_at: recentAttemptAt,
+    delivery,
+    envelope_id: "envelope-1",
+    error: null,
+    message_id: messageID,
+    reply_id: null,
+    session_id: "planner-session",
+    state: "sent",
+    ...overrides,
+  };
+}
+
+const accepted = { accepted_as: "user_turn", accepted_at: recentAttemptAt } as const;
+
+// A person's direct Send or Aside that an Oh My Pi session took as its own user turn is answered
+// in the session's conversation, never with a Dispatch reply, so its card waits on no reply and
+// offers no other way to send it. The session records that with Dispatch; nothing else says it,
+// so every attempt the session did not accept - a Claude Code session's, an older plugin's, an
+// accept Dispatch refused - keeps today's card and its mode-change row.
+for (const [name, session, read, headline, retries] of [
+  [
+    "a person's direct Aside the session took as its own turn",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside", accepted)],
+      }),
+      replies: [],
+    },
+    "Delivered to Planner's conversation (Aside)",
+    0,
+  ],
+  [
+    "a person's reply the session took as its own turn",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside", accepted)],
+      }),
+      replies: [
+        message("And the logs?", {
+          deliveries: [sentAttempt("message-2", "steer", accepted)],
+          id: "message-2",
+          in_reply_to: "message-1",
+        }),
+      ],
+    },
+    "Delivered to Planner's conversation (Send)",
+    0,
+  ],
+  [
+    "a turn the session took whose send the listener later recorded as failed",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [
+          sentAttempt("message-1", "aside", {
+            ...accepted,
+            envelope_id: null,
+            error: RECEIPT_TIMEOUT_CAUSE,
+            state: "failed",
+          }),
+        ],
+      }),
+      replies: [],
+    },
+    "Delivered to Planner's conversation (Aside)",
+    0,
+  ],
+  [
+    "a person's direct Aside the session did not accept",
+    "Planner",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside")],
+      }),
+      replies: [],
+    },
+    "Sent to Planner (Aside)",
+    1,
+  ],
+  [
+    "an Aside an aside-only session got as a card",
+    "Reviewer",
+    {
+      message: message("Where is the dashboard?", {
+        deliveries: [sentAttempt("message-1", "aside", { session_id: "reviewer-session" })],
+        target: "session:reviewer-session",
+      }),
+      replies: [],
+    },
+    "Sent to Reviewer (Aside)",
+    1,
+  ],
+] as const satisfies readonly (readonly [string, string, MessageRead, string, number])[]) {
+  test(`Agents shows ${name} as ${retries === 0 ? "delivered to the conversation" : "sent, awaiting a reply"}`, async () => {
+    // As a current Dispatch answers: a direct message no broadcast sent reads broadcast_id null.
+    const page = renderAgents({
+      messages: [
+        {
+          message: { ...read.message, broadcast_id: null },
+          replies: read.replies.map((reply) => ({ ...reply, broadcast_id: null })),
+        },
+      ],
+    });
+
+    try {
+      const target = card(await screen.findByRole("region", { name: "Agents" }), session);
+      expand(target, session);
+      await within(target).findByText(headline);
+      expect(within(target).queryAllByRole("button", { name: "Use BTW instead" })).toHaveLength(
+        retries
+      );
+    } finally {
+      page.view.unmount();
+      page.restore();
+    }
+  });
+}
 
 /** One exchange: a root from Alice at `createdAt`, optionally answered by the planner. */
 function exchange(
@@ -1345,9 +1478,7 @@ test("a root targeted-message retry on the Agents page checks the role's current
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard)
-        .getByRole("button", { name: "Send as BTW instead" })
-        .hasAttribute("disabled")
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();
@@ -1423,9 +1554,7 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
     const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard)
-        .getByRole("button", { name: "Send as BTW instead" })
-        .hasAttribute("disabled")
+      within(reviewerCard).getByRole("button", { name: "Use BTW instead" }).hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();
@@ -1448,7 +1577,7 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
       target: { value: "btw" },
     });
     expect(
-      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise btw\)/)
+      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise BTW\)/)
     ).toBeTruthy();
     fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
       target: { value: "Stand down and report status." },
@@ -1458,6 +1587,7 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
       expect(page.createBroadcast).toHaveBeenCalledWith({
         body: "Stand down and report status.",
         delivery: "btw",
+        idempotency_key: expect.any(String),
         session_ids: ["planner-session"],
       })
     );
@@ -1465,6 +1595,15 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
     page.view.unmount();
     page.restore();
   }
+});
+
+test("a broadcast composer labels a mode-mismatched recipient", () => {
+  const [, reviewer] = agents;
+  const composer = broadcastPlan(new Set([reviewer.session_id]), [reviewer], "btw");
+
+  // `packages/dispatch/AGENTS.md:36-41` and `features/conversation/delivery.ts:8-12` name this
+  // composer-facing label.
+  expect(composer.excluded[0]?.reason).toBe("does not advertise BTW");
 });
 
 test("a mode both recipients advertise takes the excluded one back in", async () => {
@@ -1486,6 +1625,451 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
     page.view.unmount();
     page.restore();
   }
+});
+
+test("Restore draft refuses, and says why on screen, while the composer holds a message or a selection started since the refused send", async () => {
+  const page = renderAgents();
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+  const reason =
+    "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first.";
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = within(region).getByRole("checkbox", { name: "Select Planner for broadcast" });
+    const message = () =>
+      within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("textbox", {
+        name: "Broadcast message",
+      });
+    fireEvent.click(planner);
+    fireEvent.change(message(), { target: { value: "Keep this." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    const restore = within(sends).getByRole("button", { name: "Restore draft" });
+    expect(restore.getAttribute("aria-disabled")).toBeNull();
+
+    // A message started since the press: Restore draft would overwrite it, so it refuses, and the
+    // line under its row, which it is described by, says why.
+    fireEvent.click(planner);
+    fireEvent.change(message(), { target: { value: "Started since." } });
+    expect(restore.getAttribute("aria-disabled")).toBe("true");
+    expect(restore.getAttribute("title")).toBe(reason);
+    const describedBy = restore.getAttribute("aria-describedby") ?? "";
+    expect(document.getElementById(describedBy)?.textContent).toBe(reason);
+    expect(within(sends).getByText(reason)).toBeTruthy();
+    fireEvent.click(restore);
+    expect(message()).toHaveProperty("value", "Started since.");
+    expect(within(sends).getByText(/^Could not send to 1 agent/)).toBeTruthy();
+
+    // An empty message with agents ticked since is a broadcast begun too: Restore draft would
+    // replace the selection, so it still refuses.
+    fireEvent.change(message(), { target: { value: "" } });
+    expect(restore.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(restore);
+    expect(planner).toHaveProperty("checked", true);
+    expect(message()).toHaveProperty("value", "");
+
+    // With nothing begun, the refused send's message and selection come back.
+    fireEvent.click(planner);
+    expect(restore.getAttribute("aria-disabled")).toBeNull();
+    expect(within(sends).queryByText(reason)).toBeNull();
+    fireEvent.click(restore);
+    expect(message()).toHaveProperty("value", "Keep this.");
+    expect(planner).toHaveProperty("checked", true);
+    expect(screen.queryByRole("region", { name: "Sends" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+/** The page's `api.createBroadcast` spy, as far as reading back what it was handed. */
+interface BroadcastSpy {
+  readonly createBroadcast: {
+    readonly mock: { readonly calls: readonly (readonly [CreateBroadcastInput])[] };
+  };
+}
+
+/** The i-th request the page handed `api.createBroadcast`. */
+function posted(page: BroadcastSpy, index: number): CreateBroadcastInput {
+  const call = page.createBroadcast.mock.calls[index];
+  if (call === undefined) throw new Error(`no broadcast request ${index}`);
+  return call[0];
+}
+
+// LEGION-446. A refused send's row is the only copy of its message, and Restore draft is how the
+// human sends it again. Until something is edited the request goes out word for word, key
+// included, so a send that did land behind the refusal is answered as the repeat it is; the first
+// edit makes it a new composition, under a new key.
+test("Restore draft re-sends the refused request word for word, and the first edit drops it for a new send", async () => {
+  const page = renderAgents();
+  const refuse = async () => {
+    throw new Error("Envoy listener unreachable");
+  };
+  page.createBroadcast.mockImplementationOnce(refuse).mockImplementationOnce(refuse);
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const message = () =>
+      within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("textbox", {
+        name: "Broadcast message",
+      });
+    const restoreDraft = async (failures: number) => {
+      const sends = await screen.findByRole("region", { name: "Sends" });
+      await waitFor(() =>
+        expect(
+          within(sends).getAllByText("Could not send to 1 agent: Envoy listener unreachable")
+        ).toHaveLength(failures)
+      );
+      fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+    };
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.change(message(), { target: { value: "Keep this." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
+    const first = posted(page, 0);
+    expect(first.idempotency_key).not.toBe("");
+
+    await restoreDraft(1);
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
+    expect(posted(page, 1)).toEqual(first);
+
+    await restoreDraft(1);
+    fireEvent.change(message(), { target: { value: "Keep this!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
+    expect(posted(page, 2).idempotency_key).not.toBe(first.idempotency_key);
+    expect(posted(page, 2).body).toBe("Keep this!");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a selected agent that went away does not change what Restore draft re-sends, and the composer says so", async () => {
+  const [planner, reviewer] = agents;
+  const listening = { ...reviewer, capabilities: ["aside", "btw"] };
+  const page = renderAgents({ listedAgents: [planner, listening] });
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    const composer = () => within(region).getByRole("region", { name: "Broadcast" });
+    fireEvent.change(within(composer()).getByRole("combobox", { name: "Delivery mode" }), {
+      target: { value: "btw" },
+    });
+    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Still here?" },
+    });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
+    expect(posted(page, 0).session_ids).toEqual(["planner-session", "reviewer-session"]);
+
+    page.listAgents.mockResolvedValue([planner]);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    await waitFor(() =>
+      expect(
+        within(region).queryByRole("checkbox", { name: "Select Reviewer for broadcast" })
+      ).toBeNull()
+    );
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 2 agents: Envoy listener unreachable");
+    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+
+    // The restored request names both, so the composer counts both; the Reviewer's chip falls
+    // back to its session id, with no reason, since the request asks for it.
+    expect(within(composer()).getByRole("heading", { level: 2 }).textContent).toBe(
+      "Broadcast to 2 of 2 selected"
+    );
+    expect(
+      within(composer()).getByTitle("Remove session:reviewer… from this broadcast").textContent
+    ).toBe("session:reviewer… ✕");
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
+    expect(posted(page, 1)).toEqual(posted(page, 0));
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The security review's case the other way round: an agent the refused send could not reach is
+// back by the restore. The request being re-sent does not name it, so the composer says so rather
+// than show it as reached; ticking it back in is an edit, which composes a new send.
+test("a selected agent that came back is shown as not in the restored send, and the request stays as refused", async () => {
+  const [planner, reviewer] = agents;
+  const page = renderAgents();
+  const refuse = async () => {
+    throw new Error("Envoy listener unreachable");
+  };
+  page.createBroadcast.mockImplementationOnce(refuse).mockImplementationOnce(refuse);
+  const notInTheSend =
+    "Excluded: Reviewer (not in the refused send; edit to include it). Nothing is sent to them, and no other mode is substituted.";
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const composer = () => within(region).getByRole("region", { name: "Broadcast" });
+    const restoreDraft = async (failures: number) => {
+      const sends = await screen.findByRole("region", { name: "Sends" });
+      await waitFor(() =>
+        expect(
+          within(sends).getAllByText("Could not send to 1 agent: Envoy listener unreachable")
+        ).toHaveLength(failures)
+      );
+      fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+    };
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    fireEvent.change(within(composer()).getByRole("combobox", { name: "Delivery mode" }), {
+      target: { value: "btw" },
+    });
+    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Still here?" },
+    });
+    expect(
+      within(composer()).getByText(/Excluded: Reviewer \(does not advertise BTW\)/)
+    ).toBeTruthy();
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
+    const first = posted(page, 0);
+    expect(first.session_ids).toEqual(["planner-session"]);
+
+    // The Reviewer now takes BTW: the live plan would reach it, the refused request does not.
+    page.listAgents.mockResolvedValue([planner, { ...reviewer, capabilities: ["aside", "btw"] }]);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    await restoreDraft(1);
+    expect(within(composer()).getByRole("heading", { level: 2 }).textContent).toBe(
+      "Broadcast to 1 of 2 selected"
+    );
+    expect(within(composer()).getByText(notInTheSend)).toBeTruthy();
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
+    expect(posted(page, 1)).toEqual(first);
+
+    // Taking the Reviewer out and ticking it back in is an edit: the live plan takes over, and
+    // the send that follows is a new composition naming both, under a key of its own.
+    await restoreDraft(1);
+    fireEvent.click(within(composer()).getByTitle("Remove Reviewer from this broadcast"));
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    expect(within(composer()).queryByText(/Excluded:/)).toBeNull();
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
+    expect(posted(page, 2).session_ids).toEqual(["planner-session", "reviewer-session"]);
+    expect(posted(page, 2).idempotency_key).not.toBe(first.idempotency_key);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The security review's minor: only a session an edit would bring in is "not in the refused send";
+// one the live plan still leaves out keeps the reason the live plan gives.
+test("a restored send names a selected session it leaves out by the reason an edit would keep, unless it has come back", () => {
+  const [planner, reviewer] = agents;
+  const restored = {
+    body: "Still here?",
+    delivery: "btw",
+    idempotency_key: "refused-key",
+    session_ids: ["planner-session"],
+  } satisfies CreateBroadcastInput;
+  const composition = {
+    delivery: "btw",
+    draft: "Still here?",
+    restored,
+    selected: new Set(["planner-session", "reviewer-session"]),
+    sendKey: "next-key",
+  } as const;
+  const reasons = (live: readonly Agent[]) =>
+    composedBroadcast(composition, live).plan.excluded.map((item) => item.reason);
+
+  expect(reasons([planner, reviewer])).toEqual(["does not advertise BTW"]);
+  expect(reasons([planner])).toEqual(["no live session"]);
+  expect(reasons([planner, { ...reviewer, capabilities: ["aside", "btw"] }])).toEqual([
+    "not in the refused send; edit to include it",
+  ]);
+  expect(composedBroadcast(composition, [planner, reviewer]).input).toBe(restored);
+});
+
+// Two deliberate sends of the same words are two broadcasts: each composition carries a key of its
+// own, so the server never answers the second with the first.
+test("each composed send carries a key of its own, even when it says the same thing", async () => {
+  const page = renderAgents();
+  // Refused, so each row stays on the strip and the page does not open a broadcast in between.
+  page.createBroadcast.mockImplementation(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    for (const count of [1, 2, 3]) {
+      fireEvent.click(
+        within(region).getByRole("checkbox", { name: "Select Planner for broadcast" })
+      );
+      fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
+        target: { value: "Status?" },
+      });
+      fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+      await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(count));
+    }
+    const keys = [0, 1, 2].map((index) => posted(page, index).idempotency_key);
+    expect(new Set(keys).size).toBe(3);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// TanStack resumes a paused mutation only while the tab is visible (`focusManager`), so a queue
+// built on a mutation `scope` would hold the second send until the reader came back to the tab.
+test("a queued broadcast goes out as soon as the one ahead is answered, with the tab hidden by then", async () => {
+  const page = renderAgents();
+  const held = Promise.withResolvers<void>();
+  page.createBroadcast.mockImplementationOnce(async (input) => {
+    await held.promise;
+    return {
+      author: { id: "alice", kind: "user" },
+      body: input.body,
+      created_at: "2026-09-14T00:00:00Z",
+      delivery: input.delivery,
+      excluded: [],
+      id: "broadcast-held",
+      recipients: [],
+    };
+  });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = within(region).getByRole("checkbox", { name: "Select Planner for broadcast" });
+    // Each press in a task of its own: the queue drops a second press in the same task.
+    for (const body of ["First.", "Second."]) {
+      fireEvent.click(planner);
+      fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
+        target: { value: body },
+      });
+      fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+      await screen.findByTitle(body);
+    }
+    const sends = screen.getByRole("region", { name: "Sends" });
+    expect(within(sends).getByText("Queued: to 1 agent")).toBeTruthy();
+    expect(page.createBroadcast).toHaveBeenCalledTimes(1);
+
+    focusManager.setFocused(false);
+    held.resolve();
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
+    expect(page.createBroadcast.mock.calls.map(([input]) => input.body)).toEqual([
+      "First.",
+      "Second.",
+    ]);
+  } finally {
+    // `lastRequest` is module state: a held request left unresolved would hold every later
+    // broadcast in this file behind it.
+    held.resolve();
+    focusManager.setFocused(undefined);
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Send says which of its reasons stops it, where that reason is shown, and the mode that would reach a selection this one reaches none of", () => {
+  const [planner, reviewer] = agents;
+  const deaf = { ...reviewer, capabilities: [], session_id: "deaf-session", title: "Deaf" };
+  const state = (
+    selected: readonly string[],
+    live: readonly Agent[],
+    delivery: MessageDeliveryMode,
+    body = "Report status."
+  ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
+  const both = [planner.session_id, reviewer.session_id];
+  const tail = "Nothing is sent to them, and no other mode is substituted.";
+  // Nobody reached: the label stops counting, and the Excluded line is the notice and the reason.
+  const nobody = (line: string) => ({
+    label: "No recipient",
+    notice: line,
+    refusal: line,
+    refusalOnNotice: true,
+  });
+
+  // Every selected session has left the registry: the line names each by its ID, and no mode
+  // would help.
+  expect(state(both, [], "btw")).toEqual(
+    nobody(
+      `Excluded: session:planner-… (no live session), session:reviewer… (no live session). ${tail}`
+    )
+  );
+  // One gone, one without the mode: each with its own cause, then the mode that reaches the
+  // live one.
+  expect(state(both, [reviewer], "btw")).toEqual(
+    nobody(
+      `Excluded: session:planner-… (no live session), Reviewer (does not advertise BTW). ${tail} Sending as Aside would reach 1 of them.`
+    )
+  );
+  // The hint picks the mode that reaches the most: Aside reaches both, BTW only the Planner.
+  expect(state(both, agents, "steer").refusal).toMatch(
+    / Sending as Aside would reach 2 of them\.$/
+  );
+  // One session alone is "it"; a session advertising nothing gets no hint at all.
+  expect(state([reviewer.session_id], [reviewer], "btw").refusal).toMatch(
+    / Sending as Aside would reach it\.$/
+  );
+  expect(state([deaf.session_id], [deaf], "btw")).toEqual(
+    nobody(`Excluded: Deaf (does not advertise BTW). ${tail}`)
+  );
+
+  // Someone reached: the label counts, and an Excluded line is context beside Send, never its
+  // reason, with no hint since the mode reaches someone.
+  const reviewerLeftOut = `Excluded: Reviewer (does not advertise BTW). ${tail}`;
+  expect(state(both, agents, "btw")).toEqual({
+    label: "Send to 1",
+    notice: reviewerLeftOut,
+    refusal: null,
+    refusalOnNotice: false,
+  });
+  // An empty message is Send's own reason, beside the same line.
+  expect(state(both, agents, "btw", "  ")).toEqual({
+    label: "Send to 1",
+    notice: reviewerLeftOut,
+    refusal: "Type a message first.",
+    refusalOnNotice: false,
+  });
+  expect(state([planner.session_id], agents, "btw")).toEqual({
+    label: "Send to 1",
+    notice: null,
+    refusal: null,
+    refusalOnNotice: false,
+  });
+
+  // The limit outranks an empty message and the Excluded line alike.
+  const crowd = Array.from({ length: 101 }, (_, index) => ({
+    ...planner,
+    session_id: `crowd-${index}`,
+  }));
+  const limit = "At most 100 recipients per broadcast; this one would reach 101.";
+  expect(
+    state(
+      [...crowd.map((agent) => agent.session_id), reviewer.session_id],
+      [...crowd, reviewer],
+      "btw",
+      ""
+    )
+  ).toEqual({
+    label: "Send to 101",
+    notice: limit,
+    refusal: limit,
+    refusalOnNotice: true,
+  });
 });
 
 test("the header checkbox follows the filters and its count never hides a selected row the filter hides", async () => {
@@ -1527,7 +2111,7 @@ test("the header checkbox follows the filters and its count never hides a select
       within(chips)
         .getAllByRole("button")
         .map((chip) => chip.textContent)
-    ).toEqual(["Reviewer · does not advertise btw ✕"]);
+    ).toEqual(["Reviewer · does not advertise BTW ✕"]);
 
     // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
     fireEvent.change(directory, { target: { value: "" } });

@@ -459,8 +459,8 @@ func dedent(lines string, limit int) string {
 
 // blockStart reports whether offset opens its own line: everything back to lineStart is
 // indentation the parser skips, up to three spaces or a run of tabs. A marker one space in is
-// still the marker — AGENTC-193's own payload was indented — and a line that began in an earlier
-// text node (lineStart < 0) is never a block start here.
+// still the marker, and a line that began in an earlier text node (lineStart < 0) is never a block
+// start here.
 func blockStart(value string, lineStart, offset int) bool {
 	if lineStart < 0 || lineStart > offset {
 		return false
@@ -755,12 +755,17 @@ func imageAlt(alt string, context inlineContext) string {
 // altReadsBack reports whether an image label written as written reads back as the alt text alt,
 // read in the block it is written in: a table cell, where the cell takes its escaped pipes first
 // and a line ending ends the row; a heading, which a line ending ends; or a paragraph, where a
-// line of the label can open a block.
+// line of the label can open a block. In a table cell a label holding a `|` after an even run of
+// backslashes does not: Parse reads that pipe as escaped, while the browser editor's parser, which
+// pairs backslashes before a pipe, ends the cell there.
 func altReadsBack(written, alt string, context inlineContext) bool {
 	image := "![" + written + "](u)"
 	var markdown string
 	switch {
 	case context.tableCell:
+		if pipeAfterEvenBackslashes(written) {
+			return false
+		}
 		markdown = "| h |\n| - |\n| " + image + " |\n"
 	case context.heading:
 		markdown = "# " + image + "\n"
@@ -784,4 +789,27 @@ func altReadsBack(written, alt string, context inlineContext) bool {
 	}
 	got, _ := nodes[0].Attrs["alt"].(string)
 	return got == alt
+}
+
+// pipeAfterEvenBackslashes reports whether value holds a `|` the browser editor's parser ends a
+// table cell at (escapedByBackslashes).
+func pipeAfterEvenBackslashes(value string) bool {
+	for index := range len(value) {
+		if value[index] == '|' && !escapedByBackslashes(value, index) {
+			return true
+		}
+	}
+	return false
+}
+
+// escapedByBackslashes reports whether the character at index stands after an odd run of
+// backslashes. The browser editor's parser pairs backslashes before a pipe, so in a table row a
+// `|` after an odd run is the cell's text and one after an even run, none included, ends the cell;
+// goldmark takes any backslash right before a pipe as escaping it.
+func escapedByBackslashes[T string | []byte](value T, index int) bool {
+	run := 0
+	for run < index && value[index-1-run] == '\\' {
+		run++
+	}
+	return run%2 == 1
 }

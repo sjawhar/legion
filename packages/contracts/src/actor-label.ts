@@ -2,9 +2,9 @@ import { type Actor, serviceSubjectLabel } from "./dispatch-api";
 
 /**
  * The one way an actor is named, shared by every surface that names one: the Dashboard's
- * headers, cards and lists, and the agent tools' own text. It lived only in the SPA, so
- * `dispatch_read` printed the title a session stamped on a write while the dashboard printed
- * the live one from the agent registry, and the same holder read two ways.
+ * headers, cards and lists, and the agent tools' own text. Kept in the SPA alone, it would let
+ * `dispatch_read` print the title a session stamped on a write while the dashboard printed the
+ * live one from the agent registry, and the same holder would read two ways.
  *
  * A caller that can see the registry passes its titles (`session_id` to live title); one that
  * cannot passes nothing and gets the stamped title, which is the same fallback the SPA uses

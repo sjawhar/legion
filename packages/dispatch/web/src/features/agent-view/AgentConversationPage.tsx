@@ -17,6 +17,7 @@ import {
   textPrimaryOnCanvas,
 } from "../../theme/classes";
 import { useMarkRepliesRead } from "../agents/unread";
+import { MODE_LABELS } from "../conversation/delivery";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
@@ -32,10 +33,18 @@ const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
   unavailable: { dot: connectionDotFailed, label: "This session's conversation is unavailable" },
 };
 
-/** The modes a human can talk to a session in, narrowed to the ones it advertises. `aside`
- *  is the default everywhere: it reaches the agent without interrupting its turn. */
+/** Where each mode stands in the composer. Send comes first wherever the session takes it, since
+ *  that is Enter at its terminal, and Aside next, so a session that takes only asides (a Claude
+ *  Code session, which refuses a steer) opens on Aside. A mode the contracts add must be placed
+ *  here before it compiles. */
+const MODE_ORDER: Record<MessageDeliveryMode, number> = { aside: 1, btw: 2, steer: 0 };
+
+/** The modes a human can talk to a session in, narrowed to the ones it advertises, in
+ *  `MODE_ORDER`; the first is what the composer sends until the human picks. */
 function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
-  const advertised = DELIVERY_CAPABILITIES.filter((mode) => capabilities.includes(mode));
+  const advertised = DELIVERY_CAPABILITIES.filter((mode) => capabilities.includes(mode)).sort(
+    (left, right) => MODE_ORDER[left] - MODE_ORDER[right]
+  );
   return advertised.length === 0 ? ["aside"] : advertised;
 }
 
@@ -64,12 +73,18 @@ export function AgentConversationPage(): ReactNode {
 
   const { conversation, responding, status } = useAgentStream(sessionId);
   const modes = deliveryModes(agent?.capabilities ?? []);
-  const [mode, setMode] = useState<MessageDeliveryMode>("aside");
+  // The human's pick holds only while the session still offers it: the session list loads after
+  // the page, and a pick the session does not advertise would be refused.
+  const [picked, setPicked] = useState<MessageDeliveryMode | null>(null);
+  const mode = picked !== null && modes.includes(picked) ? picked : (modes[0] ?? "aside");
   const [sendError, setSendError] = useState<string | null>(null);
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
-  // targeted delivery reaches the session as a notice rather than one of its own user messages,
-  // so the session publishes no frame for it (measured against a live Oh My Pi session), and it
-  // answers through dispatch_message, which the stream shows only as that tool call. Without
+  // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
+  // stream carries tagged with this message's id, and the thread shows it once; one the stream
+  // carries untagged shows twice (`packages/pi-envoy/AGENTS.md`, the phase-worker section, says
+  // when). A BTW, an issue message, and any message to a session that takes no user turn from
+  // Envoy (a Claude Code session) arrive as notices the stream has no frame for, and the session
+  // answers them through dispatch_message, which the stream shows only as that tool call. Without
   // these the thread would show replies to messages the human cannot see, and no replies at all.
   // Seeing them here is reading them.
   const queryClient = useQueryClient();
@@ -77,8 +92,9 @@ export function AgentConversationPage(): ReactNode {
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
 
-  // Talking to the agent is Dispatch's existing targeted delivery, unchanged: the stream itself
-  // stays read-only and this adds no write path of its own.
+  // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
+  // read-only and this adds no write path of its own. The session confirms a Send or Aside with
+  // Dispatch before it takes one as its user's own turn.
   const onNew = useCallback(
     async (message: { content: readonly { type: string; text?: string }[] }) => {
       const body = message.content
@@ -130,12 +146,12 @@ export function AgentConversationPage(): ReactNode {
           <select
             aria-label="Delivery mode"
             className={`min-h-8 rounded-lg px-2 py-1 text-xs ${inputClasses(false)}`}
-            onChange={(event) => setMode(event.target.value as MessageDeliveryMode)}
+            onChange={(event) => setPicked(event.target.value as MessageDeliveryMode)}
             value={mode}
           >
             {modes.map((candidate) => (
               <option key={candidate} value={candidate}>
-                {candidate}
+                {MODE_LABELS[candidate]}
               </option>
             ))}
           </select>
@@ -172,7 +188,7 @@ export function AgentConversationPage(): ReactNode {
           conversation={conversation}
           empty={emptyText(responding)}
           onNew={onNew}
-          placeholder={`Message ${label} — delivered as ${mode}…`}
+          placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}…`}
           resetKey={sessionId}
           sessionId={sessionId}
           stored={stored.data ?? []}

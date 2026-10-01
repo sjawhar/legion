@@ -128,21 +128,6 @@ func waitForIssued(t *testing.T, b *Broker) {
 
 // --- wire-shape mirrors (contract v9), for decoding the real broker's own responses ---
 
-type contractChallenges struct {
-	Approve string `json:"approve"`
-}
-
-type contractLookupResponse struct {
-	RecordID   string              `json:"record_id"`
-	State      string              `json:"state"`
-	Challenges *contractChallenges `json:"challenges"`
-}
-
-type contractApproveResponse struct {
-	State        string  `json:"state"`
-	CredentialID *string `json:"credential_id"`
-}
-
 type contractSelfResponse struct {
 	EnrollmentID string `json:"enrollment_id"`
 	Kind         string `json:"kind"`
@@ -160,13 +145,13 @@ func contractDecode[T any](t *testing.T, body []byte) T {
 
 // TestContractLoginApprovalEnrollSignAndExpiry drives helper.Broker/Server against a real broker
 // (brokertest.NewRig) end to end: Broker.Login -> a human approves the pending machine login
-// through the real UI routes with a real WebAuthn assertion -> LoginStatus reaches issued ->
-// EnrollBox mints a live enrollment -> a session register (the existing path) enrolls kind host
-// -> sign produces a proof the real broker's own /v1/enrollments/self accepts -> the launcher
-// credential is expired by direct SQL -> the next EnrollBox names the login command again. It
-// also proves the machine key, the session key, and every proof this test produced never touch
-// disk (neither an arbitrary $HOME nor the registry's own persisted sessions.json state file) or
-// a log line.
+// through the real UI routes, by its typed code and the operator's login -> LoginStatus reaches
+// issued -> EnrollBox mints a live enrollment -> a session register (the existing path) enrolls
+// kind host -> sign produces a proof the real broker's own /v1/enrollments/self accepts -> the
+// launcher credential is expired by direct SQL -> the next EnrollBox names the login command
+// again. It also proves the machine key, the session key, and every proof this test produced
+// never touch disk (neither an arbitrary $HOME nor the registry's own persisted sessions.json
+// state file) or a log line.
 func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -184,29 +169,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	}
 
 	// --- approve (human/operator side, over the rig's own UI-bearer HTTP calls) ---
-	status, body := cr.broker.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
-	}
-	looked := contractDecode[contractLookupResponse](t, body)
-	if looked.State != "pending" || looked.Challenges == nil || looked.Challenges.Approve == "" {
-		t.Fatalf("lookup = %+v, want pending with an approve challenge", looked)
-	}
-	challenge, err := base64.RawURLEncoding.DecodeString(looked.Challenges.Approve)
-	if err != nil {
-		t.Fatalf("decode approve challenge: %v", err)
-	}
-	assertion := cr.broker.Approver.Assert(t, brokertest.RPID, brokertest.Origin, challenge)
-	status, body = cr.broker.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"assertion": json.RawMessage(assertion), "code": code})
-	if status != http.StatusOK {
-		t.Fatalf("approve machine record = %d: %s", status, body)
-	}
-	approved := contractDecode[contractApproveResponse](t, body)
-	if approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("approve response = %+v, want state=approved with a credential_id", approved)
-	}
-	credentialID := *approved.CredentialID
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
 
 	// --- LoginStatus reaches issued ---
 	waitForIssued(t, b)
@@ -247,7 +210,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if !signed.OK || signed.Proof == "" || signed.EnrollmentID != reg.EnrollmentID {
 		t.Fatalf("sign: %+v", signed)
 	}
-	status, body = cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": signed.Proof}, nil)
+	status, body := cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": signed.Proof}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/enrollments/self (real broker) = %d: %s", status, body)
 	}
@@ -299,7 +262,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 			}
 		}
 	}
-	for _, token := range []string{code, signed.Proof, string(assertion)} {
+	for _, token := range []string{code, signed.Proof} {
 		if token != "" && strings.Contains(logText, token) {
 			t.Fatalf("a bearer-shaped token appears in the log verbatim: %q", token)
 		}

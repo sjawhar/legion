@@ -286,3 +286,44 @@ describe("the replay budget", () => {
     expect(frames.length).toBeGreaterThan(0);
   });
 });
+
+/** A user message as the host records one: a prompt's text part, stamped once. */
+function user(timestamp: number, text: string) {
+  return { content: [{ text, type: "text" }], role: "user", timestamp };
+}
+
+function dispatchIds(frames: readonly AgentStreamFrame[]): (string | undefined)[] {
+  return frames.map((frame) =>
+    frame.kind === "message" ? frame.message.dispatchMessageId : undefined
+  );
+}
+
+/**
+ * A person's direct message from Dispatch becomes the session's own user turn, and the viewer
+ * also shows Dispatch's stored copy of it. Which user message that is, only the caller knows
+ * (`matchInjectedUserTurn`), so it passes the id with the record, and every frame of that message
+ * carries it.
+ */
+describe("a user turn a Dispatch message became", () => {
+  test("carries the id it was recorded with on every later frame of that message and in the replay", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(SUBJECT, user(10, "Where is the dashboard?"), true, "m-1");
+    publisher.record(SUBJECT, user(10, "Where is the dashboard?"), false);
+    publisher.record(SUBJECT, user(30, "typed at the terminal"), false);
+    publisher.record(SUBJECT, assistant(20, [{ text: "At /dash.", type: "text" }]), false);
+
+    expect(dispatchIds(published)).toEqual(["m-1", "m-1", undefined, undefined]);
+    expect(dispatchIds(publisher.replay("s1").frames)).toEqual(["m-1", undefined, undefined]);
+  });
+
+  test("goes with the conversation when the session is replaced", () => {
+    const { published, publisher } = harness();
+    publisher.record(SUBJECT, user(10, "ship it"), false, "m-1");
+    publisher.reset();
+    publisher.noteViewer();
+    publisher.record(SUBJECT, user(10, "ship it"), false);
+
+    expect(dispatchIds(published)).toEqual([undefined]);
+  });
+});

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { IssueSummary } from "@legion/contracts";
 import { DispatchClient } from "../dispatch-http";
 
 interface RecordedRequest {
@@ -35,16 +36,110 @@ const actor = {
 };
 
 describe("DispatchClient", () => {
-  test("serializes the updated_since boundary when listing issues", async () => {
-    const { fetchImpl, requests } = fakeFetch([jsonResponse([])]);
+  // A summary carrying only what these tests read; the rest of the shape is left out.
+  const issue = (key: string) => ({ key, title: key, status: "todo" }) as unknown as IssueSummary;
+
+  test("asks for a page of the issue listing with the filters and the updated_since boundary", async () => {
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse({ issues: [], total: 0, limit: 5, offset: 10 }),
+    ]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
 
-    await client.listIssues({ project: "DSP", updated_since: "2026-09-10T12:00:00Z" });
+    await client.listIssuePage(
+      { project: "DSP", updated_since: "2026-09-10T12:00:00Z" },
+      { limit: 5, offset: 10 }
+    );
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toContain(
-      "/api/v1/issues?project=DSP&updated_since=2026-09-10T12%3A00%3A00Z"
+      "/api/v1/issues?project=DSP&updated_since=2026-09-10T12%3A00%3A00Z&limit=5&offset=10"
     );
+  });
+
+  test("reads a paging Dispatch's page as served", async () => {
+    const served = { issues: [issue("DSP-4")], total: 4, limit: 3, offset: 3 };
+    const { fetchImpl } = fakeFetch([jsonResponse(served)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    // The page a paging Dispatch cut is the page: nothing is sliced out of it again.
+    await expect(
+      client.listIssuePage({ project: "DSP" }, { limit: 3, offset: 3 })
+    ).resolves.toEqual(served);
+  });
+
+  // A Dispatch that ignores limit and offset answers the whole listing as an array. That is a
+  // server older than the paging listing or a regression of it, so the client refuses it rather
+  // than read every issue to cut the page itself. The refusal names the Dispatch and the whole
+  // request, since a repository can point the tool at a Dispatch of its own.
+  test("refuses a bare array answered to a paged request, naming the request and both causes", async () => {
+    const { fetchImpl } = fakeFetch([
+      jsonResponse(["DSP-1", "DSP-2", "DSP-3", "DSP-4"].map(issue)),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(
+      client.listIssuePage({ project: "DSP", status: "todo" }, { limit: 2, offset: 1 })
+    ).rejects.toThrow(
+      "GET http://dispatch.test/api/v1/issues?project=DSP&status=todo&limit=2&offset=1 asked for " +
+        "a page ({issues, total, limit, offset}) and got a bare array of 4 entries, the unpaged " +
+        "listing, which means that Dispatch is older than sjawhar/legion#1612 or that change has " +
+        "regressed. Retrying will not help: the same request gets the same answer until that " +
+        "Dispatch is upgraded or fixed."
+    );
+  });
+
+  // A JSON answer that is not a page is Dispatch's own and comes back the same on a retry; text in
+  // its place is most likely a proxy or gateway page, which a retry can get past. The agent acts on
+  // the advice, so each kind gets its own.
+  test("refuses an issue listing answer that is not a page, naming what arrived and whether a retry can help", async () => {
+    const { fetchImpl } = fakeFetch([
+      jsonResponse({ issues: "DSP-1", total: 1 }),
+      jsonResponse(null),
+      new Response("<html>bad gateway</html>", { status: 200 }),
+      new Response("{truncat", { status: 200, headers: { "Content-Type": "application/json" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const refusal = () =>
+      client.listIssuePage({ project: "DSP" }, { limit: 50, offset: 0 }).then(
+        () => "",
+        (error: Error) => error.message
+      );
+    const sameAgain =
+      ". Retrying will not help: the same request gets the same answer until that Dispatch is " +
+      "upgraded or fixed.";
+    const maySucceed =
+      "and got text that is not a JSON page, which looks like a proxy or gateway page rather than " +
+      "Dispatch's own answer, so a retry may succeed.";
+
+    expect(await refusal()).toEndWith(
+      `and got an object without an issues array or a numeric limit or a numeric offset${sameAgain}`
+    );
+    expect(await refusal()).toEndWith(`and got null${sameAgain}`);
+    for (const text of [await refusal(), await refusal()]) {
+      expect(text).toEndWith(maySucceed);
+      expect(text).not.toContain("Retrying will not help");
+    }
+  });
+
+  // The executor prints `showing A-B of N` from the served limit and offset, so a page missing
+  // either must be refused rather than read as `showing NaN-NaN of N`.
+  test("refuses a page that does not name its limit and offset", async () => {
+    const { fetchImpl } = fakeFetch([
+      jsonResponse({ issues: [issue("DSP-2")], total: 5 }),
+      jsonResponse({ issues: [issue("DSP-2")], total: 5, limit: 1 }),
+      jsonResponse({ issues: [issue("DSP-2")], total: 5, limit: "1", offset: 1 }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    for (const lacking of [
+      "a numeric limit or a numeric offset",
+      "a numeric offset",
+      "a numeric limit",
+    ]) {
+      await expect(
+        client.listIssuePage({ project: "DSP" }, { limit: 1, offset: 1 })
+      ).rejects.toThrow(`and got an object without ${lacking}. Retrying`);
+    }
   });
 
   test("search encodes q, project, and limit and returns the response body", async () => {

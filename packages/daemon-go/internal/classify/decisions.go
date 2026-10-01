@@ -216,22 +216,27 @@ func pathFrom(pushes []record.ClassifiedPush, head string, unplaced bool) []reco
 // ApprovalStands says whether an approval of reviewed approves the pull request's current head:
 // walking back from the current head through pushes that carry an approval across
 // (carriesApproval) reaches reviewed, so every push between them changed only .legion/. Nothing
-// stands while a push that may change code lies on the path forward from the current head and its
-// new head has not arrived: the push event can come first, and the approval is then of a head
-// already on its way out. That includes a push delivered late, after its new head arrived and the
-// branch returned to this one: nothing tells it from the same two heads pushed again, so it blocks
-// until the next head arrives, by design. In Legion's flow one always follows an approval (the
-// reviewer's handoff push).
+// stands while a push that may change code is on its way (CodeOnItsWay): the push event can come
+// first, and the approval is then of a head already on its way out.
 func ApprovalStands(pr record.PullRequest, reviewed string) bool {
-	if reviewed == "" {
+	if reviewed == "" || CodeOnItsWay(pr) {
 		return false
 	}
+	return carriedBack(pr.Pushes, pr.HeadSHA, reviewed)
+}
+
+// CodeOnItsWay says whether a push that may change code lies on the path forward from the pull
+// request's current head, its new head not arrived yet. That includes a push delivered late, after
+// its new head arrived and the branch returned to this one: nothing tells it from the same two
+// heads pushed again, so it counts until the next head arrives, by design. In Legion's flow one
+// always follows an approval (the reviewer's handoff push).
+func CodeOnItsWay(pr record.PullRequest) bool {
 	for _, p := range pathFrom(pr.Pushes, pr.HeadSHA, true) {
 		if p.MayChangeCode() {
-			return false
+			return true
 		}
 	}
-	return carriedBack(pr.Pushes, pr.HeadSHA, reviewed)
+	return false
 }
 
 // carriedBack is whether earlier is head, or walking back from head through pushes that carry an

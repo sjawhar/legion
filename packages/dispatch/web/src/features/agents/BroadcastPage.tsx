@@ -25,6 +25,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import { MODE_LABELS } from "../conversation/delivery";
 import {
   capabilitiesForTarget,
   DeliveryRetry,
@@ -130,8 +131,8 @@ function BroadcastRecipientRow({
             Retry
           </button>
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
-            Nobody is carrying this send. Retry uses {latest?.delivery ?? delivery} again, which
-            cannot deliver it twice.
+            Nobody is carrying this send. Retry uses {MODE_LABELS[latest?.delivery ?? delivery]}{" "}
+            again, which cannot deliver it twice.
           </p>
         </div>
       ) : null}
@@ -185,7 +186,7 @@ export function BroadcastPage(): ReactNode {
           Broadcast to {sent.recipients.length} {sent.recipients.length === 1 ? "agent" : "agents"}
         </h1>
         <p className={`mt-1 flex flex-wrap items-center gap-2 text-sm ${textMutedOnCanvas}`}>
-          <LabelPill>{sent.delivery}</LabelPill>
+          <LabelPill>{MODE_LABELS[sent.delivery]}</LabelPill>
           <span>{resolveAuthor(sent.author, titles).label}</span>
           <Timestamp at={sent.created_at} />
           <span>

@@ -39,6 +39,12 @@ export interface SessionContext {
     readonly ensureOnDisk: () => Promise<void>;
     /** Entries of the active branch; non-empty at session_start on resume. */
     readonly getBranch?: () => readonly unknown[];
+    /**
+     * Every entry the session holds, on every branch of its tree, in the order they were written
+     * (the header excluded; `ReadonlySessionManager.getEntries`). An entry `pi.appendEntry` wrote
+     * is in it at once, before the transcript reaches disk.
+     */
+    readonly getEntries: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
@@ -322,6 +328,12 @@ export interface PiApi {
       | { readonly type: string },
     options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
   ) => void;
+  /**
+   * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
+   * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
+   * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
+   */
+  readonly sendUserMessage: (content: string, options?: { readonly deliverAs: "aside" }) => void;
   /**
    * The fork's side turn before Oh My Pi 18.3: the same call as `SessionContext.runEphemeralTurn`,
    * with the question wrapped in the /btw prompt by the host.

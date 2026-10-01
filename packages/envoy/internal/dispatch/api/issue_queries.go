@@ -32,7 +32,13 @@ var issueStatusCase = issueStatusOrderSQL()
 // where state = 'open' index instead of forcing a sequential scan of asks.
 // The components lateral yields one row per issue, so grouping by its columns
 // with the key adds no rows. listPinnedIssuesQuery is the same query joined
-// to the caller's pinned rows ($9 is the login).
+// to the caller's pinned rows ($9 is the login). The order ends on the key, the
+// one column no two issues share, so it is total, and pages cut at consecutive
+// offsets (parseIssuePage) cannot show a row twice or never while the listing
+// does not change between the reads (issuePage.of says what a change does).
+// Without the key they could: ranks repeat across projects (every project's
+// first issue is "U"), nothing makes one unique within a project, and
+// created_at is the creating transaction's start.
 var listIssuesQuery = issueSummaryHead + issueSummaryTail
 
 var listPinnedIssuesQuery = issueSummaryHead + `
@@ -62,7 +68,7 @@ var issueSummaryTail = `
 	       or i.priority = any($7::smallint[])
 	       or ($8::boolean and i.priority is null))
 	group by i.key, ` + issueComponentsColumns + `
-	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
+	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc, i.key asc
 `
 
 const (
@@ -176,6 +182,11 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	page, err := parseIssuePage(query)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	listQuery := listIssuesQuery
 	// A route matters only while there is work to reach, so the route_status filter reads open
 	// issues alone: the owner audit is every open issue whose route reaches nobody.
@@ -205,6 +216,12 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		issues = slices.DeleteFunc(issues, func(issue model.IssueSummary) bool {
 			return issue.RouteStatus == nil || *issue.RouteStatus != routeStatus
 		})
+	}
+	// The page is cut from the listing every filter has narrowed, route_status included, which
+	// is applied here rather than in SQL, so total counts what the caller's filters match.
+	if page != nil {
+		WriteJSON(w, http.StatusOK, page.of(issues))
+		return
 	}
 	WriteJSON(w, http.StatusOK, issues)
 }

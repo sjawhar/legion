@@ -17,7 +17,6 @@ func validEnv() map[string]string {
 	return map[string]string{
 		"BROKER_DATABASE_URL": "postgres://x",
 		"BROKER_PUBLIC_URL":   "https://secrets.internal.example",
-		"BROKER_UI_ORIGIN":    "https://secrets-ui.internal.example",
 		"BROKER_UI_TOKEN":     "ui-token",
 		"BROKER_RULES_FILE":   "/r.yaml",
 	}
@@ -45,14 +44,21 @@ func TestLoadRefusesDispatchVariables(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresUIOriginAndToken(t *testing.T) {
+// TestLoadRefusesUIOrigin pins that BROKER_UI_ORIGIN, the WebAuthn origin approval by Dispatch
+// login removed, fails loudly rather than being silently ignored: a deployment still setting it
+// was built for the key-signature design and must be updated, not run half-migrated.
+func TestLoadRefusesUIOrigin(t *testing.T) {
 	e := validEnv()
-	delete(e, "BROKER_UI_ORIGIN")
-	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_UI_ORIGIN") {
-		t.Fatalf("expected BROKER_UI_ORIGIN refusal, got %v", err)
+	e["BROKER_UI_ORIGIN"] = "https://secrets-ui.internal.example"
+	_, err := Load(env(e))
+	want := "BROKER_UI_ORIGIN is removed; approval is by Dispatch login, so the broker checks no WebAuthn origin (AGENTC-393)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Load(BROKER_UI_ORIGIN set) = %v, want %q", err, want)
 	}
+}
 
-	e = validEnv()
+func TestLoadRequiresUIToken(t *testing.T) {
+	e := validEnv()
 	delete(e, "BROKER_UI_TOKEN")
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_UI_TOKEN") {
 		t.Fatalf("expected BROKER_UI_TOKEN refusal, got %v", err)

@@ -73,7 +73,13 @@ import {
   type ThreadReply,
   visibleConversationItems,
 } from "./conversation-model";
-import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  duplicateText,
+  isSafeRetry,
+  MODE_LABELS,
+  safeRetryGuidance,
+  withGuidance,
+} from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -497,13 +503,7 @@ function CommentDeliveryList({
             )}
             {disabled || canRetry ? null : (
               <span className={textMutedOnSurface}>
-                {delivery.target} no longer supports{" "}
-                {delivery.delivery === "btw"
-                  ? "BTW"
-                  : delivery.delivery === "aside"
-                    ? "Aside"
-                    : "normal delivery"}
-                .
+                {delivery.target} no longer supports {MODE_LABELS[delivery.delivery]}.
               </span>
             )}
           </li>
@@ -1373,8 +1373,8 @@ export function ConversationTab({
                   set its own width it pushed the line, the turns list and the document past
                   the viewport. The description keeps a floor so it wraps as prose rather than
                   one word per line. */}
-              {/* Who and when are one group that never breaks: the time used to wrap alone to
-                  the start of the next row once the author took most of the line. The author
+              {/* Who and when are one group that never breaks, so the time never wraps alone to
+                  the start of the next row when the author takes most of the line. The author
                   truncates inside it, with the full label on hover - a live session title can
                   be a whole sentence - and only the description wraps, with a floor so it
                   wraps as prose rather than one word per line. */}

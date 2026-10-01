@@ -75,18 +75,9 @@ type Current struct {
 }
 
 // NewCurrent loads loader once (a failure here is fatal) and then reloads on a ticker.
-// onReload, when given (at most the first value is used), is called with every successfully
-// parsed Set before it is adopted — Task 8 wires it to approvers.Service.Reconcile so a rules
-// edit is rejected, and the previous set kept, whenever it would leave the persisted approver
-// key set unable to satisfy it. A nil or omitted onReload adopts every successfully parsed Set
-// unconditionally, matching this function's pre-Task-8 behavior.
-func NewCurrent(ctx context.Context, loader Loader, reload time.Duration, alarm func(error), onReload ...func(*Set) error) (*Current, error) {
-	var hook func(*Set) error
-	if len(onReload) > 0 {
-		hook = onReload[0]
-	}
+func NewCurrent(ctx context.Context, loader Loader, reload time.Duration, alarm func(error)) (*Current, error) {
 	c := &Current{}
-	set, err := loadAndReconcile(ctx, loader, hook)
+	set, err := load(ctx, loader)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +90,7 @@ func NewCurrent(ctx context.Context, loader Loader, reload time.Duration, alarm 
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				next, err := loadAndReconcile(ctx, loader, hook)
+				next, err := load(ctx, loader)
 				if err != nil {
 					alarm(err)
 					continue
@@ -109,19 +100,6 @@ func NewCurrent(ctx context.Context, loader Loader, reload time.Duration, alarm 
 		}
 	}()
 	return c, nil
-}
-
-func loadAndReconcile(ctx context.Context, loader Loader, hook func(*Set) error) (*Set, error) {
-	set, err := load(ctx, loader)
-	if err != nil {
-		return nil, err
-	}
-	if hook != nil {
-		if err := hook(set); err != nil {
-			return nil, fmt.Errorf("rules: reload reconciliation refused: %w", err)
-		}
-	}
-	return set, nil
 }
 
 func load(ctx context.Context, loader Loader) (*Set, error) {

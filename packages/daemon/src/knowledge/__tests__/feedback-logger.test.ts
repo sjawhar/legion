@@ -106,6 +106,8 @@ describe("captureLearningFeedbackFromWorkspace", () => {
 
     await mkdir(workspaceDir, { recursive: true });
     writePhaseHandoff(workspaceDir, "plan", {
+      gapAnalysis: { findings: [] },
+      planReview: { verdict: "approved", rounds: 1 },
       requiredSkills: { implement: ["using-jj"], test: ["testing"], review: ["testing"] },
       learningsHelpful: ["docs/solutions/knowledge/plan.md"],
       learningsInjected: ["docs/solutions/knowledge/shared.md"],

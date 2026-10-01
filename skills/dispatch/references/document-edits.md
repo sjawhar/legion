@@ -43,7 +43,15 @@ within one textblock; split changes that span separate blocks into separate oper
 `block` plus a zero-based `index`. An insert or move anchor is a quote, `"start"`, `"end"`, `"heading:Title"`, or `"block:<id>"`.
 Ordinary inserts create a sibling block before or after the quote, heading, or block's enclosing document block, and a move lands the
 block at that same boundary; `"start"` and `"end"` select the document edges. At a table-cell quote, a body-row fragment (no header or
-delimiter rows) extends that table before or after the matched row instead; short rows are padded, wider rows are rejected, and deleting
+delimiter rows) extends that table before or after the matched row instead, decided in three steps. A fragment whose every line yields
+a cell and an unescaped `|` (a lone `|` yields no cell, and a line whose only pipe is `\|` has no separator), with no line a delimiter
+row of three hyphens or more a cell, is parsed as rows of that table. What that parse refuses is refused: a row holding text past the
+table's width as `TABLE_WIDTH` (blank cells there are dropped), a line the table cannot hold as a row (indented code, `2. | a | b |`)
+as `INVALID_OP`. When it refuses nothing and reads every line as a row, the rows are inserted, short ones padded. Any other fragment is
+read on its own as blocks, which are inserted after the table or refused as such blocks would be: a whole table you paste there, its
+delimiter row three hyphens or more a cell, becomes a second table, while one with any delimiter cell of one or two hyphens (`| - |`,
+`| --- | - |`) passes the first step, so its header and delimiter rows are inserted as rows of the table, or refused as `TABLE_WIDTH`
+where it is wider than the table. Deleting
 a cell's quoted text removes only that text. `delete_row` / `delete_column` instead mutate their named table in place, keeping the
 table's block id. A row index includes the header: row `0` is the header and its deletion promotes the first body row. The last body
 row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is
@@ -115,6 +123,10 @@ paragraph you replaced, which keeps that paragraph's id; only when no paragraph 
 the old block's place is it a `delete` of the old block and then an `insert` of the new one, anchored on the
 block before or after it. The delete is what costs the id (below); a typed block keeps its id when the insert
 carries it, which works only in that order, because an insert carrying an id the document still holds is refused.
+The tools refuse a `delete` or `retype` that would take out an `ask` block whose ask is still open, delete-then-insert included:
+reword it with `replace`, relocate it with `move`, or change its question, options, urgency or `multiple` with `dispatch_edit_ask` if you asked it. A single
+batch that moves an open block out of a container and then deletes the container is refused; make them two calls (the check reads
+the document as it stood before the batch).
 Then read the document back with
 `dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
 `with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill
@@ -129,8 +141,8 @@ A `delete` whose `find` is a block's entire text removes the block itself — th
 a list emptied of every item disappears with it; a partial match keeps the block with its remaining text. Deleting the text of a bullet
 that holds a nested list hoists that list's items into the bullet's place (as an outliner does); a bullet with any other content
 (paragraphs, code, tables) is refused with `INVALID_OP` naming `delete {block:"<item id>"}`, which removes the item with its content.
-`delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; deleting an open `ask` block
-retracts its ask, while an answered one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
+`delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; an answered `ask` block keeps
+its answer as the record, and a resolved one, which carries no answer, its resolution), and `move` with `block` relocates one, keeping its id and
 attributes — a moved `ask` keeps its ask and answer. **A block loses its id only when it is removed**, and its anchors go with it:
 `delete` by text or by id removes the block and any container it empties; `delete_row` / `delete_column` remove their cells' ids,
 which is why they are refused while an open ask or unresolved comment sits on them; and a `move` that takes the last block out of a
@@ -174,3 +186,9 @@ deletion cannot undo a removal.
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
 an existing paragraph is the question that should become a decision.
+
+An ask block has two ids: the block id, shown as `:::ask{#<id> …}` in the rendered document and
+taken bare by `move`/`delete` in `block` (the `block:<id>` form is only for `before`/`after`
+anchors), and the ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read`
+and `dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
+`not found`.

@@ -372,12 +372,12 @@ func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T)
 // 0033's table, on the raw actor id, while the read mark above is canonical. The write's rawness
 // is what this pins - canonicalising it while the read stays raw loses a non-lowercase viewer's
 // Clear outright and puts their count back up. The second read pins the keying itself, which
-// packages/envoy/AGENTS.md records as a known inconsistency this change does not fix: a future
-// backfill that normalises user_agent_state turns it red on purpose, as the invariant asking to
-// be decided again rather than a fault in the change that trips it. Why the write must stay raw
-// is held by neither assertion, since canonicalising the write and the state query's read
-// together is self-consistent and green: a Dispatch image predating user_agent_read wrote
-// cleared_before under the raw actor id and must still read it back across a rolling deploy.
+// packages/envoy/AGENTS.md records as a known inconsistency: a future backfill that normalises
+// user_agent_state turns it red on purpose, as the invariant asking to be decided again rather
+// than a fault in the change that trips it. Why the write must stay raw is held by neither
+// assertion, since canonicalising the write and the state query's read together is
+// self-consistent and green: a Dispatch image predating user_agent_read wrote cleared_before under
+// the raw actor id and must still read it back across a rolling deploy.
 func TestClearIsKeyedOnTheRawActorID(t *testing.T) {
 	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
 	first := decodeBody[model.Message](t, reply("On it."))
@@ -890,9 +890,9 @@ func assertRootCarriesDelivery(t *testing.T, database *store.Store, rootID, sess
 // is that its other member stays green.)
 //
 // The flag a conversation comes back with is the read mark's verdict, not "this session has
-// replied here". Written by the Legion PO's reviewer (#1533, issuecomment-5865095561), green at
-// 13dbc553; it hangs off directConversationFrom, as TestARootInBothCandidateBranchesIsListedOnce
-// does, so a change to that helper fails both at once, which is the point of sharing it.
+// replied here". It hangs off directConversationFrom, as
+// TestARootInBothCandidateBranchesIsListedOnce does, so a change to that helper fails both at
+// once, which is the point of sharing it.
 func TestTheWindowsUnreadFlagIsReadAgainstTheMarkNotThePresenceOfAReply(t *testing.T) {
 	handler, _, readRoot, replyToRead, _ := directConversationFrom(t, "alice")
 	readReply := decodeBody[model.Message](t, replyToRead("Answered, and read."))

@@ -274,16 +274,55 @@ test("reopening the same reply restores its canonical prefills after cancel", as
   }
 });
 
-test("a token-only direct-session draft cannot submit an empty message", () => {
+/** Send's refusal as a reader meets it: `aria-disabled`, and the reason on `title` and in the
+ *  element `aria-describedby` names. */
+interface SendRefusal {
+  readonly description: string | null;
+  readonly disabled: string | null;
+  readonly title: string | null;
+}
+
+function sendRefusal(): SendRefusal {
+  const send = screen.getByRole("button", { name: "Send" });
+  const describedBy = send.getAttribute("aria-describedby");
+  return {
+    description:
+      describedBy === null ? null : (document.getElementById(describedBy)?.textContent ?? null),
+    disabled: send.getAttribute("aria-disabled"),
+    title: send.getAttribute("title"),
+  };
+}
+
+/** Presses Send both ways a reader can - the button, and Ctrl+Enter in the box - then waits a
+ *  task. TanStack awaits `onMutate` before it calls the mutation function, so an API spy read
+ *  straight after the press shows no call whether or not Send refused. */
+async function pressSend(field: HTMLElement): Promise<void> {
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 20);
+  await promise;
+}
+
+test("a token-only direct-session draft cannot submit an empty message, and Send says why", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/aside " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    const field = screen.getByLabelText("Comment");
+    for (const command of ["/btw", "/aside"]) {
+      fireEvent.change(field, { target: { value: `${command} ` } });
+      const reason = `Type the message after ${command}.`;
+      expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
+      await pressSend(field);
+      expect(createAgentMessage).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull();
+    }
+    fireEvent.change(field, { target: { value: "/btw status?" } });
+    expect(sendRefusal()).toEqual({ description: null, disabled: null, title: null });
   } finally {
     view.unmount();
+    createAgentMessage.mockRestore();
   }
 });
 
@@ -402,7 +441,8 @@ test("a command on a plain legacy reply stays verbatim and sends no delivery", a
   }
 });
 
-test("a token-only targeted legacy reply cannot submit", () => {
+test("a token-only targeted legacy reply cannot submit, and Send says why", async () => {
+  const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
       author: "Planner",
@@ -414,10 +454,16 @@ test("a token-only targeted legacy reply cannot submit", () => {
   });
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    const field = screen.getByLabelText("Comment");
+    fireEvent.change(field, { target: { value: "/btw " } });
+    const reason = "Type the message after /btw.";
+    expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
+    await pressSend(field);
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull();
   } finally {
     view.unmount();
+    createMessage.mockRestore();
   }
 });
 
@@ -735,11 +781,45 @@ test("a direct-session reply warns before sending when the target does not adver
 
   try {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
-    expect(screen.getByText(/Worker does not advertise Steer/)).toBeTruthy();
+    expect(screen.getByText(/Worker does not advertise Send/)).toBeTruthy();
   } finally {
     view.unmount();
   }
 });
+
+// The warning's way out names only a mode the session takes: a Claude Code session advertises
+// Aside alone, so offering it /btw would suggest a send that fails the same way.
+for (const [name, capabilities, suggestion] of [
+  [
+    "an aside-only session is offered /aside",
+    ["aside"],
+    "Prefix with /aside to send it as an Aside instead.",
+  ],
+  ["a BTW-only session is offered /btw", ["btw"], "Prefix with /btw to send it as a BTW instead."],
+  [
+    "a session taking both is offered both",
+    ["aside", "btw"],
+    "Prefix with /btw or /aside to send it as a BTW or an Aside instead.",
+  ],
+  ["a session taking neither is offered nothing", [], undefined],
+] as const) {
+  test(`when a session does not advertise Send, ${name}`, () => {
+    const session: Agent = { ...worker, capabilities: [...capabilities] };
+    const { view } = renderComposer({
+      agents: [session],
+      owner: { kind: "session", sessionId: "B" },
+    });
+
+    try {
+      fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
+      const warning = screen.getByText(/Worker does not advertise Send, so sending it records/);
+      if (suggestion === undefined) expect(warning.textContent).not.toContain("Prefix with");
+      else expect(warning.textContent).toContain(suggestion);
+    } finally {
+      view.unmount();
+    }
+  });
+}
 
 test("mentioning two targets that both lack the outbound mode names both in the warning", async () => {
   const { view } = renderComposer({ agents: [planner, worker] });
@@ -756,7 +836,7 @@ test("mentioning two targets that both lack the outbound mode names both in the 
     await screen.findByRole("option", { name: "Worker" });
     fireEvent.click(screen.getByRole("option", { name: "Worker" }));
     await waitFor(() => expect(field.value).toBe("@Planner x @Worker"));
-    expect(screen.getByText(/Planner and Worker do not advertise Steer/)).toBeTruthy();
+    expect(screen.getByText(/Planner and Worker do not advertise Send/)).toBeTruthy();
   } finally {
     view.unmount();
   }

@@ -1,9 +1,9 @@
 # Documents: typed blocks, comments, suggestions, and artifacts
 
 `skill://dispatch` sends you here when you write a typed block (an `:::ask` or a callout), comment on
-or suggest a change to a document, upload an artifact, or get `DOC_SCHEMA`, `INVALID_ASK_BLOCK` or
-`DOC_SERVICE_UNAVAILABLE` back. Changing a document's text, tables included, is
-[Editing a document](skill://dispatch/references/document-edits.md).
+or suggest a change to a document, upload an artifact, request a document's approval, or get
+`DOC_SCHEMA`, `INVALID_ASK_BLOCK` or `DOC_SERVICE_UNAVAILABLE` back. Changing a document's text,
+tables included, is [Editing a document](skill://dispatch/references/document-edits.md).
 
 ## Typed blocks
 
@@ -11,14 +11,22 @@ The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write 
 container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
 and a closing line of as many colons at the same nesting. A typed block directly inside another needs the outer
 one's fence a colon longer (`::::callout{…}` around a `:::callout{…}`), and so does one whose code holds a `:::` line;
-Dispatch writes its fences that way. An unclosed typed block at document level is rejected. For
+Dispatch writes its fences that way. An unclosed typed block at document level is rejected. An
+opening line that continues a paragraph instead of standing on its own (indented four or more
+columns under the paragraph's text) is refused, naming the line's number and text - `INVALID_OP` on an edit's `markdown` or `with`, `INVALID_MARKDOWN` on any other write - since it
+would be stored as the paragraph's text; start the block on its own line. An opening written inside
+a line is stored as text, and `dispatch_issue` and `dispatch_artifact` quote it back as a
+typed-block opening that is text, not a block. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
 its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
 names one block, so an insert, upload or suggestion whose markdown names an id the document holds
 outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
 `INVALID_MARKDOWN` for any other write. To rewrite such a block whole, `delete` it and then
 `insert` the new one carrying its id, anchored on the block before or after it, in that order and
-in one batch: an insert carrying an id the document still holds is refused.
+in one batch: an insert carrying an id the document still holds is refused. An `ask` block whose ask
+is still open cannot be rewritten that way: the tools refuse the `delete`, so reword it with
+`replace`, relocate it with `move`, or change its question, options, urgency or `multiple` with
+`dispatch_edit_ask` if you asked it ([Editing a document](skill://dispatch/references/document-edits.md)).
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf
@@ -127,6 +135,34 @@ Documents are CommonMark. A bare `<https://example.com|text>` is a CommonMark au
 dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|text>` displays as `<https://example.com|text>` in the
 document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,
 still belongs inside a fenced code block, where it survives verbatim both ways.
+
+A table cell ends at every `|` not written `\|`, inside inline code and links too, so write
+`` `x: Promise<void> \| undefined` ``, never `` `x: Promise<void> | undefined` ``, in a cell. A row
+holding text in a cell past its table's width is refused rather than stored without it, naming the
+row: write a `|` inside a cell as `\|`, or, where the row really has more cells, give the header and
+delimiter rows as many. Blank cells past the width are dropped, on every path. A spec, an upload or
+a version answers `INVALID_MARKDOWN`, an insert of blocks `INVALID_OP` on `markdown`, and an insert
+of bare table rows `TABLE_WIDTH`, which names the cell counts only.
+
+## Approval requests
+
+```
+dispatch_request_approval({ issue?, project?, artifact?, summary })
+```
+
+The call opens an approval ask with the options `Approve` and `Request changes`, its question
+"Approve spec.md (version N)?" followed by `summary`, where N is the document's latest version. It
+is refused, with nothing sent, while that version holds a decision block open, and the refusal
+names each block and its ask. An answer or a `dispatch_resolve_ask` closes the ask at once but
+reaches a version only when the document settles, about two seconds later, or with your next
+`dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
+in) and then request. A block written in the last few seconds counts as open before Dispatch has
+opened its ask. A repeat at the same version returns the open request unchanged. A new version
+retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
+the new version once its blocks are settled. The answer reaches you as `artifact.approved` or
+`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
+which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show the document's
+approval state; `stale` means it was approved and then edited.
 
 ## A document that is reloading
 

@@ -37,10 +37,12 @@ import {
   ASK_URGENCIES,
   actorLabel,
   claimHolds,
+  DEFAULT_ISSUE_PAGE_LIMIT,
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
   overCapMessage,
+  PROJECT_KEY_PATTERN,
   serviceSubjectLabel,
   snippetText,
   zodSchemaApi,
@@ -177,13 +179,28 @@ function renderAdvice(
   const openAsks = advice.your_open_asks;
   const writesSinceHuman = advice.session_writes_since_human;
   const lines: string[] = [];
+  const unparsed = advice.unparsed_openers;
+  if (
+    unparsed !== undefined &&
+    unparsed.count > 0 &&
+    (tool === "dispatch_issue" || tool === "dispatch_artifact")
+  ) {
+    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
+    const subject =
+      unparsed.count === 1
+        ? "1 typed-block opening in this document is text, not a block"
+        : `${unparsed.count} typed-block openings in this document are text, not blocks`;
+    lines.push(
+      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`
+    );
+  }
   if (
     advice.decision_blocks === 0 &&
     opts.isPrimarySpec === true &&
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
     lines.push(
-      'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+      'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
     );
   }
 
@@ -858,7 +875,7 @@ async function resolveOwnerArguments(
     problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
-    if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
+    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push("project must be a project key such as CORE");
     }
     const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
@@ -1578,6 +1595,149 @@ async function openArtifactMarks(
   ];
 }
 
+/** The asks of the document's `ask` blocks. An issue lists them under the issue, since the artifact
+ * route refuses an issue document; an unlinked document lists its own. */
+async function blockAsks(
+  client: DispatchClient,
+  resolved: ResolvedArtifact,
+  state?: "all" | "open" | "answered"
+): Promise<Array<Ask & { readonly block_id: string }>> {
+  const asks = await (resolved.issue === undefined
+    ? client.getArtifactAsks(resolved.artifact.id, state)
+    : client.listIssueAsks(resolved.issue.key, state));
+  return asks.filter(
+    (ask): ask is Ask & { readonly block_id: string } =>
+      typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id
+  );
+}
+
+/**
+ * Refuses an approval request while the document holds an open decision block. A request names
+ * the latest version, and a new version retracts it, so a request over a block the human has yet
+ * to answer goes stale the moment they answer it. The live document's `ask` blocks are judged by
+ * the latest version, the one the request would name: a block that version shows open counts as
+ * open even when its ask is already answered or closed, since that answer reaches a version only
+ * when the document settles, about two seconds later, or with the next edit (the agent's fold of
+ * the answer into the text). A block not yet in that version counts as open too. A block removed
+ * from the document is not judged here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is
+ * open in it. A document already approved at its latest version is left to the server, which
+ * answers with that approval.
+ */
+async function refuseOpenDecisionBlocks(
+  client: DispatchClient,
+  tool: string,
+  resolved: ResolvedArtifact
+): Promise<void> {
+  const artifact = resolved.artifact;
+  const latest = artifact.approval?.latest_version;
+  // No approval state means no document version to approve: the server's own refusal says so.
+  if (latest === undefined || latest < 1 || artifact.approval?.state === "approved") return;
+  const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
+  if (blocks.length === 0) return;
+  const [documentAsks, version] = await Promise.all([
+    blockAsks(client, resolved),
+    client.docRead(artifact.id, latest),
+  ]);
+  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
+  const lines = version.markdown.split("\n");
+  const open = blocks.flatMap((block) => {
+    const ask = asks.get(block.id);
+    const named =
+      ask === undefined
+        ? `block ${block.id}`
+        : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
+    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
+    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
+    // whose lines carries a state is open.
+    const states = lines
+      .filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`))
+      .map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
+    if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
+    if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
+    if (ask === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
+    if (ask.state === "open") return [named];
+    // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
+    const next =
+      ask.state === "answered"
+        ? "fold the answer into the text"
+        : "write the decision into the text";
+    return [
+      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`,
+    ];
+  });
+  if (open.length === 0) return;
+  const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
+  throw new Error(
+    [
+      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+      ...open.map((line) => `- ${line}`),
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again.",
+    ].join("\n")
+  );
+}
+
+/**
+ * Refuses a document edit that would take a decision block out of the document while its ask is
+ * open: a `delete` of the block or of a block holding it, or a `retype` of it into another type.
+ * The edit writes its version at once; about two seconds later settlement retracts the ask in the
+ * system's name and writes no version, so the human's question leaves the Inbox unanswered and an
+ * approval request made after it names a version with no open block for
+ * `refuseOpenDecisionBlocks` to find. An `insert` in the same batch that carries the block's id
+ * does not exempt it: telling a block written back from an opener quoted in code needs the
+ * server's parser, so the executor fails closed, as `refuseOpenDecisionBlocks` does for a quoted
+ * opener. An open block is reworded with `replace`, moved with `move`, or, when this session asked
+ * it, has its question, options, urgency or multiple changed with `dispatch_edit_ask`; each keeps
+ * it. Costs nothing for an edit with no such operation, then one
+ * `GET /artifacts/{id}/blocks`, and the owner's asks only when an operation reaches an `ask` block.
+ */
+async function refuseRemovingOpenDecisionBlocks(
+  client: DispatchClient,
+  tool: string,
+  resolved: ResolvedArtifact,
+  ops: readonly EditOp[]
+): Promise<void> {
+  const removing = ops.filter(
+    (operation) =>
+      operation.block !== undefined &&
+      (operation.op === "delete" || (operation.op === "retype" && operation.type !== "ask"))
+  );
+  if (removing.length === 0) return;
+  const artifact = resolved.artifact;
+  const blocks = await client.artifactBlocks(artifact.id);
+  const askBlocks = blocks.filter((block) => block.type === "ask");
+  const removed = new Set<string>();
+  for (const operation of removing) {
+    const target = blocks.find((block) => block.id === operation.block);
+    if (target === undefined) continue;
+    // A delete takes every block inside the one it names; a retype changes only that block.
+    for (const block of askBlocks) {
+      if (
+        block.id === target.id ||
+        (operation.op === "delete" && block.from >= target.from && block.to <= target.to)
+      ) {
+        removed.add(block.id);
+      }
+    }
+  }
+  if (removed.size === 0) return;
+  const asks = await blockAsks(client, resolved, "open");
+  const open = asks.filter((ask) => removed.has(ask.block_id));
+  if (open.length === 0) return;
+  const [what, question] =
+    open.length === 1
+      ? ["a decision block whose ask is", "question"]
+      : [`${open.length} decision blocks whose asks are`, "questions"];
+  throw new Error(
+    [
+      `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+      ...open.map(
+        (ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`
+      ),
+      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+    ].join("\n")
+  );
+}
+
 /**
  * A Dispatch refusal carrying its own code in the message the host shows: the code
  * (ISSUE_CLAIMED, CLAIM_CONTENDED, EXTERNAL_LINK_TAKEN, ...) is the part an agent acts on, and
@@ -1979,19 +2139,25 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
-      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
-      const issues = await client.listIssues({
-        project,
-        ...(status === undefined ? {} : { status }),
-        ...(parent === undefined ? {} : { parent }),
-        ...(label === undefined ? {} : { label }),
-        ...(priority === undefined ? {} : { priority }),
-        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
-        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
-      });
-      const total = issues.length;
-      const rows = issues.slice(offset, offset + limit).map((row) => ({
+      const page = await client.listIssuePage(
+        {
+          project,
+          ...(status === undefined ? {} : { status }),
+          ...(parent === undefined ? {} : { parent }),
+          ...(label === undefined ? {} : { label }),
+          ...(priority === undefined ? {} : { priority }),
+          ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+          ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
+        },
+        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
+        // negative or fractional offset.
+        {
+          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+          offset: optionalNumber(args, "offset") ?? 0,
+        }
+      );
+      const { total, limit, offset } = page;
+      const rows = page.issues.map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -2349,6 +2515,7 @@ export async function executeDispatchTool(
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
       const precondition = rawPrecondition as EditPrecondition | undefined;
+      await refuseRemovingOpenDecisionBlocks(client, input.tool, resolved, ops);
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,
         ...(summary === undefined ? {} : { summary }),
@@ -2458,7 +2625,11 @@ export async function executeDispatchTool(
           ? ownerArguments.ref.id
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
-      const result = await client.requestApproval(resolved.artifact.id, { actor });
+      await refuseOpenDecisionBlocks(client, input.tool, resolved);
+      const result = await client.requestApproval(resolved.artifact.id, {
+        actor,
+        summary: stringArg(args, "summary"),
+      });
       if (result.ask === null) {
         return {
           text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
@@ -2473,7 +2644,7 @@ export async function executeDispatchTool(
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }

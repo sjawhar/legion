@@ -10,6 +10,7 @@ import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import pkg from "../package.json";
+import { matchInjectedUserTurn } from "../src/dispatch-user-turn";
 import {
   classifySession,
   generation,
@@ -232,9 +233,9 @@ function isSingleLegionCommand(command: unknown): boolean {
 
 // Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
 // operation log: `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite it for
-// every tree at once (LEGION-45: one worker's `jj undo` rewrote nine of another tree's commits).
-// The tool_call hook refuses them in every phase-worker pane. `restore`/`revert` are operation-log
-// commands only under `op`/`operation`; `jj restore <paths>` is file-level and stays allowed.
+// every tree at once (LEGION-45). The tool_call hook refuses them in every phase-worker pane.
+// `restore`/`revert` are operation-log commands only under `op`/`operation`; `jj restore <paths>`
+// is file-level and stays allowed.
 const JJ_LOG_REWRITE_WORDS = ["undo", "abandon"];
 const JJ_OP_WORDS = ["op", "operation"];
 const JJ_OP_LOG_REWRITE_WORDS = ["restore", "revert"];
@@ -1049,11 +1050,18 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   // The daemon's assignment (a user message) opens the phase; an Envoy delivery re-arms a stall
-  // that already had its follow-up or a WAITING reply. The `legion` tool's successful
-  // `handoff_complete` closes it (`onPhaseCompleted`, below).
+  // that already had its follow-up or a WAITING reply. A person's direct message that envoy.ts
+  // sent in as the user's own turn is a user message too, but it is an inbound event, as its Envoy
+  // card was: the record envoy.ts keeps of the turns it sent in says which user message that is,
+  // whichever of the two extensions asks first. A turn that record misses falls through to
+  // `inboundKind` and counts as an assignment; `packages/pi-envoy/AGENTS.md` (the phase-worker
+  // section) says which turns it misses. The `legion` tool's successful `handoff_complete` closes
+  // the phase (`onPhaseCompleted`, below).
   pi.on("message_start", async (event, context) => {
     if (!phaseWorkerSession(context)) return;
-    const kind = inboundKind(event.message);
+    const injected =
+      matchInjectedUserTurn(context.sessionManager.getSessionId(), event.message) !== undefined;
+    const kind = injected ? "inbound-event" : inboundKind(event.message);
     if (kind !== undefined) advancePhaseStall({ kind });
   });
 

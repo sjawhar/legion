@@ -44,14 +44,25 @@ fi
 PATH="${PATH#*:}" exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
 
+// fakeCodegraph is a recording `codegraph` stub first on the tree volume's PATH: it never does
+// anything but log its own argv, so workspace-init calling it at all is the regression this
+// guards, caught at once rather than by a timeout. Every real codegraph invocation runs with
+// codegraphEnvironment()'s minimal environment (PATH/HOME/TMPDIR/DO_NOT_TRACK only), so the log
+// path can't come from the test's own environment the way the jj/git stubs' do: it is derived
+// from the stub's own invocation path ($0 is "<dir>/bin/codegraph"; stripping "/bin/codegraph"
+// leaves "<dir>", matching v.codegraphLog).
+const fakeCodegraph = `#!/bin/sh
+printf '%s\n' "$*" >> "${0%/bin/codegraph}/codegraph.log"
+`
+
 // treeVolume is one tree volume and what a pod's two init containers run against it: a PATH whose
 // git clones a local bare remote in place of github.com/acme/widgets, the provisioning token file
 // `fetch` is pointed at and `provision` never is, the pod's feed, a TMPDIR standing in for the
 // fetching container's own filesystem, and, as in a pod, a jj config home that starts empty and no
 // user configuration.
 type treeVolume struct {
-	root, token, feed, jjLog, credentialLog, realJJ, tmp string
-	env                                                  map[string]string
+	root, token, feed, jjLog, credentialLog, codegraphLog, realJJ, tmp string
+	env                                                                map[string]string
 }
 
 func newTreeVolume(t *testing.T) *treeVolume {
@@ -72,7 +83,7 @@ func newTreeVolume(t *testing.T) *treeVolume {
 			t.Fatal(err)
 		}
 	}
-	for name, script := range map[string]string{"jj": fakeJJ, "git": fakeGit} {
+	for name, script := range map[string]string{"jj": fakeJJ, "git": fakeGit, "codegraph": fakeCodegraph} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -87,7 +98,8 @@ func newTreeVolume(t *testing.T) *treeVolume {
 	}
 	v := &treeVolume{
 		root: root, token: token, feed: filepath.Join(dir, "feed"), jjLog: filepath.Join(dir, "jj.log"),
-		credentialLog: filepath.Join(dir, "credential.log"), realJJ: realJJ, tmp: tmp,
+		credentialLog: filepath.Join(dir, "credential.log"), codegraphLog: filepath.Join(dir, "codegraph.log"),
+		realJJ: realJJ, tmp: tmp,
 	}
 	v.env = map[string]string{
 		"PATH":                 bin + string(filepath.ListSeparator) + os.Getenv("PATH"),
@@ -194,10 +206,11 @@ func runWorkspaceInitHere(args []string) (code int, stdout, stderr string) {
 	return code, out.String(), errb.String()
 }
 
-// jjCalls is every jj invocation the volume's PATH saw, "<tag> <argv>" each.
-func (v *treeVolume) jjCalls(t *testing.T) []string {
+// logLines is every invocation one of the volume's PATH stubs recorded to path, one call per
+// line; nil when the stub was never run.
+func logLines(t *testing.T, path string) []string {
 	t.Helper()
-	body, err := os.ReadFile(v.jjLog)
+	body, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -206,6 +219,13 @@ func (v *treeVolume) jjCalls(t *testing.T) []string {
 	}
 	return strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
 }
+
+// jjCalls is every jj invocation the volume's PATH saw, "<tag> <argv>" each.
+func (v *treeVolume) jjCalls(t *testing.T) []string { return logLines(t, v.jjLog) }
+
+// codegraphCalls is every codegraph invocation the volume's PATH saw, one argv per line; nil
+// when the stub was never run.
+func (v *treeVolume) codegraphCalls(t *testing.T) []string { return logLines(t, v.codegraphLog) }
 
 func (v *treeVolume) jj(t *testing.T, args ...string) string {
 	t.Helper()
@@ -430,7 +450,9 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 // named, the gh shim first on a pod's PATH and no tmux pane's `legion` launcher (a pod's PATH names
 // the image's legion), the two directories the main container mounts, one log line naming the
 // workspace — and the repository lock free once it is done, so the next pod's init container
-// never waits on a finished one.
+// never waits on a finished one. The permanent guard on the pod path: a recording `codegraph`
+// stub is first on PATH throughout, and this container must never call it (#1647) — only a
+// synchronous warm-up regressing back onto the init container's launch path would.
 func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
@@ -479,6 +501,9 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	}
 	if !v.lockIsFree(t) {
 		t.Fatal("the repository lock is still held after the command returned")
+	}
+	if calls := v.codegraphCalls(t); calls != nil {
+		t.Fatalf("workspace-init called codegraph %q, want it to build no index on the pod's registration path", calls)
 	}
 	holdsNoToken(t, v.root, "after provisioning")
 }

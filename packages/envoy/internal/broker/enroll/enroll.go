@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
@@ -73,7 +72,7 @@ type Service struct {
 	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
 	// call: a launcher_credentials row is never trusted on its own, since it must still trace
 	// back to a genuinely signed, human-approved credential-request record. NewChainVerifier
-	// builds one against this same Store and an approvers.Service.
+	// builds one against this same Store.
 	Chain *record.ChainVerifier
 
 	// testConflictHook, when set, runs once a 23505 insert conflict is detected in createAttempt,
@@ -117,57 +116,9 @@ func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, opera
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
-// re-verification uses, wired against st and approversSvc: FetchRecord and FetchApproval read
-// straight from Postgres. VerifyAssertion re-runs the approver's real WebAuthn signature check
-// (approvers.Service.VerifyAssertion — full origin/rpID/flags/challenge/signature verification,
-// plus the approver key's own current active/revoked state) inside a transaction it always rolls
-// back, so a re-check can never persist a side effect. The assertion's own authenticator
-// signature counter was already advanced once, for real, by the original (committed) decision at
-// ApplyDecision time, so every honest re-check of that exact same stored assertion fails the
-// counter-monotonicity check on its own — approvers.ErrCounterReplay — and that is the ONLY error
-// this treats as success: the counter check runs strictly after every cryptographic check inside
-// VerifyAssertion, so a forged signature, wrong origin/rpID/challenge, or a since-revoked or
-// tombstoned key all fail before the counter is ever reached, and none of those wrap
-// ErrCounterReplay.
-func NewChainVerifier(st *store.Store, approversSvc *approvers.Service, audience string, skew time.Duration) *record.ChainVerifier {
-	return &record.ChainVerifier{
-		Audience: audience,
-		Skew:     skew,
-		FetchRecord: func(ctx context.Context, recordID string) (string, time.Time, bool, error) {
-			var body string
-			var createdAt time.Time
-			err := st.Pool.QueryRow(ctx, `select body, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).Scan(&body, &createdAt)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return "", time.Time{}, false, nil
-			}
-			if err != nil {
-				return "", time.Time{}, false, err
-			}
-			return body, createdAt, true, nil
-		},
-		FetchApproval: func(ctx context.Context, recordID string) (json.RawMessage, bool, error) {
-			var assertion json.RawMessage
-			err := st.Pool.QueryRow(ctx, `select assertion from credential_request_events where record_id=$1 and event='approved'`, recordID).Scan(&assertion)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, false, nil
-			}
-			if err != nil {
-				return nil, false, err
-			}
-			return assertion, true, nil
-		},
-		VerifyAssertion: func(ctx context.Context, login string, challenge [32]byte, assertion json.RawMessage) error {
-			tx, err := st.Pool.Begin(ctx)
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback(ctx)
-			if _, err := approversSvc.VerifyAssertion(ctx, tx, login, challenge, assertion); err != nil && !errors.Is(err, approvers.ErrCounterReplay) {
-				return err
-			}
-			return nil
-		},
-	}
+// re-verification uses, scoped to launcher_credential records.
+func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
+	return st.ChainVerifier("launcher_credential", audience, skew)
 }
 
 // AuthenticateLauncher answers proof.Verifier's LookupLauncher hook directly: given a launcher
@@ -269,8 +220,7 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 		in.ID, in.Kind, in.RuntimeID, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if store.IsUniqueViolation(err) {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before
 		// recovery asks the pool for one: holding one connection while waiting for a second is how
 		// enough concurrent retries of one enrollment deadlock the whole pool.
@@ -493,8 +443,7 @@ func (s *Service) SessionID(ctx context.Context, id string) (string, error) {
 // so the table stays bounded without a separate job.
 func (s *Service) Replay(ctx context.Context, jti string, expires time.Time) (bool, error) {
 	_, err := s.Store.Pool.Exec(ctx, `insert into proof_jtis (jti, expires_at) values ($1,$2)`, jti, expires)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if store.IsUniqueViolation(err) {
 		return false, nil
 	}
 	if err != nil {

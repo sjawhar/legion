@@ -194,9 +194,9 @@ test("a writer inside the docs layer when its room fails is told, and the room r
   console.log(
     `FAILED-ROOM queued status=${behind.status} code=${behind.code} in ${behind.seconds}s`
   );
-  // The writer that was inside the docs layer when the room failed is told so. Before the fix it
-  // waited for a recovery that could not finish while it held what that recovery needs, and its
-  // client gave up at 30 s.
+  // The writer that was inside the docs layer when the room failed is told so, rather than
+  // waiting for a recovery that cannot finish while it holds what that recovery needs until its
+  // client gives up at 30 s.
   expect(holder.status).toBe(503);
   expect(holder.code).toBe("DOC_SERVICE_UNAVAILABLE");
   // The one behind it has two correct outcomes: told the same way, or admitted after the room

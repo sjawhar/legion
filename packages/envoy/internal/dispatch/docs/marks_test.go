@@ -614,9 +614,9 @@ func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 
 // A replace through the edit API keeps an open anchor over the text it wrote wherever that text
 // lands inside the anchor, so the refreshed quote is the anchor's whole current extent rather than
-// the run of the mark before the edit (production's LEGSMOKE-301 read "quick " after "brown"
-// became "red"). A replace that runs past the anchor's edge rewrote text outside it as well, so the
-// anchor keeps only the text the replace left alone.
+// the run of the mark before the edit, which would read "quick " after "brown" became "red". A
+// replace that runs past the anchor's edge rewrote text outside it as well, so the anchor keeps
+// only the text the replace left alone.
 func TestAReplaceKeepsTheAnchorOverItsWholeCurrentExtent(t *testing.T) {
 	const text = "The quick brown fox jumps over the lazy dog"
 	const quote = "quick brown fox jumps"

@@ -63,17 +63,22 @@ async function resolveArgs(command: RunnableCommand): Promise<Record<string, unk
   return command.args as Record<string, unknown>;
 }
 
-/** A plan payload that passes the write-time skill-list rule, for tests that exercise something else. */
+/** A plan payload that passes the write-time skill-list and plan-check rules, for tests that
+ * exercise something else. */
 function planData(extra: Record<string, unknown> = {}): string {
-  return JSON.stringify({
-    ...extra,
-    requiredSkills: {
-      implement: ["using-jj"],
-      test: ["testing"],
-      review: ["none: looked through the repository skills; nothing reviews this surface"],
-    },
-  });
+  return JSON.stringify({ ...planChecks, ...extra, requiredSkills });
 }
+
+const requiredSkills = {
+  implement: ["using-jj"],
+  test: ["testing"],
+  review: ["none: looked through the repository skills; nothing reviews this surface"],
+};
+
+const planChecks = {
+  gapAnalysis: { findings: [{ finding: "no criterion checks it", answer: "task 2's check" }] },
+  planReview: { verdict: "approved", rounds: 1 },
+};
 
 describe("handoff command", () => {
   const originalCwd = process.cwd();
@@ -281,7 +286,11 @@ describe("handoff command", () => {
     try {
       await runCommand(write, {
         phase: "plan",
-        data: '{"taskCount":5,"requiredSkills":{"implement":["using-jj"],"review":["testing"]}}',
+        data: JSON.stringify({
+          ...planChecks,
+          taskCount: 5,
+          requiredSkills: { implement: ["using-jj"], review: ["testing"] },
+        }),
       });
     } catch {}
 
@@ -296,7 +305,40 @@ describe("handoff command", () => {
     const write = getSubCommand(handoffCommand, "write");
     await runCommand(write, {
       phase: "plan",
-      data: '{"requiredSkills":{"implement":["none: no agent skills exist in this repository yet"],"test":["none: same"],"review":["none: same"]}}',
+      data: JSON.stringify({
+        ...planChecks,
+        requiredSkills: {
+          implement: ["none: no agent skills exist in this repository yet"],
+          test: ["none: same"],
+          review: ["none: same"],
+        },
+      }),
+    });
+    expect(exitCode).toBeUndefined();
+    expect(fs.existsSync(path.join(tempDir, ".legion", "plan.json"))).toBe(true);
+  });
+
+  it("refuses a plan handoff that records neither plan check, and writes one whose checks failed", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    try {
+      await runCommand(write, { phase: "plan", data: JSON.stringify({ requiredSkills }) });
+    } catch {}
+
+    expect(exitCode).toBe(1);
+    const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat().join("\n");
+    expect(errors).toContain("gapAnalysis: missing");
+    expect(errors).toContain("planReview: missing");
+    expect(fs.existsSync(path.join(tempDir, ".legion", "plan.json"))).toBe(false);
+
+    // A check whose call failed is recorded as its error, and the plan still goes ahead.
+    exitCode = undefined;
+    await runCommand(write, {
+      phase: "plan",
+      data: JSON.stringify({
+        requiredSkills,
+        gapAnalysis: { error: "model call failed: 503" },
+        planReview: { verdict: "failed", rounds: 1, error: "model call failed: 503" },
+      }),
     });
     expect(exitCode).toBeUndefined();
     expect(fs.existsSync(path.join(tempDir, ".legion", "plan.json"))).toBe(true);
