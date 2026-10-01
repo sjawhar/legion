@@ -3620,6 +3620,28 @@ describe("executeDispatchTool", () => {
       }
     });
 
+    test("an opener that the inserted markdown holds only as code does not write the block back", async () => {
+      // Dispatch parses these as a code block, so the block leaves the document and settlement
+      // retracts its open ask, exactly as a bare delete would (acceptance at de9909aa: each one
+      // was applied, the ask retracted by document-settlement, and the next request sent).
+      for (const markdown of [
+        "```text\n:::ask{#b-1}\n```",
+        '~~~\n:::ask{#b-1 urgency="med"}\n~~~',
+        "The old question read:\n\n    :::ask{#b-1}",
+      ]) {
+        const { outcome, edits } = edit([
+          { op: "delete", block: "b-1" },
+          { op: "insert", after: "block:p-1", markdown },
+        ]);
+        expect((await outcome).split("\n")).toEqual([
+          "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
+          '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
+          "A decision block leaves the document once its ask is answered or resolved.",
+        ]);
+        expect(edits).toEqual([]);
+      }
+    });
+
     test("sends an edit that keeps every open block, reading nothing when no block is removed", async () => {
       for (const ops of [
         [{ op: "delete", block: "b-2" }],
