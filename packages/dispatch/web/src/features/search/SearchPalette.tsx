@@ -542,8 +542,15 @@ function PaletteDialog({
     }
     onClose();
   };
+  // While the query's search is out, its hits have still to arrive above the More actions, so an
+  // arrow aimed at the list now would land on whatever row then sits there: until the search
+  // answers, the arrows walk only the rows above where the hits will go, and with none they do
+  // nothing.
+  const searchOut =
+    waitingForQuery || (queryEnabled && search.data === undefined && !search.isError);
+  const walkable = searchOut ? rows.length - moreActions.options.length : rows.length;
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && rows.length > 0) {
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && walkable > 0) {
       event.preventDefault();
       const delta = event.key === "ArrowDown" ? 1 : -1;
       // From no highlight, Down takes the first row and Up the last.
@@ -551,8 +558,8 @@ function PaletteDialog({
         activeIndex === -1
           ? delta === 1
             ? 0
-            : rows.length - 1
-          : stepActive(activeIndex, delta, rows.length);
+            : walkable - 1
+          : stepActive(activeIndex, delta, walkable);
       setActiveId(rows[next]?.id ?? null);
     } else if (event.key === "Enter" && activeRow !== undefined) {
       event.preventDefault();
