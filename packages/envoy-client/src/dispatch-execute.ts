@@ -59,7 +59,12 @@ import {
   resolveCwdRepo,
   resolveOrigin,
 } from "./dispatch-cwd";
-import { DispatchClient, DispatchServiceError, type GraphReferencesQuery } from "./dispatch-http";
+import {
+  DispatchClient,
+  DispatchGatewayError,
+  DispatchServiceError,
+  type GraphReferencesQuery,
+} from "./dispatch-http";
 import {
   dispatchChildRef,
   dispatchDocumentRef,
@@ -1747,8 +1752,29 @@ async function refuseRemovingOpenDecisionBlocks(
  * `throw refusalWithCode(error)` rethrows it untouched. This returns rather than throws: a
  * helper that never returns leaves its switch case with no visible terminator, which Biome's
  * noFallthroughSwitchClause rejects.
+ *
+ * A gateway's answer stays a `DispatchGatewayError`, and `suffix`, the caller's account of what
+ * its call did, joins it in one sentence. Where the gateway's status can clear, the client's
+ * advice only guessed from the method whether the request reached Dispatch, so a suffix takes its
+ * place and must say what to do; otherwise the request never got past the gateway, and the suffix
+ * follows the client's advice.
  */
 function refusalWithCode(error: unknown, suffix = ""): unknown {
+  if (error instanceof DispatchGatewayError) {
+    let told = error.message;
+    if (suffix !== "") {
+      told = error.transient
+        ? `${error.answer}${suffix}`
+        : `${error.answer}, so ${error.advice}${suffix}`;
+    }
+    return new DispatchGatewayError(
+      error.status,
+      error.answer,
+      error.transient,
+      error.advice,
+      `${error.code}: ${told}`
+    );
+  }
   if (!(error instanceof DispatchServiceError)) return error;
   return new DispatchServiceError(
     error.code,
@@ -1987,7 +2013,15 @@ export async function executeDispatchTool(
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id),
           };
         } catch (error) {
-          throw refusalWithCode(error, "; the reason was not posted, so the close was not sent");
+          // A gateway's answer whose status can clear may come back after Dispatch stored the
+          // reason, so only Dispatch's own refusal, or a gateway's that cannot clear, proves it
+          // was not posted.
+          throw refusalWithCode(
+            error,
+            error instanceof DispatchGatewayError && error.transient
+              ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
+              : "; the reason was not posted, so the close was not sent"
+          );
         }
       }
       // The server replaces the whole link set; the common call is "link the pull request
@@ -2011,9 +2045,13 @@ export async function executeDispatchTool(
         });
       } catch (error) {
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
-        // unique-index violation with 500 INTERNAL, which names nothing; say what it means.
+        // unique-index violation with 500 INTERNAL, which names nothing; say what it means. A
+        // gateway's 500 page is not that answer, and gets no such reading.
         const taken =
-          error instanceof DispatchServiceError && error.status === 500 && newLinks.length > 0
+          error instanceof DispatchServiceError &&
+          !(error instanceof DispatchGatewayError) &&
+          error.status === 500 &&
+          newLinks.length > 0
             ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
         if (closingNote === undefined) throw refusalWithCode(error, taken);

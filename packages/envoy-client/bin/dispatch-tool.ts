@@ -1,21 +1,28 @@
-#!/usr/bin/env bun
 // Runs one native Dispatch tool through `executeDispatchTool`, the function every host's registered
 // `dispatch_*` tool calls (pi-envoy `extensions/envoy.ts`, claude-envoy
 // `src/envoy-channel-server.ts`, envoy-plugin `src/server.ts`), and prints what the model would
-// see: the result text on success (exit 0), the failure text on a refusal (exit 1). Dispatch is
-// resolved as the hosts resolve it (`activeDispatchConfig`: envoy.json, then `DISPATCH_URL` with
+// see: the result text on success (exit 0), the failure text on a refusal (exit 1). A usage error,
+// arguments that are not JSON included, exits 2. Dispatch is resolved as the hosts resolve it
+// (`activeDispatchConfig`: envoy.json, then `DISPATCH_URL` with
 // `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`), so to drive a stand-in set both `DISPATCH_URL` and
 // `DISPATCH_TOKEN`, or the configured bearer is sent to the stand-in. Every request is traced on
 // stderr as `METHOD URL -> status content-type`. A write tool against a real Dispatch writes there,
 // as the session `ENVOY_SESSION_ID` names (a fresh id when unset).
 //   bun bin/dispatch-tool.ts <dispatch_tool> '<json arguments>'
 import { activeDispatchConfig } from "../src/dispatch-config";
-import { executeDispatchTool } from "../src/dispatch-execute";
+import { type ExecuteDispatchToolInput, executeDispatchTool } from "../src/dispatch-execute";
 import { messageFor } from "../src/errors";
 
 const [tool, rawArguments] = Bun.argv.slice(2);
 if (tool === undefined || rawArguments === undefined) {
   console.error("usage: bun bin/dispatch-tool.ts <dispatch_tool> '<json arguments>'");
+  process.exit(2);
+}
+let args: ExecuteDispatchToolInput["args"];
+try {
+  args = JSON.parse(rawArguments);
+} catch (error) {
+  console.error(`dispatch-tool: the arguments are not JSON: ${messageFor(error)}`);
   process.exit(2);
 }
 const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
@@ -35,7 +42,7 @@ const traced: typeof fetch = Object.assign(
 try {
   const result = await executeDispatchTool({
     tool,
-    args: JSON.parse(rawArguments),
+    args,
     cwd: process.cwd(),
     host: "omp",
     sessionId: process.env.ENVOY_SESSION_ID ?? `dispatch-tool-${crypto.randomUUID()}`,

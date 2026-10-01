@@ -1,9 +1,10 @@
 import { STATUS_CODES } from "node:http";
+import { parseArgs } from "node:util";
 
 /** The kinds of answer a gateway in front of Dispatch gives in its place. */
 const BODIES = ["html", "empty", "text", "json"] as const;
 
-export type StandInBody = (typeof BODIES)[number];
+type StandInBody = (typeof BODIES)[number];
 
 export interface StandInOptions {
   readonly status: number;
@@ -12,33 +13,31 @@ export interface StandInOptions {
 }
 
 /**
- * `bin/stand-in-gateway.ts`'s flags, as `--flag value` pairs in any order: `--status` (200-599,
- * what `Response` accepts; 502 when omitted), `--body` (one of `BODIES`; `html` when omitted) and
- * `--port` (0 for an ephemeral port, the default). Throws naming the first flag it cannot read.
+ * `bin/stand-in-gateway.ts`'s flags, `--flag value` or `--flag=value` in any order: `--status`
+ * (200-599, what `Response` accepts; 502 when omitted), `--body` (one of `BODIES`; `html` when
+ * omitted) and `--port` (0 for an ephemeral port, the default). An unknown flag, a flag without
+ * a value and a value out of range each throw, naming it.
  */
 export function parseStandInArguments(argv: readonly string[]): StandInOptions {
-  let status = 502;
-  let body: StandInBody = "html";
-  let port = 0;
-  for (let index = 0; index < argv.length; index += 2) {
-    const flag = argv[index];
-    const value = argv[index + 1];
-    if (value === undefined) throw new Error(`${flag} needs a value`);
-    if (flag === "--status") {
-      status = integerIn(flag, value, 200, 599);
-    } else if (flag === "--port") {
-      port = integerIn(flag, value, 0, 65_535);
-    } else if (flag === "--body") {
-      const kind = BODIES.find((candidate) => candidate === value);
-      if (kind === undefined) {
-        throw new Error(`--body must be html, empty, text or json, not ${value}`);
-      }
-      body = kind;
-    } else {
-      throw new Error(`unknown option ${flag} ${value}`);
-    }
+  const { values } = parseArgs({
+    args: [...argv],
+    strict: true,
+    allowPositionals: false,
+    options: {
+      status: { type: "string", default: "502" },
+      body: { type: "string", default: "html" },
+      port: { type: "string", default: "0" },
+    },
+  });
+  const body = BODIES.find((kind) => kind === values.body);
+  if (body === undefined) {
+    throw new Error(`--body must be html, empty, text or json, not ${values.body}`);
   }
-  return { status, body, port };
+  return {
+    status: integerIn("--status", values.status, 200, 599),
+    body,
+    port: integerIn("--port", values.port, 0, 65_535),
+  };
 }
 
 function integerIn(flag: string, value: string, low: number, high: number): number {

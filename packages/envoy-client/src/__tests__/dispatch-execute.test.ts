@@ -256,7 +256,8 @@ describe("executeDispatchTool", () => {
 
   // A gateway in front of Dispatch answers a non-2xx with its own page. The tool result is the
   // thrown message, so through the executor the agent must get the request, the status and a
-  // plain-text excerpt rather than the page's markup, for a write and for a read alike. The
+  // plain-text excerpt rather than the page's markup, for a write and for a read alike, and advice
+  // that fits the method: a read may succeed on a retry, a write may already have landed. The
   // message's wording is pinned in dispatch-http.test.ts.
   test("hands the agent the request and status, not a gateway's HTML, when Dispatch's host answers non-2xx", async () => {
     const requests: string[] = [];
@@ -292,6 +293,10 @@ describe("executeDispatchTool", () => {
       "POST http://dispatch.test/api/v1/issues/DSP-1/messages answered 502 Bad Gateway with a body that is not Dispatch's error JSON"
     );
     expect(write).not.toContain("<");
+    expect(write).toEndWith(
+      "so the write may or may not have reached Dispatch: check whether it took effect before retrying it."
+    );
+    expect(write).not.toContain("a retry may succeed");
     expect(requests).toEqual(["POST /api/v1/issues/DSP-1/messages"]);
 
     const read = await run("dispatch_read", { issue: "DSP-1" });
@@ -299,6 +304,7 @@ describe("executeDispatchTool", () => {
       "GET http://dispatch.test/api/v1/issues/DSP-1 answered 502 Bad Gateway with a body that is not Dispatch's error JSON"
     );
     expect(read).not.toContain("<");
+    expect(read).toEndWith("so a retry may succeed.");
   });
 
   test("names the configured Dispatch URL when its transport is unreachable", async () => {
@@ -2570,6 +2576,49 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // The taken-link hint reads Dispatch's own 500 from before EXTERNAL_LINK_TAKEN. A gateway's 500
+  // page in its place is not that answer: naming a link clash there gives the agent a second,
+  // wrong diagnosis, so the refusal carries only the gateway's answer and the client's advice for
+  // a write.
+  test("dispatch_issue_update gives a gateway's 500 on external_links no link-clash hint", async () => {
+    const pullRequest = "https://github.com/owner/repo/pull/7";
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+      (init?.method ?? "GET") === "GET"
+        ? response({
+            key: "AGENTC-175",
+            title: "x",
+            status: "todo",
+            labels: [],
+            external_links: [],
+          })
+        : new Response("<html><body><h1>500 Internal Server Error</h1></body></html>", {
+            status: 500,
+            statusText: "Internal Server Error",
+            headers: { "Content-Type": "text/html" },
+          });
+
+    const failure = await executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "AGENTC-175", external_links: [pullRequest] },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    }).then(
+      () => "",
+      (error: Error) => error.message
+    );
+
+    expect(failure).toBe(
+      "HTTP_500: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 500 Internal Server " +
+        'Error with a body that is not Dispatch\'s error JSON ("500 Internal Server Error"), which ' +
+        "looks like a proxy or gateway page rather than Dispatch's own answer, so the write may or " +
+        "may not have reached Dispatch: check whether it took effect before retrying it."
+    );
+  });
+
   test("dispatch_issue_update refuses a call with nothing to change before any request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -2715,6 +2764,54 @@ describe("executeDispatchTool", () => {
     expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
   });
 
+  const gatewayPage = (status: number, statusText: string) =>
+    new Response(`<html><body><h1>${status} ${statusText}</h1></body></html>`, {
+      status,
+      statusText,
+      headers: { "Content-Type": "text/html" },
+    });
+
+  // A gateway's answer to the reason's post says nothing Dispatch decided. One that can clear may
+  // have come back after Dispatch stored the reason, so the refusal must not claim it was not
+  // posted, and its advice replaces the client's; one that cannot clear never reached Dispatch,
+  // so the client's advice stands and the close-path account follows it in the same sentence.
+  test("dispatch_issue_update says whether a gateway's answer to the reason's post leaves the reason posted", async () => {
+    const answered = (status: string, page: string) =>
+      `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/AGENTC-175/messages ` +
+      `answered ${status} with a body that is not Dispatch's error JSON ("${page}"), which looks ` +
+      "like a proxy or gateway page rather than Dispatch's own answer";
+    for (const [message, expected] of [
+      [
+        () => gatewayPage(502, "Bad Gateway"),
+        `${answered("502 Bad Gateway", "502 Bad Gateway")}; the reason may or may not have been ` +
+          "posted, and the close was not sent: read the issue's messages before retrying, since " +
+          "retrying this call posts its reason again",
+      ],
+      [
+        () => gatewayPage(404, "Not Found"),
+        `${answered("404 Not Found", "404 Not Found")}, so a retry gets the same answer until the ` +
+          "Dispatch URL, or whatever answers in its place, is fixed; the reason was not posted, so " +
+          "the close was not sent",
+      ],
+    ] as const) {
+      const server = closingServer({
+        message,
+        patch: () => {
+          throw new Error("the close must not be sent");
+        },
+      });
+
+      const failure = await closeCall(server.fetchImpl).then(
+        () => "",
+        (error: Error) => error.message
+      );
+
+      expect(failure).toBe(expected);
+      expect(failure).not.toContain("a retry may succeed");
+      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+    }
+  });
+
   test("dispatch_issue_update names the posted reason when the close fails after it", async () => {
     const server = closingServer({
       message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
@@ -2728,10 +2825,27 @@ describe("executeDispatchTool", () => {
         "points at message message-7"
     );
     expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+
+    const gateway = closingServer({
+      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      patch: () => gatewayPage(404, "Not Found"),
+    });
+    await expect(closeCall(gateway.fetchImpl)).rejects.toThrow(
+      "HTTP_404: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 404 Not Found with a " +
+        'body that is not Dispatch\'s error JSON ("404 Not Found"), which looks like a proxy or ' +
+        "gateway page rather than Dispatch's own answer, so a retry gets the same answer until the " +
+        "Dispatch URL, or whatever answers in its place, is fixed; the reason already landed as " +
+        "message message-7 (dispatch://AGENTC-175/message/message-7) but the issue did not close. " +
+        "Retrying this call posts its reason again, so fix what refused the close, then retry with " +
+        "a reason that points at message message-7"
+    );
   });
 
   // A timeout, a transport error, or a 5xx gives no proof the issue stayed open, so the error
-  // must not say it did: an agent that believed it would retry and post its reason twice.
+  // must not say it did: an agent that believed it would retry and post its reason twice. A
+  // gateway's 5xx page is the same case, and its account replaces the client's retry advice
+  // rather than following it, so the message never says both that a retry may succeed and that
+  // retrying posts the reason again.
   test("dispatch_issue_update says the close is unknown when the PATCH times out or 5xxes after the post", async () => {
     const unknown =
       "; the reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
@@ -2746,6 +2860,12 @@ describe("executeDispatchTool", () => {
         "The operation timed out.",
       ],
       [() => refusal(502, "HTTP_502", "Bad Gateway"), "HTTP_502: Bad Gateway"],
+      [
+        () => gatewayPage(502, "Bad Gateway"),
+        "HTTP_502: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 502 Bad Gateway " +
+          'with a body that is not Dispatch\'s error JSON ("502 Bad Gateway"), which looks like a ' +
+          "proxy or gateway page rather than Dispatch's own answer",
+      ],
     ] as const) {
       const server = closingServer({
         message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
@@ -2757,6 +2877,7 @@ describe("executeDispatchTool", () => {
       if (!(failure instanceof Error)) throw new Error(`expected an Error, got ${String(failure)}`);
       expect(failure.message).toBe(`${head}${unknown}`);
       expect(failure.message).not.toContain("did not close");
+      expect(failure.message).not.toContain("a retry may succeed");
       expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
     }
   });

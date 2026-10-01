@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { IssueSummary } from "@legion/contracts";
-import { DispatchClient } from "../dispatch-http";
+import { DispatchClient, DispatchGatewayError } from "../dispatch-http";
 
 interface RecordedRequest {
   readonly url: string;
@@ -454,52 +454,25 @@ describe("DispatchClient", () => {
 
   // Dispatch writes every answer as JSON, so a non-2xx body that is not its `{code, error}` came
   // from something in front of it: a gateway's HTML page, an empty body, JSON of another shape. The
-  // agent reads only the error's message, so it must name the request, the status and whether a
-  // retry can help, and quote the body only as a short plain-text excerpt, never the markup whole.
-  test("names the request, status and a plain-text excerpt when a non-2xx body is not Dispatch's JSON", async () => {
+  // agent reads only the error's message, so it names the request and the status, quotes the body
+  // only as a one-line plain-text excerpt (scripts, styles and tags dropped), and says whether a
+  // retry can help: on a read, a gateway's 5xx, 408 or 429 can clear, while any other status
+  // answers the same request the same way. The bearer travels in a header, so the URL never
+  // carries it. The error says it is a gateway's answer, so a caller with advice of its own can
+  // use `answer` without the client's.
+  test("names the request, status and a plain-text excerpt, advising a read's retry only for a status that can clear", async () => {
     const nginx =
       "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1>" +
       "</center>\r\n<hr><center>nginx/1.25.3</center>\r\n</body>\r\n</html>\r\n";
+    const cloudflare =
+      "<html><head><style>body{margin:0}</style><script>var x=1;</script></head><body>" +
+      "<h1>Error 522</h1><p>Connection timed out</p></body></html>";
     const { fetchImpl } = fakeFetch([
       new Response(nginx, {
         status: 502,
         statusText: "Bad Gateway",
         headers: { "Content-Type": "text/html" },
       }),
-    ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
-
-    const error = await client.getIssue("DSP-1").then(
-      () => {
-        throw new Error("expected a refusal");
-      },
-      (error: unknown) => error
-    );
-
-    expect(error).toEqual(
-      expect.objectContaining({
-        name: "DispatchServiceError",
-        code: "HTTP_502",
-        status: 502,
-        message:
-          "GET http://dispatch.test/api/v1/issues/DSP-1 answered 502 Bad Gateway with a body that " +
-          'is not Dispatch\'s error JSON ("502 Bad Gateway 502 Bad Gateway nginx/1.25.3"), which ' +
-          "looks like a proxy or gateway page rather than Dispatch's own answer, so a retry may " +
-          "succeed.",
-      })
-    );
-    expect((error as Error).message).not.toContain("<");
-  });
-
-  // What the excerpt keeps and what the advice says depends on the answer: scripts, styles and
-  // tags are dropped and the text is cut at one line; a gateway's 5xx, 408 or 429 can clear on a
-  // retry, while any other status answers the same request the same way. The bearer travels in a
-  // header, so the URL the error names never carries it.
-  test("cuts the excerpt to plain text and advises a retry only for a status that can clear", async () => {
-    const cloudflare =
-      "<html><head><style>body{margin:0}</style><script>var x=1;</script></head><body>" +
-      "<h1>Error 522</h1><p>Connection timed out</p></body></html>";
-    const { fetchImpl } = fakeFetch([
       new Response(cloudflare, { status: 522, headers: { "Content-Type": "text/html" } }),
       new Response(null, { status: 503, statusText: "Service Unavailable" }),
       new Response("x".repeat(500), { status: 429, headers: { "Content-Type": "text/plain" } }),
@@ -517,40 +490,92 @@ describe("DispatchClient", () => {
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
     const refusal = () =>
       client.getIssueEvents("DSP-1", 4, 10).then(
-        () => "",
-        (error: Error) => error.message
+        () => {
+          throw new Error("expected a refusal");
+        },
+        (error: Error) => error
       );
     const request =
       "GET http://dispatch.test/api/v1/issues/DSP-1/events?after=4&limit=10 answered ";
-    const gateway =
-      ", which looks like a proxy or gateway page rather than Dispatch's own answer, so ";
-    const maySucceed = `${gateway}a retry may succeed.`;
+    const gateway = ", which looks like a proxy or gateway page rather than Dispatch's own answer";
+    const maySucceed = `${gateway}, so a retry may succeed.`;
     const sameAgain =
-      `${gateway}a retry gets the same answer until the Dispatch URL, or whatever answers in its ` +
-      "place, is fixed.";
+      `${gateway}, so a retry gets the same answer until the Dispatch URL, or whatever answers ` +
+      "in its place, is fixed.";
 
-    expect(await refusal()).toBe(
+    const badGateway = await refusal();
+    const answer =
+      `${request}502 Bad Gateway with a body that is not Dispatch's error JSON ` +
+      `("502 Bad Gateway 502 Bad Gateway nginx/1.25.3")${gateway}`;
+    expect(badGateway).toBeInstanceOf(DispatchGatewayError);
+    expect(badGateway).toEqual(
+      expect.objectContaining({
+        name: "DispatchServiceError",
+        code: "HTTP_502",
+        status: 502,
+        answer,
+        transient: true,
+        message: `${answer}, so a retry may succeed.`,
+      })
+    );
+    expect((await refusal()).message).toBe(
       `${request}522 with a body that is not Dispatch's error JSON ("Error 522 Connection timed out")${maySucceed}`
     );
-    expect(await refusal()).toBe(
+    expect((await refusal()).message).toBe(
       `${request}503 Service Unavailable with an empty body${maySucceed}`
     );
-    expect(await refusal()).toBe(
+    expect((await refusal()).message).toBe(
       `${request}429 with a body that is not Dispatch's error JSON ("${"x".repeat(120)}…")${maySucceed}`
     );
-    expect(await refusal()).toBe(
+    expect((await refusal()).message).toBe(
       `${request}504 Gateway Timeout with a body that is not Dispatch's error JSON ` +
         `(${JSON.stringify('{"message":"upstream timed out"}')})${maySucceed}`
     );
-    expect(await refusal()).toBe(
+    const notFound = await refusal();
+    expect(notFound.message).toBe(
       `${request}404 Not Found with a body that is not Dispatch's error JSON ("404 Not Found")${sameAgain}`
+    );
+    expect(notFound).toEqual(expect.objectContaining({ code: "HTTP_404", transient: false }));
+  });
+
+  // A gateway that answers a write with a status that can clear may have forwarded it first: a
+  // 502 or 504 can come back after Dispatch applied the write. Advising a retry there can post a
+  // message twice, so a write is told to check what took effect; a status that cannot clear still
+  // gets the same advice as a read, since the request never got past the gateway.
+  test("tells a write a gateway answered to check whether it took effect, never that a retry may succeed", async () => {
+    const page = (status: number, statusText: string) =>
+      new Response(`<html><body><h1>${status} ${statusText}</h1></body></html>`, {
+        status,
+        statusText,
+        headers: { "Content-Type": "text/html" },
+      });
+    const { fetchImpl } = fakeFetch([page(502, "Bad Gateway"), page(404, "Not Found")]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const refusal = () =>
+      client.message("DSP-1", { body: "Shipped.", actor }).then(
+        () => "",
+        (error: Error) => error.message
+      );
+    const request = "POST http://dispatch.test/api/v1/issues/DSP-1/messages answered ";
+    const gateway = ", which looks like a proxy or gateway page rather than Dispatch's own answer";
+
+    expect(await refusal()).toBe(
+      `${request}502 Bad Gateway with a body that is not Dispatch's error JSON ("502 Bad Gateway")` +
+        `${gateway}, so the write may or may not have reached Dispatch: check whether it took ` +
+        "effect before retrying it."
+    );
+    expect(await refusal()).toBe(
+      `${request}404 Not Found with a body that is not Dispatch's error JSON ("404 Not Found")` +
+        `${gateway}, so a retry gets the same answer until the Dispatch URL, or whatever answers ` +
+        "in its place, is fixed."
     );
   });
 
-  // The excerpt is text a gateway chose, and a misconfigured one can echo the request back,
-  // headers included. Whatever reads as a credential is redacted before it is quoted: the client's
-  // own bearer wherever it appears, and the value after `Authorization:` or `Bearer`.
-  test("redacts the bearer and anything that reads as a credential from the excerpt", async () => {
+  // The excerpt and the reason phrase are text a gateway chose, and a misconfigured one can echo
+  // the request back, headers included. Two kinds of credential are redacted before either is
+  // quoted: the client's own bearer wherever it appears (trimmed, as fetch sends it), and the
+  // value after `Authorization:` or `Bearer`. The reason phrase is cut to one line like the body.
+  test("redacts the bearer and an Authorization or Bearer value from the excerpt and the reason phrase", async () => {
     const token = "dsp_live_4f9a2c7e";
     const echo =
       `<html><body><h1>401 Unauthorized</h1><pre>token=${token}\r\n` +
@@ -565,30 +590,67 @@ describe("DispatchClient", () => {
         status: 502,
         headers: { "Content-Type": "application/json" },
       }),
+      new Response(null, { status: 502, statusText: `Denied for ${token} ${"x".repeat(200)}` }),
+      new Response(`<p>token=${token}</p>`, { status: 401, statusText: "Unauthorized" }),
     ]);
     const client = new DispatchClient("http://dispatch.test", token, fetchImpl);
-    const refusal = () =>
-      client.getIssue("DSP-1").then(
+    const refusal = (from: DispatchClient) =>
+      from.getIssue("DSP-1").then(
+        () => "",
+        (error: Error) => error.message
+      );
+    const request = "GET http://dispatch.test/api/v1/issues/DSP-1 answered ";
+    const gateway = ", which looks like a proxy or gateway page rather than Dispatch's own answer";
+
+    const unauthorized = await refusal(client);
+    expect(unauthorized).toBe(
+      `${request}401 Unauthorized with a body that is not Dispatch's error JSON ("401 Unauthorized ` +
+        'token=[redacted] Authorization: Basic [redacted] X-Forwarded: Bearer [redacted]")' +
+        `${gateway}, so a retry gets the same answer until the Dispatch URL, or whatever answers ` +
+        "in its place, is fixed."
+    );
+    const echoedJson = await refusal(client);
+    expect(echoedJson).toContain(
+      JSON.stringify('{"headers":{"authorization":"Bearer [redacted]"}}')
+    );
+    const reasonPhrase = await refusal(client);
+    expect(reasonPhrase).toBe(
+      `${request}502 Denied for [redacted] ${"x".repeat(98)}… with an empty body${gateway}, so a ` +
+        "retry may succeed."
+    );
+    const untrimmed = new DispatchClient("http://dispatch.test", ` ${token}\n`, fetchImpl);
+    const echoedTrimmed = await refusal(untrimmed);
+    expect(echoedTrimmed).toContain('("token=[redacted]")');
+    for (const message of [unauthorized, echoedJson, reasonPhrase, echoedTrimmed]) {
+      expect(message).not.toContain(token);
+      expect(message).not.toContain("dXNlcjpwYXNz");
+      expect(message).not.toContain("other.jwt-value");
+    }
+  });
+
+  // Whatever answers at the Dispatch URL (a repository's own `.opencode/envoy.json` can name it)
+  // controls the body, and the excerpt is built synchronously on the host's event loop, before the
+  // 120-character cut. Each pass over the body must stay linear and the scan bounded, or a page of
+  // unclosed tags freezes the session: a quadratic pass takes seconds on tens of kilobytes. The
+  // bound is generous so a loaded machine passes and a quadratic pass does not.
+  test("builds the excerpt of a megabyte of unclosed tags in bounded time", async () => {
+    const megabyte = 1 << 20;
+    for (const unit of ["<", "<script", "<script x", "<a <b", "</script>", "<script></script "]) {
+      const hostile = unit.repeat(Math.ceil(megabyte / unit.length));
+      const { fetchImpl } = fakeFetch([
+        new Response(hostile, { status: 502, headers: { "Content-Type": "text/html" } }),
+      ]);
+      const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+      const started = performance.now();
+      const message = await client.getIssue("DSP-1").then(
         () => "",
         (error: Error) => error.message
       );
 
-    const unauthorized = await refusal();
-    expect(unauthorized).toBe(
-      "GET http://dispatch.test/api/v1/issues/DSP-1 answered 401 Unauthorized with a body that is " +
-        "not Dispatch's error JSON (\"401 Unauthorized token=[redacted] Authorization: Basic " +
-        '[redacted] X-Forwarded: Bearer [redacted]"), which looks like a proxy or gateway page ' +
-        "rather than Dispatch's own answer, so a retry gets the same answer until the Dispatch " +
-        "URL, or whatever answers in its place, is fixed."
-    );
-    const echoedJson = await refusal();
-    expect(echoedJson).toContain(
-      JSON.stringify('{"headers":{"authorization":"Bearer [redacted]"}}')
-    );
-    for (const message of [unauthorized, echoedJson]) {
-      expect(message).not.toContain(token);
-      expect(message).not.toContain("dXNlcjpwYXNz");
-      expect(message).not.toContain("other.jwt-value");
+      expect(performance.now() - started).toBeLessThan(2_000);
+      expect(message).toStartWith(
+        "GET http://dispatch.test/api/v1/issues/DSP-1 answered 502 with "
+      );
     }
   });
 

@@ -49,11 +49,16 @@ line an agent passes to subscribe to the whole issue itself.
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none). Any
 other body — a gateway's HTML page, an empty body, JSON of another shape — did not come from
-Dispatch, so the message names the method, the URL with its query (never the bearer, which is a
-header), the status, a one-line plain-text excerpt of the body with tags dropped and anything
-that reads as a credential redacted (the client's bearer, the value after `Authorization:` or
-`Bearer`), and whether a retry can help: it can for a 5xx, 408 or 429; any other status answers
-the same until the Dispatch URL, or whatever answers in its place, is fixed.
+Dispatch, so it is a `DispatchGatewayError` whose message names the method, the URL with its query
+(never the bearer, which is a header), the status and reason phrase, a one-line plain-text excerpt
+of the body, and what asking again can do. The excerpt drops scripts, styles and tags, scans at
+most the body's first 64 KiB in linear time, and, like the reason phrase, has the client's bearer
+and the value after `Authorization:` or `Bearer` redacted. A status that cannot clear answers the
+same until the Dispatch URL, or whatever answers in its place, is fixed; a 5xx, 408 or 429 may
+clear for a GET, while a write may or may not have reached Dispatch, so the advice is to check
+whether it took effect before retrying. The error's `answer`, `transient` and `advice` let a
+caller that knows more about its own request, such as `dispatch_issue_update`'s close path, give
+its own advice instead.
 
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec

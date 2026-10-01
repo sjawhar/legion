@@ -38925,6 +38925,18 @@ class DispatchServiceError extends Error {
     this.mismatches = mismatches;
   }
 }
+
+class DispatchGatewayError extends DispatchServiceError {
+  answer;
+  transient;
+  advice;
+  constructor(status, answer, transient, advice, message = `${answer}, so ${advice}.`) {
+    super(`HTTP_${status}`, status, message);
+    this.answer = answer;
+    this.transient = transient;
+    this.advice = advice;
+  }
+}
 function asErrorShape(value) {
   return typeof value === "object" && value !== null ? value : {};
 }
@@ -38938,7 +38950,7 @@ function requestSignal(signal) {
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
-    return `text that is not a JSON page, ${gatewayAnswer(true)}`;
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so ${gatewayAdvice("GET", true)}.`;
   }
   let what;
   if (Array.isArray(answer)) {
@@ -38957,16 +38969,22 @@ function whyNotAPage(answer) {
   }
   return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
 }
-function gatewayAnswer(retryMaySucceed) {
-  return "which looks like a proxy or gateway page rather than Dispatch's own answer, so " + (retryMaySucceed ? "a retry may succeed." : "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, " + "is fixed.");
+var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+function gatewayAdvice(method, transient) {
+  if (!transient) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  return method === "GET" ? "a retry may succeed" : "the write may or may not have reached Dispatch: check whether it took effect before retrying it";
 }
 function transientStatus(status) {
   return status >= 500 || status === 408 || status === 429;
 }
 var REDACTED = "[redacted]";
-function bodyExcerpt(text, token) {
-  const plain = text.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ").replace(/<[^>]*>/g, " ");
-  return textHead((token === "" ? plain : plain.replaceAll(token, REDACTED)).replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
+var EXCERPT_SCAN_LIMIT = 64 * 1024;
+function excerpt(text, token) {
+  const bearer = token.trim();
+  const plain = (bearer === "" ? text : text.replaceAll(bearer, REDACTED)).slice(0, EXCERPT_SCAN_LIMIT).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
 }
 
 class DispatchClient {
@@ -39273,10 +39291,12 @@ class DispatchClient {
       if (typeof error48.error === "string") {
         throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
       }
-      const excerpt = bodyExcerpt(text, this.token);
-      const body = excerpt === "" ? "an empty body" : `a body that is not Dispatch's error JSON (${JSON.stringify(excerpt)})`;
-      const reason = response.statusText === "" ? "" : ` ${response.statusText}`;
-      throw new DispatchServiceError(`HTTP_${response.status}`, response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ` + gatewayAnswer(transientStatus(response.status)));
+      const quoted = excerpt(text, this.token);
+      const body = quoted === "" ? "an empty body" : `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      const transient = transientStatus(response.status);
+      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, transient, gatewayAdvice(method, transient));
     }
     return payload;
   }
@@ -40164,8 +40184,8 @@ function referenceLines(edges) {
   if (edges.length === 0)
     return ["- none"];
   return edges.map((edge) => {
-    const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})`;
+    const excerpt2 = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
+    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})`;
   });
 }
 function unavailableReason(error48) {
@@ -40448,6 +40468,13 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
 `));
 }
 function refusalWithCode(error48, suffix = "") {
+  if (error48 instanceof DispatchGatewayError) {
+    let told = error48.message;
+    if (suffix !== "") {
+      told = error48.transient ? `${error48.answer}${suffix}` : `${error48.answer}, so ${error48.advice}${suffix}`;
+    }
+    return new DispatchGatewayError(error48.status, error48.answer, error48.transient, error48.advice, `${error48.code}: ${told}`);
+  }
   if (!(error48 instanceof DispatchServiceError))
     return error48;
   return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${suffix}`, error48.candidates, error48.current, error48.mismatches);
@@ -40621,7 +40648,7 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error48) {
-          throw refusalWithCode(error48, "; the reason was not posted, so the close was not sent");
+          throw refusalWithCode(error48, error48 instanceof DispatchGatewayError && error48.transient ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "; the reason was not posted, so the close was not sent");
         }
       }
       const linked = before.external_links.map((link) => link.url);
@@ -40640,7 +40667,7 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
-        const taken = error48 instanceof DispatchServiceError && error48.status === 500 && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
+        const taken = error48 instanceof DispatchServiceError && !(error48 instanceof DispatchGatewayError) && error48.status === 500 && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
         const refused = error48 instanceof DispatchServiceError && error48.status < 500;

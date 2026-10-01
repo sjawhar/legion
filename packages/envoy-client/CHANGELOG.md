@@ -68,16 +68,25 @@
 
 - A non-2xx answer whose body is not Dispatch's `{code, error}` JSON — a gateway's or proxy's HTML
   page, an empty body, JSON of another shape — reached every `dispatch_*` tool as its raw body
-  (LEGION-457). `DispatchClient` now throws it as `<METHOD> <url with query> answered <status>
-  [<reason>] with <a body that is not Dispatch's error JSON ("<excerpt>") | an empty body>, which
-  looks like a proxy or gateway page rather than Dispatch's own answer, so <a retry may succeed. |
-  a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is
-  fixed.>`: a 5xx, 408 or 429 gets the first advice, any other status the second. The excerpt is
-  one line of at most 120 characters with scripts, styles and tags dropped, and with whatever
-  reads as a credential redacted first: the client's own bearer wherever it appears, and the value
-  after `Authorization:` or `Bearer`. The URL never carries the bearer, which travels in a header.
-  `code` stays `HTTP_<status>`. Dispatch's own JSON errors render as before: their `error` text
-  under their `code`.
+  (LEGION-457). `DispatchClient` now throws it as a `DispatchGatewayError` (a
+  `DispatchServiceError` whose `code` stays `HTTP_<status>`) reading `<METHOD> <url with query>
+  answered <status> [<reason>] with <a body that is not Dispatch's error JSON ("<excerpt>") | an
+  empty body>, which looks like a proxy or gateway page rather than Dispatch's own answer, so
+  <advice>.` The advice fits the method and the status: a status that cannot clear gets "a retry
+  gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed"; a 5xx,
+  408 or 429 gets "a retry may succeed" on a GET and, on a write a gateway may have answered after
+  Dispatch applied it, "the write may or may not have reached Dispatch: check whether it took
+  effect before retrying it". The error carries `answer` (the message without the advice),
+  `transient` and `advice`, so `dispatch_issue_update` gives its close path's own account in place
+  of the client's: a gateway's 5xx on the close says the reason landed and the close may or may
+  not have, on the reason's post that the reason may or may not have been posted, and a gateway's
+  500 on `external_links` gets no link-clash hint, which reads Dispatch's own 500 only. The
+  excerpt and the reason phrase are each one line of at most 120 characters with scripts, styles
+  and tags dropped, and with the client's own bearer (trimmed) wherever it appears and the value
+  after `Authorization:` or `Bearer` redacted first. The excerpt scans at most the first 64 KiB of
+  the body, and every pattern it runs is linear, so a body of any shape cannot hold the host's
+  event loop. The URL never carries the bearer, which travels in a header. Dispatch's own JSON
+  errors render as before: their `error` text under their `code`.
 
 - `getArchitectureSource` reads both answers a server gives for a project with no architecture
   source as `null`: a current server's `200 null` and an older server's `404 SOURCE_NOT_FOUND`.
