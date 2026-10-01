@@ -32,7 +32,9 @@ const (
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
 type OutboxPayload interface{ OutboxKind() OutboxKind }
 
-// StatusWrite records the Dispatch status observed when this write was enqueued.
+// StatusWrite is a Dispatch status the daemon writes. ObservedStatus is the status Dispatch shows
+// until the write runs: the runner writes Status only while Dispatch still shows ObservedStatus, so a
+// move someone else made since the write was queued stands.
 type StatusWrite struct {
 	Status         string `json:"status"`
 	ObservedStatus string `json:"observedStatus"`
@@ -169,10 +171,15 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 
 // The controller notices no architect is told of. A triage notice's root is unrecorded, so no
 // architect owns it; a slot-free notice names the root whose slot admission released while no
-// waiting root took it, and the controller picks the next root to hand to Legion.
+// waiting root took it, and the controller picks the next root to hand to Legion. A todo notice
+// names an issue not handed to Legion that changed in `todo`, a new candidate for that walk; a
+// tick is the daemon's periodic wake, whose issue is the project key. When admission sends each
+// is its rule (admit.Admission.wakeController and its callers).
 const (
 	TriageNotice   NoticeKind = "triage"
 	SlotFreeNotice NoticeKind = "slot-free"
+	TodoNotice     NoticeKind = "todo"
+	TickNotice     NoticeKind = "tick"
 )
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
@@ -416,7 +423,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "catch-up", "checks-red":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false
@@ -427,7 +434,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice:
 		return true
 	default:
 		return false

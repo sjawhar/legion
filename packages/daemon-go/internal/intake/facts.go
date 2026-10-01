@@ -32,8 +32,10 @@ type DispatchIssue struct {
 	Rank   string
 	// HandedOver is whether the event's own labels carried dispatch.LegionLabel.
 	HandedOver bool
-	// ActorSession is the id of the session that wrote the event, when a session did; empty for a
-	// user or any other actor kind.
+	// ActorSession is the id of the session that wrote the event, when a session other than the
+	// daemon did. It is empty for the writes the workflow acts on as a person's move: a user's, the
+	// daemon's own under dispatch.DaemonSession (every `legion status`, the controller's park, a
+	// close's done), and any other actor kind's.
 	ActorSession string
 }
 
@@ -83,6 +85,14 @@ func (DispatchConsumerPosition) isFact() {}
 func (p DispatchConsumerPosition) Reached(target int64) bool {
 	return p.AckFloorStream >= target || p.Idle
 }
+
+// ControllerTick is the daemon's periodic wake for the project's controller, applied as a
+// synthetic fact every `controller_wake_interval_seconds` and never decoded from an event.
+// Admission is the only handler that acts on it; when it wakes the controller is admission's rule
+// (admit.Admission.wakeController and its callers).
+type ControllerTick struct{}
+
+func (ControllerTick) isFact() {}
 
 // PullRequestOpened registers a pull request whose branch or body identifies a Dispatch issue.
 type PullRequestOpened struct {

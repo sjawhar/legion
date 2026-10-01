@@ -306,7 +306,7 @@ func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
 	}
 }
 
-func TestCreateIssueWithMissingOrBlankSpecSeedsPrimaryDocument(t *testing.T) {
+func TestCreateIssueWithMissingOrBlankSpecGetsAnEmptyPrimaryDocument(t *testing.T) {
 	handler := newTestHandler(t)
 	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -344,57 +344,12 @@ func TestCreateIssueWithMissingOrBlankSpecSeedsPrimaryDocument(t *testing.T) {
 			}
 			text := decodeBody[struct {
 				Markdown string `json:"markdown"`
+				Version  *int   `json:"version"`
 			}](t, textResponse)
-			if !strings.HasPrefix(text.Markdown, "## Summary") {
-				t.Fatalf("primary document = %q, want it to start with Summary", text.Markdown)
+			if text.Markdown != "" || text.Version == nil || *text.Version != 1 {
+				t.Fatalf("primary document = %#v, want empty markdown at version 1", text)
 			}
 		})
-	}
-}
-
-func TestSeededSpecHeadingsMatchDispatchWritingGuidance(t *testing.T) {
-	handler := newTestHandler(t)
-	issue := createArtifactIssue(t, handler)
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("read primary document: status=%d body=%s", response.Code, response.Body.String())
-	}
-	document := decodeBody[struct {
-		Markdown string `json:"markdown"`
-	}](t, response)
-
-	skill, err := os.ReadFile("../../../../../skills/dispatch/SKILL.md")
-	if err != nil {
-		t.Fatalf("read Dispatch skill: %v", err)
-	}
-	const tableHeader = "| Section | Required content | Form |\n"
-	_, table, found := strings.Cut(string(skill), tableHeader)
-	if !found {
-		t.Fatal("Dispatch skill has no Writing a spec section table")
-	}
-	var want []string
-	for _, line := range strings.Split(table, "\n") {
-		if line == "" {
-			break
-		}
-		if !strings.HasPrefix(line, "| **") {
-			continue
-		}
-		section, _, found := strings.Cut(strings.TrimPrefix(line, "| **"), "** |")
-		if !found {
-			t.Fatalf("malformed Dispatch skill section row %q", line)
-		}
-		want = append(want, section)
-	}
-
-	var got []string
-	for _, line := range strings.Split(document.Markdown, "\n") {
-		if section, found := strings.CutPrefix(line, "## "); found {
-			got = append(got, section)
-		}
-	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("seeded spec headings = %q, want %q from Dispatch guidance", got, want)
 	}
 }
 
@@ -1899,8 +1854,8 @@ func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
 	scanner := bufio.NewScanner(stream.Body)
 	// The 1005 seeded events plus the issue creation exceed one capped page
 	// (maxSSEReplay=1000); a single connection pages through all of them without
-	// ever disconnecting — a capped page used to end the stream and force a client
-	// reconnect, which left a gap where a low id committing between "read this page"
+	// ever disconnecting: a capped page that ended the stream and forced a client
+	// reconnect would leave a gap where a low id committing between "read this page"
 	// and "a new connection subscribes" could be lost forever.
 	for wantID := 2; wantID <= 1007; wantID++ {
 		frame := readSSEFrame(t, scanner)
@@ -2263,11 +2218,11 @@ func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
 	}
 }
 
-// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging proves the fix for
-// the recurrence: a capped catch-up page used to end the stream (forcing a client
-// reconnect with a higher Last-Event-ID), which meant a still-uncommitted low id —
-// invisible to every catch-up page, since each page's cursor only moves forward —
-// could never be recovered once it finally committed. Keeping one subscription
+// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging: a capped catch-up
+// page that ended the stream (forcing a client reconnect with a higher
+// Last-Event-ID) would mean a still-uncommitted low id — invisible to every
+// catch-up page, since each page's cursor only moves forward — could never be
+// recovered once it finally committed. Keeping one subscription
 // attached across every page closes that gap.
 func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T) {
 	handler, database, broker := newTestHandlerWithBroker(t)
@@ -2353,10 +2308,9 @@ func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T)
 	}
 }
 
-// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost proves the fix
-// for the cold-start event-loss recurrence: the client used to make two separate
-// requests (GET /events/head, then GET /events?since=<head>), so a transaction
-// that grabbed a lower id before the head was read could commit in the gap
+// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost: a client making
+// two separate requests (GET /events/head, then GET /events?since=<head>) would let a
+// transaction that grabbed a lower id before the head was read commit in the gap
 // between those two requests and never be delivered — invisible to a catch-up
 // query (its id is <= since) and to the subscription (registered only by the
 // second request, after the gap). A cold request (no since=, no Last-Event-ID)

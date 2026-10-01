@@ -68,7 +68,8 @@ func (m *Machine) chargeDeath() bool {
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the
 // session kept — and the same session relaunched, or, once retirements run out too, the claim
 // fails with its prompt count left at the limit. A suspension that fails charges nothing: the next
-// failure reaches the limit again and retries the retirement.
+// failure reaches the limit again and retries the retirement. A retirement while a suspension is
+// held is that suspension's stop instead, charged nothing (suspendHeld).
 func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 	failures := m.claim.Budgets.PromptFailures + 1
 	if failures < m.deps.Limits.PromptFailures {
@@ -76,6 +77,9 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 		m.log.Warn("supervise: prompt failure", "why", why, "promptFailures", failures,
 			"limit", m.deps.Limits.PromptFailures)
 		return m.persist(ctx)
+	}
+	if m.held != nil {
+		return m.suspendHeld(ctx)
 	}
 	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)

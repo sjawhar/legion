@@ -663,7 +663,7 @@ test("an inbox row sets its issue's priority in place", async ({ browser }, test
 // Deferring a row is only worth anything if it stops being asked about, so this case gates the
 // whole rule at the UI: the band, and the two counts that would otherwise keep nagging - the
 // Blocked-on-you banner and the rail's Needs-you badge - including after an agent replies,
-// which hands the turn back and is exactly what used to pull a deferred ask onto the list.
+// which hands the turn back and is exactly what could pull a deferred ask onto the list.
 test("a snoozed row leaves Later, the banner and the Needs-you badge alone until un-snoozed", async ({
   browser,
 }, testInfo) => {

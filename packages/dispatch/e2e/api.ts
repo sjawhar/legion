@@ -163,6 +163,7 @@ export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
 export function createIssue(
   input: Partial<Pick<Issue, "project" | "title">> & {
     external?: string;
+    force?: boolean;
     parent?: string;
     spec?: string;
   },
@@ -177,6 +178,16 @@ export function createAsk(
   options: ApiOptions = {}
 ): Promise<Ask> {
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
+}
+
+/** Every ask on the issue, whatever its state (the route's default `state=all`). */
+export function listIssueAsks(issue: string, options: ApiOptions = {}): Promise<Ask[]> {
+  return request<Ask[]>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/asks`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 export function createProjectDocument(
@@ -349,12 +360,13 @@ export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artif
 
 export function requestApproval(
   id: string,
+  input: { summary?: string } = {},
   options: ApiOptions = {}
 ): Promise<{ ask: Ask; artifact_id: string; version: number }> {
   return request(
     `/api/v1/artifacts/${encodeURIComponent(id)}/approval-requests`,
     "POST",
-    {},
+    input,
     options
   );
 }

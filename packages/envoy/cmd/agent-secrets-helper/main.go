@@ -10,6 +10,7 @@
 //
 //	agent-secrets-helper [serve]     run (the unit's ExecStart)
 //	agent-secrets-helper sessions    list live sessions: pid, runtime_id, enrollment_id, state
+//	agent-secrets-helper --version   the release this binary was built as
 package main
 
 import (
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
+	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
 type config struct {
@@ -60,6 +62,10 @@ func main() {
 	if len(os.Args) > 1 {
 		sub = os.Args[1]
 	}
+	if sub == "--version" {
+		fmt.Printf("agent-secrets-helper %s\n", buildversion.String())
+		return
+	}
 	cfg, err := loadConfig(os.Getenv)
 	fatal(err)
 	switch sub {
@@ -68,17 +74,16 @@ func main() {
 	case "sessions":
 		fatal(printSessions(cfg.Socket))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: agent-secrets-helper [serve|sessions]")
+		fmt.Fprintln(os.Stderr, "usage: agent-secrets-helper [serve|sessions|--version]")
 		os.Exit(2)
 	}
 }
 
 // serve runs the daemon: it always listens and serves, whether or not a machine credential has
-// ever been installed. There is no startup gate on TokenFile/OperatorFile — the brief's contract
-// is that the unit no longer exits without a credential; a login is a separate ceremony
-// (`agent-secrets launcher login`) run against the already-listening socket, and a missing or
-// empty OperatorFile only surfaces later, informatively, the first time Login actually needs it
-// for its login_hint.
+// ever been installed. There is no startup gate on TokenFile/OperatorFile: the unit never exits
+// for want of a credential; a login is a separate ceremony (`agent-secrets launcher login`) run
+// against the already-listening socket, and a missing or empty OperatorFile only surfaces later,
+// informatively, the first time Login actually needs it for its login_hint.
 func serve(cfg config) error {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return errors.New("AGENT_SECRETS_URL is required (the secrets broker, e.g. https://secrets.internal.example)")
@@ -101,7 +106,7 @@ func serve(cfg config) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(cfg.StatePath),
-		Broker:   &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, HTTP: &http.Client{Timeout: 30 * time.Second}},
+		Broker:   &helper.Broker{URL: cfg.URL, OperatorFile: cfg.OperatorFile, HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log},
 		Hostname: hostname,
 		PeerOf:   helper.PeerOf,
 		Log:      log,
@@ -110,7 +115,9 @@ func serve(cfg config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	srv.Recover(ctx)
-	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL)
+	// The version says which release a restart came up on. The credential's state is logged where
+	// it changes (the Broker's machine-login and refusal lines); a restart never holds one here.
+	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL, "version", buildversion.String())
 	return srv.Serve(ctx, ln)
 }
 

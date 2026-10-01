@@ -29,6 +29,17 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e2.$$.XXXXXXXX")
+# Every line of the run also goes to $work/transcript.log (lib/transcript.sh), so the driver and its
+# cleanup, which stops the panes and removes both containers, never fail on a write whoever is
+# reading. The transcript is in the work directory, kept with it on a failure, and cleanup SIGKILLs
+# every process whose command line names that directory (run_processes), so the tee gets the
+# transcript as fd 8, never by path. The tee keeps the copy it forked with, and the driver closes
+# its own so nothing it starts inherits it.
+exec 8>>"$work/transcript.log"
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to /dev/fd/8
+exec 8>&-
 ok=
 daemon_pid=
 deadline_pid=
@@ -45,6 +56,7 @@ omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$work/daemon.log
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 timeout_hook=
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
@@ -55,6 +67,7 @@ timeout_hook=
 
 begin() {
   check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
   echo "== $check"
 }
 note() { echo "   $*"; }
@@ -106,7 +119,7 @@ run_processes() {
   done
 }
 cleanup() {
-  local p
+  local status=$? p
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
   for p in "$ptoken" "$deadline_ptoken"; do
@@ -119,7 +132,11 @@ cleanup() {
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
-    echo "the run's workspace is $work (daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
+    echo "the run's workspace is $work (transcript: $work/transcript.log; daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
+    # A diagnostic: it never sets the run's status (errexit is on here). A hangup, an interrupt or
+    # a termination (129, 130, 143, as trapped below) stopped the run and gets none; a child a signal
+    # killed, which is a failure, still does.
+    [[ $status =~ ^(129|130|143)$ ]] || bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$work/model-gateway" "$check_started" "$check" >&2 || true
   fi
   return 0
 }

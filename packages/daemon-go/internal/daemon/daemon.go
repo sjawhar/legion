@@ -584,6 +584,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			RegistrationIntervals: cfg.WorkerBootRegistrationDeadlineIntervals,
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
+			Stop:                  cfg.WorkerStopTimeout,
 		},
 	}
 	return &supervision{
@@ -796,6 +797,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Project:           p.project,
 		OperatorToken:     p.operatorToken,
 		Controller:        st,
+		DesignGate:        cfg.Gates.Design,
 		Log:               s.log,
 		Pool:              st.Pool(),
 		Handlers:          handlers,

@@ -185,13 +185,17 @@ test("issue header copies its key and persists its title, status, and route", as
     // The same button copies the dispatch:// reference under Ctrl/Cmd.
     await copyKey.click({ modifiers: ["ControlOrMeta"] });
     await expect.poll(copied).toEqual([issue.key, `dispatch://${issue.key}`]);
-    await page.getByText("Message route:", { exact: true }).hover();
-    await page.getByText("Message route:", { exact: true }).evaluate((label) => {
+    const routeLabel = page.getByText("Message route:", { exact: true });
+    await routeLabel.hover();
+    // The screenshot shows the hint as a fixed box under its label. The box sits over the header's
+    // controls, so the hint gets its own style back before anything below is clicked.
+    const hintStyle = await routeLabel.evaluate((label) => {
       const hintId = label.getAttribute("aria-describedby");
       const hint = hintId === null ? null : document.getElementById(hintId);
       if (hint === null) {
         throw new Error("Message route hint is missing");
       }
+      const style = hint.getAttribute("style");
       const labelBox = label.getBoundingClientRect();
       Object.assign(hint.style, {
         background: "Canvas",
@@ -212,12 +216,24 @@ test("issue header copies its key and persists its title, status, and route", as
         width: "18rem",
         zIndex: "50",
       });
+      return style;
     });
     await page.screenshot({
       path: testInfo.outputPath(
         `issue-header-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`
       ),
     });
+    await routeLabel.evaluate((label, style) => {
+      const hint = document.getElementById(label.getAttribute("aria-describedby") ?? "");
+      if (hint === null) {
+        throw new Error("Message route hint is missing");
+      }
+      if (style === null) {
+        hint.removeAttribute("style");
+      } else {
+        hint.setAttribute("style", style);
+      }
+    }, hintStyle);
     await heading.click();
     const issueTitle = page.getByLabel("Issue title");
     await issueTitle.fill("First decision revised");
@@ -809,7 +825,7 @@ test("issue header gives the title the row's free space beside a short details l
     // A busy details line (whose-turn badge, one label, Route, Subscribers) that fits beside a
     // 12rem title but not beside the whole title: just below 1280 the title must keep at least
     // half the card rather than share the row and drop to its minimum. The line without the
-    // GitHub link is the one that used to squeeze (with the link it was too wide to share).
+    // GitHub link is the one that could squeeze (with the link it is too wide to share).
     await patchIssue(issue.key, {
       labels: ["api"],
       title: "Migrate the issue header to a single row",

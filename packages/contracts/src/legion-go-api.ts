@@ -235,9 +235,11 @@ export const LegionGoControllerRegisterResponse = z.strictObject({
 export type LegionGoControllerRegistration = z.output<typeof LegionGoControllerRegisterResponse>;
 
 /** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
- * capability the operator's bearer bought. */
+ * capability the operator's bearer bought, and the project's `gates.design`, which
+ * `legion controller start` tells the controller. The CLI reads it; the plugin never does. */
 export const LegionGoControllerSecretResponse = z.strictObject({
   secret: nonEmptyString,
+  designGate: z.enum(["root-issues", "off"]),
 });
 
 /** Claim routes refuse with only a sentence; credential and workflow routes add a stable code. */
@@ -283,6 +285,8 @@ export const LegionGoOperatorClaimResponse = z.strictObject({
   }),
   uncertainStreak: z.number().int().nonnegative(),
   pending: legionGoDeliveryView.optional(),
+  /** A suspension the claim's machine holds for the agent's turn to end; absent when none is. */
+  suspensionHeld: z.literal(true).optional(),
 });
 
 export type LegionGoOperatorClaim = z.output<typeof LegionGoOperatorClaimResponse>;

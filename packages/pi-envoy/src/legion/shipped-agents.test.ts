@@ -53,3 +53,8 @@ test.each(agents)("%s names every skill it autoloads as skill://<name>", (file) 
     expect(named, `${file} autoloads ${entry} but names no skill://${entry}`).toContain(entry);
   }
 });
+
+// deep-worker.md's frontmatter says why.
+test("deep-worker.md is blocking", () => {
+  expect(definition("deep-worker.md").fields.blocking).toBe(true);
+});

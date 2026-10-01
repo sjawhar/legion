@@ -854,6 +854,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
 			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
 		}
+		// Rows first, judged against the target table's width; the block path below reads the
+		// fragment as a document of its own, whose tables are its own.
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
+			return out, invalidSchemaOp("markdown", err)
+		}
 		position := target.From
 		if after {
 			position = target.To
@@ -864,15 +869,18 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp, budget *pmdoc.TablePaddin
 				return nil, err
 			}
 		}
+		// A document with nothing in it holds one empty paragraph, which the insert takes the place
+		// of rather than leaving an empty line beside what it writes, so it lands at the start.
+		at := pmdoc.Range{From: position, To: position}
+		if pmdoc.EmptyDocument(tree) {
+			at = pmdoc.Range{From: 0, To: pmdoc.Size(tree)}
+		}
 		// Front matter opens only the document's start, so only there does the insert read it.
-		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position), budget)
+		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, at.From), budget)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after, budget); err != nil || inserted {
-			return out, invalidSchemaOp("markdown", err)
-		}
-		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		out, err := pmdoc.Splice(tree, at, with)
 		if err != nil {
 			return nil, invalidSchemaOp("markdown", err)
 		}
@@ -978,7 +986,7 @@ func anchorField(after bool) string {
 
 // replacementMarkdown resolves `with` against the marker the matched block already renders.
 // A replace is inline, so a `with` that opens with the block's own marker would write that
-// marker twice (AGENTC-193 read back `## ##`, `7. 7\.`, `4. 4\.` and `-    - `). A heading
+// marker twice (`## ##`, `7. 7\.`, `4. 4\.`, `-    - `). A heading
 // rename is the one shape that keeps working: `find` carried the marker through the match, so
 // an identical one in `with` is the block's, and it is dropped. Every other repetition is
 // refused, and a marker of a different kind stays the literal text it has always been.

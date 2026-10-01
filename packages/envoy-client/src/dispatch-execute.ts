@@ -37,10 +37,12 @@ import {
   ASK_URGENCIES,
   actorLabel,
   claimHolds,
+  DEFAULT_ISSUE_PAGE_LIMIT,
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
   overCapMessage,
+  PROJECT_KEY_PATTERN,
   serviceSubjectLabel,
   snippetText,
   zodSchemaApi,
@@ -177,13 +179,28 @@ function renderAdvice(
   const openAsks = advice.your_open_asks;
   const writesSinceHuman = advice.session_writes_since_human;
   const lines: string[] = [];
+  const unparsed = advice.unparsed_openers;
+  if (
+    unparsed !== undefined &&
+    unparsed.count > 0 &&
+    (tool === "dispatch_issue" || tool === "dispatch_artifact")
+  ) {
+    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
+    const subject =
+      unparsed.count === 1
+        ? "1 typed-block opening in this document is text, not a block"
+        : `${unparsed.count} typed-block openings in this document are text, not blocks`;
+    lines.push(
+      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`
+    );
+  }
   if (
     advice.decision_blocks === 0 &&
     opts.isPrimarySpec === true &&
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
     lines.push(
-      'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+      'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
     );
   }
 
@@ -858,7 +875,7 @@ async function resolveOwnerArguments(
     problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
-    if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
+    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push("project must be a project key such as CORE");
     }
     const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
@@ -1979,19 +1996,25 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
-      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
-      const issues = await client.listIssues({
-        project,
-        ...(status === undefined ? {} : { status }),
-        ...(parent === undefined ? {} : { parent }),
-        ...(label === undefined ? {} : { label }),
-        ...(priority === undefined ? {} : { priority }),
-        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
-        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
-      });
-      const total = issues.length;
-      const rows = issues.slice(offset, offset + limit).map((row) => ({
+      const page = await client.listIssuePage(
+        {
+          project,
+          ...(status === undefined ? {} : { status }),
+          ...(parent === undefined ? {} : { parent }),
+          ...(label === undefined ? {} : { label }),
+          ...(priority === undefined ? {} : { priority }),
+          ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+          ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
+        },
+        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
+        // negative or fractional offset.
+        {
+          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+          offset: optionalNumber(args, "offset") ?? 0,
+        }
+      );
+      const { total, limit, offset } = page;
+      const rows = page.issues.map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,

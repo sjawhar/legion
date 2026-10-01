@@ -318,10 +318,10 @@ func TestEnrollRetriesUntilTheBrokerAnswers(t *testing.T) {
 		t.Fatalf("before enrollment: %+v", signed)
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && r.srv.Registry.Get(os.Getpid()).State() != "enrolled" {
+	for time.Now().Before(deadline) && r.srv.Registry.Get(os.Getpid()).snapshot().State != "enrolled" {
 		time.Sleep(100 * time.Millisecond)
 	}
-	if r.srv.Registry.Get(os.Getpid()).State() != "enrolled" {
+	if r.srv.Registry.Get(os.Getpid()).snapshot().State != "enrolled" {
 		t.Fatal("two 503s then a 201 must end enrolled within 10 s (1 s + 2 s backoff)")
 	}
 }
@@ -428,21 +428,21 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var sess *Session
 	for time.Now().Before(deadline) {
-		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.State() == "enrolled" {
+		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.snapshot().State == "enrolled" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if sess == nil || sess.State() != "enrolled" {
+	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled")
 	}
 	if sess.Thumbprint == oldTP || sess.EnrollmentID() == first.EnrollmentID || sess.RuntimeID != first.RuntimeID {
 		t.Fatalf("recovery uses a fresh key and a new enrollment for the same runtime_id: %+v", sess.Info())
 	}
 	// The recovered session's own goroutine revokes the old enrollment before its first enroll
-	// call (the AGENTC-834 thermonuclear review's finding on Recover's ordering, fixed by
-	// threading priorID through adopt/enrollLoop): by the time sess reads "enrolled" above, the
-	// old id must already be revoked, so this poll should already find it on the first check.
+	// call (AGENTC-834 thermonuclear review, Recover's ordering; enrollLoop revokes the session's
+	// lapsed id first): by the time sess reads "enrolled" above, the old id must already be
+	// revoked, so this poll should already find it on the first check.
 	revokeDeadline := time.Now().Add(5 * time.Second)
 	for {
 		r.fake.mu.Lock()
@@ -531,7 +531,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.cancel() // the helper dies; keys are gone with it
 	time.Sleep(100 * time.Millisecond)
 	// Hold the old row "live" for 300ms once srv2.Recover asks to revoke it: nothing has issued
-	// a DELETE for this broker yet, so this is that first (and, under the fix, only) one.
+	// a DELETE for this broker yet, so this is that first (and only) one.
 	r.fake.mu.Lock()
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
@@ -548,12 +548,12 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var sess *Session
 	for time.Now().Before(deadline) {
-		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.State() == "enrolled" {
+		if sess = srv2.Registry.Get(child.Process.Pid); sess != nil && sess.snapshot().State == "enrolled" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if sess == nil || sess.State() != "enrolled" {
+	if sess == nil || sess.snapshot().State != "enrolled" {
 		t.Fatal("the live session must be re-pinned and enrolled despite the delayed revoke")
 	}
 	r.fake.mu.Lock()
@@ -585,20 +585,19 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 }
 
 // TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff is the regression for
-// the Important finding on the third fix pass (AGENTC-834 thermonuclear review): enrollLoop's
-// revoke-before-enroll guard calls revokeLapsed synchronously, and revokeLapsed retries
-// indefinitely with backoff — so if the re-pinned session ends (Registry.Remove, exactly what
-// retire/unregister would do) while that revoke is genuinely stuck retrying against a failing
-// broker, the previous fix left priorID abandoned forever: retire's own revoke only ever touches
-// sess.EnrollmentID(), still empty at this point since this session never reached its first
-// successful Enroll, and once Registry.Remove drops the record a later restart's Recover has no
-// way to find priorID either. The fix falls back to firing the same bounded, independent
-// s.revoke used elsewhere whenever revokeLapsed gives up because the session ended rather than
-// because ctx was canceled. fakeBroker's revokeFailFirst holds the first revoke attempt at a 503
-// (an unreachable broker, not merely a slow one) so revokeLapsed is genuinely retrying with
-// backoff — its next attempt is roughly a second away — and revokeAttempts lets this test poll
-// for exactly when that first attempt has landed instead of guessing with a raw sleep, so ending
-// the session lands reliably inside the backoff window rather than racing it.
+// AGENTC-834: enrollLoop's revoke-before-enroll guard calls revokeLapsed synchronously, and
+// revokeLapsed retries indefinitely with backoff — so if the re-pinned session ends
+// (Registry.Remove, exactly what retire/unregister would do) while that revoke is genuinely stuck
+// retrying against a failing broker, the prior id would be abandoned: retire's own revoke only
+// ever touches sess.EnrollmentID(), still empty at this point since this session never reached its
+// first successful Enroll, and once Registry.Remove drops the record a later restart's Recover has
+// no way to find the prior id either. revokeLapsed therefore hands the id to the same bounded,
+// independent s.revoke used elsewhere whenever it gives up because the session ended rather than
+// because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a 503 (an
+// unreachable broker, not merely a slow one) until the session has ended and its own retry loop
+// has stopped, so revokeLapsed is genuinely retrying when the session ends, however long the test
+// takes to get there: no assertion here has to land inside a real backoff window. Only then is the
+// fault cleared, so only the handed-off revoke can land the prior id.
 func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
@@ -635,11 +634,9 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	}
 	r.cancel() // the helper dies; keys are gone with it
 	time.Sleep(100 * time.Millisecond)
-	// Fail only the first revoke of the old enrollment: revokeLapsed's own loop (or the
-	// fallback's) succeeds on whichever attempt comes next, so the enrollment is never
-	// permanently stuck — only genuinely retrying with backoff for one round.
+	// Fail every revoke of the old enrollment until the test clears it, after the session ends.
 	r.fake.mu.Lock()
-	r.fake.revokeFailFirst = 1
+	r.fake.revokeFailFirst = failAlways
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "sjawhar")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
@@ -657,7 +654,8 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	}
 	// Wait for the first (failing) revoke attempt to land, then end the re-pinned session —
 	// Registry.Remove, exactly what retire/unregister would do — while revokeLapsed is still
-	// backed off waiting for its next attempt (roughly a second away).
+	// retrying: every attempt fails until the fault is cleared below, so it cannot have
+	// succeeded meanwhile.
 	attemptDeadline := time.Now().Add(5 * time.Second)
 	for {
 		r.fake.mu.Lock()
@@ -684,15 +682,12 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	}
 	r.fake.mu.Unlock()
 	if alreadyRevoked {
-		t.Fatal("the old enrollment was already revoked before the session ended; this run never reached the mid-backoff window the fix covers")
+		t.Fatal("the old enrollment was revoked while every revoke was failing")
 	}
-	srv2.Registry.Remove(sess)
-	if sess.peer != nil {
-		sess.peer.Close()
-	}
+	endSessionThenReleaseRevokes(t, r, srv2.Registry, sess)
 	// The independent fallback must still revoke the old enrollment even though the session that
 	// was supposed to revoke it is gone.
-	revokeDeadline := time.Now().Add(5 * time.Second)
+	revokeDeadline := time.Now().Add(10 * time.Second)
 	for {
 		r.fake.mu.Lock()
 		revoked := false
@@ -752,19 +747,28 @@ func TestRecoverDropsDeadRecords(t *testing.T) {
 // and SAME stale lease on the next enroll — so a fixed renewLoop must revoke the lapsed id
 // before enrolling again, and this proves it does: within a bounded time the session ends up
 // enrolled under a genuinely NEW id, having explicitly revoked the old one, never spinning.
+//
+// The lapse is the fake's genuine expiry path, with nothing timed against it: the fake holds the
+// session's first renew at its renew gate until the test has seen the enrollment's stored lease
+// pass, and only then lets it through, so the renew is refused because the lease has passed
+// however slow the host is. The first enrollment's short lease is the fake's nextLease, so the
+// fresh enrollment gets the fake's 900 s default and cannot lapse again under the assertions.
 func TestRenewRefusedRevokesTheLapsedEnrollmentBeforeReenrolling(t *testing.T) {
 	r := startRig(t, "")
+	gate, open := testGate(t)
 	r.fake.mu.Lock()
-	r.fake.lease = 60 * time.Millisecond
-	// Three failed renew attempts (150ms of retrying at the 50ms MinRenew floor) comfortably
-	// outlasts the 60ms lease, so by the time renewFail hits zero the lease has genuinely
-	// lapsed and the next renew is refused for that reason, not a transient outage.
-	r.fake.renewFail = 3
+	r.fake.nextLease = 60 * time.Millisecond
+	r.fake.renewGate = gate
 	r.fake.mu.Unlock()
 	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !reg.OK || reg.State != "enrolled" {
 		t.Fatalf("register: %+v", reg)
 	}
+	r.fake.mu.Lock()
+	expiry := r.fake.leaseExpiry[reg.EnrollmentID]
+	r.fake.mu.Unlock()
+	time.Sleep(time.Until(expiry) + 20*time.Millisecond)
+	open()
 	deadline := time.Now().Add(5 * time.Second)
 	var newID string
 	for time.Now().Before(deadline) {

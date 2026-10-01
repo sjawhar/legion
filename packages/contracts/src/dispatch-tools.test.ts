@@ -6,6 +6,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
+  SEARCH_QUERY_MAX,
   SPEC_SECTIONS,
 } from "./dispatch-tools";
 import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
@@ -203,6 +204,43 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ query: "a" }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 51 }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 50, project: "LEGION" }).success).toBe(true);
+  });
+
+  test("dispatch_search accepts a query at the limit and refuses one character over by name", () => {
+    const schema = schemaFor("dispatch_search");
+
+    expect(schema.safeParse({ query: "x".repeat(SEARCH_QUERY_MAX) }).success).toBe(true);
+    const over = schema.safeParse({ query: "x".repeat(SEARCH_QUERY_MAX + 1) });
+    expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+      `is 1 characters over the ${SEARCH_QUERY_MAX}-character limit (${SEARCH_QUERY_MAX + 1}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage`,
+    ]);
+  });
+
+  test("dispatch_search takes a project key or none, and refuses anything else by name", () => {
+    const schema = schemaFor("dispatch_search");
+
+    // The key's length limits, and anchors that hold at the ends of the whole value rather than
+    // of a line, are what keep the search URL short ("Search limits" in
+    // packages/contracts/AGENTS.md), and this copy of the pattern changes without a migration.
+    for (const project of [undefined, "", "AB", "K8S", "LEGION", "LEGSMOKE", "ABCDEFGHIJ"]) {
+      expect(schema.safeParse({ query: "ok", project }).success).toBe(true);
+    }
+    for (const project of [
+      "A",
+      "ABCDEFGHIJK",
+      "1ABC",
+      "legion",
+      " LEGION",
+      "LEGION\n",
+      "LEGION\nX",
+      "LEGION-1",
+      "中".repeat(100),
+    ]) {
+      const refused = schema.safeParse({ query: "ok", project });
+      expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
+        "project must be a project key such as CORE",
+      ]);
+    }
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
@@ -419,9 +457,8 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  // Sami, 2026-09-24, answering "may agents set issue priority (P0–P3), or only propose it for
-  // you?" on dispatch://LEGION/artifact/issue-status-conventions-md: "Agents may set". Only
-  // priority was ruled on, so rank stays the board's and is still refused.
+  // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
+  // rank stays the board's and is refused.
   test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
     const schema = schemaFor("dispatch_issue_update");
 
@@ -529,10 +566,10 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
-  // A mistyped `with` (`replace:`) used to be stripped by Zod's default strip mode, so the call
-  // validated with `with` simply absent - which the server reads as the one `with` that deletes
-  // the match. The edit applied, 200, and the quoted prose was gone with nothing to tell the
-  // model. Every key of an op but `op` is optional, so an unknown key is the only signal there is.
+  // A mistyped `with` (`replace:`) stripped by Zod's default strip mode would validate with `with`
+  // simply absent - which the server reads as the one `with` that deletes the match: the edit would
+  // apply, 200, and the quoted prose would be gone with nothing to tell the model. Every key of an
+  // op but `op` is optional, so an unknown key is the only signal there is.
   test("rejects a document edit op carrying an unknown key rather than stripping it", () => {
     const schema = schemaFor("dispatch_doc_edit");
     const target = { issue: "DSP-1", artifact: "spec" };
