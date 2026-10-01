@@ -201,7 +201,8 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     const plannerToggle = plannerCard.getByRole("button", { exact: true, name: "Planner" });
     await plannerToggle.click();
     await expect(plannerCard.getByRole("form", { name: "Comment composer" })).toBeVisible();
-    await expect(plannerCard).toContainText("Ctrl/Cmd+Enter to send · Enter for a new line");
+    // Until a message is typed the hint's line says why Send waits; then it says how to send.
+    await expect(plannerCard).toContainText("Type a message first.");
     const body = "Please inspect the current implementation.";
     const sentBody = `${body}\n`;
     const sent = page.waitForResponse(
@@ -212,6 +213,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     );
     const composer = plannerCard.getByRole("textbox", { name: "Comment" });
     await composer.fill(`/btw ${body}`);
+    await expect(plannerCard).toContainText("Ctrl/Cmd+Enter to send · Enter for a new line");
     await composer.press("Enter");
     await expect(composer).toHaveValue(`/btw ${sentBody}`);
     await composer.press("Control+Enter");
@@ -853,7 +855,7 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
   }
 });
 
-const NOTICE = /^(At most \d+ recipients|Could not send:|Excluded:)/;
+const NOTICE = /^(At most \d+ recipients|Excluded:)/;
 const NOTICE_SIZES = [
   { height: 664, width: 390 },
   { height: 390, width: 844 },
@@ -910,7 +912,6 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
   await page.goto("/agents");
   await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
   await expect(composer).toBeVisible();
-  const refused = composer.getByText(/^Could not send:/);
   return {
     agents,
     composer,
@@ -919,14 +920,6 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
     excludedLine: composer.getByText(/^Excluded:/),
     limit: composer.getByText(/^At most 100 recipients per broadcast/),
     notice: composer.getByText(NOTICE),
-    refused,
-    // Every listed recipient leaves the registry before Send, so the server refuses the send.
-    refuse: async (leaving: FakeSession[]) => {
-      await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
-      for (const session of leaving) await setSessionLive(session.session_id, false);
-      await composer.getByRole("button", { name: /^Send to / }).click();
-      await expect(refused).toBeVisible();
-    },
   };
 }
 
@@ -1013,45 +1006,6 @@ test.describe("the composer's notices share one slot, highest first, within budg
     }
   });
 
-  test("a refused send alone: 40 recipients leave the registry before Send", async ({
-    browser,
-  }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
-    const alice = await asUser(browser, "alice");
-    try {
-      const page = await alice.newPage();
-      const sessions = planners(40, 40);
-      const fixture = await openNoticeFixture(page, sessions);
-      await fixture.refuse(sessions);
-      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
-        await expect.soft(fixture.refused, at).toHaveCount(1);
-        await expect.soft(fixture.notice, at).toHaveCount(1);
-      });
-    } finally {
-      await alice.close();
-    }
-  });
-
-  test("a refused send over exclusions: 40 selected, 20 without BTW, each excluded chip still names its reason", async ({
-    browser,
-  }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
-    const alice = await asUser(browser, "alice");
-    try {
-      const page = await alice.newPage();
-      const sessions = planners(40, 20);
-      const fixture = await openNoticeFixture(page, sessions);
-      await fixture.refuse(sessions.slice(0, 20));
-      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
-        await expect.soft(fixture.refused, at).toHaveCount(1);
-        await expect.soft(fixture.excludedLine, at).toHaveCount(0);
-        await expect.soft(fixture.excludedChip("Planner 21"), at).toHaveCount(1);
-      });
-    } finally {
-      await alice.close();
-    }
-  });
-
   test("the boundary with exclusions: 101 recipients show the limit, exactly 100 the Excluded line", async ({
     browser,
   }, testInfo) => {
@@ -1080,39 +1034,29 @@ test.describe("the composer's notices share one slot, highest first, within budg
       await alice.close();
     }
   });
-
-  test("nobody to reach: neither of 2 selected advertises BTW, and the Excluded line keeps room beside Send", async ({
-    browser,
-  }, testInfo) => {
-    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
-    const alice = await asUser(browser, "alice");
-    try {
-      const page = await alice.newPage();
-      const fixture = await openNoticeFixture(page, [
-        builder("a", ["steer"]),
-        builder("b", ["steer"]),
-      ]);
-      // The refusal reads short here: the full label would squeeze the line that explains it to
-      // nothing on a narrow screen, where the line shares Send's row.
-      const send = fixture.composer.getByRole("button", { name: "No recipient" });
-      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
-        await expect.soft(fixture.excludedLine, at).toContainText("Sending as steer would reach 2");
-        await expect.soft(send, at).toBeDisabled();
-        const [line, button] = await Promise.all([
-          fixture.excludedLine.boundingBox(),
-          send.boundingBox(),
-        ]);
-        expect
-          .soft(line?.width ?? 0, `${at}: the Excluded line keeps at least half Send's width`)
-          .toBeGreaterThanOrEqual((button?.width ?? Number.POSITIVE_INFINITY) / 2);
-      });
-    } finally {
-      await alice.close();
-    }
-  });
 });
 
-test("a typed broadcast survives clearing the selection, picking again and a refused send", async ({
+/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
+ *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
+async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
+  let refusing = true;
+  await page.route("**/api/v1/broadcasts", (route) =>
+    refusing && route.request().method() === "POST"
+      ? route.fulfill({
+          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+          contentType: "application/json",
+          status: 503,
+        })
+      : route.fallback()
+  );
+  return {
+    allow: () => {
+      refusing = false;
+    },
+  };
+}
+
+test("a typed broadcast survives clearing the selection and picking again, and a refused send gives it back", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the draft rule");
@@ -1128,6 +1072,7 @@ test("a typed broadcast survives clearing the selection, picking again and a ref
     const composer = page.getByRole("region", { name: "Broadcast" });
     const message = composer.getByRole("textbox", { name: "Broadcast message" });
     const mode = composer.getByRole("combobox", { name: "Delivery mode" });
+    const sends = page.getByRole("region", { name: "Sends" });
 
     await header.click();
     await message.fill("Keep this draft.");
@@ -1139,25 +1084,164 @@ test("a typed broadcast survives clearing the selection, picking again and a ref
     await expect(message).toHaveValue("Keep this draft.");
     await expect(mode).toHaveValue("aside");
 
-    // A send the server refuses keeps the page, and the draft with it: both sessions leave the
-    // registry after the page last read it, so the server finds no one to reach.
-    for (const session of pair) {
-      await setSessionLive(session.session_id, false);
-    }
+    // Send hands the draft to the queue, so the composer goes with the selection. The server
+    // refuses it, and the send's row keeps it: Restore draft puts the message, its mode and its
+    // recipients back.
+    const refusal = await refuseBroadcasts(page);
     await composer.getByRole("button", { name: "Send to 2" }).click();
-    await expect(composer.getByText(/^Could not send:/)).toBeVisible();
+    await expect(composer).toHaveCount(0);
+    const failed = sends.getByRole("listitem").filter({ hasText: "Keep this draft." });
+    await expect(failed.getByRole("status")).toHaveText(
+      "Could not send to 2 agents: Envoy listener unreachable"
+    );
+    await failed.getByRole("button", { name: "Restore draft" }).click();
     await expect(message).toHaveValue("Keep this draft.");
     await expect(mode).toHaveValue("aside");
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })
+    ).toBeVisible();
+    await expect(sends).toHaveCount(0);
 
-    // A send that succeeds leaves the page; coming back finds an empty draft.
-    for (const session of pair) {
-      await setSessionLive(session.session_id, true);
-    }
+    // A single send that succeeds leaves the page; coming back finds an empty draft.
+    refusal.allow();
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
     await page.goBack();
     await header.click();
     await expect(message).toHaveValue("");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a second broadcast pressed while the first is on the wire waits its turn, and each send keeps its own row", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
+  const pair = planners(40, 40).slice(0, 2);
+  await setLiveSessions(pair);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // Each POST waits until the test lets it through, so each row's states can be read in turn
+    // and the second press lands while the first is still on the wire.
+    const held = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const posted: unknown[] = [];
+    await page.route("**/api/v1/broadcasts", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const index = posted.push(route.request().postDataJSON()) - 1;
+      await held[index]?.promise;
+      return route.fallback();
+    });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    const sends = page.getByRole("region", { name: "Sends" });
+    const row = (body: string) => sends.getByRole("listitem").filter({ hasText: body });
+
+    await header.click();
+    await message.fill("First.");
+    // Two clicks in one task, before React re-renders: one send, not two.
+    await composer.getByRole("button", { name: "Send to 2" }).evaluate((button: HTMLElement) => {
+      button.click();
+      button.click();
+    });
+    // The press hands the message off: the draft and the selection go with it.
+    await expect(composer).toHaveCount(0);
+    await expect(row("First.").getByRole("status")).toHaveText("Sending to 2 agents…");
+    await expect(sends.getByRole("listitem")).toHaveCount(1);
+
+    await header.click();
+    await expect(message).toHaveValue("");
+    await message.fill("Second.");
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+    await expect(row("Second.").getByRole("status")).toHaveText("Queued: to 2 agents");
+    // One at a time: the second has not left the browser while the first is unanswered.
+    expect(posted).toMatchObject([{ body: "First." }]);
+
+    held[0]?.resolve();
+    await expect(row("First.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
+    await expect(row("Second.").getByRole("status")).toHaveText("Sending to 2 agents…");
+    await expect.poll(() => posted).toMatchObject([{ body: "First." }, { body: "Second." }]);
+    // Nothing navigates while a send is still out.
+    await expect(page).toHaveURL(/\/agents$/);
+
+    held[1]?.resolve();
+    await expect(row("Second.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
+    // After more than one send the page stays, and each row links its own broadcast.
+    await page.waitForTimeout(500);
+    await expect(page).toHaveURL(/\/agents$/);
+    await row("First.").getByRole("link", { name: "Sent to 2 agents" }).click();
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+    const view = page.getByRole("region", { name: "Broadcast" });
+    await expect(view.getByRole("heading", { name: "Broadcast to 2 agents" })).toBeVisible();
+    await expect(view.locator("header")).toContainText("First.");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a send the server refuses keeps its row after a later send succeeds, and Retry sends it again as it was", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
+  const pair = planners(40, 40).slice(0, 2);
+  await setLiveSessions(pair);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posted: unknown[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
+        posted.push(request.postDataJSON());
+      }
+    });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    const sends = page.getByRole("region", { name: "Sends" });
+    const row = (body: string) => sends.getByRole("listitem").filter({ hasText: body });
+
+    await header.click();
+    await message.fill("Refused first.");
+    await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("aside");
+    const refusal = await refuseBroadcasts(page);
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+    const failed = row("Refused first.");
+    await expect(failed.getByRole("status")).toHaveText(
+      "Could not send to 2 agents: Envoy listener unreachable"
+    );
+
+    refusal.allow();
+    await header.click();
+    await message.fill("Second.");
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+    await expect(row("Second.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
+    // A later success neither hides the failure nor navigates away from it.
+    await page.waitForTimeout(500);
+    await expect(page).toHaveURL(/\/agents$/);
+    await expect(failed.getByRole("status")).toHaveText(/^Could not send to 2 agents: /);
+    await expect(failed.getByRole("button", { name: "Restore draft" })).toBeVisible();
+
+    // Retry sends the very message again: the same body, mode and recipients.
+    await failed.getByRole("button", { name: "Retry" }).click();
+    await expect(
+      row("Refused first.").getByRole("link", { name: "Sent to 2 agents" })
+    ).toBeVisible();
+    await expect(sends.getByText(/^Could not send/)).toHaveCount(0);
+    expect(posted).toHaveLength(3);
+    expect(posted[2]).toEqual(posted[0]);
+    expect(posted[0]).toEqual({
+      body: "Refused first.",
+      delivery: "aside",
+      session_ids: pair.map((session) => session.session_id),
+    });
   } finally {
     await alice.close();
   }
@@ -1243,16 +1327,14 @@ test("a mode no selected agent advertises leaves Send dead, and Send says so and
     await message.fill("Report status.");
     await expect(mode).toHaveValue("btw");
 
-    // The label refuses rather than counting, and the reason rides the button itself.
-    const dead = composer.getByRole("button", { name: "No live recipient for btw" });
+    // The label refuses rather than counting, and the reason rides the button itself: the
+    // Excluded line, which names each agent, why, and the mode that would reach them.
+    const dead = composer.getByRole("button", { name: "No recipient" });
+    const why =
+      "Excluded: Builder A (does not advertise btw), Builder B (does not advertise btw). Nothing is sent to them, and no other mode is substituted. Sending as steer would reach 2 of them.";
     await expect(dead).toBeDisabled();
-    await expect(dead).toHaveAccessibleDescription(
-      "Excluded: Builder A (does not advertise btw), Builder B (does not advertise btw). Nothing is sent to them, and no other mode is substituted. Sending as steer would reach 2 of them."
-    );
-    await expect(dead).toHaveAttribute(
-      "title",
-      "None of the 2 selected agents advertises btw. Sending as steer would reach 2 of them."
-    );
+    await expect(dead).toHaveAccessibleDescription(why);
+    await expect(dead).toHaveAttribute("title", why);
     // A keyboard reaches it, so the reason does too: Tab from the message lands on Send.
     await message.press("Tab");
     await expect(dead).toBeFocused();
@@ -1304,39 +1386,6 @@ test("with one of two selected agents gone from the registry, Send reaches the l
     await expect(
       composer.getByRole("button", { name: /^session:bravo-se… · no live session/ })
     ).toBeVisible();
-  } finally {
-    await alice.close();
-  }
-});
-
-// This row cannot go red on a build without the button's reasons: an empty selection has
-// unmounted the composer since the broadcast shipped. It pins that nothing selected is a
-// different state from everything excluded - no Send at all, rather than a dead one to explain.
-test("with nothing selected there is no Send to explain: the composer leaves with the last chip", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "one browser proves the selection rule");
-  await setLiveSessions([builder("a", ["steer"]), builder("b", ["steer"])]);
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.goto("/agents");
-    const agents = page.getByRole("region", { name: "Agents" });
-    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
-    const composer = page.getByRole("region", { name: "Broadcast" });
-    const anySend = page.getByRole("button", { name: /^(Send to |No live recipient)/ });
-    await expect(header).toHaveAccessibleDescription("2 matching");
-    await expect(anySend).toHaveCount(0);
-
-    await header.click();
-    await expect(composer).toBeVisible();
-    await composer.getByRole("button", { name: /^Builder A · / }).click();
-    await composer.getByRole("button", { name: /^Builder B · / }).click();
-    await expect(header).toHaveAccessibleDescription("2 matching");
-    await expect(composer).toHaveCount(0);
-    await expect(anySend).toHaveCount(0);
-    await expect(page.getByText(/does not advertise|No live recipient/)).toHaveCount(0);
   } finally {
     await alice.close();
   }

@@ -114,7 +114,7 @@ test("an unsupported selected mode warns but does not prevent Send", async ({ br
   }
 });
 
-test("/btw with nothing after it keeps an agent's direct composer from sending, and Send says why", async ({
+test("/btw with nothing after it keeps an agent's direct composer from sending, and Send says why on screen", async ({
   browser,
 }) => {
   // No `last_seen`: the fixture stamps one, so the session lists as live rather than inactive.
@@ -146,12 +146,19 @@ test("/btw with nothing after it keeps an agent's direct composer from sending, 
     await card.getByRole("button", { exact: true, name: "worker" }).click();
     const field = card.getByRole("textbox", { name: "Comment" });
     const send = card.getByRole("button", { exact: true, name: "Send" });
+    const hint = card.getByText("Ctrl/Cmd+Enter to send · Enter for a new line", { exact: true });
+    const reason = card.getByText("Type the message after /btw.", { exact: true });
 
     // The box holds text, and the command strips to an empty message: Send refuses, and says why.
     await field.fill("/btw ");
     await expect(send).toBeDisabled();
     await expect(send).toHaveAccessibleDescription("Type the message after /btw.");
     await expect(send).toHaveAttribute("title", "Type the message after /btw.");
+    // The reason is on screen, in the hint's place, for a reader with no pointer to hover Send
+    // with. `toBeVisible` passes for an `sr-only` line, a 1 px box, so its height is the check.
+    await expect(hint).toHaveCount(0);
+    await expect(reason).toBeVisible();
+    expect((await reason.boundingBox())?.height ?? 0).toBeGreaterThan(8);
     // A keyboard reaches it, so the reason does too: Tab from the message lands on Send.
     await field.press("Tab");
     await expect(send).toBeFocused();
@@ -163,6 +170,8 @@ test("/btw with nothing after it keeps an agent's direct composer from sending, 
     await field.fill("/btw status?");
     await expect(send).toBeEnabled();
     await expect(send).not.toHaveAttribute("aria-describedby");
+    await expect(reason).toHaveCount(0);
+    await expect(hint).toBeVisible();
   } finally {
     await alice.close();
   }

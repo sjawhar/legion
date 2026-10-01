@@ -299,19 +299,32 @@ function sendRefusal(): SendRefusal {
   };
 }
 
-test("a token-only direct-session draft cannot submit an empty message, and Send says why", () => {
+/** Presses Send both ways a reader can - the button, and Ctrl+Enter in the box - then waits a
+ *  task. TanStack awaits `onMutate` before it calls the mutation function, so an API spy read
+ *  straight after the press shows no call whether or not Send refused. */
+async function pressSend(field: HTMLElement): Promise<void> {
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 20);
+  await promise;
+}
+
+test("a token-only direct-session draft cannot submit an empty message, and Send says why", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
 
   try {
+    const field = screen.getByLabelText("Comment");
     for (const command of ["/btw", "/aside"]) {
-      fireEvent.change(screen.getByLabelText("Comment"), { target: { value: `${command} ` } });
+      fireEvent.change(field, { target: { value: `${command} ` } });
       const reason = `Type the message after ${command}.`;
       expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
-      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await pressSend(field);
+      expect(createAgentMessage).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull();
     }
-    expect(createAgentMessage).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw status?" } });
+    fireEvent.change(field, { target: { value: "/btw status?" } });
     expect(sendRefusal()).toEqual({ description: null, disabled: null, title: null });
   } finally {
     view.unmount();
@@ -434,7 +447,7 @@ test("a command on a plain legacy reply stays verbatim and sends no delivery", a
   }
 });
 
-test("a token-only targeted legacy reply cannot submit, and Send says why", () => {
+test("a token-only targeted legacy reply cannot submit, and Send says why", async () => {
   const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
@@ -447,11 +460,13 @@ test("a token-only targeted legacy reply cannot submit, and Send says why", () =
   });
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw " } });
+    const field = screen.getByLabelText("Comment");
+    fireEvent.change(field, { target: { value: "/btw " } });
     const reason = "Type the message after /btw.";
     expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await pressSend(field);
     expect(createMessage).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull();
   } finally {
     view.unmount();
     createMessage.mockRestore();
