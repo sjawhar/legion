@@ -725,6 +725,62 @@ describe("DispatchClient", () => {
     }
   });
 
+  // A gateway can echo the header cut short, split by markup, or twice with the copies
+  // overlapping (a bearer that ends in its own first characters), and an exact match finds none
+  // of those. Every run of 8 or more of the bearer's characters within what the excerpt reads is
+  // redacted, one that starts inside the scan limit and runs past it included, so no piece of the
+  // bearer that long reaches the message. Each body holds such a piece, so the search can see one.
+  // Dispatch's tokens are `dsp_` and 43 base64url characters; this one ends in its first two.
+  const pieceBearer = "dsp_Q7vK2mXr9LtW4nBz8YcH1jPe5sAf3gUo6iNq0wEbTds";
+  /** Every run of 8 of the bearer's characters `text` holds; any longer piece holds one. */
+  const bearerPieces = (text: string) =>
+    Array.from({ length: pieceBearer.length - 7 }, (_, at) => pieceBearer.slice(at, at + 8)).filter(
+      (piece) => text.includes(piece)
+    );
+  test.each([
+    [
+      "cut short by its last character",
+      `<p>echo=${pieceBearer.slice(0, -1)} end</p>`,
+      "echo=[redacted] end",
+    ],
+    [
+      "cut short by its last 10 characters",
+      `<p>echo=${pieceBearer.slice(0, -10)} end</p>`,
+      "echo=[redacted] end",
+    ],
+    [
+      "followed by a copy that starts inside its last characters",
+      `<p>echo=${pieceBearer}${pieceBearer.slice(2)} end</p>`,
+      "echo=[redacted] end",
+    ],
+    [
+      "split by a tag",
+      `<p>echo=${pieceBearer.slice(0, 20)}<wbr>${pieceBearer.slice(20)} end</p>`,
+      "echo=[redacted] [redacted] end",
+    ],
+    [
+      // A 64 KiB scan limit; the copy starts 20 characters inside it and ends 17 past it.
+      "cut short, across the scan limit",
+      `<style>${"s".repeat(64 * 1024 - 75)}</style>${"q".repeat(40)}${pieceBearer.slice(0, -10)} after the limit`,
+      `${"q".repeat(40)}[redacted]`,
+    ],
+  ] as const)("redacts a piece of the bearer %s", async (_copy, body, quoted) => {
+    const { fetchImpl } = fakeFetch([
+      new Response(body, { status: 502, headers: { "Content-Type": "text/html" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", pieceBearer, fetchImpl);
+
+    const message = await client.getIssue("DSP-1").then(
+      () => "",
+      (error: Error) => error.message
+    );
+
+    expect(bearerPieces(body)).not.toEqual([]);
+    expect(bearerPieces(message)).toEqual([]);
+    expect(message).toContain(`(${JSON.stringify(quoted)})`);
+    expect(message).not.toContain("after the limit");
+  });
+
   // A body of nothing but markup is not empty, and an agent told it was would look for a gateway
   // that sent nothing. The answer gives the body's size in bytes and says none of it reads as
   // text, or none of what the excerpt reads when the body runs past that.

@@ -2852,8 +2852,9 @@ describe("executeDispatchTool", () => {
   // before the reason could be stored proves it was not. That is Dispatch's own 4xx, or a
   // gateway's answer that never reached Dispatch: a 408 or 429 (its own timeout or rate limit,
   // where the client's advice that a retry may succeed stands) or a status that cannot clear. A
-  // 5xx, Dispatch's own included (it can fail after it committed), or a timeout leaves the reason
-  // possibly posted, and that account replaces the client's advice.
+  // 5xx, Dispatch's own included (it can fail after it committed), a timeout or a transport error
+  // leaves the reason possibly posted, and that account replaces the client's advice. After an
+  // error's own message it joins a clause, or starts a sentence where the message ended one.
   test("dispatch_issue_update says whether a failed post of the reason leaves it posted", async () => {
     const answered = (status: string, page: string) =>
       `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/AGENTC-175/messages ` +
@@ -2862,8 +2863,16 @@ describe("executeDispatchTool", () => {
     const unknown =
       "; the reason may or may not have been posted, and the close was not sent: read the " +
       "issue's messages before retrying, since retrying this call posts its reason again";
+    const unknownSentence =
+      " The reason may or may not have been posted, and the close was not sent: read the " +
+      "issue's messages before retrying, since retrying this call posts its reason again";
     const notPosted = "; the reason was not posted, so the close was not sent";
     const retry = ", so the write did not reach Dispatch, and a retry may succeed";
+    // Bun's messages for a refused connection and a reset one; the second ends with no stop.
+    const refused = "Unable to connect. Is the computer able to access the url?";
+    const reset =
+      "The socket connection was closed unexpectedly. For more information, pass `verbose: true` " +
+      "in the second argument to fetch()";
     for (const [message, expected] of [
       [
         () => gatewayPage(502, "Bad Gateway"),
@@ -2877,7 +2886,26 @@ describe("executeDispatchTool", () => {
         (): Response => {
           throw new DOMException("The operation timed out.", "TimeoutError");
         },
-        `The operation timed out.${unknown}`,
+        `The operation timed out.${unknownSentence}`,
+      ],
+      [
+        (): Response => {
+          throw new TypeError("fetch failed");
+        },
+        "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
+          `changed, restart this agent process so it picks up the new configuration.${unknownSentence}`,
+      ],
+      [
+        (): Response => {
+          throw new Error(refused);
+        },
+        `${refused}${unknownSentence}`,
+      ],
+      [
+        (): Response => {
+          throw new Error(reset);
+        },
+        `${reset}${unknown}`,
       ],
       [
         () => gatewayPage(408, "Request Timeout"),
@@ -2982,19 +3010,31 @@ describe("executeDispatchTool", () => {
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
-    for (const [patch, head] of [
+    const unknownSentence =
+      " The reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      "and the close may or may not have taken effect. Read the issue's status before retrying: " +
+      "done means it closed; otherwise retry with a reason that points at message message-7, " +
+      "since retrying this call posts its reason again";
+    for (const [patch, expected] of [
       [
         (): Response => {
           throw new DOMException("The operation timed out.", "TimeoutError");
         },
-        "The operation timed out.",
+        `The operation timed out.${unknownSentence}`,
       ],
-      [() => refusal(502, "HTTP_502", "Bad Gateway"), "HTTP_502: Bad Gateway"],
+      [
+        (): Response => {
+          throw new TypeError("fetch failed");
+        },
+        "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
+          `changed, restart this agent process so it picks up the new configuration.${unknownSentence}`,
+      ],
+      [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`],
       [
         () => gatewayPage(502, "Bad Gateway"),
         "HTTP_502: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 502 Bad Gateway " +
           'with a body that is not Dispatch\'s error JSON ("502 Bad Gateway"), which looks like a ' +
-          "proxy or gateway page rather than Dispatch's own answer",
+          `proxy or gateway page rather than Dispatch's own answer${unknown}`,
       ],
     ] as const) {
       const server = closingServer({
@@ -3005,7 +3045,7 @@ describe("executeDispatchTool", () => {
       const failure = await closeCall(server.fetchImpl).catch((error: unknown) => error);
 
       if (!(failure instanceof Error)) throw new Error(`expected an Error, got ${String(failure)}`);
-      expect(failure.message).toBe(`${head}${unknown}`);
+      expect(failure.message).toBe(expected);
       expect(failure.message).not.toContain("did not close");
       expect(failure.message).not.toContain("a retry may succeed");
       expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);

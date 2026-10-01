@@ -53,9 +53,11 @@ did not come from Dispatch, so it is a `DispatchGatewayError` (`fromDispatch` fa
 names the method, the URL with its query (never the bearer, which is a header), the status and
 reason phrase, a one-line plain-text excerpt of the body, and what asking again can do. The excerpt
 drops scripts, styles and tags, reads at most the body's first 64 KiB in linear time, and, like the
-reason phrase, has the client's bearer and the value after `Authorization:` or `Bearer` redacted. A
-body none of whose read part is text is named by its size in bytes; only a body with nothing in it
-is "an empty body". A status that cannot clear answers the same until the Dispatch URL, or whatever
+reason phrase, has the value after `Authorization:` or `Bearer` redacted, and every run of 8 or more
+of the client's bearer's characters (a shorter bearer only whole), so a copy cut short, split by
+markup or overlapping another leaves no such piece. A body none of whose read part is text is named
+by its size in bytes; only a body with nothing in it is "an empty body". A status that cannot clear
+answers the same until the Dispatch URL, or whatever
 answers in its place, is fixed. A 5xx, 408 or 429 may clear: a GET may succeed on a retry, and so
 may a write answered 408 or 429, the gateway's own timeout or rate limit, which it sends before it
 forwards anything (`mayHaveReachedDispatch` false); a write answered 5xx may or may not have reached

@@ -83,20 +83,23 @@
   `transient` and `mayHaveReachedDispatch`. `dispatch_issue_update`'s close path reads one rule for
   whether its reason's post or its close may have taken effect: only Dispatch's own 4xx or a
   gateway's answer that never reached Dispatch proves it did not, while a 5xx (Dispatch's own
-  included, since it can fail after it committed) or a timeout says the reason, or the close, may
-  or may not have landed, in place of the client's advice. A gateway's 408 or 429 on the close
-  says the issue did not close and how to retry without posting the reason twice, with nothing to
-  fix. A status is read as Dispatch's meaning only from Dispatch's own answer: a gateway's 404 page
-  is reported as such, not as no issue linked to an external reference (with the advice to create
-  one), no such project document, no comments on a document, or a reference section the server
-  does not serve, and a gateway's 500 on `external_links` gets no link-clash hint. The excerpt and
-  the reason phrase are each one line of at most 120 characters with scripts, styles and tags
-  dropped, and with the client's own bearer (trimmed) and the value after `Authorization:` or
-  `Bearer` redacted first. The excerpt reads at most the first 64 KiB of the body, redacting the
-  bearer within that slice and taking whole one that runs past its end, and every pattern it runs
-  is linear, so a body of any size or shape cannot hold the host's event loop. The URL never
-  carries the bearer, which travels in a header. Dispatch's own JSON errors render as before:
-  their `error` text under their `code`.
+  included, since it can fail after it committed), a timeout or a transport error says the reason,
+  or the close, may or may not have landed, in place of the client's advice; after an error
+  message that ends a sentence (`The operation timed out.`), that account starts one of its own. A
+  gateway's 408 or 429 on the close says the issue did not close and how to retry without posting
+  the reason twice, with nothing to fix. A status is read as Dispatch's meaning only from
+  Dispatch's own answer: a gateway's 404 page is reported as such, not as no issue linked to an
+  external reference (with the advice to create one), no such project document, no comments on a
+  document, or a reference section the server does not serve, and a gateway's 500 on
+  `external_links` gets no link-clash hint. The excerpt and the reason phrase are each one line of
+  at most 120 characters with scripts, styles and tags dropped, and with the value after
+  `Authorization:` or `Bearer` and every run of 8 or more of the client's own bearer's characters
+  (trimmed; a shorter bearer only whole) redacted first, so a copy cut short, split by markup or
+  overlapping another leaves no such piece. The excerpt reads at most the first 64 KiB of the body,
+  redacting the bearer within that slice and taking whole a piece that runs past its end, and every
+  pattern it runs is linear, so a body of any size or shape cannot hold the host's event loop. The
+  URL never carries the bearer, which travels in a header. Dispatch's own JSON errors render as
+  before: their `error` text under their `code`.
 
 - `getArchitectureSource` reads both answers a server gives for a project with no architecture
   source as `null`: a current server's `200 null` and an older server's `404 SOURCE_NOT_FOUND`.

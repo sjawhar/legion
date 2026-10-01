@@ -1798,6 +1798,19 @@ function writeMayHaveLanded(error: unknown): boolean {
   return !(error instanceof DispatchServiceError) || error.status >= 500;
 }
 
+/**
+ * An error that is no refusal (a timeout, a transport error) with `account`, a clause starting
+ * "; ", after its message: joined to it, or as a sentence of its own after a message that ends
+ * one ("The operation timed out.", "… able to access the url?").
+ */
+function withAccount(error: unknown, account: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const told = /[.!?]$/.test(message)
+    ? `${message} ${account.charAt(2).toUpperCase()}${account.slice(3)}`
+    : `${message}${account}`;
+  return new Error(told, { cause: error });
+}
+
 /** Validate and execute one native Dispatch tool against the JSON HTTP API. */
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
@@ -2031,9 +2044,7 @@ export async function executeDispatchTool(
             ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
             : "; the reason was not posted, so the close was not sent";
           if (error instanceof DispatchServiceError) throw refusalWithCode(error, told);
-          throw new Error(`${error instanceof Error ? error.message : String(error)}${told}`, {
-            cause: error,
-          });
+          throw withAccount(error, told);
         }
       }
       // The server replaces the whole link set; the common call is "link the pull request
@@ -2076,9 +2087,7 @@ export async function executeDispatchTool(
           ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`
           : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken + landed);
-        throw new Error(`${error instanceof Error ? error.message : String(error)}${landed}`, {
-          cause: error,
-        });
+        throw withAccount(error, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [

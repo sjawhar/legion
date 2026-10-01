@@ -38990,10 +38990,32 @@ function reachesDispatch(status) {
 }
 var REDACTED = "[redacted]";
 var EXCERPT_SCAN_LIMIT = 64 * 1024;
+var BEARER_PIECE = 8;
+function redactBearer(text, bearer) {
+  if (bearer === "")
+    return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  for (let at = 0;at + length <= bearer.length; at++) {
+    const piece = bearer.slice(at, at + length);
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
 function excerpt(text, token) {
-  const bearer = token.trim();
-  const scanned = bearer === "" ? text.slice(0, EXCERPT_SCAN_LIMIT) : text.slice(0, Math.max(EXCERPT_SCAN_LIMIT, text.lastIndexOf(bearer, EXCERPT_SCAN_LIMIT - 1) + bearer.length)).replaceAll(bearer, REDACTED).slice(0, EXCERPT_SCAN_LIMIT);
-  const plain = scanned.replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
   return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
 }
 
@@ -40504,6 +40526,11 @@ function writeMayHaveLanded(error48) {
     return error48.mayHaveReachedDispatch;
   return !(error48 instanceof DispatchServiceError) || error48.status >= 500;
 }
+function withAccount(error48, account) {
+  const message = error48 instanceof Error ? error48.message : String(error48);
+  const told = /[.!?]$/.test(message) ? `${message} ${account.charAt(2).toUpperCase()}${account.slice(3)}` : `${message}${account}`;
+  return new Error(told, { cause: error48 });
+}
 async function executeDispatchTool(input) {
   const configUrl = input.config.url;
   const configToken = input.config.token;
@@ -40676,9 +40703,7 @@ async function executeDispatchTool(input) {
           const told = writeMayHaveLanded(error48) ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "; the reason was not posted, so the close was not sent";
           if (error48 instanceof DispatchServiceError)
             throw refusalWithCode(error48, told);
-          throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${told}`, {
-            cause: error48
-          });
+          throw withAccount(error48, told);
         }
       }
       const linked = before.external_links.map((link) => link.url);
@@ -40705,9 +40730,7 @@ async function executeDispatchTool(input) {
         const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
           throw refusalWithCode(error48, taken + landed);
-        throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${landed}`, {
-          cause: error48
-        });
+        throw withAccount(error48, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
