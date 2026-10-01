@@ -119,6 +119,10 @@
     "refs": []
   },
   {
+    "body": "An id decoding to a NUL: dispatch://CORE-1/comment/%00, https://dispatch.test/issues/CORE-1/comments/%00, https://dispatch.test/issues/CORE-1/spec?comment=%2500, https://dispatch.test/issues/CORE-1/spec?comment=%00 and dispatch://CORE/artifact/handbook-md/comment/%00",
+    "refs": []
+  },
+  {
     "body": "A slug is all of its segment and a version has no leading zero: dispatch://CORE-1/artifact/notes-md!x, dispatch://CORE/artifact/Notes-md, https://dispatch.test/issues/CORE-1/artifacts/notes_md and dispatch://CORE-1/artifact/notes-md@v03",
     "refs": []
   },

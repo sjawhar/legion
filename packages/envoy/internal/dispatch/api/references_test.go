@@ -418,6 +418,42 @@ func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T
 	}
 }
 
+// An item id that decodes to a NUL names nothing. The index binds ids as `text[]`, and Postgres
+// refuses a NUL there, so a reader that decoded one failed the write holding it: the comment, the
+// seeded spec and the author's edit answered 500, and a rebuild stopped at the first stored body
+// that held one.
+func TestCitationsOfAnIDDecodingToNULDoNotFailTheWrite(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	body := "See dispatch://" + target.Key + "/comment/%00, https://dispatch.example/issues/" + target.Key +
+		"/comments/%00 and https://dispatch.example/issues/" + target.Key + "/spec?comment=%2500.\n"
+
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/comments", map[string]string{
+		"body": body,
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create comment citing a NUL id: status=%d body=%s", response.Code, response.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, response)
+	commentRef := "dispatch://" + target.Key + "/comment/" + comment.ID
+	if edges := graphEdges(t, handler, url.Values{"from": {commentRef}, "kind": {"mentions"}}).Edges; len(edges) != 0 {
+		t.Fatalf("comment mentions = %#v; want none", edges)
+	}
+	if seeded := createIssueRequest(t, handler, map[string]any{"project": "CORE", "title": "Seeded", "spec": body}); seeded.Code != http.StatusCreated {
+		t.Fatalf("create issue whose spec cites a NUL id: status=%d body=%s", seeded.Code, seeded.Body.String())
+	}
+	plain := createReferenceAPIComment(t, handler, target.Key, "Plain comment.")
+	if edit := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+plain.ID, map[string]string{
+		"body": body,
+	}, "alice"); edit.Code != http.StatusOK {
+		t.Fatalf("edit a comment to cite a NUL id: status=%d body=%s", edit.Code, edit.Body.String())
+	}
+	if _, err := refs.RebuildAll(context.Background(), database.Pool, "https://dispatch.example"); err != nil {
+		t.Fatalf("rebuild refs over bodies citing a NUL id: %v", err)
+	}
+}
+
 type refRow struct {
 	FromKind, FromID, ToKind, ToID, Kind string
 	SourceSeq                            *int64
