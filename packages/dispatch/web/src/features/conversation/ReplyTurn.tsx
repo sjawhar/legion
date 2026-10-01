@@ -10,7 +10,6 @@ import { ReplyQuote } from "./ReplyQuote";
 import {
   DeliveryRetry,
   DeliveryStatus,
-  offersSafeRetry,
   type TargetedMessageAttempt,
   takenAsUserTurn,
 } from "./TargetedMessageCard";
@@ -110,7 +109,7 @@ export function ReplyTurn({
             <DeliveryStatus
               answeredBy={delivery.answeredBy}
               deliveries={delivery.attempts}
-              retryOffered={offersSafeRetry(delivery.attempts, retry !== undefined)}
+              retryRow={retry !== undefined}
               targetName={delivery.targetName}
             />
             {retry === undefined ? null : (
@@ -118,10 +117,9 @@ export function ReplyTurn({
                 canAside={retry.canAside}
                 canBtw={retry.canBtw}
                 canSteer={retry.canSteer}
-                mode={delivery.attempts.at(-1)?.delivery ?? "steer"}
+                latest={delivery.attempts.at(-1)}
                 onRetry={retry.onRetry}
                 retrying={retry.retrying}
-                sameModeRetry={offersSafeRetry(delivery.attempts, true)}
                 targetName={delivery.targetName}
               />
             )}

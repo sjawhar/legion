@@ -2,7 +2,7 @@
 //
 // The App itself is created once at github.com/settings/apps/new (see
 // packages/envoy/cmd/dispatch/README.md for the setup checklist). The
-// resulting client_id, client_secret, webhook secret, and private key (PEM)
+// resulting client_id, client_secret, and private key (PEM)
 // are written by hand into ~/.local/share/dispatch/app.json — dispatch only
 // reads this file, never creates or modifies it.
 package auth
@@ -19,16 +19,15 @@ import (
 
 // AppConfig is the persisted Envoy App credentials.
 type AppConfig struct {
-	ID            int64    `json:"id,omitempty"`
-	Slug          string   `json:"slug,omitempty"`
-	Name          string   `json:"name,omitempty"`
-	HTMLURL       string   `json:"htmlUrl,omitempty"`
-	ClientID      string   `json:"clientId"`
-	ClientSecret  string   `json:"clientSecret"`
-	WebhookSecret string   `json:"webhookSecret,omitempty"`
-	PEM           string   `json:"pem,omitempty"`
-	OwnerLogin    string   `json:"ownerLogin,omitempty"`
-	Permissions   AppPerms `json:"permissions,omitempty"`
+	ID           int64    `json:"id,omitempty"`
+	Slug         string   `json:"slug,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	HTMLURL      string   `json:"htmlUrl,omitempty"`
+	ClientID     string   `json:"clientId"`
+	ClientSecret string   `json:"clientSecret"`
+	PEM          string   `json:"pem,omitempty"`
+	OwnerLogin   string   `json:"ownerLogin,omitempty"`
+	Permissions  AppPerms `json:"permissions,omitempty"`
 }
 
 // AppPerms mirrors the GitHub Apps permissions object. We surface only the
@@ -80,7 +79,6 @@ func ReadApp(path string) (*AppConfig, error) {
 //	DISPATCH_APP_ID                (integer)
 //	DISPATCH_APP_SLUG
 //	DISPATCH_APP_NAME
-//	DISPATCH_APP_WEBHOOK_SECRET
 //
 // Returns (nil, nil) when DISPATCH_APP_CLIENT_ID is unset so callers can
 // fall through to the file-based path.
@@ -110,12 +108,11 @@ func LoadAppFromEnv() (*AppConfig, error) {
 		appID = n
 	}
 	return &AppConfig{
-		ID:            appID,
-		Slug:          os.Getenv("DISPATCH_APP_SLUG"),
-		Name:          os.Getenv("DISPATCH_APP_NAME"),
-		ClientID:      clientID,
-		ClientSecret:  clientSecret,
-		WebhookSecret: os.Getenv("DISPATCH_APP_WEBHOOK_SECRET"),
-		PEM:           pem,
+		ID:           appID,
+		Slug:         os.Getenv("DISPATCH_APP_SLUG"),
+		Name:         os.Getenv("DISPATCH_APP_NAME"),
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		PEM:          pem,
 	}, nil
 }

@@ -37040,6 +37040,23 @@ var EnvelopeSchema = exports_external.object({
   urgency: exports_external.enum(["low", "med", "high", "blocking"]).optional(),
   expects_reply: exports_external.enum(["none", "optional", "required"]).optional()
 });
+var MINTED_DEDUPE_KEY_PATTERN = "^(?:envoy\\.role\\.forward\\.)?(?:publish|agent\\.[^.]+)\\.(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$";
+var mintedDedupeKey = new RegExp(MINTED_DEDUPE_KEY_PATTERN);
+function dedupeKeyNamesItsEvent(envelope) {
+  const key = envelope.dedupe_key;
+  if (key === undefined)
+    return false;
+  if (envelope.source === "dispatch" || mintedDedupeKey.test(key))
+    return true;
+  switch (envelope.source) {
+    case "github":
+    case "slack":
+    case "ghostwispr":
+      return envelope.source_event_id !== undefined && envelope.source_event_id !== "" && key === `${envelope.source}.${envelope.source_event_id}`;
+    default:
+      return false;
+  }
+}
 // ../contracts/src/handoff-schema.ts
 var HANDOFF_SCHEMA_VERSION = 1;
 var HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"];
@@ -38151,6 +38168,7 @@ var InboundSenderSchema = exports_external.object({
 var InboundEnvelopeSchema = exports_external.object({
   event_id: exports_external.string().optional(),
   source: exports_external.string(),
+  source_event_id: exports_external.string().optional(),
   source_session: exports_external.string().optional(),
   topic: exports_external.string().optional(),
   dedupe_key: exports_external.string().optional(),
@@ -38194,13 +38212,72 @@ async function postDeliveryReply(config2, sessionId, delivery, result) {
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
 }
-function rememberBounded(seen, key, limit) {
-  seen.add(key);
-  if (seen.size > limit) {
-    const oldest = seen.values().next();
-    if (!oldest.done)
-      seen.delete(oldest.value);
-  }
+var DedupeIdentitySchema = exports_external.object({
+  event_id: exports_external.string().min(1).optional(),
+  dedupe_key: exports_external.string().min(1).optional(),
+  source: exports_external.string().optional(),
+  source_event_id: exports_external.string().optional()
+});
+var DELIVERY_DEDUPE_KEY_LIMIT = 250000;
+var DELIVERY_EVENT_ID_LIMIT = 1e4;
+function createDeliveryDedupe(now = Date.now) {
+  const keys = new Map;
+  let events = new Map;
+  let olderEvents = new Map;
+  let claims = 0;
+  return {
+    claim(frame) {
+      const eventId = frame?.event_id;
+      if (eventId !== undefined && (events.has(eventId) || olderEvents.has(eventId))) {
+        return;
+      }
+      const key = frame?.dedupe_key;
+      const named = frame !== undefined && key !== undefined && dedupeKeyNamesItsEvent(frame);
+      const at = now();
+      if (named) {
+        const claimedAt = keys.get(key);
+        if (claimedAt !== undefined && at - claimedAt < DELIVERY_DUPLICATE_WINDOW_MS) {
+          return;
+        }
+        for (const [oldest, deliveredAt] of keys) {
+          if (at - deliveredAt < DELIVERY_DUPLICATE_WINDOW_MS)
+            break;
+          keys.delete(oldest);
+        }
+        keys.delete(key);
+        if (keys.size >= DELIVERY_DEDUPE_KEY_LIMIT) {
+          const oldest = keys.keys().next();
+          if (oldest.done !== true)
+            keys.delete(oldest.value);
+        }
+        keys.set(key, at);
+      }
+      const claim = ++claims;
+      if (eventId !== undefined) {
+        if (events.size >= DELIVERY_EVENT_ID_LIMIT / 2) {
+          olderEvents = events;
+          events = new Map;
+        }
+        events.set(eventId, claim);
+      }
+      let released = false;
+      return {
+        release() {
+          if (released)
+            return;
+          released = true;
+          if (named && keys.get(key) === at)
+            keys.delete(key);
+          if (eventId === undefined)
+            return;
+          if (events.get(eventId) === claim)
+            events.delete(eventId);
+          if (olderEvents.get(eventId) === claim)
+            olderEvents.delete(eventId);
+        }
+      };
+    }
+  };
 }
 function isCommentTargetedDelivery(delivery) {
   return "comment_id" in delivery;
@@ -38916,6 +38993,7 @@ class DispatchServiceError extends Error {
   current;
   mismatches;
   name = "DispatchServiceError";
+  fromDispatch = true;
   constructor(code, status, message, candidates, current, mismatches) {
     super(message);
     this.code = code;
@@ -38923,6 +39001,21 @@ class DispatchServiceError extends Error {
     this.candidates = candidates;
     this.current = current;
     this.mismatches = mismatches;
+  }
+}
+
+class DispatchGatewayError extends DispatchServiceError {
+  answer;
+  advice;
+  fromDispatch = false;
+  transient;
+  mayHaveReachedDispatch;
+  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
+    super(`HTTP_${status}`, status, message);
+    this.answer = answer;
+    this.advice = advice;
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
   }
 }
 function asErrorShape(value) {
@@ -38938,7 +39031,7 @@ function requestSignal(signal) {
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
-    return "text that is not a JSON page, which looks like a proxy or gateway page rather than " + "Dispatch's own answer, so a retry may succeed.";
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
   }
   let what;
   if (Array.isArray(answer)) {
@@ -38956,6 +39049,53 @@ function whyNotAPage(answer) {
     what = `an object without ${lacking.join(" or ")}`;
   }
   return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+function gatewayAdvice(method, status) {
+  if (!transientStatus(status)) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  if (method === "GET")
+    return "a retry may succeed";
+  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
+}
+function transientStatus(status) {
+  return status >= 500 || status === 408 || status === 429;
+}
+function reachesDispatch(status) {
+  return status >= 500;
+}
+var REDACTED = "[redacted]";
+var EXCERPT_SCAN_LIMIT = 64 * 1024;
+var BEARER_PIECE = 8;
+function redactBearer(text, bearer) {
+  if (bearer === "")
+    return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  const pieces = new Set;
+  for (let at = 0;at + length <= bearer.length; at++)
+    pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
+function excerpt(text, token) {
+  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
 }
 
 class DispatchClient {
@@ -39214,22 +39354,24 @@ class DispatchClient {
     };
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
-    const response = await this.fetchImpl(this.#url(path2, query), {
+    const url2 = this.#url(path2, query);
+    const response = await this.fetchImpl(url2, {
       method,
       headers,
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
-    return this.#response(response);
+    return this.#response(method, url2, response);
   }
   async#form(method, path2, body) {
-    const response = await this.fetchImpl(this.#url(path2), {
+    const url2 = this.#url(path2);
+    const response = await this.fetchImpl(url2, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
       signal: this.#signal
     });
-    return this.#response(response);
+    return this.#response(method, url2, response);
   }
   #url(path2, query) {
     const url2 = new URL(`${path2.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -39245,7 +39387,7 @@ class DispatchClient {
     }
     return url2.toString();
   }
-  async#response(response) {
+  async#response(method, url2, response) {
     const text = await response.text();
     let payload = text;
     if (text && isJson(response)) {
@@ -39257,7 +39399,23 @@ class DispatchClient {
     }
     if (!response.ok) {
       const error48 = asErrorShape(payload);
-      throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error ?? (typeof payload === "string" && payload ? payload : response.statusText), error48.candidates, error48.current, error48.mismatches);
+      if (typeof error48.error === "string") {
+        throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
+      }
+      const quoted = excerpt(text, this.token);
+      let body;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
     }
     return payload;
   }
@@ -39977,7 +40135,7 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
       throw new Error("artifact is required for a project document");
     }
     const routed = await client.getProjectArtifact(owner.project, artifactReference).catch((error48) => {
-      if (!(error48 instanceof DispatchServiceError) || error48.status !== 404)
+      if (!dispatchAnswered(error48, 404))
         throw error48;
       return;
     });
@@ -40145,12 +40303,12 @@ function referenceLines(edges) {
   if (edges.length === 0)
     return ["- none"];
   return edges.map((edge) => {
-    const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})`;
+    const excerpt2 = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
+    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})`;
   });
 }
 function unavailableReason(error48) {
-  return error48 instanceof DispatchServiceError && error48.status === 404 ? "unavailable" : `unavailable: ${messageFor(error48)}`;
+  return dispatchAnswered(error48, 404) ? "unavailable" : `unavailable: ${messageFor(error48)}`;
 }
 async function graphEdges(client, query) {
   try {
@@ -40340,9 +40498,8 @@ async function openArtifactMarks(client, resolved) {
   const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
   const commentsResult = await commentsResultPromise;
   if (commentsResult.status === "rejected") {
-    if (commentsResult.reason instanceof DispatchServiceError && commentsResult.reason.status === 404) {
+    if (dispatchAnswered(commentsResult.reason, 404))
       return marks;
-    }
     throw commentsResult.reason;
   }
   return [
@@ -40429,9 +40586,29 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
 `));
 }
 function refusalWithCode(error48, suffix = "") {
+  if (error48 instanceof DispatchGatewayError) {
+    let told = error48.message;
+    if (suffix !== "") {
+      told = error48.mayHaveReachedDispatch ? `${error48.answer}${suffix}` : `${error48.answer}, so ${error48.advice}${suffix}`;
+    }
+    return new DispatchGatewayError(error48.status, error48.answer, error48.advice, `${error48.code}: ${told}`);
+  }
   if (!(error48 instanceof DispatchServiceError))
     return error48;
   return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${suffix}`, error48.candidates, error48.current, error48.mismatches);
+}
+function dispatchAnswered(error48, status) {
+  return error48 instanceof DispatchServiceError && error48.fromDispatch && error48.status === status;
+}
+function writeMayHaveLanded(error48) {
+  if (error48 instanceof DispatchGatewayError)
+    return error48.mayHaveReachedDispatch;
+  return !(error48 instanceof DispatchServiceError) || error48.status >= 500;
+}
+function withAccount(error48, account) {
+  const message = messageFor(error48);
+  const told = /[.!?]$/.test(message) ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}` : `${message}; ${account}`;
+  return new Error(told, { cause: error48 });
 }
 async function executeDispatchTool(input) {
   const configUrl = input.config.url;
@@ -40602,7 +40779,10 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error48) {
-          throw refusalWithCode(error48, "; the reason was not posted, so the close was not sent");
+          const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
+          if (error48 instanceof DispatchServiceError)
+            throw refusalWithCode(error48, `; ${told}`);
+          throw withAccount(error48, told);
         }
       }
       const linked = before.external_links.map((link) => link.url);
@@ -40621,17 +40801,15 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
-        const taken = error48 instanceof DispatchServiceError && error48.status === 500 && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
+        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
-        const refused = error48 instanceof DispatchServiceError && error48.status < 500;
-        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
-        const landed = refused ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}` : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
+        const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
+        const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
-          throw refusalWithCode(error48, taken + landed);
-        throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${landed}`, {
-          cause: error48
-        });
+          throw refusalWithCode(error48, `${taken}; ${landed}`);
+        throw withAccount(error48, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
@@ -41235,7 +41413,7 @@ async function resolveExistingIssue(client, issueReference) {
   try {
     return await client.resolveIssue(issueReference);
   } catch (error48) {
-    if (error48 instanceof DispatchServiceError && error48.status === 404) {
+    if (dispatchAnswered(error48, 404)) {
       throw new Error(`no Dispatch issue is linked to ${issueReference}; create it first with ` + `dispatch_issue({ external: "${issueReference}", ... })`);
     }
     throw error48;
@@ -44063,16 +44241,13 @@ class StdioServerTransport {
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
-var version2 = "0.6.0";
+var version2 = "0.6.1";
 
 // src/channel-forwarder.ts
-var DeliveryIdentity = exports_external.object({
-  event_id: exports_external.string().min(1).optional(),
-  dedupe_key: exports_external.string().min(1).optional(),
+var DeliveryIdentity = DedupeIdentitySchema.extend({
   topic: exports_external.string().min(1).optional()
 });
 var decoder = new TextDecoder;
-var SEEN_KEYS_LIMIT = 1000;
 var DEFAULT_DRAIN_TIMEOUT_MS = 1000;
 function deliveryIdentity(raw) {
   let parsed;
@@ -44090,19 +44265,17 @@ function report(what, error48) {
 }
 function createChannelForwarder(connection, options) {
   const following = new Map;
-  const seen = new Set;
+  const dedupe = createDeliveryDedupe();
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
   const deliver = async (topic, subscription) => {
     try {
       for await (const message of subscription) {
+        const raw = decoder.decode(message.data);
+        const identity = deliveryIdentity(raw);
+        const claim = dedupe.claim(identity);
+        const duplicate = claim === undefined;
         try {
-          const raw = decoder.decode(message.data);
-          const identity = deliveryIdentity(raw);
-          const key = identity?.event_id ?? identity?.dedupe_key;
-          const duplicate = key !== undefined && seen.has(key);
-          if (key !== undefined && !duplicate)
-            rememberBounded(seen, key, SEEN_KEYS_LIMIT);
-          await options.deliver({
+          const handed = await options.deliver({
             subject: message.subject,
             data: message.data,
             raw,
@@ -44110,7 +44283,10 @@ function createChannelForwarder(connection, options) {
             ...identity?.topic === undefined ? {} : { envelopeTopic: identity.topic },
             ...duplicate ? { duplicate: true } : {}
           });
+          if (!handed)
+            claim?.release();
         } catch (error48) {
+          claim?.release();
           report(`could not deliver a message on ${message.subject}`, error48);
         }
       }
@@ -44359,22 +44535,23 @@ function createChannelDelivery(input) {
     enqueue({ subject: subject2, raw }) {
       const rendered = renderInbound(raw, input.identity.id, subject2);
       if (rendered.skip)
-        return tail;
+        return tail.then(() => false);
       if (rendered.rejectedDelivery !== undefined) {
         const rejected = rendered.rejectedDelivery;
         process.stderr.write(`envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.id}
 `);
         return postDispatchReply(input.identity, rejected, {
           error: "Invalid Dispatch targeted delivery frame"
-        }).catch((error48) => {
+        }).then(() => false, (error48) => {
           process.stderr.write(`envoy-channel: could not report the rejected delivery to Dispatch \u2014 ${messageFor(error48)}
 `);
+          return false;
         });
       }
       if (rendered.malformedDelivery === true) {
         process.stderr.write(`envoy-channel: dropping malformed Dispatch targeted delivery without a reply address
 `);
-        return tail;
+        return tail.then(() => false);
       }
       const envelope2 = rendered.envelope;
       if (envelope2 !== undefined) {
@@ -44387,7 +44564,7 @@ function createChannelDelivery(input) {
         if (inbox.length > CHANNEL_INBOX_LIMIT)
           inbox.pop();
       }
-      return queue({
+      const queued = queue({
         method: CHANNEL_NOTIFICATION_METHOD,
         params: {
           content: rendered.content,
@@ -44403,6 +44580,7 @@ function createChannelDelivery(input) {
           })
         }
       });
+      return queued.then(() => true);
     },
     announceFollow(details) {
       return announce(details) ?? tail;
@@ -44426,7 +44604,7 @@ async function writePersistedRole(roleFile, state) {
 `);
 }
 async function enqueueChannelMessage(delivery, connection, directSubject, message) {
-  const queued = message.duplicate ? Promise.resolve() : delivery.enqueue({ subject: message.subject, raw: message.raw });
+  const queued = message.duplicate ? Promise.resolve(false) : delivery.enqueue({ subject: message.subject, raw: message.raw });
   const lane = {
     subject: message.subject,
     directSubject,
@@ -44435,7 +44613,7 @@ async function enqueueChannelMessage(delivery, connection, directSubject, messag
   };
   if (expectsLaneReceipt(lane))
     connection.publish(lane.reply, EMPTY_RECEIPT);
-  await queued;
+  return queued;
 }
 async function startChannelSession(options) {
   const { identity } = options;
@@ -44469,7 +44647,7 @@ async function startChannelSession(options) {
 `);
         });
       }
-      await enqueueChannelMessage(delivery, options.connection, directSubject, message);
+      return enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
   function dropFromForwarderAndRegistry(topics) {
@@ -44812,7 +44990,7 @@ async function runEnvoyChannelServer() {
   const stateDirectory = pluginStateDirectory();
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id is the dedupe identity, urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
   });
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch });
   let runtime;

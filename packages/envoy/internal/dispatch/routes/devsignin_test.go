@@ -207,6 +207,48 @@ func TestDevSignInRefusesANonLoopbackPeer(t *testing.T) {
 	}
 }
 
+// Every fence item that takes a URL decides on LoopbackURL, so the spellings that dress another host
+// up as this machine are refused in one place.
+func TestLoopbackURL(t *testing.T) {
+	for _, raw := range []string{
+		"http://127.0.0.1:9022",
+		"https://127.0.0.2/api",
+		"http://localhost:9022",
+		"http://LocalHost",
+		"http://[::1]:9022",
+		"http://127.0.0.1:9022/path?next=x#frag",
+		// No scheme but a host: net/http refuses such a request before dialling anything.
+		"//127.0.0.1:9022",
+	} {
+		if !LoopbackURL(raw) {
+			t.Errorf("LoopbackURL(%q) = false, want true", raw)
+		}
+	}
+	for _, raw := range []string{
+		"",
+		"https://api.github.com",
+		"http://10.0.0.5:9022",
+		"http://127.0.0.1@api.github.com",
+		"http://127.0.0.1:9022@api.github.com",
+		"http://api.github.com#@127.0.0.1",
+		"http://api.github.com?@127.0.0.1",
+		"http://localhost./",
+		"http://127.0.0.1./",
+		"http://a.localhost/",
+		"http://0.0.0.0:9022",
+		"http://127.1:9022",
+		"http://[::ffff:127.0.0.1]:9022",
+		"http://[::1%25lo]:9022",
+		"localhost:9022",
+		"127.0.0.1:9022",
+		"http://127.0.0.1 :9022",
+	} {
+		if LoopbackURL(raw) {
+			t.Errorf("LoopbackURL(%q) = true, want false", raw)
+		}
+	}
+}
+
 func TestDevSignInRefusesForwardedRequests(t *testing.T) {
 	handler := newDevSignInRouter(t, devSignInOrigin, &memorySessionStore{generations: map[string]int64{}})
 	for _, header := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Via"} {

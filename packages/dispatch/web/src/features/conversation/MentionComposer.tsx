@@ -517,8 +517,11 @@ interface MentionComposerProps {
   readonly owner: ComposerOwner;
   readonly replyTo?: MentionReplyTarget | null;
   readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
-  /** A selected document mark is the only surface where the kind can change. */
-  readonly showKindSwitch?: boolean;
+  /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
+   *  through `kind` - a selected document mark is the only surface where the kind can change, and
+   *  its mark has to change with it (the margin retypes it) - or returns, in the reader's words,
+   *  why it refused, which the composer shows under the switch. */
+  readonly onKindChange?: (kind: ComposerKind) => string | undefined;
 }
 
 export function MentionComposer({
@@ -529,15 +532,15 @@ export function MentionComposer({
   edit,
   seedMentions = [],
   inline = false,
-  kind: initialKind = "comment",
+  kind = "comment",
   mutationKey,
   onCancelReply,
   onClose,
+  onKindChange,
   onSent,
   owner,
   replyTo = null,
   saveEdit,
-  showKindSwitch = false,
 }: MentionComposerProps): ReactNode {
   // Only the mount reads it, so it is computed once rather than on every keystroke.
   const [initial] = useState(() => seededDraft(seedMentions, undefined, owner));
@@ -553,7 +556,6 @@ export function MentionComposer({
   const queryClient = useQueryClient();
   const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
-  const [kind, setKind] = useState<ComposerKind>(initialKind);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
   /** Puts a whole draft in the field at once - its text and the records in step with it - where
    *  the reader did not type it, so their next edit is measured from here (`previousBody`). */
@@ -569,6 +571,10 @@ export function MentionComposer({
   const [autocomplete, setAutocomplete] = useState<{ query: string; start: number }>();
   const [pendingUploads, setPendingUploads] = useState(0);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  // Why the last kind pick was refused, kept with the mark it answered: the composer stays mounted
+  // when a newer compose replaces the anchor, and a refusal about the old mark says nothing about
+  // the new one.
+  const [kindRefusal, setKindRefusal] = useState<{ markId: string; text: string }>();
   const autocompleteOpen = autocomplete !== undefined;
   const live = useAgents(
     suppliedAgents === undefined && owner.kind !== "session",
@@ -622,9 +628,6 @@ export function MentionComposer({
     if (editBody === undefined) return;
     replaceDraft({ body: editBody, mentions: [] });
   }, [editBody, replaceDraft]);
-  useEffect(() => {
-    setKind(initialKind);
-  }, [initialKind]);
   useEffect(() => {
     if (autoFocus) textarea.current?.focus();
   }, [autoFocus]);
@@ -1053,21 +1056,37 @@ export function MentionComposer({
           {anchor.quote}
         </blockquote>
       )}
-      {showKindSwitch && edit === undefined && owner.kind !== "session" ? (
-        <fieldset className="flex gap-1">
-          <legend className="sr-only">Kind</legend>
-          {(["comment", "suggestion", "ask"] as const).map((next) => (
-            <button
-              aria-pressed={kind === next}
-              className={`min-h-11 rounded-lg px-3 text-sm ${kind === next ? primaryButtonBg : textSecondaryOnSurface}`}
-              key={next}
-              onClick={() => setKind(next)}
-              type="button"
-            >
-              {next === "comment" ? "Comment" : next === "suggestion" ? "Suggest" : "Ask"}
-            </button>
-          ))}
-        </fieldset>
+      {onKindChange !== undefined && edit === undefined && owner.kind !== "session" ? (
+        <>
+          <fieldset className="flex gap-1" disabled={save.isPending}>
+            <legend className="sr-only">Kind</legend>
+            {(["comment", "suggestion", "ask"] as const).map((next) => (
+              <button
+                aria-pressed={kind === next}
+                className={`min-h-11 rounded-lg px-3 text-sm ${kind === next ? primaryButtonBg : textSecondaryOnSurface}`}
+                key={next}
+                onClick={() => {
+                  const refused = onKindChange(next);
+                  setKindRefusal(
+                    refused === undefined || anchor === undefined
+                      ? undefined
+                      : { markId: anchor.mark_id, text: refused }
+                  );
+                }}
+                type="button"
+              >
+                {next === "comment" ? "Comment" : next === "suggestion" ? "Suggest" : "Ask"}
+              </button>
+            ))}
+          </fieldset>
+          {/* Why the kind did not change, where the reader pressed; a switch that takes clears it,
+              and a newer anchor leaves it behind. */}
+          {kindRefusal === undefined || kindRefusal.markId !== anchor?.mark_id ? null : (
+            <p className={`text-sm ${dangerText}`} role="status">
+              {kindRefusal.text}
+            </p>
+          )}
+        </>
       ) : null}
       {confirmingDiscard ? (
         <div

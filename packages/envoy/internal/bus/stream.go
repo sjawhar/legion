@@ -19,10 +19,11 @@ const Stream = "ENVOY_NOTIFICATIONS"
 // GitHub redelivers only deliveries from the past three days, so its whole
 // redelivery horizon falls inside this window.
 //
-// It is the same window the dashboard gates its "retrying is safe" promise on: past it the
-// stream holds neither the message nor its MsgId, so a same-mode retry delivers a second time.
-// Both sides read one literal - DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, from which
-// contracts.DeliveryDuplicateWindow is generated.
+// It is also the window of the dashboard's retry promise, which the stream holds only in part: it
+// keeps one copy of a repeat and reports it duplicate, while a core-NATS subscriber is handed the
+// repeat anyway and drops it itself. The promise, and the part each side plays, is stated once on
+// DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, from which contracts.DeliveryDuplicateWindow
+// is generated.
 const streamDuplicateWindow = contracts.DeliveryDuplicateWindow
 
 var streamSubjects = []string{

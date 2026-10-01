@@ -45,6 +45,28 @@ line an agent passes to subscribe to the whole issue itself.
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.
+
+A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
+`error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
+`fromDispatch` true. Any other body — a gateway's HTML page, an empty body, JSON of another shape —
+did not come from Dispatch, so it is a `DispatchGatewayError` (`fromDispatch` false) whose message
+names the method, the URL with its query (never the bearer, which is a header), the status and
+reason phrase, a one-line plain-text excerpt of the body, and what asking again can do. The excerpt
+drops scripts, styles and tags, reads at most the body's first 64 KiB in linear time, and, like the
+reason phrase, has the value after `Authorization:` or `Bearer` redacted, and every run of 8 or more
+of the client's bearer's characters (a shorter bearer only whole), so a copy cut short, split by
+markup or overlapping another leaves no such piece. A body none of whose read part is text is named
+by its size in bytes; only a body with nothing in it is "an empty body". A status that cannot clear
+answers the same until the Dispatch URL, or whatever
+answers in its place, is fixed. A 5xx, 408 or 429 may clear: a GET may succeed on a retry, and so
+may a write answered 408 or 429, the gateway's own timeout or rate limit, which it sends before it
+forwards anything (`mayHaveReachedDispatch` false); a write answered 5xx may or may not have reached
+Dispatch, so the advice is to check whether it took effect before retrying. The error's `answer`,
+`advice`, `transient` and `mayHaveReachedDispatch` let a caller that knows more about its own
+request, such as `dispatch_issue_update`'s close path, give its own advice instead. The executor
+reads a status as Dispatch's meaning (a 404 as no linked issue, no such document, or a server
+without the route) only when `fromDispatch` is true.
+
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec
 with no decision blocks, three or more session writes without a human response (with stronger
@@ -68,6 +90,18 @@ and names the path in `error`; it never falls back. With `dispatch.enabled:
 true` and no `dispatch.serverUrl`, the URL defaults to `http://localhost:8766`,
 the Go server's listen address. Invalid configuration, malformed URLs, and
 empty tokens leave Dispatch disabled and name the failing source in `error`.
+
+### Driving a tool by hand
+
+`bun bin/dispatch-tool.ts <dispatch_tool> '<json arguments>'` runs one tool through
+`executeDispatchTool`, the function every host's registered tool calls, and prints what the model
+would see: the result text (exit 0) or the failure text (exit 1), with each request traced on
+stderr. It resolves Dispatch as the hosts do, so to aim it at a stand-in set both `DISPATCH_URL`
+and `DISPATCH_TOKEN`; against a real Dispatch a write tool writes, as the session
+`ENVOY_SESSION_ID` names. `bun bin/stand-in-gateway.ts --status 502 --body html` serves one
+non-Dispatch answer (`html`, `empty`, `text` or `json`, from `src/stand-in-gateway.ts`) on
+`--port` (ephemeral by default) and prints its URL, for proving what a tool shows when a gateway,
+not Dispatch, answers.
 
 ## Tool contract
 

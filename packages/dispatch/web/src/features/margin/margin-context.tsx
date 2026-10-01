@@ -7,20 +7,47 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ComposerAnchor } from "../conversation/MentionComposer";
+import type { ComposerAnchor, ComposerKind } from "../conversation/MentionComposer";
+import type { RetypeOutcome, RetypeRefusal } from "../doc/editor";
 import { pulseBlock } from "../doc/marks";
 import type { MarkPlacement } from "./useMarginItems";
 
-interface DocumentBridge {
+export interface DocumentBridge {
   focusBlock(blockId: string): void;
   focusMark(markId: string): void;
+  /** Removes the record mark `markId` from the document, whatever its kind. */
+  removeMark(markId: string): void;
+  /** Replaces the provisional mark `markId` with one of `kind` over the same text. */
+  retypeMark(markId: string, kind: ComposerKind): RetypeOutcome;
+  /** Names the mark the open composer holds, or null when none is open, so the document treats a
+   *  selection-bar action that cuts into it as the composer's own write. */
+  setComposerMark(markId: string | null): void;
   setActiveBlocks(blockIds: readonly string[]): void;
   setActiveMarks(markIds: readonly string[]): void;
 }
 
+/** What the composer says when its kind cannot change, in the reader's words. */
+const KIND_SWITCH_REFUSALS: Record<RetypeRefusal["refused"], string> = {
+  missing:
+    "That highlight is gone from the document. Close this composer and select the text again.",
+  overlaps:
+    "Someone else's comment already covers part of this text. Close this composer and select text outside it.",
+  unmarkable:
+    "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again.",
+};
+
 interface MarkComposeRequest {
   anchor: ComposerAnchor;
-  kind: "ask" | "comment" | "suggestion";
+  kind: ComposerKind;
+}
+
+type PendingCompose = MarkComposeRequest & { seq: number };
+
+/** The open mark composer: what it is about, and the editor's promise it settles. */
+interface OpenCompose {
+  reject(reason: Error): void;
+  request: PendingCompose;
+  resolve(): void;
 }
 
 interface MarginContextValue {
@@ -38,13 +65,15 @@ interface MarginContextValue {
   hoveredItemId: string | undefined;
   hoveredMarkId: string | undefined;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
-  pendingCompose: (MarkComposeRequest & { seq: number }) | undefined;
+  pendingCompose: PendingCompose | undefined;
   /** Whether the open document has reported its layout: it says so by publishing placements,
    *  and takes the answer back when it unregisters. An empty map is still an answer - a document
    *  with no live mark and no typed block has one - so the maps cannot stand in for this. */
   placementsReported: boolean;
   registerDocument(bridge: DocumentBridge | undefined): void;
-  replaceCompose(): void;
+  /** The open mark composer's kind switch: retypes its mark and moves the pending compose to the
+   *  new mark, or answers why the switch was refused, for the composer to show. */
+  retypeCompose(kind: ComposerKind): string | undefined;
   selectItem(id: string): void;
   selectedItemId: string | undefined;
   setBlockPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
@@ -76,7 +105,7 @@ const MarginContext = createContext<MarginContextValue>({
   pendingCompose: undefined,
   placementsReported: false,
   registerDocument: unavailableMargin,
-  replaceCompose: unavailableMargin,
+  retypeCompose: unavailableMargin,
   selectItem: unavailableMargin,
   selectedItemId: undefined,
   setBlockPlacements: unavailableMargin,
@@ -103,45 +132,84 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     () => new Map()
   );
   const [placementsReported, setPlacementsReported] = useState(false);
-  const [pendingCompose, setPendingCompose] = useState<
-    (MarkComposeRequest & { seq: number }) | undefined
-  >();
+  const [pendingCompose, setPendingCompose] = useState<PendingCompose>();
   const [selectedItemId, setSelectedItemId] = useState<string>();
   const markItemIds = useRef<ReadonlyMap<string, string>>(new Map());
   const sequence = useRef(0);
-  const composePromise = useRef<{ reject(reason: Error): void; resolve(): void } | undefined>(
-    undefined
-  );
+  // Mirrors of the open compose and `documentBridge` for the compose callbacks, which stay stable
+  // (the editor holds `composeForMark` for the document's lifetime).
+  const openCompose = useRef<OpenCompose | undefined>(undefined);
+  const bridgeRef = useRef<DocumentBridge | undefined>(undefined);
+  // Every change to the open compose goes through here: the ref the callbacks read, the state the
+  // sheet renders, and the mark the document treats as the composer's own.
+  const publishCompose = useCallback((next: OpenCompose | undefined) => {
+    openCompose.current = next;
+    setPendingCompose(next?.request);
+    bridgeRef.current?.setComposerMark(next?.request.anchor.mark_id ?? null);
+  }, []);
 
+  // The margin owns the provisional mark a compose request names: it leaves the document when the
+  // composer ends unsaved - cancelled, or replaced by a newer composer - and it changes kind with
+  // the composer (`retypeCompose`). The editor's own catch (`runAction` in
+  // @legion/proof-editor's dispatch-action-bar.ts) still removes the mark it created, which is a
+  // no-op by then, and cannot know a retyped mark's id.
   const composeForMark = useCallback(
     (request: MarkComposeRequest): Promise<void> =>
       new Promise<void>((resolve, reject) => {
-        composePromise.current?.reject(new Error("replaced by a newer composer"));
-        composePromise.current = { reject, resolve };
+        const replaced = openCompose.current;
+        if (replaced !== undefined) {
+          bridgeRef.current?.removeMark(replaced.request.anchor.mark_id);
+          replaced.reject(new Error("replaced by a newer composer"));
+        }
         sequence.current += 1;
-        setPendingCompose({ ...request, seq: sequence.current });
+        publishCompose({ reject, request: { ...request, seq: sequence.current }, resolve });
       }),
-    []
+    [publishCompose]
   );
-  const settleCompose = useCallback((outcome: "saved" | "cancelled") => {
-    const pending = composePromise.current;
-    composePromise.current = undefined;
-    setPendingCompose(undefined);
-    if (pending === undefined) {
-      return;
-    }
-    if (outcome === "saved") {
-      pending.resolve();
-      return;
-    }
-    pending.reject(new Error("composer closed"));
-  }, []);
-  const replaceCompose = useCallback(() => {
-    const pending = composePromise.current;
-    composePromise.current = undefined;
-    setPendingCompose(undefined);
-    pending?.reject(new Error("replaced by a newer composer"));
-  }, []);
+  const settleCompose = useCallback(
+    (outcome: "saved" | "cancelled") => {
+      const open = openCompose.current;
+      // Nothing is open when a reply composer closes, or the composer closes after its save.
+      if (open === undefined) {
+        return;
+      }
+      if (outcome === "cancelled") {
+        bridgeRef.current?.removeMark(open.request.anchor.mark_id);
+      }
+      publishCompose(undefined);
+      if (outcome === "saved") {
+        open.resolve();
+        return;
+      }
+      open.reject(new Error("composer closed"));
+    },
+    [publishCompose]
+  );
+  const retypeCompose = useCallback(
+    (kind: ComposerKind): string | undefined => {
+      const open = openCompose.current;
+      if (open === undefined || open.request.kind === kind) {
+        return undefined;
+      }
+      // No open document means no mark to retype: the same words as a mark that is gone.
+      const outcome = bridgeRef.current?.retypeMark(open.request.anchor.mark_id, kind) ?? {
+        refused: "missing" as const,
+      };
+      if ("refused" in outcome) {
+        return KIND_SWITCH_REFUSALS[outcome.refused];
+      }
+      publishCompose({
+        ...open,
+        request: {
+          ...open.request,
+          anchor: { ...open.request.anchor, mark_id: outcome.markId, quote: outcome.quote },
+          kind,
+        },
+      });
+      return undefined;
+    },
+    [publishCompose]
+  );
   const focusItemForMark = useCallback((markId: string) => {
     sequence.current += 1;
     setFocusRequest({ markId, seq: sequence.current });
@@ -171,7 +239,12 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // cards from the last one's layout, and they tell the link's hold that this landing is already
   // over before the new document has reported anything.
   const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
+    bridgeRef.current = bridge;
     setDocumentBridge(bridge);
+    // A document registers fresh whenever `ProofDocument` remounts its editor - a new artifact or
+    // block schema - and the margin's open composer outlives that: the new editor has to learn
+    // which mark the composer holds, as `publishCompose` tells the one it replaces.
+    bridge?.setComposerMark(openCompose.current?.request.anchor.mark_id ?? null);
     if (bridge === undefined) {
       setBlockPlacements(new Map());
       setMarkPlacements(new Map());
@@ -211,7 +284,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       pendingCompose,
       placementsReported,
       registerDocument,
-      replaceCompose,
+      retypeCompose,
       selectItem: setSelectedItemId,
       selectedItemId,
       setBlockPlacements: publishBlockPlacements,
@@ -240,7 +313,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       publishBlockPlacements,
       publishMarkPlacements,
       registerDocument,
-      replaceCompose,
+      retypeCompose,
       selectHoveredItem,
       selectedItemId,
       setMarkItemIds,

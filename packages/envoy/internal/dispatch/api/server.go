@@ -3,7 +3,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -387,13 +386,11 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 }
 
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
-	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
-	if authorization != "" {
-		token, ok := strings.CutPrefix(authorization, "Bearer ")
-		if !ok || token == "" {
+	if token, present := auth.BearerToken(r); present {
+		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
-		if matchesSharedAgentToken(token, s.deps.AgentToken) {
+		if auth.MatchesSharedAgentToken(token, s.deps.AgentToken) {
 			return model.Actor{}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
@@ -416,10 +413,6 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, err
 	}
 	return model.Actor{Kind: "user", ID: login}, true, nil
-}
-
-func matchesSharedAgentToken(token, configured string) bool {
-	return configured != "" && subtle.ConstantTimeCompare([]byte(token), []byte(configured)) == 1
 }
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's

@@ -47,11 +47,12 @@ function MachineLoginDecision({
 
 /**
  * The machine-login code-entry page: `agent-secrets launcher login` prints an 8-character code
- * on the machine, and the operator types it here. Contract v9 ruling 13 - only this code-lookup
- * route selects a `launcher_credential` record, and deciding it sends the same code again, so
- * this is the one place a machine record gets Approve/Deny buttons. A looked-up login already
- * decided shows its decision, and so does one decided here, in their place, as the record page
- * does, so a second click never reaches the broker's already-decided refusal.
+ * on the machine, and the operator types it here. Ruling 13 of the shared broker contract
+ * (dispatch://AGENTC-393/artifact/plan-overview-md): only this code-lookup route selects a
+ * `launcher_credential` record, and deciding it sends the same code again, so this is the one
+ * place a machine record gets Approve/Deny buttons. A looked-up login already decided shows its
+ * decision, and so does one decided here, in their place, as the record page does, so a second
+ * click never reaches the broker's already-decided refusal.
  */
 export function MachineLoginPage(): ReactNode {
   const [code, setCode] = useState("");
