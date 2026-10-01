@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -841,6 +843,76 @@ func TestResolveBootConfigDevSignInRefusesARemoteEnvoyListener(t *testing.T) {
 	}
 	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": "https://listener.example.com", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
 		t.Errorf("a remote listener without the flag: %v, want accepted", err)
+	}
+}
+
+// With the flag a loopback client acts as any allowlisted human, and a human can have the App probe
+// and import any repository it is installed on, so the App's private key may sign calls only to a
+// GitHub API on this machine.
+func TestDevSignInRefusesAnAppKeyThatReachesGitHub(t *testing.T) {
+	withKey := &auth.AppConfig{ClientID: "Iv1.app", ClientSecret: "secret", PEM: "app private key"}
+	boot := func(overrides map[string]string) bootConfig {
+		t.Helper()
+		resolved, err := resolveBootConfig(devSignInEnvironment(overrides))
+		if err != nil {
+			t.Fatalf("resolveBootConfig(%v): %v", overrides, err)
+		}
+		return resolved
+	}
+	// Unset, the App calls https://api.github.com.
+	for _, base := range []string{"", "https://api.github.com", "https://github.example.com/api/v3", "http://10.0.0.5:9022", "http://127.0.0.1@api.github.com", "localhost:9022"} {
+		err := devSignInAppFence(boot(map[string]string{"DISPATCH_GITHUB_API_BASE": base}), withKey, "env")
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_GITHUB_API_BASE="+strconv.Quote(base)) || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
+			t.Errorf("DISPATCH_GITHUB_API_BASE=%q: err = %v, want a refusal naming DISPATCH_GITHUB_API_BASE and DISPATCH_APP_PEM_B64", base, err)
+		}
+	}
+	// The e2e harness points the App at its fake GitHub on 127.0.0.1 (packages/dispatch/e2e/run-server.sh).
+	for _, base := range []string{"http://127.0.0.1:9022", "http://localhost:9022", "http://[::1]:9022"} {
+		if err := devSignInAppFence(boot(map[string]string{"DISPATCH_GITHUB_API_BASE": base}), withKey, "env"); err != nil {
+			t.Errorf("DISPATCH_GITHUB_API_BASE=%s: %v, want a GitHub fake on this machine accepted", base, err)
+		}
+	}
+	// No App, or an App without its private key, signs no App call.
+	for _, app := range []*auth.AppConfig{nil, {ClientID: "Iv1.app", ClientSecret: "secret"}} {
+		if err := devSignInAppFence(boot(nil), app, "env"); err != nil {
+			t.Errorf("App %+v: %v, want accepted", app, err)
+		}
+	}
+	if err := devSignInAppFence(boot(map[string]string{"DISPATCH_DEV_SIGNIN": ""}), withKey, "env"); err != nil {
+		t.Errorf("an App key reaching GitHub without the flag: %v, want accepted", err)
+	}
+}
+
+// The fence holds the App main loaded, so a key in the data dir's app.json, a developer's usual
+// path, is refused as one in the environment is, and the refusal names where the key is.
+func TestDevSignInAppFenceNamesWhereTheKeyIs(t *testing.T) {
+	boot, err := resolveBootConfig(devSignInEnvironment(nil))
+	if err != nil {
+		t.Fatalf("resolveBootConfig: %v", err)
+	}
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "app.json")
+	if err := os.WriteFile(path, []byte(`{"clientId":"Iv1.file","clientSecret":"secret","pem":"app private key"}`), 0o600); err != nil {
+		t.Fatalf("write app.json: %v", err)
+	}
+	t.Setenv("DISPATCH_APP_CLIENT_ID", "")
+	app, source, err := loadAppCredentials(dataDir)
+	if err != nil || app == nil {
+		t.Fatalf("loadAppCredentials from app.json: %+v, %v", app, err)
+	}
+	if err := devSignInAppFence(boot, app, source); err == nil || !strings.Contains(err.Error(), path) {
+		t.Errorf("a key in %s: err = %v, want a refusal naming the file", path, err)
+	}
+
+	t.Setenv("DISPATCH_APP_CLIENT_ID", "Iv1.env")
+	t.Setenv("DISPATCH_APP_CLIENT_SECRET", "secret")
+	t.Setenv("DISPATCH_APP_PEM_B64", base64.StdEncoding.EncodeToString([]byte("app private key")))
+	app, source, err = loadAppCredentials(dataDir)
+	if err != nil || app == nil {
+		t.Fatalf("loadAppCredentials from the environment: %+v, %v", app, err)
+	}
+	if err := devSignInAppFence(boot, app, source); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") || strings.Contains(err.Error(), path) {
+		t.Errorf("a key in DISPATCH_APP_PEM_B64: err = %v, want a refusal naming DISPATCH_APP_PEM_B64 and not %s", err, path)
 	}
 }
 

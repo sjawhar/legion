@@ -119,6 +119,15 @@ users through `Identity.Login` and write identity errors with
   `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set
   `DISPATCH_AGENT_SECRETS_URL` names a loopback host, and `ENVOY_URL` (the
   listener mentions and messages are delivered through) names a loopback host.
+  `devSignInAppFence` (run by `main` as soon as it has loaded the App, from the
+  environment or `app.json`, before anything connects) refuses a loaded App
+  private key unless `DISPATCH_GITHUB_API_BASE` names a loopback host, naming
+  where the key came from: a signed-in session can save an architecture source,
+  which has the App probe and import the repository the caller names. The key is
+  the credential that acts (`githubapp.New` builds no client without it, and the
+  App JWT names the client ID), so neither the App ID nor the OAuth client pair,
+  which acts only on a code GitHub issues after a person signs in there, is
+  fenced.
   `routes.BuildAppContext` (and `main`, before any connection) refuses a
   dashboard origin that is not
   `127.0.0.1`, `[::1]` or `localhost` (`routes.DevSignInOrigin`) and stores the

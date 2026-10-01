@@ -76,7 +76,8 @@ type bootConfig struct {
 	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
 	ListenAddr string
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the fence
-	// resolveBootConfig and routes.BuildAppContext apply; the signing key is then per process.
+	// resolveBootConfig, devSignInAppFence and routes.BuildAppContext apply; the signing key is
+	// then per process.
 	DevSignIn bool
 }
 
@@ -108,6 +109,27 @@ func main() {
 	serverURL := ""
 	if envoyConfig.Dispatch != nil {
 		serverURL = envoyConfig.Dispatch.ServerURL
+	}
+	// The App credentials are read before anything connects, so the dev sign-in fence's App half
+	// refuses a key that would reach GitHub before NATS or Postgres is dialled.
+	dataDir, err := defaultDataDir()
+	if err != nil {
+		slog.Error("dispatch: resolve data dir", "error", err)
+		os.Exit(1)
+	}
+	appCfg, appSource, err := loadAppCredentials(dataDir)
+	if err != nil {
+		slog.Error("dispatch: load app credentials", "error", err)
+		os.Exit(1)
+	}
+	if err := devSignInAppFence(boot, appCfg, appSource); err != nil {
+		slog.Error("dispatch: dev sign-in", "error", err)
+		os.Exit(1)
+	}
+	if appCfg == nil {
+		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
+	} else {
+		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource)
 	}
 	if boot.DevSignIn {
 		if _, err := routes.DevSignInOrigin(serverURL); err != nil {
@@ -174,11 +196,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	dataDir, err := defaultDataDir()
-	if err != nil {
-		slog.Error("dispatch: resolve data dir", "error", err)
-		os.Exit(1)
-	}
 	webDistDir, err := defaultWebDistDir()
 	if err != nil {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
@@ -194,17 +211,6 @@ func main() {
 	if err != nil {
 		slog.Error("dispatch: load signing key", "error", err)
 		os.Exit(1)
-	}
-
-	appCfg, appSource, err := loadAppCredentials(dataDir)
-	if err != nil {
-		slog.Error("dispatch: load app credentials", "error", err)
-		os.Exit(1)
-	}
-	if appCfg == nil {
-		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
-	} else {
-		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource)
 	}
 
 	users := store.NewPgUserStore(database.Pool)
@@ -503,7 +509,8 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 // devSignInFence is DISPATCH_DEV_SIGNIN=1's boot half. With the flag any loopback client signs in
 // as any allowlisted login, so the process must listen, keep its data and reach the services that
 // act on a human's word (NATS, the secrets broker, the Envoy listener that delivers mentions and
-// messages) on this machine alone, and sign its cookies with a key no other process holds.
+// messages, GitHub as the App) on this machine alone, and sign its cookies with a key no other
+// process holds. devSignInAppFence checks the App once main has loaded it, and
 // routes.BuildAppContext checks the dashboard origin.
 func devSignInFence(boot bootConfig, getenv func(string) string) error {
 	if boot.IdentityHeader != "" {
@@ -530,6 +537,27 @@ func devSignInFence(boot bootConfig, getenv func(string) string) error {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 delivers through this machine's Envoy listener only: ENVOY_URL=%q must name 127.0.0.1, [::1] or localhost", boot.EnvoyURL)
 	}
 	return nil
+}
+
+// devSignInAppFence is the fence's App half, run as soon as main has loaded the GitHub App
+// credentials, from the environment or the data dir's app.json, which resolveBootConfig cannot
+// see. With the flag a loopback client acts as an allowlisted human, and a human can make the App
+// act: saving an architecture source has the App probe and import the repository the caller
+// names. So the App's private key may sign calls only to a GitHub API on this machine, as the e2e
+// harness's fake is. The key is the credential that acts: githubapp.New builds no client without
+// it, the App JWT names the client ID, and nothing sends the numeric App ID.
+func devSignInAppFence(boot bootConfig, app *auth.AppConfig, source string) error {
+	if !boot.DevSignIn || app == nil || app.PEM == "" {
+		return nil
+	}
+	if parsed, err := url.Parse(boot.GitHubAPIBase); err == nil && routes.LoopbackName(parsed.Hostname()) {
+		return nil
+	}
+	key := "DISPATCH_APP_PEM_B64"
+	if path, ok := strings.CutPrefix(source, "file:"); ok {
+		key = "pem in " + path
+	}
+	return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 calls GitHub as the App only through a fake on this machine: the App private key (%s) would sign calls to DISPATCH_GITHUB_API_BASE=%q (empty is https://api.github.com), which must name 127.0.0.1, [::1] or localhost; remove the key, or point DISPATCH_GITHUB_API_BASE at a GitHub fake on this machine", key, boot.GitHubAPIBase)
 }
 
 // loopbackDatabase refuses a DATABASE_URL with a host that is not this machine: the data a
