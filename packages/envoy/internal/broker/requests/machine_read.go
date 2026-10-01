@@ -358,12 +358,14 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 }
 
 // ApproverGrant is one live, approval-granted grant an approver (or its enrollment's operator) may
-// revoke, for GET /v1/grants?approver=<login>.
+// revoke, for GET /v1/grants?approver=<login>. Approver is the login that approved it, which for an
+// operator's own list can be another login.
 type ApproverGrant struct {
 	GrantID    string
 	RecordID   *string
 	Enrollment record.Enrollment
 	Names      []string
+	Approver   string
 	ExpiresAt  time.Time
 	CreatedAt  time.Time
 }
@@ -373,7 +375,7 @@ type ApproverGrant struct {
 // appears here — newest first.
 func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
 	login := record.CanonicalLogin(approver)
-	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), g.expires_at, g.created_at,
+	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), g.approver, g.expires_at, g.created_at,
 		coalesce((select array_agg(rs.name order by rs.name) from request_secrets rs where rs.request_id=r.id and rs.decision<>'deny'), '{}')
 		from grants g
 		join requests r on r.id=g.request_id
@@ -388,7 +390,7 @@ func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]App
 	var out []ApproverGrant
 	for rows.Next() {
 		var g ApproverGrant
-		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
+		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.Approver, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
 			return nil, err
 		}
 		out = append(out, g)

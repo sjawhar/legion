@@ -23,9 +23,10 @@ import { Timestamp } from "../refs/Timestamp";
 import { credentialGrantsQuery } from "./grants";
 
 /**
- * The viewer's live approval-granted credential grants, each revocable with one click: Dispatch
- * sends the broker the viewer's own login, and the broker allows the revoke only when that login
- * is the grant's approver or its enrollment's operator. Rendered on the Settings page.
+ * The live approval-granted credential grants the viewer approved, and those on enrollments the
+ * viewer operates whoever approved them, each naming its approver and revocable with one click:
+ * Dispatch sends the broker the viewer's own login, and the broker allows the revoke only when that
+ * login is the grant's approver or its enrollment's operator. Rendered on the Settings page.
  */
 export function GrantsSection(): ReactNode {
   const queryClient = useQueryClient();
@@ -44,8 +45,8 @@ export function GrantsSection(): ReactNode {
         Live grants
       </h2>
       <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-        Every credential grant your approvals are still live for. Revoking one ends its access
-        immediately.
+        Live credential grants you approved, and those on enrollments you operate, whoever approved
+        them. Revoking one ends its access immediately.
       </p>
 
       {grants.isPending ? <p className={`mt-6 ${textMutedOnCanvas}`}>Loading grants…</p> : null}
@@ -70,6 +71,9 @@ export function GrantsSection(): ReactNode {
                   Names
                 </th>
                 <th className="px-4 py-3 font-semibold" scope="col">
+                  Approver
+                </th>
+                <th className="px-4 py-3 font-semibold" scope="col">
                   Created
                 </th>
                 <th className="px-4 py-3 font-semibold" scope="col">
@@ -83,7 +87,7 @@ export function GrantsSection(): ReactNode {
             <tbody>
               {grants.data.grants.length === 0 ? (
                 <tr>
-                  <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={5}>
+                  <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={6}>
                     No live grants.
                   </td>
                 </tr>
@@ -97,6 +101,7 @@ export function GrantsSection(): ReactNode {
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       {grant.names.join(", ")}
                     </td>
+                    <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>{grant.approver}</td>
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       <Timestamp at={grant.created_at} />
                     </td>

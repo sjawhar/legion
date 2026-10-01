@@ -411,17 +411,18 @@ func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 	grantsResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-grants?approver=me", nil, contractApprover)
 	grants := decodeBody[struct {
 		Grants []struct {
-			GrantID string `json:"grant_id"`
+			GrantID  string `json:"grant_id"`
+			Approver string `json:"approver"`
 		} `json:"grants"`
 	}](t, grantsResp)
 	found := false
 	for _, g := range grants.Grants {
-		if g.GrantID == grantID {
+		if g.GrantID == grantID && g.Approver == contractApprover {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("grants list %+v does not include %s", grants.Grants, grantID)
+		t.Fatalf("grants list %+v does not include %s approved by %s", grants.Grants, grantID, contractApprover)
 	}
 
 	revokePath := "/api/v1/credential-grants/" + grantID + "/revoke"

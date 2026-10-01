@@ -56,6 +56,7 @@ test("lists live grants once credential requests are configured, and Revoke is o
   const getCredentialGrants = spyOn(api, "getCredentialGrants").mockResolvedValue({
     grants: [
       {
+        approver: "sami",
         created_at: "2026-09-30T00:00:00Z",
         enrollment: { kind: "box", operator: "sami", runtime_id: "box-1" },
         expires_at: "2026-09-30T01:00:00Z",
@@ -80,6 +81,42 @@ test("lists live grants once credential requests are configured, and Revoke is o
     getCredentialPending.mockRestore();
     getCredentialGrants.mockRestore();
     revokeCredentialGrant.mockRestore();
+    for (const spy of Object.values(unrelated)) {
+      spy.mockRestore();
+    }
+  }
+});
+
+// The list holds grants on enrollments the viewer operates that another login approved, so each
+// row names the login that approved it.
+test("names the approver of a grant another login approved on the viewer's enrollment", async () => {
+  const unrelated = stubUnrelatedQueries();
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({
+    pending: [],
+  });
+  const getCredentialGrants = spyOn(api, "getCredentialGrants").mockResolvedValue({
+    grants: [
+      {
+        approver: "mallory",
+        created_at: "2026-09-30T00:00:00Z",
+        enrollment: { kind: "box", operator: "sami", runtime_id: "box-1" },
+        expires_at: "2026-09-30T01:00:00Z",
+        grant_id: "grant-1",
+        names: ["DEEL_API_KEY"],
+        record_id: "rec-1",
+      },
+    ],
+  });
+
+  try {
+    renderPage();
+
+    expect(await screen.findByRole("columnheader", { name: "Approver" })).toBeDefined();
+    expect(screen.getByRole("cell", { name: "mallory" })).toBeDefined();
+  } finally {
+    cleanup();
+    getCredentialPending.mockRestore();
+    getCredentialGrants.mockRestore();
     for (const spy of Object.values(unrelated)) {
       spy.mockRestore();
     }

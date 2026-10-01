@@ -143,9 +143,11 @@ the record's approver with `403 NOT_APPROVER`, surfaced verbatim. Terminal-state
 (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their recorded decision and no
 buttons; every broker error surfaces verbatim through `ApiError`'s message, never reworded.
 
-`GrantsSection.tsx` renders on `/settings`, under the same `FEATURE_OFF` gate: the viewer's live
-approval-granted grants (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`), each with a Revoke
-button that POSTs `{}` to `/api/v1/credential-grants/{id}/revoke`.
+`GrantsSection.tsx` renders on `/settings`, under the same `FEATURE_OFF` gate: the live
+approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever
+approved them (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names its approver
+(the broker's `approver` field) and has a Revoke button that POSTs `{}` to
+`/api/v1/credential-grants/{id}/revoke`.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,

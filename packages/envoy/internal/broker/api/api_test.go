@@ -274,6 +274,7 @@ type wireApproverGrant struct {
 	RecordID   *string            `json:"record_id"`
 	Enrollment wireEnrollmentInfo `json:"enrollment"`
 	Names      []string           `json:"names"`
+	Approver   string             `json:"approver"`
 	ExpiresAt  time.Time          `json:"expires_at"`
 	CreatedAt  time.Time          `json:"created_at"`
 }
@@ -762,8 +763,8 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if listed == nil {
 		t.Fatalf("GET /v1/grants = %+v, want grant %s listed", grantList, grantID)
 	}
-	if len(listed.Names) != 1 || listed.Names[0] != "DEEL_API_KEY" {
-		t.Fatalf("listed grant names = %v, want [DEEL_API_KEY]", listed.Names)
+	if len(listed.Names) != 1 || listed.Names[0] != "DEEL_API_KEY" || listed.Approver != testApprover {
+		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] approved by %s", listed, testApprover)
 	}
 
 	// Revoking by approver takes the grant's approver or its enrollment's operator (both sjawhar
