@@ -22,22 +22,21 @@ import (
 func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	names := testBuckets(t)
 	js, err := conn.JetStream()
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.interests, Storage: natsgo.FileStorage})
+	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create interest bucket: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create role bucket: %v", err)
 	}
-	readableRole, unreadableRole := testnats.LegacyKeys(names.roles, "r")
-	readableSession, unreadableSession := testnats.LegacyKeys(names.interests, "s")
-	rawOnlyRole, rawOnlySession := testnats.RawOnlyKey(names.roles, "o"), testnats.RawOnlyKey(names.interests, "o")
+	readableRole, unreadableRole := testnats.LegacyKeys(RoleBucket, "r")
+	readableSession, unreadableSession := testnats.LegacyKeys(Bucket, "s")
+	rawOnlyRole, rawOnlySession := testnats.RawOnlyKey(RoleBucket, "o"), testnats.RawOnlyKey(Bucket, "o")
 	stale := time.Now().Add(-time.Hour).UnixMilli()
 	for role, holder := range map[string]string{"reviewer": "ses_live", readableRole: readableSession, unreadableRole: unreadableSession, rawOnlyRole: "ses_gone"} {
 		claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: stale})
@@ -52,7 +51,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 		putInterest(t, rawInterests, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID[:8]}, UpdatedAt: stale})
 	}
 
-	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	registry, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open over the earlier listener's keys: %v", err)
 	}
@@ -102,20 +101,19 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
-	names := testBuckets(t)
 	js, err := conn.JetStream()
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.interests, Storage: natsgo.FileStorage})
+	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create interest bucket: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create role bucket: %v", err)
 	}
-	readable, unreadable := testnats.LegacyKeys(names.interests, "s")
+	readable, unreadable := testnats.LegacyKeys(Bucket, "s")
 	roles := map[string]string{"legacy-readable": readable, "legacy-unreadable": unreadable}
 	for role, holder := range roles {
 		claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: time.Now().UnixMilli()})
@@ -130,7 +128,7 @@ func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
 		putInterest(t, rawInterests, Interest{SessionID: holder, MachineID: "earlier", Topics: []string{"notifications.agent." + holder, "notifications.role." + role}, UpdatedAt: time.Now().UnixMilli()})
 	}
 
-	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	registry, err := Open(conn, WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

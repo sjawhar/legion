@@ -4,15 +4,56 @@
 
 ### Added
 
+- `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>` on Dispatch, which signs an allowlisted login in with the same session cookie a GitHub sign-in issues, with no GitHub step, so a local instance can be driven signed-in. Boot refuses the flag unless identity is cookie, the listen address is a loopback IP literal, the dashboard origin names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set `DISPATCH_AGENT_SECRETS_URL` names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, since a signed-in session can have the App probe and import any repository it is installed on. A key in `app.json`, where a developer keeps the real App's key, is refused whatever the base, naming the file; the environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, because every App call hands a signed App JWT to whatever listens at that base. These refusals come before NATS or Postgres is dialled. The signing key is then generated per process, so a minted cookie is worthless on any other server and dies with the process. What a signed-in session writes to the database (a `dsp_` token it mints, the session and token rows its sign-out changes) is honoured by every server on that database, so a dev-sign-in server needs a database of its own. While the flag is on, every request must carry the dashboard origin as its `Host` (`421 HOST_MISMATCH`), the route serves only a loopback peer with no forwarding header (`403 DEV_SIGNIN_FORBIDDEN`) and logs every mint at WARN, and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` without reading a stored token pair. `DISPATCH_LISTEN_HOST` may now be an IPv6 literal with or without brackets: `::1` listened on `::1:8766` and failed with "too many colons", and now listens on `[::1]:8766`. A bad `DISPATCH_PORT` now refuses the boot before NATS and Postgres connect.
 - Every cache warm-up logs one line when its initial scan ends, `<cache> cache warm-up`, with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` (`completed`, or `timed out` at WARN when nats.go's idle timer gave up on the scan). The counts are disjoint, like the role restore line's: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them. The line goes through the logger the listener passes each cache (`store.WithLogger`, `session.WithSessionLogger`, the CI store's own), so it is a JSON record with `machine_id`, and so are the cache watchers' other lines (a failed first start, a recreated bucket, a watcher that stopped). A restart now names its own cost — measured on a listener with a seeded bucket: `{"msg":"interest registry cache warm-up","machine_id":"smoke374r2","bucket":"envoy_interests","elapsed_ms":5,"entries":3,"delete_markers":500,"outcome":"completed"}`. A timed-out scan is logged and never recorded as the watcher's terminal error, so a live watcher whose warm-up merely timed out is not a 503 or a rebuild.
 - A listener start logs one INFO line for the role-claim snapshot it restores, `restored role claims`, with two disjoint fields: `restored`, the claims whose revision the scan read and which therefore keep their holder's restart grace, and `delete_markers`, the tombstones the scan streamed past to find them (production on 2026-09-28: `restored=9 delete_markers=757`). They are separate on purpose — one total of both reads as claims the restart failed to restore. `internal/store`'s lines, this one and both reaper cycles, now go through the logger the listener passes it (`store.WithLogger`), so they are JSON records carrying `machine_id` like the rest of the listener's output. `internal/bus`'s lines and the stdlib `log` package's stay in Go's text format, which the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream subjects match on.
 - A CI record write that runs out of its two-second retry budget logs one JSON line, `ci record exceeded its retry budget`, naming the head (`owner`, `repo`, `number`, `sha`), the record's `checks`, the write's `attempts`, the `observations` it answered 503 and the last attempt's `error`, so an alarm can count the listener's 503s by that cause.
 - Added the native Dispatch workspace API, persisted documents and events, retained Dispatch notifications, and daily Postgres backups.
 - `POST /v1/roles/set` accepts `"soft": true`: the claim lands only if the role is unheld, held by a session that is no longer live, or held by the declared `previous_session_id`; any other live holder answers 409 with its id.
 - Dispatch redelivers the GitHub App webhook's failed deliveries, which GitHub never redelivers on its own. Every two minutes it lists the webhook's attempts whose status is not OK and asks GitHub to redeliver each one the listener answered 5xx or GitHub could not complete. A failed or refused redelivery is retried after a doubling backoff, at most five times, and a 4xx is never redelivered. Requests go a second apart, and a GitHub rate limit stops the sweep until the time GitHub gives. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep over a chosen window.
+- Every Dispatch message read returns `broadcast_id`, the broadcast the message is one
+  recipient's copy of, or null: the thread read (`GET /api/v1/messages/{id}`), the Agents page's
+  conversation list, each reply, and every message event (LEGION-394).
+- `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`: the attempt's session records, once
+  per message, that it took a person's fresh, latest attempt of a direct message to it, requested
+  by the message's own author, as its user's own turn, and is answered that attempt with the
+  message's stored `body`. Anything else is refused with a 409 naming the check
+  (`ACCEPT_NOT_DIRECT` for a message on an issue, a broadcast's copy or a reply in a broadcast's
+  thread, `ACCEPT_NOT_WRITTEN_BY_PERSON`, `ACCEPT_NOT_ASIDE_OR_STEER` for a BTW,
+  `ACCEPT_ALREADY_ACCEPTED`, `ACCEPT_SUPERSEDED`, `ACCEPT_NOT_REQUESTED_BY_PERSON`,
+  `ACCEPT_NOT_REQUESTED_BY_AUTHOR` for another person's retry, `ACCEPT_FAILED` for an attempt
+  Dispatch recorded as failed, `ACCEPT_STALE`) or 403
+  `ACCEPT_FORBIDDEN`. It appends `message.accepted`, which reaches the dashboard's event stream
+  and never NATS, since the outbox publishes no issue-less event. Every delivery attempt now reads
+  `requested_by` (who asked for it, kept on a resume, null before migration 0054), `accepted_at`
+  and `accepted_as` (LEGION-394).
+- `POST /api/v1/broadcasts` requires `idempotency_key`, naming one send (letters, digits, `.`,
+  `_`, `:` and `-`, at most 128 characters), so a repeated create no longer hands every recipient
+  the message twice. A repeat by the same human with the same key, body, mode and `session_ids`
+  is answered `200` with the broadcast the key made, even while the listener is down; the same
+  key with a different request is `409 BROADCAST_KEY_REUSED`, naming that broadcast as
+  `broadcast_id`, and sends nothing; two requests carrying one key at once write one broadcast.
+  A missing key or one with another character is `400 BROADCAST_INPUT`, and one over 128
+  characters `400 CAP_EXCEEDED`; only the missing-key text adds what a page loaded before this
+  change should do (restore its draft, copy the message, reload and send again). Keys are stored
+  per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
+  broadcast (LEGION-446).
 
 ### Changed
 
+- Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
+  session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
+  person's message that an Oh My Pi session took as its own user turn shows once, where the
+  session took it, still naming its author, and only when the streamed text is the stored one;
+  one the session took between a run's last queue or aside poll and its `agent_end` reaches the
+  stream untagged and shows twice (`packages/pi-envoy/AGENTS.md`). The Agents page shows an
+  attempt the session accepted as delivered to the session's
+  conversation, with no retry, even after a later `failed`; every other attempt keeps its states
+  (LEGION-394). Every label the dashboard composes for a mode now uses the composer's names (Send,
+  Aside, BTW), the card's mode-change buttons included ("Use BTW instead", "Use Send instead",
+  which read "Send as BTW instead" and "Send normally instead"). A delivery error or broadcast
+  exclusion reason Dispatch stored keeps its wire name (`does not advertise steer`), as agents and
+  scripts read it (LEGION-394).
 - `GET /api/v1/issues` pages with `limit` (1–250) and `offset` (0 or more; `offset` alone pages
   50), answering `{issues, total, limit, offset}` with `total` counting every issue the filters
   match; without either parameter it answers the whole listing as an array, as before. It used to
@@ -48,8 +89,66 @@
   across a restart too. A rolled-back listener ignores the field. A listener built with #1526 but
   without this change publishes the whole backlog, so every head-gated listener moves straight to
   a build carrying this change.
+- `GET /api/v1/search` refuses a `q` over 1,000 UTF-16 units, counted after trimming, with the
+  ordinary `400 CAP_EXCEEDED` and a sentence saying what to send instead (LEGION-386), and a
+  `project` that is not a project key with `400 INVALID_PROJECT`, where a lowercased key used to
+  answer an empty result. A mistyped key that still has a key's shape, such as `LEGOIN`, is still
+  searched and still answers empty. An empty `project` still searches every project. Both ride
+  in the URL, and the load balancer in front of production Dispatch answers a URL longer than it
+  accepts with a bare `414` before the server sees the request. So deploying this names the rule
+  only to a request that still fits; it cannot answer the 26,637-character search that prompted
+  LEGION-386. Only an updated `@sjawhar/pi-legion-envoy` in a session's profile (or the OpenCode
+  or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
+  because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+- Dispatch exits with status 1 when it cannot bind its listen address. It logged
+  `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
+  clash as a clean stop.
+
+- A search that contains only stop words now returns `200` with no results, so every consumer
+  can show an empty result rather than a retryable failure.
+
+- A targeted message's delivery claim no longer deadlocks with the session's reply to the same
+  message: it takes the message row `FOR NO KEY UPDATE`, as the new accept does, which the
+  reply's foreign-key `FOR KEY SHARE` does not wait for (LEGION-394).
+- Dispatch no longer stores a table row without its last cells. A cell ends at every `|` not
+  written `\|`, inside code and links too, and the parser dropped the cells a body row held past
+  its delimiter row's, which the browser editor's parser keeps: a spec, upload or version whose
+  code span held a bare `|` in a row that filled its table was stored with the rest of that row
+  gone, and no refusal. Such markdown is now refused (`400 INVALID_MARKDOWN`; an insert's
+  `markdown` answers `INVALID_OP`), naming the row's cells, its table's width and its opening
+  words, and both fixes: write a `|` inside a cell as `\|`, or give the header and delimiter rows
+  as many cells as the row. A row whose cells past the width are all blank is still read at the
+  table's width. A bare-row insert now decides in three steps. A fragment whose every line yields
+  a cell and an unescaped `|` (a lone `|` yields no cell, and a line whose only pipe is `\|` has no
+  separator), with no line delimiter-shaped (cells of three hyphens or more), is parsed under a
+  header at the target table's width. What that parse refuses is refused, a wide row of that
+  table as `TABLE_WIDTH`. When it refuses nothing and reads one table holding every line, those
+  rows are inserted. Every other fragment goes to the block path whole, which reads it as a
+  document of its own. The insert used to count cells itself first, line by line, over a fragment
+  trimmed of Unicode spaces and a first row's indentation, so it now answers differently in these
+  ways. It drops blank cells past the width and refuses text there, where it refused both. A `|`
+  after an even run of backslashes is text to it, as it always was to uploads, so
+  `| A11 | new \\| extra |` under two columns is stored as one cell reading `new \| extra` where it
+  was refused as `TABLE_WIDTH`; the browser editor's reading of such a pipe is LEGION-412. A space
+  outside ASCII, a vertical tab or a form feed is a cell's text wherever it stands, so
+  `| A11 | new |` then U+00A0 is refused as three cells where it was stored as two, and a line of
+  `|` then U+00A0 is a row holding it, as an upload reads it, where it was a lone `|` that sent the
+  fragment to blocks. A line the parser refuses as another block (indented code, `2. | a | b |`)
+  is refused as an upload refuses it, `INVALID_OP` on `markdown`, however many cells it holds and
+  on any row. A fragment that goes to the block path was refused as `TABLE_WIDTH` wherever
+  the old count met a line too wide before whatever sends the fragment there, as with
+  `- | a | b |` (counted as three cells), or `| A11 | x | y |` then a lone `|` or a line whose only
+  pipe is `\|` under two columns; it is now written as the blocks it reads as.
+  The route also tries a fragment as rows before it reads it as a document of its own, so rows
+  that reading refused, such as `[x]: |`, which it took for a link reference definition, are
+  inserted as the rows an upload reads. Versions written before 2026-09-19 hold rows with text
+  past their table's width, since the renderer then wrote a code span's pipe unescaped;
+  re-uploading one is refused rather than stored short. A row's closing `|` after an odd run of
+  backslashes (`| x | y \|`) is now kept as the last cell's text, as the browser editor reads it,
+  where it was dropped (`y \`). An image's alt holding a backslash before a pipe in a table cell
+  is written so that the browser editor reads it as one cell too.
 
 - `GET /api/v1/broadcasts/{id}` now returns recipient copies in the order the sender named them,
   including the relative order of recipients left after exclusions. Broadcasts created before

@@ -1,6 +1,7 @@
 import type { EditArtifactInput } from "@legion/contracts";
 import type {
   Actor,
+  Agent,
   AnswerAskInput,
   ArchitectureSource,
   ArchitectureTree,
@@ -11,6 +12,7 @@ import type {
   Ask,
   AskFollower,
   AskRead,
+  AskSnooze,
   BroadcastCreated,
   BroadcastRead,
   BroadcastSummary,
@@ -160,9 +162,30 @@ export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
   return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
 }
 
+/** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until
+ *  `snoozedUntil` (RFC 3339, in the future). */
+export function snoozeAsk(
+  id: string,
+  snoozedUntil: string,
+  options: ApiOptions = {}
+): Promise<AskSnooze> {
+  return request<AskSnooze>(
+    `/api/v1/me/asks/${encodeURIComponent(id)}/snooze`,
+    "PUT",
+    { snoozed_until: snoozedUntil },
+    options
+  );
+}
+
+/** The Agents page's rows: every live Envoy session merged with its Dispatch activity. */
+export function listAgents(options: ApiOptions = {}): Promise<Agent[]> {
+  return request<Agent[]>("/api/v1/agents", "GET", undefined, options);
+}
+
 export function createIssue(
   input: Partial<Pick<Issue, "project" | "title">> & {
     external?: string;
+    force?: boolean;
     parent?: string;
     spec?: string;
   },
@@ -177,6 +200,16 @@ export function createAsk(
   options: ApiOptions = {}
 ): Promise<Ask> {
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
+}
+
+/** Every ask on the issue, whatever its state (the route's default `state=all`). */
+export function listIssueAsks(issue: string, options: ApiOptions = {}): Promise<Ask[]> {
+  return request<Ask[]>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/asks`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 export function createProjectDocument(
@@ -436,11 +469,18 @@ export function createAgentMessage(
   );
 }
 
+/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
+ *  the caller names its own, as a row that replays a request the page made does. */
 export function createBroadcast(
-  input: CreateBroadcastInput,
+  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
+  return request<BroadcastCreated>(
+    "/api/v1/broadcasts",
+    "POST",
+    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
+    options
+  );
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {

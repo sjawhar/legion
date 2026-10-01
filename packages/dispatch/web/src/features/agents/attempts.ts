@@ -9,6 +9,7 @@ export function deliveryAttempts(
   targetName: string
 ): TargetedMessageAttempt[] {
   return deliveries.map((attempt) => ({
+    acceptedAs: attempt.accepted_as ?? null,
     attempt: attempt.attempt,
     createdAt: attempt.created_at,
     delivery: attempt.delivery,

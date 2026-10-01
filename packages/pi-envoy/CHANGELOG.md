@@ -2,7 +2,60 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
+  the eight required headings: a spec starts as the problem and its evidence, puts each open
+  question in a decision block at the end of the section that discusses it, records a settled
+  point in the human's words with the date, and is rewritten in place as it changes. "Approval of
+  a spec" says to request approval only once no decision block is open and the spec proposes
+  something the human hasn't settled. The `dispatch_issue` and `dispatch_doc_edit` descriptions
+  point at that section instead of listing headings.
+- `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
+  the human hasn't already agreed to, in one to three sentences. The Inbox shows it after "Approve
+  spec.md (version N)?", and the result text quotes the question the human sees. It needs a
+  Dispatch server that accepts `summary`; an older one refuses the call.
+- `dispatch_request_approval` is refused while the document holds an open decision block, even
+  when a human asked for approval, and the refusal names each block. "Approval of a spec" says
+  what to do instead: name the open block and ask the human to answer or waive it; a waived block
+  is closed with `dispatch_resolve_ask`. It also says to request approval in the pass that
+  finishes a spec whose remaining choices are the agent's own, rather than making each of them a
+  decision block.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open, even in a batch that inserts it
+  again; the refusal names `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. A whole-document
+  replace through `dispatch_artifact` is not refused, so it can still remove an open block.
+- The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
+  decision blocks first, as "Approval of a spec" defines settled, then request approval with a
+  summary of what the tree will do. `legion-architect` states that condition once.
+- The run-end nudge that tells an agent to open an ask no longer offers
+  `dispatch_request_approval` as a way to wait on a human.
+
 ### Added
+
+- The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
+  `task(agent="plan-gap-analyst")`, which finds the hidden requirements, ambiguities, and
+  acceptance criteria no machine could check that the issue leaves unsaid, each with what the plan
+  must answer. After it drafts, it runs `task(agent="plan-reviewer")`, which checks that the plan
+  can be carried out as written, approves when in doubt, and names at most three blocking issues,
+  each with its evidence. The planner revises for at most three rounds, then proceeds with the
+  issues still standing; a check whose model call fails is recorded and never blocks the plan. The
+  plan handoff records both results (`gapAnalysis`, `planReview`). Both agents ship in `agents/`
+  with read-only file tools: the gap analyst runs on the operator's `@oracle` role and the reviewer
+  on `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the
+  reviewer's pair. Oh My Pi also gives each the Dispatch and Envoy tools; their prompts forbid
+  writing through them, and nothing enforces it (LEGION-428). The Go daemon build's role prompts
+  dispatch `plan-gap-analyst` and `plan-reviewer`, and its boot gate refuses a plugin that ships
+  neither, so install the plugin first on either runtime: on the Sandbox runtime, the worker image
+  built from this release before the Go daemon build; on the tmux runtime, this
+  `@sjawhar/pi-legion-envoy` release before restarting the Go daemon. An old daemon build boots on
+  the new plugin.
+- Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
+  `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
+  ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`
+  lines quoted from the published head (AGENTC-1305). The implementer writes the brief when the
+  PR opens and keeps it true; the reviewer fills `Look at first` and `Not proven / risk` each
+  round; a body with no brief still publishes, with one line saying so.
 
 - The implementer orchestrates its change rather than writing it (LEGION-415). The package ships
   `deep-worker` in `agents/`, an autonomous coding agent on the deployment's `deep` model role
@@ -33,6 +86,19 @@
   extension inserts one. It is read once at load, so a package without
   `dist/skills/dispatch-first/SKILL.md` fails to load naming the file. A session without Dispatch
   configured gets nothing.
+- The reviewer's pair runs an explicit security pass. The `thermonuclear-deep-review` rubric gains
+  Security Guidelines: six tagged rows (`authz`, `secret`, `untrusted-input`, `prompt`,
+  `supply-chain`, `sandbox`), each answered with a file:line citation when the diff touches its
+  surface and summed up in one `Security:` line. Every security finding that states an exploit path
+  stands at its own priority, prefixed `Security[<tag>]:`, and only hardening is capped, at two
+  items. The rubric also gains a section on attacking the PR body's safety claims. The reviewer's
+  core role text has it write that `Security:` line into every review body, every round, and the
+  review body template carries it. The tester's core text makes the call made as the party a new
+  or moved authorization boundary must refuse that change's negative control. Both pair agents
+  declare their rubric in `autoloadSkills`, so the subagent starts with it rather than being told
+  to read it. Each still names it as `skill://<name>`, the form the Go daemon's boot gate
+  resolves, and `src/legion/shipped-agents.test.ts` fails an autoloaded name with no such token
+  (AGENTC-1305).
 - The planner, tester, reviewer and implementer role texts, and the worker skill's push procedure
   they point to, each say that under the Go daemon the issue branch is pushed with `legion push`,
   which runs that procedure and decides whether the push skips CI: a handoff push that a later push
@@ -46,6 +112,14 @@
   `agentstream.<session id>.control`, and a session that hears nothing for thirty seconds goes
   quiet — and a viewer's replay is answered from a bounded in-memory ring (200 messages, 512 KiB)
   that never leaves the process. Nothing about it is written to Dispatch's database.
+- The dispatch skill's documents reference says a `|` in a table cell, inside inline code and
+  links too, is written `\|`, and that a row holding text in a cell past its table's width is
+  refused on every write path rather than stored short, naming each path's error code. Its
+  document-edits reference says how an insert at a table-cell quote decides it holds table rows,
+  in three steps: every line yields a cell and an unescaped `|` and none is a delimiter row of
+  three hyphens or more a cell; what the rows parse refuses is refused; and the rows are inserted
+  only when that parse reads one table holding every line. Any other fragment, such as
+  `- | a | b |`, is read on its own as blocks.
 
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask
@@ -69,6 +143,52 @@
 
 ### Changed
 
+- A person's direct Send or Aside from Dispatch's Agents page arrives as that person's own user
+  turn, as if typed at the terminal, instead of an Envoy card with a `reply_with` hint
+  (LEGION-394). The extension asks Dispatch, with its own bearer, to accept the frame's attempt
+  (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`, which takes only a person's own fresh
+  Send or Aside to this session; its conditions are that route's row in
+  `packages/envoy/cmd/dispatch/AGENTS.md`), and only on that 200 sends the body Dispatch stored,
+  never the frame's text: Send (no `deliverAs`, as Enter does) or Aside (`deliverAs: "aside"`), as
+  the accepted attempt says. Its own checks can only keep a card: it never accepts an attempt it
+  already delivered, as a card or as a turn, recording each one in the session's transcript
+  (`envoy-dispatch-handled-attempt`) before it goes out and reading every such entry back on
+  restore, so a replayed frame, or one forged for a Send that arrived as a card, is a card, even
+  after a restart, while a person's retry of that Send can still be their turn. Anything else, a
+  refused accept, an error, a timeout or a Dispatch configuration that no longer resolves, keeps
+  its card and posts nothing. The live stream tags that user message with `dispatchMessageId`, so
+  Dispatch's conversation view shows it once, and in a Legion phase worker it counts as an inbound
+  event, as its card did, except a Send or an Aside sent in between the run's last queue or aside
+  poll and its `agent_end`, which the host runs as a turn of its own: that one shows twice and
+  counts as an assignment (`packages/pi-envoy/AGENTS.md`).
+- The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
+  quote or attribution that came with it; every rule, command and example stays, and a decision
+  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules
+  deployment instructions never override: no deferrals, bringing the base in only on a real
+  conflict or a retarget, the implementer's own proof on a production-like surface at the head
+  that merges (an applied simplify head included), and the implementer's production check after
+  the merge.
+- The `dispatch` skill's gate 2 states as instructions what only its deleted story implied: put
+  the measurement and the size of the affected population in the ask, and when the measurement
+  shows one fix cannot repair most of that population and another fix can, drop the first rather
+  than offer it cut down to the part it reaches; an option not to act, such as a permission ask's
+  Hold, is not a fix and stays (LEGION-386). On the skill scenario rig, an agent asked which of
+  three options to take, where an export shows one reaches 18 of 430, left it out in 7 of 10 runs
+  with the rule's first wording ("drops an option the measurement shows cannot work"), against 1
+  of 10 with the story and 0 of 10 with gate 2's sentences deleted. With this final wording it
+  left the option out in 10 of 10 runs, five run by the implementer and five independently by the
+  acceptance tester. That is no improvement over the first wording's 7 of 10 (one-sided Fisher
+  p ≈ 0.11), and it says nothing about the clause that keeps an option not to act, which no
+  scenario exercises (LEGION-444).
+- The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
+  `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
+  `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found
+  them in the implement handoff it read or in the CLI's refusal of its write.
+- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
+  not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
+  which the load balancer in front of production Dispatch answers with a bare HTML `414` when it
+  is too long, so this refusal is what stops a pasted passage from becoming that error; a
+  lowercased key, which used to come back as no results, is now refused by name.
 - The `dispatch` skill arrives whole (LEGION-386): its body is under 500 lines and its detail lives
   in step-linked `skill://dispatch/references/*.md` files, each under Oh My Pi's 51,200-byte spill
   threshold, where the 75 KB single file used to reach agents with its middle cut out.

@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import { api, apiErrorMessage } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { getAssertion } from "../../lib/webauthn";
 import {
   card,
   dangerText,
@@ -21,28 +20,23 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
-import { credentialGrantsQuery, revokeChallenge } from "./keys";
-
-const credentialGrantsQueryKey = ["credential-grants"] as const;
+import { credentialGrantsQuery } from "./grants";
 
 /**
- * The viewer's live approval-granted credential grants, each revocable by running a WebAuthn
- * assertion over the revoke challenge (contract v9: `SHA-256("agent-secrets/revoke/v1\n" +
- * <grant id>)`, computed client-side in `revokeChallenge`, since the UI revoke route carries no
- * `challenges` field of its own). Rendered inside `KeysPage`.
+ * The live approval-granted credential grants the viewer approved, and those on enrollments the
+ * viewer operates whoever approved them, each naming its approver and revocable with one click:
+ * Dispatch sends the broker the viewer's own login, and the broker allows the revoke only when that
+ * login is the grant's approver or its enrollment's operator. Rendered on the Settings page.
  */
 export function GrantsSection(): ReactNode {
   const queryClient = useQueryClient();
   const submitGuard = useSubmitGuard();
   const grants = useQuery(credentialGrantsQuery());
   const revoke = useMutation({
-    mutationFn: async (grantId: string) => {
-      const challenge = await revokeChallenge(grantId);
-      const assertion = await getAssertion(challenge, window.location.hostname);
-      return api.revokeCredentialGrant(grantId, { assertion });
-    },
+    mutationFn: (grantId: string) => api.revokeCredentialGrant(grantId),
     onSettled: () => submitGuard.release(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: credentialGrantsQueryKey }),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: credentialGrantsQuery().queryKey }),
   });
 
   return (
@@ -51,8 +45,8 @@ export function GrantsSection(): ReactNode {
         Live grants
       </h2>
       <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-        Every credential grant your approvals are still live for. Revoking one ends its access
-        immediately.
+        Live credential grants you approved, and those on enrollments you operate, whoever approved
+        them. Revoking one ends its access immediately.
       </p>
 
       {grants.isPending ? <p className={`mt-6 ${textMutedOnCanvas}`}>Loading grants…</p> : null}
@@ -77,6 +71,9 @@ export function GrantsSection(): ReactNode {
                   Names
                 </th>
                 <th className="px-4 py-3 font-semibold" scope="col">
+                  Approver
+                </th>
+                <th className="px-4 py-3 font-semibold" scope="col">
                   Created
                 </th>
                 <th className="px-4 py-3 font-semibold" scope="col">
@@ -90,7 +87,7 @@ export function GrantsSection(): ReactNode {
             <tbody>
               {grants.data.grants.length === 0 ? (
                 <tr>
-                  <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={5}>
+                  <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={6}>
                     No live grants.
                   </td>
                 </tr>
@@ -104,6 +101,7 @@ export function GrantsSection(): ReactNode {
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       {grant.names.join(", ")}
                     </td>
+                    <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>{grant.approver}</td>
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       <Timestamp at={grant.created_at} />
                     </td>

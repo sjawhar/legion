@@ -70,6 +70,9 @@ describe("formatZodIssues", () => {
     expect(problemsFor("dispatch_resolve_ask", { ask: "a", kind: "no", reason: "r" })).toEqual([
       'kind must be one of retracted|resolved; got "no"',
     ]);
+    expect(problemsFor("dispatch_request_approval", { issue: "DSP-42" })).toEqual([
+      "summary is required (string)",
+    ]);
   });
 
   test("names the object shape an array element must have, per element", () => {

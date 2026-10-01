@@ -74,8 +74,15 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
 		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
+		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
+		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
-			return workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
+			provisioned, err := workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
+			if err != nil {
+				return workspace.Workspace{}, err
+			}
+			workspace.WarmCodegraphIndexInBackground(provisioned.Dir)
+			return provisioned, nil
 		},
 		remove: func(ctx context.Context, working workspace.Workspace) error {
 			return workspace.Remove(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
@@ -132,6 +139,12 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				// every attempt of its backoff.
 				if row.Attempts == 0 {
 					r.log.Info("outbox notice waits for its architect", "row", row.ID, "issue", row.Issue, "error", err)
+				}
+			} else if errors.Is(err, supervise.ErrSuspendHeld) {
+				// A suspension held for its agent's turn (supervise's holdSuspension) is a wait: the
+				// row is asked again on its backoff and finishes once the claim is suspended.
+				if row.Attempts == 0 {
+					r.log.Info("outbox suspend is held for its agent's turn to end", "row", row.ID, "issue", row.Issue, "error", err)
 				}
 			} else if errors.Is(err, supervise.ErrDeliveryPending) {
 				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
@@ -349,7 +362,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	notice, key := payload.Published(row.ID)
-	published := r.notices.Publish(ctx, roleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
+	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	switch {
 	case published == nil:
 		return nil
@@ -373,7 +386,7 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
 	}
-	err := r.notices.Publish(ctx, roleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
+	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}

@@ -31,6 +31,11 @@ var ErrNoHolder = errors.New("no live session holds the role")
 // an older listener lacks — and never ErrNoHolder.
 var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
 
+// RoleTopicPrefix is the Envoy subject a role token is reached on (ROLE_TOPIC_PREFIX,
+// packages/contracts/src/subject.ts): a notice goes to its architect's, and a review-stuck notice
+// names its reviewer's, so the architect need not build it.
+const RoleTopicPrefix = "notifications.role."
+
 // ControllerTopic is the topic of project's controller, the one notice topic the daemon publishes
 // to; a workflow notice goes to the role topic of the architect that owns its issue instead (the
 // daemon's notice executor), since every issue's topic is a subject its phase workers subscribe

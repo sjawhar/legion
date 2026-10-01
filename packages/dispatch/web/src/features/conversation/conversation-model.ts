@@ -264,6 +264,8 @@ export function activityDescription(
       return "sent a message";
     case "message.delivery":
       return "delivered a message";
+    case "message.accepted":
+      return "took a message as its own turn";
     case "message.answered":
       return "answered a message";
     case "child.status":

@@ -14,8 +14,7 @@ import (
 // that merely has it loaded. Every such process heartbeats a claim. Blind
 // last-writer-wins therefore routes deliveries to an arbitrary holder, and a
 // holder that is not driving the session starts its own model loop on delivery —
-// two loops interleaving one transcript (observed 2026-07-29 on
-// ses_05fce2520ffeoVkqBxn2DfJyft, which flip-flopped between four ports).
+// two loops interleaving one transcript.
 //
 // mergeForClaim decides which claim survives.
 
@@ -135,7 +134,7 @@ func TestMergeForClaim_KeepsIncumbentMetadataWhenChallengerLoses(t *testing.T) {
 
 func TestSessionRegistry_PutRejectsNonDrivingClaimOverLiveDriver(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -162,7 +161,7 @@ func TestSessionRegistry_PutRejectsNonDrivingClaimOverLiveDriver(t *testing.T) {
 
 func TestSessionRegistry_PutAcceptsDrivingClaimOverBystander(t *testing.T) {
 	client := setupNATS(t)
-	reg, err := client.OpenRegistry(WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Minute))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}

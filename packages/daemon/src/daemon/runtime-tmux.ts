@@ -40,6 +40,111 @@ const TMUX_OWN_GLOBALS: Record<string, true> = { PWD: true, SHLVL: true };
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 
+/** Each background `codegraph` invocation's bound. Nothing waits on the warm-up, and a first index
+ * of a large repository (tens of thousands of files) takes far longer than a launch command. */
+const CODEGRAPH_WARM_TIMEOUT_MS = 30 * 60_000;
+
+/** `codegraph status --json`'s `initialized` and `index.state` fields (AGENTC-1305 §7):
+ * `codegraph status` exits 0 whether or not the project has ever been indexed, so only the
+ * parsed body tells the cases apart. Anything that fails to parse as that shape — a missing
+ * CLI's empty output, a version whose JSON differs — is treated as not initialized.
+ * `index.state` is `"complete"` only once a build has finished; a build still running, or one an
+ * earlier warm-up left partial, reports it `"indexing"` with `initialized` already true. */
+function parseCodegraphStatus(stdout: string): { initialized: boolean; complete: boolean } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { initialized: false, complete: false };
+  }
+  if (typeof parsed !== "object" || parsed === null) return { initialized: false, complete: false };
+  const initialized = "initialized" in parsed && parsed.initialized === true;
+  const index = "index" in parsed ? parsed.index : undefined;
+  const complete =
+    typeof index === "object" && index !== null && "state" in index && index.state === "complete";
+  return { initialized, complete };
+}
+
+/** The single next codegraph subcommand `nextCodegraphStep` decides, or none. */
+export type CodegraphStep = "none" | "init" | "index";
+
+/** Decides `ensureCodegraphIndex`'s one next codegraph subcommand, pure and table-tested
+ * (`runtime.contract.test.ts`). When `status` exits 0 and parses as JSON, its own `initialized`
+ * and `index.state` fields decide outright: `initialized: false` always means `init`, even when
+ * `.codegraph/` already exists — CodeGraph's own `.gitignore` template (`*` then `!.gitignore`)
+ * leaves one tracked file behind in every `.codegraph/` a repository commits, so a fresh
+ * workspace of such a repository starts with the directory present and no database, and `index`
+ * on that refuses ("CodeGraph not initialized"). `dirExists` — whether `<workspace>/.codegraph`
+ * exists on disk — is consulted only as a fallback, when `status` failed to run or returned
+ * something that is not even JSON (a corrupted database mid-build, an old CLI): there, an
+ * existing directory still means `index` over `init`, since `init` on one only prints "Already
+ * initialized" and exits 0, repairing nothing. `lockLive` — whether `.codegraph/codegraph.lock`
+ * names a process that is still alive — always wins over an index repair: a build that is still
+ * running also reports `index.state: "indexing"`, indistinguishable from one left partial by a
+ * dead process, so this never relies on CodeGraph's own mtime-based staleness check to tell the
+ * two apart. */
+export function nextCodegraphStep(
+  dirExists: boolean,
+  lockLive: boolean,
+  statusExitCode: number,
+  statusStdout: string
+): CodegraphStep {
+  if (statusExitCode === 0) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(statusStdout);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed !== undefined) {
+      const { initialized, complete } = parseCodegraphStatus(statusStdout);
+      if (!initialized) return "init";
+      if (complete) return "none";
+      return lockLive ? "none" : "index";
+    }
+  }
+  if (!dirExists) return "init";
+  return lockLive ? "none" : "index";
+}
+
+/** Reports whether `workspaceDir`'s `.codegraph/codegraph.lock` names a process that is still
+ * alive. CodeGraph 1.5.0's `FileLock` (its installed dist's `utils.js`) writes the lock's entire
+ * content as the builder's decimal PID with no other metadata, and its own staleness check
+ * compares the lock file's mtime against a fixed 2-minute timeout rather than checking the PID,
+ * so a lock can still name a live, actively-writing process past that window. A lock this cannot
+ * read, or whose content isn't a PID, is treated as not live — this never blocks a repair on a
+ * lock it cannot make sense of. Liveness alone is not enough on a host where PIDs recycle: a
+ * dead builder's PID reused by an unrelated process would read as live forever, so where
+ * `/proc/<pid>/cmdline` exists, the process also has to look like codegraph — a dead builder
+ * whose PID is unused, or whose slot now holds something else, is correctly stale. `/proc`
+ * absent (non-Linux) falls back to the liveness check alone. */
+async function codegraphLockHeldByLiveProcess(workspaceDir: string): Promise<boolean> {
+  let content: string;
+  try {
+    content = await readFile(path.join(workspaceDir, ".codegraph", "codegraph.lock"), "utf8");
+  } catch {
+    return false;
+  }
+  const pid = Number.parseInt(content.trim(), 10);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    // Signal 0 sends nothing; a successful call (no throw) means the process exists and is
+    // signalable. EPERM means it exists but belongs to another user -- still live. Any other
+    // error (typically ESRCH) means it is gone.
+    process.kill(pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+  }
+  try {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8");
+    return cmdline.includes("codegraph");
+  } catch {
+    // No /proc entry at all (process gone between the signal and this read, or a non-Linux host
+    // where /proc never exists): the signal result is all there is to go on.
+    return true;
+  }
+}
+
 function treeName(issue: IssueKey): string {
   const fullName = issue.toLowerCase();
   if (fullName.length <= MAX_TMUX_WINDOW_NAME_LENGTH) return fullName;
@@ -264,6 +369,12 @@ export class TmuxRuntime implements Runtime {
    * by every spawn that reaches the session step while it runs, and cleared the moment it
    * settles either way (see `ensureSession`). */
   private sessionCreation: Promise<boolean> | undefined;
+  /** Workspace directories with a background CodeGraph warm-up in flight in this daemon. */
+  private readonly codegraphWarming = new Set<string>();
+  /** Workspace directories where this process has already attempted a `codegraph index`
+   * repair, so a build that never reaches `"complete"` gets re-indexed at most once per
+   * workspace per process rather than on every later spawn. */
+  private readonly codegraphRepaired = new Set<string>();
 
   constructor(private readonly deps: TmuxRuntimeDeps) {}
 
@@ -452,6 +563,118 @@ export class TmuxRuntime implements Runtime {
     );
   }
 
+  /** Starts `ensureCodegraphIndex` for the workspace and returns at once, so a launch never waits
+   * on an index build (a first index of a large repository takes many minutes); a second call for
+   * a workspace whose warm-up is still running does nothing. */
+  private warmCodegraphIndexInBackground(workspaceDir: string): void {
+    if (this.codegraphWarming.has(workspaceDir)) return;
+    this.codegraphWarming.add(workspaceDir);
+    void this.ensureCodegraphIndex(workspaceDir).finally(() =>
+      this.codegraphWarming.delete(workspaceDir)
+    );
+  }
+
+  /** Warms `@bopstack/pi-codegraph`'s index for the issue's working copy (research report
+   * AGENTC-1305 §7): the tester's `affected` and the reviewer's `impact`/`callers` queries need
+   * one already built, not one built on first use. It runs only in the background
+   * (`warmCodegraphIndexInBackground`), outside the per-repository provisioning lock: indexing
+   * reads the issue's own workspace directory, not the shared clone that lock protects.
+   * `codegraph status` is a fast no-op on an already-indexed directory, so a later phase worker
+   * of the same issue costs one quick check, not a re-index. An index an earlier warm-up left
+   * partial (`initialized` true but `index.state` not `"complete"`) is repaired with `codegraph
+   * index` rather than accepted as built — `codegraph init` on an already-initialized directory
+   * only prints "Already initialized" and exits 0, so it cannot do this repair itself — unless
+   * the build that left it that way is still running: `nextCodegraphStep` skips the repair
+   * entirely while `.codegraph/codegraph.lock` names a live process. A second `codegraph index`
+   * started against a live build damages the shared SQLite database even when CodeGraph's own
+   * lock refuses it the write (observed: the second process exits on "Could not acquire file
+   * lock", and the live build still fails with "database disk image is malformed") — so this
+   * never lets a second process even attempt it, and never relies on CodeGraph's own mtime-based
+   * (2-minute) staleness check, which can hand the lock to a second writer regardless. A missing
+   * CLI or a failed build is logged loudly — never silently swallowed — and never fails or
+   * delays the launch: a worker without an index falls back to grep, per its role prompt. */
+  private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
+    // createDaemonRunner merges `{ ...environment.paneEnv, ...options?.env }`, so an `env` option
+    // here can only add variables, never remove the ones paneEnv already carries (which may
+    // include a one-shot GitHub token or other secrets); `process.env` is also wrong here — the
+    // runtime's command contract is the runner's resolved environment (`environment.paneEnv`,
+    // the mise-resolved env workers inherit), not this process's own. So this runs through a
+    // shell that inherits the runner-merged env — giving it genuine PATH/HOME — then execs
+    // `env -i` from inside that shell, which drops every other variable regardless of what
+    // environment the shell itself received: `codegraph` gets only PATH, HOME, and
+    // DO_NOT_TRACK=1, never a one-shot GitHub token or any other secret the merged env carries.
+    // DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its docs rank
+    // DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on) — an
+    // automatic, non-opt-in warm-up must never phone home.
+    const codegraphShell = 'exec env -i PATH="$PATH" HOME="$HOME" DO_NOT_TRACK=1 codegraph "$@"';
+    try {
+      const status = await this.deps.run(
+        ["sh", "-c", codegraphShell, "codegraph", "status", "--json"],
+        {
+          cwd: workspaceDir,
+          timeoutMs: CODEGRAPH_WARM_TIMEOUT_MS,
+        }
+      );
+      let dirExists: boolean;
+      try {
+        await stat(path.join(workspaceDir, ".codegraph"));
+        dirExists = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          console.error(
+            `[legion] codegraph warm-up could not run for ${workspaceDir}: ${error instanceof Error ? error.message : String(error)}`
+          );
+          return;
+        }
+        dirExists = false;
+      }
+      // The lock read and the kill(pid, 0)/proc check below are worth paying for only when a
+      // repair might actually run: a complete index already needs neither, and logging a
+      // "skipped" line for a lock some unrelated codegraph run holds at that moment, on an index
+      // that needed no repair, would be misleading.
+      let complete = status.exitCode === 0;
+      if (complete) {
+        try {
+          JSON.parse(status.stdout);
+        } catch {
+          complete = false;
+        }
+      }
+      if (complete) {
+        const parsed = parseCodegraphStatus(status.stdout);
+        complete = parsed.initialized && parsed.complete;
+      }
+      const lockLive =
+        dirExists && !complete && (await codegraphLockHeldByLiveProcess(workspaceDir));
+      const step = nextCodegraphStep(dirExists, lockLive, status.exitCode, status.stdout);
+      if (step === "none") {
+        if (lockLive) {
+          console.error(
+            `[legion] codegraph warm-up for ${workspaceDir} skipped: the index lock still names a live process`
+          );
+        }
+        return;
+      }
+      if (step === "index") {
+        if (this.codegraphRepaired.has(workspaceDir)) return;
+        this.codegraphRepaired.add(workspaceDir);
+      }
+      const result = await this.deps.run(["sh", "-c", codegraphShell, "codegraph", step], {
+        cwd: workspaceDir,
+        timeoutMs: CODEGRAPH_WARM_TIMEOUT_MS,
+      });
+      if (result.exitCode !== 0) {
+        console.error(
+          `[legion] codegraph ${step} failed for ${workspaceDir} (exit ${result.exitCode}): ${result.stderr ?? ""}`
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[legion] codegraph warm-up could not run for ${workspaceDir}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   /** `deps.run` as `@legion/workspace` expects it: the daemon's runner may omit `stderr`
    * (`CommandResult.stderr` is optional on a killed command); the workspace contract requires
    * it, since `commandFailure` quotes it. */
@@ -493,8 +716,10 @@ export class TmuxRuntime implements Runtime {
     secrets: Array<[string, string]>
   ): Promise<TmuxLocator> {
     // Today's order, kept: provision, then the prompt stat and session-file stat inside the
-    // command assembly, then the socket, secret file, and tmux argv.
+    // command assembly, then the socket, secret file, and tmux argv. The CodeGraph warm-up starts
+    // in the background after provisioning and never holds the launch.
     const workspace = await this.provisionWorkspace(issue);
+    this.warmCodegraphIndexInBackground(workspace.workspaceDir);
     const innerCommand = await this.issueInnerCommand(
       issue,
       spec.launch,

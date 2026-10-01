@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 
+import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { fakeEnvoyPort } from "./harness-ports";
 
@@ -56,6 +57,38 @@ export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   >;
 }
 
+/** Every broadcast request the page posts from here on, in order, as the body it sent - a route
+ *  that fulfils a request itself still lists it. */
+export function postedBroadcasts(page: Page): CreateBroadcastInput[] {
+  const posted: CreateBroadcastInput[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
+      posted.push(request.postDataJSON() as CreateBroadcastInput);
+    }
+  });
+  return posted;
+}
+
+/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
+ *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
+export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
+  let refusing = true;
+  await page.route("**/api/v1/broadcasts", (route) =>
+    refusing && route.request().method() === "POST"
+      ? route.fulfill({
+          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+          contentType: "application/json",
+          status: 503,
+        })
+      : route.fallback()
+  );
+  return {
+    allow: () => {
+      refusing = false;
+    },
+  };
+}
+
 export interface FakeInterest {
   session_id: string;
   topics: string[];
@@ -91,13 +124,15 @@ export async function getUnsubscribeCalls(): Promise<{ session_id: string; topic
   return (await response.json()) as { session_id: string; topics: string[] }[];
 }
 
-// The Agents page's keyboard rows, in `keyboard-agents.e2e.ts` and in the picker spec the WebKit
-// and Firefox projects also run, share one page: two live sessions, each with Dispatch activity of
-// its own, so both are listed rows rather than folded into `Inactive` or `No Dispatch activity`.
+// The Agents page's keyboard rows, in `keyboard-agents.e2e.ts`, `keyboard-palette.e2e.ts` and the
+// picker spec the WebKit and Firefox projects also run, share one page: two live sessions, each
+// with Dispatch activity of its own, so both are listed rows rather than folded into `Inactive` or
+// `No Dispatch activity`.
 // The Planner's open ask waits on the viewer, which puts it above the Reviewer. Neither carries a
-// `last_seen`, so the fake Envoy stamps each seed when it is made: this module is evaluated once
-// per Playwright worker, at the first spec that imports it, and a time computed here would age with
-// every spec the worker runs after that, until the sessions fold under `Inactive`.
+// `last_seen`: the fake Envoy answers every read of a session seeded without one with the current
+// time, so a shared seed never ages into Inactive. A time computed here would: this module is
+// evaluated once per Playwright worker, at the first spec that imports it, and the time would age
+// with every spec the worker runs after that, until the sessions fold under `Inactive`.
 export const plannerSession: FakeSession = {
   capabilities: ["aside", "btw"],
   dir: "/srv/planner",

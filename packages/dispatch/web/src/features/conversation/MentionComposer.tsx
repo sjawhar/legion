@@ -7,6 +7,7 @@ import {
   type ReactNode,
   type SyntheticEvent,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -23,6 +24,7 @@ import type {
 } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -46,8 +48,6 @@ import {
   linkHoverText,
   linkText,
   primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   quoteAccentBorder,
   quoteBodyText,
   referencePillBorder,
@@ -71,6 +71,7 @@ import {
   isProjectRoute,
   referenceRouteFromHref,
 } from "../refs/routes";
+import { MODE_LABELS } from "./delivery";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { useAgents } from "./useAgents";
 
@@ -333,6 +334,11 @@ function mentionQuery(
   return { query: before.slice(at + 1), start: at };
 }
 
+/** The prefix that sends a comment or message in a mode other than a Send, the default one, as the
+ *  composer's does-not-advertise warning names it. `parseDelivery` matches the same two prefixes
+ *  with its own pattern. */
+const DELIVERY_PREFIXES = { aside: "/aside", btw: "/btw" } as const;
+
 function parseDelivery(body: string): { body: string; delivery: DeliveryCapability } {
   const match = /^(\/btw |\/aside )/.exec(body);
   if (match === null) return { body, delivery: "steer" };
@@ -456,9 +462,6 @@ function survivingMentions(body: string, mentions: readonly AcceptedMention[]): 
   }
   return surviving;
 }
-function hasDraft(kind: ComposerKind, body: string, replacement: string): boolean {
-  return (kind === "suggestion" ? replacement : body).trim().length > 0;
-}
 
 export function hasUnsavedInput(
   body: string,
@@ -472,14 +475,36 @@ export function hasUnsavedInput(
   );
 }
 
+/** Whether Send takes the draft now: nothing refuses it (`draftRefusal`, the one rule for what an
+ *  empty draft is) and no save or upload it waits on is in flight. */
 export function canSubmitComposer(
-  kind: ComposerKind,
-  body: string,
-  replacement: string,
+  refusal: string | undefined,
   isSaving: boolean,
   pendingUploads: number
 ): boolean {
-  return hasDraft(kind, body, replacement) && !isSaving && pendingUploads === 0;
+  return refusal === undefined && !isSaving && pendingUploads === 0;
+}
+
+/**
+ * Why Send refuses a draft it is not busy with, or undefined when it would take it: an empty
+ * draft, and a delivery command with nothing after it - `/btw ` alone, where the box holds text
+ * and Send is still dead. A save or an upload in flight names itself on the button instead.
+ */
+function draftRefusal(
+  kind: ComposerKind,
+  body: string,
+  replacement: string,
+  outbound: DeliveryPlan
+): string | undefined {
+  if (kind === "suggestion") {
+    return replacement.trim() === "" ? "Type the replacement text first." : undefined;
+  }
+  if (body.trim() === "")
+    return kind === "ask" ? "Type the question first." : "Type a message first.";
+  if (kind === "comment" && outbound.delivery !== undefined && outbound.body.trim() === "") {
+    return `Type the message after ${outbound.delivery === "btw" ? "/btw" : "/aside"}.`;
+  }
+  return undefined;
 }
 
 interface MentionComposerProps {
@@ -910,9 +935,9 @@ export function MentionComposer({
           ? "steer"
           : undefined;
   const outbound = deliveryPlan(body, inheritedDelivery);
-  const canSubmit =
-    canSubmitComposer(kind, body, replacement, save.isPending, pendingUploads) &&
-    (kind !== "comment" || outbound.delivery === undefined || outbound.body.trim() !== "");
+  const submitReason = draftRefusal(kind, body, replacement, outbound);
+  const footId = useId();
+  const canSubmit = canSubmitComposer(submitReason, save.isPending, pendingUploads);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) submitGuard.guard(() => save.mutate(currentDraft()));
@@ -945,6 +970,15 @@ export function MentionComposer({
             : [];
         });
   const unsupported = unsupportedOptions.length > 0;
+  // The prefixed modes a person could send in instead: only one every target refusing this mode
+  // advertises, so the warning never suggests a mode those sessions refuse too (an aside-only
+  // session is offered /aside, never /btw).
+  const alternatives = (["btw", "aside"] as const).filter(
+    (mode) =>
+      unsupported &&
+      mode !== outboundMode &&
+      unsupportedOptions.every((option) => option.capabilities.includes(mode))
+  );
 
   return (
     <form
@@ -1156,11 +1190,13 @@ export function MentionComposer({
         <p className={`text-sm ${dangerText}`}>
           {unsupportedOptions.map((option) => option.title).join(" and ")}{" "}
           {unsupportedOptions.length > 1 ? "do" : "does"} not advertise{" "}
-          {outboundMode === "btw" ? "BTW" : outboundMode === "aside" ? "Aside" : "Steer"}; Send will
-          record the failed attempt.
-          {outboundMode === "steer"
-            ? " Prefix with /btw to send as a background message instead."
-            : null}
+          {outboundMode === undefined ? null : MODE_LABELS[outboundMode]}, so sending it records a
+          failed attempt.
+          {alternatives.length === 0
+            ? null
+            : ` Prefix with ${alternatives.map((mode) => DELIVERY_PREFIXES[mode]).join(" or ")} to send it as ${alternatives
+                .map((mode) => `${mode === "aside" ? "an" : "a"} ${MODE_LABELS[mode]}`)
+                .join(" or ")} instead.`}
         </p>
       ) : null}
       {kind === "ask" ? (
@@ -1307,15 +1343,18 @@ export function MentionComposer({
           retrying={save.isPending}
         />
       ) : null}
-      <button
-        className={`rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={!canSubmit}
+      <RefusableButton
+        busy={save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : undefined}
+        refusal={submitReason ?? null}
+        refusalShownBy={footId}
         type="submit"
       >
-        {save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : title}
-      </button>
-      <p className={`text-xs ${textMutedOnSurfaceMuted}`}>
-        Ctrl/Cmd+Enter to send · Enter for a new line
+        {title}
+      </RefusableButton>
+      {/* While Send refuses, the line under it says why - on screen, for a reader with no
+          pointer to hover it - and once the draft can go, how to send it. */}
+      <p className={`text-xs ${textMutedOnSurfaceMuted}`} id={footId}>
+        {submitReason ?? "Ctrl/Cmd+Enter to send · Enter for a new line"}
       </p>
     </form>
   );

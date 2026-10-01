@@ -337,8 +337,8 @@ func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 	}
 }
 
-// The claim and the status are separate records (Sami, 2026-09-24): one names the session
-// implementing the issue, the other is how humans track where work has got to.
+// The claim and the status are separate records: one names the session implementing the issue,
+// the other is how humans track where work has got to.
 func TestClaimAndStatusMoveIndependently(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one")

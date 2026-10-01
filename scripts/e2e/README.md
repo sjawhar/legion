@@ -15,6 +15,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
+| `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's plugin in an isolated profile — as that person's own user turn, the body alone, while a BTW stays a side question; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
 
@@ -177,7 +178,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | :--- | :--- |
 | `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `goDaemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
-| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"; the rubric put back |
+| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
 | `gate-refuses-a-skill-only-the-role-prompts-load` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's roles directory can say; the skill put back |
 | `gate-refuses-an-unconfigured-model-role` | `modelRoles.oracle` removed from the isolated profile's `config.yml`; `legion start` refuses with "on its model @oracle: role oracle is not configured", naming `task agent oracle` and the prompts that dispatch it; the profile put back byte for byte |
 | `architect-registers-and-is-ready` | `legion start` passes the gate (its log line); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
@@ -198,13 +199,19 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
-`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. The
+`FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. A failed
+run also [notes](#libmodel-gateway-unservedsh) each agent that could have failed that check for
+want of a model key, and still exits 1. The
 `EXIT` trap — on a pass, a failure, or an interrupt — stops both daemons (SIGKILL after 10 s),
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
-and removes the work directory when the run passed (keeping it, with `daemon.log`,
-`deadline.log`, `listener.log`, `model-gateway/hawk-token.log` and each refusal's log, when it did
-not).
+and removes the work directory when the run passed (keeping it, with `transcript.log` (the whole
+run), `daemon.log`, `deadline.log`, `listener.log`, `model-gateway/hawk-token.log` and each
+refusal's log, when it did not). The trap still runs when whoever reads the run's output goes
+first, for example a supervised launcher's own `tee` stopped with the run, and a stop follows: the
+run's output goes through [`lib/transcript.sh`](#libtranscriptsh)'s `tee`, which outlives the
+reader. The transcript is in the work directory, whose processes the teardown kills by path, so
+the script opens it on fd 8 and calls `transcript_to /dev/fd/8`.
 
 Three things the run had to learn about its surface:
 
@@ -363,11 +370,11 @@ check, which needs the first issue's whole history, ends
 never cited as the proof; only a full run is.
 
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
-`/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): every agent transcript, the daemon,
-Dispatch, listener, and bridge logs, the model key command and its log of every mint
-(`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks, and the
-production audit. A passing run's last three checks stop every process, kill the private tmux
-server and remove both containers (`services-stopped`), check the model route
+`/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): `transcript.log` (the whole run), every agent
+transcript, the daemon, Dispatch, listener, and bridge logs, the model key command and its log of
+every mint (`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks,
+and the production audit. A passing run's last three checks stop every process, kill the private
+tmux server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-gateway`), and close every pull request the run still has open on the
 smoke repository — its own, by branch: the daemon's `legion/<project>-*` and the proof human's
 `proof/clean-main-<project, lowercased>` — before removing the isolated OMP profile and the scratch
@@ -379,7 +386,16 @@ a close whose branch delete failed is reported as closed with the reason the bra
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path. For a run that did not pass, the trap also closes the run's own
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
-pull request open and prints gh's reason, with a line saying some may still be open.
+pull request open and prints gh's reason, with a line saying some may still be open. A failed run
+also [notes](#libmodel-gateway-unservedsh) each agent that could have failed the check for want of
+a model key, and still exits 1. The trap still closes the run's pull requests in two further cases
+([`lib/transcript.sh`](#libtranscriptsh)):
+- whoever reads the run's output goes first, for example a supervised launcher's own `tee` stopped
+  with the run. The run keeps going, and the transcript still gets every line;
+- the transcript's disk fills. The run keeps going, and its output still reaches anyone reading.
+  GNU `tee`, the devbox's, keeps the transcript only up to the point its disk filled and never
+  reopens it, even once space returns; busybox `tee` picks the transcript up again once there is
+  room.
 
 ## stage3-4b13b-acceptance.sh
 
@@ -405,7 +421,14 @@ phase-finished notice's summary and verdict, the daemon posting and publishing t
 proof pull request is retargeted to a scratch base before any merge (the one merged at
 `awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
 merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
-(default the kept scratch work directory's `evidence/`).
+(default the kept scratch work directory's `evidence/`), `transcript.log` (the whole run) among it.
+A run that ends on its soft failures gets [notes](#libmodel-gateway-unservedsh) for its first
+soft-failing check, from that check's own start. The `EXIT` trap closes every proof pull request
+still open and deletes the proof branches and both bases, also when whoever reads the run's output
+goes first or the transcript's disk fills, as in [stage 3](#stage3-devbox-workflowsh). The default
+evidence directory is under the scratch work directory, whose processes the teardown kills by path,
+so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
+([`lib/transcript.sh`](#libtranscriptsh)).
 
 ## stage4a-sandbox-runtime.sh
 
@@ -458,7 +481,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
-| `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the login this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator approves it with his own YubiKey during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
+| `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the login this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator enters the code and clicks Approve, signed in to Dispatch as that login, during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
 | `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for rule `LEGION_E2E_AUTO` (pod, automatic, inject) — the harness never sees the value itself, only its hash |
 | `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
 
@@ -570,6 +593,7 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   LEGION_E2E_DISPATCH_TOKEN_SECRET_ID=<secret id> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
+STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -597,7 +621,39 @@ keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the 
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
 every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
 controller's), the interest samples, the audit files and the negative controls. What the
-run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh).
+run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is one line, just before the evidence line:
+`stage 4b e2e: PASS`; `stage 4b e2e: FAIL (check <check>)`, after [notes](#libmodel-gateway-unservedsh)
+on whether the controller could have failed that check for want of a model key; or
+`stage 4b e2e: BLOCKED (check <check>)` when the checkpoint could not run and the teardown checks
+(`namespace-clean`, `production-audit`) passed, which makes the run no verdict on the change while
+the checkpoints before it stand, and gets no notes. A failed teardown check outranks every reason
+the run stopped: it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and
+subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is
+`stage 4b e2e: FAIL (check <teardown check>, in the teardown after check <check>)` whenever the
+checkpoint that stopped the run did not fail itself: a `STAGE4B_UNTIL` run's last checkpoint, a
+blocked checkpoint, a signal. Every verdict but the pass exits non-zero: 1, or the
+stopping signal's 129, 130 or 143 when the teardown was clean.
+
+`STAGE4B_DESIGN_GATE=root-issues`, refused without a `STAGE4B_UNTIL` of `spec-posted` or a checkpoint
+before it, arms the design gate (`gates.design: root-issues`) and files tree 1 alone, since each
+admitted root's architect requests approval on its own. Tree 1's document leaves one choice (where
+the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `spec-posted` waits up
+to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
+It then fails unless the architect's approval request at the approved version carries a summary
+after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
+and no approval request on the spec, retracted ones included, was early by either of two rules
+([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by `bun test scripts/e2e/lib`).
+The version rule judges every request: the version it named must hold none of the spec's blocks
+open, read from the version itself by the block ids of the spec's block asks, because Dispatch
+indexes a block as an ask only when it settles the document, after the edit that wrote it. The
+answer-time rule judges a request no human answered: it must not come before a human answered one
+of the spec's blocks, which catches a request made while the choice was still prose or sent in
+parallel with the edit that wrote the block. A request the human answered is left to the version
+rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
+the human answers it, the architect requests again) passes; the trade-off is that a premature
+request the human answered with Request changes no longer fails the run, since the human caught it.
+It keeps the issue's asks as `<issue>-asks.json`, each requested version as
+`<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -619,7 +675,15 @@ pair; the production daemon keeps 13370 and 13371) and the namespace label
 **What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
 the run that owns it. A signal to the whole process group does not stop the removal:
 - a closed pane, a Ctrl-C, or `timeout`'s TERM;
-- the transcript's `tee` ignores those signals;
+- the transcript's `tee` ignores those signals and SIGPIPE;
+- whoever reads the run's output can go first, for example a supervised launcher's own `tee` stopped
+  with the run. A run whose reader goes and no signal follows runs to its own end, and holds the
+  lock until then;
+- the transcript's disk can fill. With or without its reader, the run keeps going and its teardown
+  still runs in full, and its output reaches anyone still reading. GNU `tee`, the devbox's, keeps
+  the transcript only up to the point its disk filled and never reopens it, even once space
+  returns; busybox `tee` picks the transcript up again once there is room
+  ([`lib/transcript.sh`](#libtranscriptsh));
 - the teardown ignores a second signal and SIGPIPE;
 - the teardown writes to the transcript even when the signal interrupted a command whose output
   went to `/dev/null`;
@@ -634,7 +698,8 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - **Production Dispatch, project LEGSMOKE**: three root issues per run. The preflight moves stale
   todo roots to backlog. The proof human's writes use the agents' bearer and name the session
   `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no
-  claim, so the workflow reads its status writes as a human's.
+  claim, so the daemon sets back its status write on a live root as it does any outside session's.
+  The run takes trees out with `legion status` from the operator shell, the daemon's own write.
 - **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, and tree 1's pull request, which
   the proof human merges. The teardown closes any pull request the run left open, such as one from a
   run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. Every one of
@@ -687,8 +752,9 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
 | `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
-| `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |
-| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/` |
+| `issue-cap-moves` | the proof human's `backlog` on tree 2's live root is set back: the next status write is `legion-daemon:LEGSMOKE`'s (a control re-attributing it must fail), tree 2's architect receives a `status-reasserted` notice naming the proof human, and tree 2 keeps its slot; `legion status … backlog` then frees the slot, tree 3 is admitted, and tree 2's pods are gone |
+| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/`. The review round is one no review decides at first: the proof tells the reviewer to submit a `COMMENT` rather than decide and to complete, and requires, at the completion, no approval and the issue still in `reviewing`; then the `review-stuck` notice on the architect, written by the reviewer's completion and naming a head that is a commit of the pull request (kept as `notice-review-stuck.jsonl`). The proof's instructions hold every agent until a targeted message gives its next operation, so the driver then tells the architect only to handle that notice as its role says, naming no topic, head or decision. The proof then requires a message in the reviewer's session whose `reply_role` names the architect's role topic, delivered after the reviewer's completion (the architect asking for the decision; the proof's own steers carry none). Messages are counted from the completion, since the notice is written in the completion's own transaction and the architect needs a model turn after it, so a message the architect sent the reviewer earlier in the round, such as a reply to the reviewer's round report, is not counted, not kept and cannot set the path. The ones after it are kept as `architect-ask.jsonl`; one the architect sent on its own, before the driver's message, counts as the stronger pass and is noted. Then the reviewer's approval of the head, which ends the round, and the issue leaving `reviewing` for retro or merging. An architect acting on the notice unprompted, as it must where no driver holds it, is not proven here (LEGION-413) |
+| `completion-closed` | each phase worker of tree 1 — planner, implementer, tester, reviewer — is suspended once its phase ends, and its saved session answers every `handoff_complete` call of the legion tool, holds one success for each assignment it completed, and records the phase stall `closed` after that call, with no phase-stall follow-up after its last success: the 4b.13b acceptance's stall check (`stage3-4b13b-acceptance.sh`'s `pane-rule-phase-worker-and-stall`), which a suspension that stops the worker inside the call fails (LEGION-283). The sessions and each verdict are kept as `completion-<role>.jsonl` and `completion-<role>-verdict.json`. Its control: the planner's session cut at its `handoff_complete` call, the transcript such a suspension leaves, is refused |
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery or a hub wait or jobs snapshot, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
 | `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on the gateway's aliases |
@@ -704,7 +770,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `node-release` | tree 1's Sandboxes stay Suspended, its volume Bound, and no pod of the run is left on its node: after the pool's consolidation the node is gone, or, when a pod of another project (a production daemon running beside the run) is on it, Pending or Running, the node stays; the note says which, and a timeout lists what the node still held |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
 | `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/workspace-recovered.json` naming `legion/<tree 1>` |
-| `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
+| `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; `legion status … backlog` then takes tree 1 out; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
 | `pod-shape` | every Sandbox pod whose worker the pod watch ever saw ready is judged from the spec the watch recorded for it, deleted pods included, so no poll has to reach it: gVisor, the operator's ServiceAccount and one projected token, the run's route ConfigMap mounted as the profile's `models.yml`, the pool, Pod Security restricted, split provisioning. No pod's command, args or environment carries a value its Sandbox's `-boot` Secret held at any point in the run (`lib/secret-leaks.ts`), and every pod's Secret was seen. The watch is complete: every pod uid the shape watcher read, the driver ended, or the daemon launched is in it. Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded |
 | `pod-watch-verdict` | the pod watch is complete (as at `pod-shape`); no pod of the run was Evicted or had a container OOMKilled, and every claim process the daemon found dead (`supervise: process died`) was one the driver ended. The resume that finds the tree volume lost is the exception, by its detail (`the tree volume was lost: …`), counted by `re-admission`. The memory hog was OOMKilled. Synthetic OOMKilled and process-died controls both fail |
 | `hygiene` | the daemon stopped, the teardown ran, and the run's consumers are gone; `namespace-clean` follows it |
@@ -727,11 +793,14 @@ bash scripts/e2e/controller-start-tmux.sh
 
 Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
 run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
-profile, both tmux servers, and its Postgres and NATS containers. `CONTROLLER_START_EVIDENCE_DIR`
-keeps the daemon and listener logs and, under `checks/`, each check's own output (the controllers'
-stderr and exit codes, the refusal, the route answers, the prober's log) and both controller panes
-as they were at exit, so a failed run keeps what failed; it defaults to a fresh `/tmp` directory,
-which is printed. No secret is written there.
+profile, both tmux servers, and its Postgres and NATS containers, also when whoever reads the run's
+output goes first and a stop follows: the run's output goes through
+[`lib/transcript.sh`](#libtranscriptsh)'s `tee`, which outlives the reader.
+`CONTROLLER_START_EVIDENCE_DIR` keeps `transcript.log` (the whole run), the daemon and listener
+logs and, under `checks/`, each check's own output (the controllers' stderr and exit codes, the
+refusal, the route answers, the prober's log) and both controller panes as they were at exit, so a
+failed run keeps what failed; it defaults to a fresh `/tmp` directory, which is printed. No secret
+is written there.
 
 | check | what it holds, and 4b.5's acceptance item |
 | :--- | :--- |
@@ -747,6 +816,54 @@ which is printed. No secret is written there.
 | `second-start-revokes-the-first` | a second start takes the role and the locator, the daemon logs mints 1 and 2, the first capability's registration is refused 403, and a grant minted before the second start, which redeemed then (500 `DISPATCH_UNAVAILABLE`, past the grant check), is refused 403 `GRANT_UNAVAILABLE` after it (a second start revokes the first's capability) |
 | `liveness-probe-against-the-listener` | `controller.Prober` on the live listener calls the second session alive and the first gone |
 | `exit-code-is-oh-my-pis` | Ctrl-D quits Oh My Pi cleanly and the command exits 0, as Oh My Pi did. A non-zero code is carried through too; the stub-omp unit test (`cmd/legion/controller_test.go`, exit 3) holds that |
+
+## dispatch-user-turns.sh
+
+LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the
+session's own user turn, and everything else keeps its Envoy card. One real session — the pinned
+Oh My Pi (the `github:sjawhar/oh-my-pi` mise tool) with this checkout's plugin in an isolated
+profile, launched with `controller-start-tmux.sh`'s `operator_env` line, its cwd under `/tmp` —
+registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
+its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
+conversation page as the person the header names. The session's model turns go through the model
+gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+
+```bash
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0, in six to eleven minutes (the listener's drop of the stopped session is most of the spread)
+```
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `DISPATCH_USER_TURNS_OMP` | the pinned build, `github:sjawhar/oh-my-pi@$(mise current github:sjawhar/oh-my-pi)` | another Oh My Pi, as a mise tool spec |
+| `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots and the session's pane at exit) and `session.jsonl`, the session's transcript |
+
+Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
+run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
+profile under the HOME it gives Oh My Pi, its tmux server, its listener and Dispatch, and its
+Postgres and NATS containers; a run that finds another's leftovers refuses to start
+([`lib/leftovers.sh`](#libleftoverssh)).
+
+| check | what it holds |
+| :--- | :--- |
+| `session-registers` | the session registers with the listener from its cwd and advertises `aside`, `btw` and `steer` |
+| `send-is-the-persons-own-turn` | the page's composer opens on Send and offers Send, Aside and BTW; a Send typed there is one user message in the session's transcript that is exactly the body, and no card; the session answers it |
+| `aside-is-the-persons-own-turn` | the same for an Aside |
+| `btw-is-a-side-question` | a BTW is answered in Dispatch and is no user message |
+| `a-session-forging-a-person-gets-a-card` | holding the listener token and a Dispatch bearer, as any session does, the driver stores a session's message on an issue and publishes a frame naming it that claims a person wrote it, on no issue: a card, no user message |
+| `a-broadcast-gets-a-card` | a person's broadcast to the session: a card, no user message |
+| `an-issue-message-gets-a-card` | a person's issue message targeted at the session: a card, no user message |
+| `a-legion-notice-gets-a-card` | the Go daemon's `phase-finished` notice on a role topic the session holds: a card, no user message |
+| `a-session-re-sending-a-persons-btw-gets-a-card` | as any bearer may, the driver retries the person's BTW to the session as a steer (`POST /api/v1/messages/{id}/deliveries` with a session actor), an attempt whose `requested_by` is that session: it arrives as a card, no user message (the refusal itself is `message_accept_test.go`'s) |
+| `a-carded-send-and-a-frame-forged-for-it-inside-the-minute-get-cards` | with the session's Dispatch token file made wrong, the person's Send arrives as a card, since the session cannot accept it; with the token restored, a frame forged with the listener token names that attempt within 45 s of the Send, while Dispatch would still accept it: the session's own record of the attempts it delivered keeps it a card, with neither the Send's text nor the forged text a user message, and Dispatch records no acceptance |
+| `a-persons-retry-of-a-carded-send-is-their-turn` | the person retries that Send as an Aside (`POST /api/v1/messages/{id}/deliveries`, attempt 2), an attempt the session never delivered: one user message that is exactly the body, and Dispatch records attempt 2 accepted |
+| `the-page-shows-each-message-once` | a fresh page, opened while the session's stream still holds the turns it tagged (the ring lives in the process, so the restart below empties it): the replay the page is served carries the Send, the Aside and the retried Send as user messages tagged with their Dispatch message ids, beside their stored copies, and the page shows each person's message once |
+| `the-session-stops` | the Send's own envelope is read back from the notification stream; Oh My Pi is killed and the listener drops the session |
+| `a-send-while-the-session-is-down-fails` | the person sends the stopped session a Send, which Dispatch records as one failed attempt naming it |
+| `a-replay-after-restart-gets-a-card` | once Oh My Pi is continued (`--continue`, the same session), the Send's own envelope is sent again: a card, and the Send is still one user message |
+| `a-frame-forged-after-the-restart-naming-an-old-send-gets-a-card` | once the Send made while the session was down, which Dispatch recorded as failed, is more than a minute old, a frame forged with the listener token names it as a person's steer: it arrives as a card, with neither its stored nor its forged text a user message |
+| `a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card` | the listener drops the session's registration (`DELETE /v1/sessions/{id}`), so the person's Send to it fails with no frame sent, and within 45 s a bare bus client publishes a frame naming that failed attempt straight onto the session's agent subject: it arrives as a card, with neither text a user message |
+| `dispatch-records-only-the-turns-the-session-took` | Dispatch's thread read, which the Agents page reads, records the Send and the Aside accepted at attempt 1 and the carded Send at its retry, attempt 2, and never the BTW, the Send made while the session was down or the Send made while the listener listed no session |
 
 ## verifiers-staging-token.sh
 
@@ -915,10 +1032,11 @@ directory, never beside `package.json`, so an interrupted run strands no `tmp.js
 
 The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
 way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
-dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
-itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
-`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
-the checkout.
+dies halfway never leaves the rewrite for jj to snapshot. The script ignores SIGPIPE, so this holds
+when whoever read its stderr has gone too: bash's `Terminated` notice for an interrupted pack would
+otherwise kill it before the trap ran. It keeps the run's status; if the copy back itself fails, it
+says where the saved bytes are, leaves them there, and exits non-zero. Afterwards `jj status` is as
+it was before the run: `dist/` is gitignored, and nothing else is written inside the checkout.
 
 Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
 itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
@@ -1051,11 +1169,14 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
 is unset for it), for that one command. It appends one line per invocation, one per mint, one per
-call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout
-carries the key alone. The profile's
-`agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
-and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role, the
-roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
+call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`, and one line
+per call and its outcome to `<dir>/hawk-token.calls`
+([`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads it); stdout carries the key
+alone. The profile's `agent/models.yml` points the `anthropic` provider at
+`LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My
+Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started,
+so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model
+role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
 `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
 `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 
@@ -1089,8 +1210,9 @@ Its first mint is the preflight, before any pane exists. It exits 1 naming the c
 `hawk-token`, `flock` or `timeout` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
 `lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
-unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
-last line of its stderr); an argument refusal exits 2. The installer runs that one call with
+unlock-keyring skill) and rerun`), when the key command gets no key (quoting its own reason: the
+outcome and `hawk-token`'s last stderr line), and when `hawk-token` prints anything but one JWT;
+an argument refusal exits 2. The installer runs that one call with
 `--preflight`, which exempts it from the key command's deadline (below): on a machine where
 `hawk-token` has never run, its first-run build takes about a minute in the foreground, and it
 happens here rather than inside a pane's ten-second `!command`. The key is never printed.
@@ -1101,9 +1223,9 @@ reads the hawk login from the keyring over the session bus, and the devbox's key
 serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run. A Stage 3 run
 invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before
 the cache. Every call inside the window gets the kept key. A key the gateway refuses before then is
-not re-minted: the proof's model turns fail, loudly, which is right for a proof. (The command cannot
-tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/sh -c`, so each call
-has a fresh parent process.)
+not re-minted: the proof's model turns fail, loudly, which is right for a proof. (A call's parent
+is a helper the Oh My Pi process starts for each call, on 18.2.9 a child of the agent's own `omp`,
+so the record names the agent by the Legion pane's role and generation instead.)
 
 One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
 once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
@@ -1118,11 +1240,78 @@ reach its first line), whether it is waiting on the lock or minting under `timeo
 A waiter that takes the lock with under 2000 ms left starts no mint: the fastest mint measured on
 the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wait is bounded by
 one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
-succeeds is served inside every caller's ten seconds. A call that gets no key exits 1, which Oh My
-Pi reports as `No API key found for anthropic.` and retries 30 s later.
+succeeds is served inside every caller's ten seconds.
+
+Every agent's call appends one tab-separated line to `<dir>/hawk-token.calls`, and to the caller's
+`MODEL_GATEWAY_CALLS_FILE` when its environment names one: the time, the caller's pid, the
+directory Oh My Pi ran it in, the agent, the outcome, and a detail. The fields, and the values the
+agent and outcome take, are stated once, in the header of
+[`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh), the file that reads them. The
+installer's preflight is no agent's and is left out; a call that gets no key also says why on
+stderr, which is where the installer reads the preflight's reason. The key command tells a spent
+budget from a refused login only by `hawk-token`'s own sentence (`in <spent> ms of a <budget> ms
+budget`, spent at least the budget), since the wrapper exits 1 either way; a `hawk-token` that
+words it otherwise has a spent budget recorded as `failed`, never as a starve. A harness that gives
+each agent its own file can judge one run from that run's directory alone.
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
+
+## lib/model-gateway-unserved.sh
+
+Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) wrote
+left an agent without a key, and why. Oh My Pi answers every call that gets no key the same way
+(`No API key found for anthropic.`, exit 1, and for `omp -p` on 18.2.9 no session file at all),
+whatever the cause, so a run cannot say for itself that it never got a model turn.
+
+```sh
+bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-calls"                                # a scorer: one agent run
+bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$evidence/model-gateway" "$check_started" "$check"  # a failed stage proof's EXIT trap
+bash scripts/e2e/lib/model-gateway-unserved.sh --fresh "$evidence"                                         # a stage proof's setup
+```
+
+An agent is a working directory and an agent field together, so a relaunched pane, with its new
+generation, is a new agent. An agent's last call decides whether it went without a key: Oh My Pi
+retries a failed key command 30 s later and after a 401.
+
+`--record` scores one agent run from the `MODEL_GATEWAY_CALLS_FILE` a harness named in that
+agent's environment: a file of the run's own, which does not exist before the run, so every line
+in it is that agent's. The skill-scenario rig runs one `omp -p` per run, which keeps its key for
+the life of the process, so a starved run has no model turn and the record agrees with the
+outcome. It exits 0 when the last call was served or the file holds none (no file included), `75`
+(`STARVED, not scored`: rerun it) when that call ran out of time or had its mint killed, and `77`
+(`KEY FAILED, not scored`) when the mint failed otherwise, which a rerun does not fix. A run from a
+checkout whose key command predates the record carries the same signal without the reason: no
+session file at all.
+
+`--notes` is a stage proof's diagnostic: the `EXIT` trap runs it once it has decided the run
+failed, guarded so that it never changes the exit status, and not after a hangup, an interrupt or
+a termination (129, 130, 143), which stopped the run rather than failed it; a child a signal killed
+is a failure and still gets them. It prints, after the check's own failure, each agent that could
+have failed the check for want of a key: when it last got none, from where, and why.
+
+- **An agent whose last call got no key is still without one.** It is listed whenever that call
+  came, marked when it came before the check began: it had no key when the check asked it.
+- **An agent served again after its last starve recovered.** It is listed, with when it was first
+  served again, when that starve came at or after `<since>` less 30 s. The 30 s is the wait Oh My
+  Pi 18.2.9 keeps before it runs a failed key command again: a request inside it fails with no key
+  and runs no command, so it leaves no line, and a check's first calls can fail on a starve from
+  just before the check began.
+- **An agent served again before that window** held a key through the whole check, and is left out.
+
+A person then sees whether starvation could explain the failure. A run-wide "not scored" would not
+be honest: in Stage 4b the key command's one caller is the operator's controller, while every pod
+uses its projected token, so a worker's failure cannot come from a starved controller.
+
+`--fresh` is the refusal Stage 3, the 4b.13b acceptance and Stage 4b make first, before they write
+anything into their evidence directory or set any trap, when the operator's evidence directory
+exists and is not empty, or cannot be listed: whatever it holds is an earlier run's, whether or not
+that run got as far as its key command, and this run must neither overwrite it nor read it as its
+own. An absent directory, or an empty one it can list (every default), passes. Stage 4b prints its
+verdict line in that refusal, since no trap exists yet to print it.
+
+Every form exits 2 on an argument refusal (a `--record` in a directory that does not exist
+included), and `--record` and `--notes` 1 on a record line they cannot read.
 
 ## lib/check-model-route.sh
 
@@ -1155,6 +1344,34 @@ Every run also carries its own negative control: the first session holding a tur
 `--control` with that one turn rewritten as `amazon-bedrock/us.anthropic.claude-opus-4-8`, and the
 same check must refuse the copy, or the run exits 1 (`the negative control passed`). An argument
 refusal exits 2.
+
+## lib/transcript.sh
+
+The stage proof's transcript. Stage 2, Stage 3, Stage 4a, Stage 4b, `stage3-4b13b-acceptance.sh`
+and `controller-start-tmux.sh` source it before their first output.
+
+```sh
+. "$root/scripts/e2e/lib/transcript.sh"     # sourced, never run
+transcript_to "$evidence/transcript.log"
+```
+
+`transcript_to FILE` sends the calling shell's stdout and stderr to `FILE` as well as to whatever
+read stdout before. It does this through a `tee` that ignores the signals a driver traps and
+SIGPIPE.
+
+- A signal to the process group, a reader that goes first (a supervised launcher's own `tee`,
+  stopped with the run), or a full disk under `FILE` each cost `tee` at most the outputs they break.
+  The driver and its cleanup never fail on a write. Without it, a group TERM after the reader had
+  gone would end a driver with a TERM trap before its `EXIT` trap ran: bash writes its `Terminated`
+  notice for the interrupted command to the dead pipe first.
+- GNU `tee` stops once every output has failed and never reopens one. `/dev/null`, an output that
+  never fails, is what keeps it draining once both the reader and `FILE` have failed.
+- busybox `tee` keeps writing every output and reports errors at EOF, so it picks `FILE` up again
+  once its disk has room. It rejects `-p`, which is why the trap, not `-p`, carries SIGPIPE.
+- The `tee` is one of the run's processes: its argv names `FILE`, and its working directory is the
+  caller's at the call. [`lib/rig.sh`](#librigsh)'s `run_processes` matches `$work` in either, so a
+  caller keeps both outside `$work`, or opens `FILE` on a descriptor and passes `/dev/fd/N`, as
+  Stage 2 and `stage3-4b13b-acceptance.sh` do with their transcript under `$work`.
 
 ## lib/rig.sh
 
@@ -1277,9 +1494,10 @@ where an agent runs:
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
 
-`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
-`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
-none, since it runs under its root's tree.
+`new_issue TITLE [PARENT] [SPEC]` creates each issue a proof drives. A root carries the Dispatch
+label `legion`, which hands it to the Go daemon (the daemon admits no root without it), and `SPEC`
+as its primary document, `smoke_spec` when `SPEC` is omitted. A child carries neither, since it runs
+under its root's tree.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to
 GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox

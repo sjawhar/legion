@@ -303,7 +303,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// only once CloseRoom has returned (failRoomLocked), so a wait here is a cycle: the load
 	// holds the eviction, and the eviction holds the load. No deadline breaks it either -
 	// both loaders that reach this one carry context.Background(), the settlement warm-up
-	// (settleRoom) and a committed write's publish (publishLiveUpdate) - and the room stayed
+	// (settleRoom) and a committed write's publish (publishLiveUpdate) - so the room would stay
 	// failed until the process restarted (LEGION-282). A failed room refuses the load
 	// instead: ygo fails the load, closes the barrier with this error and removes the room,
 	// which lets the eviction finish, and the next access loads the replacement.

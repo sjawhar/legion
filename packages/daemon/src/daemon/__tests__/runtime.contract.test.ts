@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
+import { spawn as spawnProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
@@ -22,7 +23,12 @@ import {
   sameProcess,
 } from "../runtime";
 import { KubernetesRuntime } from "../runtime-kubernetes";
-import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
+import {
+  type CodegraphStep,
+  nextCodegraphStep,
+  TmuxRuntime,
+  type TmuxRuntimeDeps,
+} from "../runtime-tmux";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { procStatLine } from "./ci-fixtures";
 import { createFakeK8sApi } from "./fake-k8s-api";
@@ -396,6 +402,11 @@ class FakeTmuxServer {
 interface TmuxHarness extends Harness {
   server: FakeTmuxServer;
   stateDir: string;
+  /** The underlying `TmuxRuntime` `runtime` wraps: only for a test that needs a method the
+   * `Runtime` interface doesn't expose (the codegraph warm-up's de-duplication is instance
+   * state on the class itself). Every other test reaches the runtime through `runtime`, the
+   * interface the daemon actually depends on. */
+  tmuxRuntime: TmuxRuntime;
   /** Every locator `spawn` returned, in order — what `issueLocators` hands the runtime. A test
    * that swaps one for a copy (as `/process/started` does) re-keys it with `registerLocator`. */
   locators: Locator[];
@@ -498,6 +509,7 @@ async function tmuxHarness(
   };
   return {
     runtime: spawningRuntime,
+    tmuxRuntime: runtime,
     expectedRuntime: "tmux",
     makeSpec,
     dials: () => socketPaths.length,
@@ -1240,7 +1252,11 @@ describe("TmuxRuntime", () => {
         return "token";
       },
       provisioningRun: async (command) => {
-        commands.push(command);
+        // Codegraph indexing (`ensureCodegraphIndex`) runs after a repository's provisioning
+        // lock releases, by design (AGENTC-1305 §7: no reason to block a sibling issue's
+        // provisioning on indexing), so its commands are not part of the contiguous
+        // jj/git provisioning block this test asserts and are excluded from `commands`.
+        if (command[0] !== "codegraph" && command[0] !== "sh") commands.push(command);
         if (commands.length === 1) {
           firstCommand.resolve();
           await gate.promise;
@@ -1945,6 +1961,159 @@ describe("TmuxRuntime", () => {
     expect(harness.server.commands.filter((c) => c[3]?.startsWith("kill-"))).toEqual([
       tmuxArgv("kill-window", "-t", "@90"),
     ]);
+  });
+});
+
+describe("codegraph warm-up", () => {
+  // Pure table tests on nextCodegraphStep: no TmuxRuntime, no filesystem, no process needed.
+  it.each<[string, boolean, boolean, number, string, CodegraphStep]>([
+    [
+      "status valid, not initialized, no directory: init",
+      false,
+      false,
+      0,
+      `{"initialized":false}`,
+      "init",
+    ],
+    [
+      "status valid, not initialized, directory exists: init (untracked .codegraph)",
+      true,
+      false,
+      0,
+      `{"initialized":false}`,
+      "init",
+    ],
+    [
+      "status valid, complete: none",
+      true,
+      false,
+      0,
+      `{"initialized":true,"index":{"state":"complete"}}`,
+      "none",
+    ],
+    [
+      "status valid, complete, lock live: none (complete wins, lock irrelevant)",
+      true,
+      true,
+      0,
+      `{"initialized":true,"index":{"state":"complete"}}`,
+      "none",
+    ],
+    [
+      "status valid, partial, no live lock: index",
+      true,
+      false,
+      0,
+      `{"initialized":true,"index":{"state":"indexing"}}`,
+      "index",
+    ],
+    [
+      "status valid, partial, live lock: none",
+      true,
+      true,
+      0,
+      `{"initialized":true,"index":{"state":"indexing"}}`,
+      "none",
+    ],
+    ["status failed, directory exists, no live lock: index", true, false, 1, "", "index"],
+    ["status failed, directory exists, live lock: none", true, true, 1, "", "none"],
+    ["status failed, no directory: init", false, false, 1, "", "init"],
+    ["status unparseable, directory exists: index", true, false, 0, "not json", "index"],
+    ["status unparseable, no directory: init", false, false, 0, "not json", "init"],
+  ])("%s", (_name, dirExists, lockLive, statusExitCode, statusStdout, want) => {
+    expect(nextCodegraphStep(dirExists, lockLive, statusExitCode, statusStdout)).toBe(want);
+  });
+
+  /** `TmuxRuntime`'s background warm-up has no public surface; this types-and-names the cast
+   * once so every test below calls a real method signature, built around `tmuxHarness`'s own
+   * `TmuxRuntime` rather than a hand-built `TmuxRuntimeDeps` that would have to track every new
+   * required dep. */
+  interface CodegraphPrivates {
+    ensureCodegraphIndex(dir: string): Promise<void>;
+    warmCodegraphIndexInBackground(dir: string): void;
+  }
+  function codegraphPrivates(harness: TmuxHarness): CodegraphPrivates {
+    return harness.tmuxRuntime as unknown as CodegraphPrivates;
+  }
+
+  it("starts no second status check while a warm-up is in flight for the same workspace", async () => {
+    const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-codegraph-warmup-"));
+    tempDirs.push(workspaceDir);
+    let statusCalls = 0;
+    const gate = Promise.withResolvers<void>();
+    const harness = await tmuxHarness({
+      provisioningRun: async (cmd) => {
+        if (cmd[4] === "status") {
+          statusCalls += 1;
+          await gate.promise;
+          return {
+            stdout: JSON.stringify({ initialized: true, index: { state: "complete" } }),
+            exitCode: 0,
+          };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    const privates = codegraphPrivates(harness);
+    privates.warmCodegraphIndexInBackground(workspaceDir);
+    privates.warmCodegraphIndexInBackground(workspaceDir);
+    const { promise: tick, resolve: tickDone } = Promise.withResolvers<void>();
+    setImmediate(tickDone);
+    await tick;
+    expect(statusCalls).toBe(1);
+    gate.resolve();
+  });
+
+  it("repairs an index at most once per workspace per process", async () => {
+    const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-codegraph-warmup-"));
+    tempDirs.push(workspaceDir);
+    await mkdir(path.join(workspaceDir, ".codegraph"), { recursive: true });
+    const subcommands: string[] = [];
+    const harness = await tmuxHarness({
+      provisioningRun: async (cmd) => {
+        if (cmd[4]) subcommands.push(cmd[4]);
+        if (cmd[4] === "status") {
+          return {
+            stdout: JSON.stringify({ initialized: true, index: { state: "indexing" } }),
+            exitCode: 0,
+          };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+    const privates = codegraphPrivates(harness);
+    await privates.ensureCodegraphIndex(workspaceDir);
+    await privates.ensureCodegraphIndex(workspaceDir);
+    expect(subcommands.filter((s) => s === "index")).toEqual(["index"]);
+  });
+
+  it("skips the repair while the index lock names a live codegraph process", async () => {
+    const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-codegraph-warmup-"));
+    tempDirs.push(workspaceDir);
+    await mkdir(path.join(workspaceDir, ".codegraph"), { recursive: true });
+    // A process actually named "codegraph" in its own argv, so the lock's PID-reuse hardening
+    // (reading /proc/<pid>/cmdline) sees what a real builder's PID would.
+    const builder = spawnProcess("sleep", ["60"], { argv0: "codegraph" });
+    try {
+      await writeFile(path.join(workspaceDir, ".codegraph", "codegraph.lock"), String(builder.pid));
+      const subcommands: string[] = [];
+      const harness = await tmuxHarness({
+        provisioningRun: async (cmd) => {
+          if (cmd[4]) subcommands.push(cmd[4]);
+          if (cmd[4] === "status") {
+            return {
+              stdout: JSON.stringify({ initialized: true, index: { state: "indexing" } }),
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", exitCode: 0 };
+        },
+      });
+      await codegraphPrivates(harness).ensureCodegraphIndex(workspaceDir);
+      expect(subcommands).toEqual(["status"]);
+    } finally {
+      builder.kill();
+    }
   });
 });
 

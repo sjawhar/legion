@@ -48,7 +48,7 @@ func mockPort(url string) int {
 func newKVDeliverer(t *testing.T) (*session.SessionRegistry, session.Deliverer) {
 	t.Helper()
 	client := session.SetupNATS(t)
-	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestDeliver_KVRegistryUsed(t *testing.T) {
 	kvPort := mockPort(kvMock.URL)
 
 	client := session.SetupNATS(t)
-	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestDeliver_CrossMachineUsesRemoteHost(t *testing.T) {
 	remoteHost := "localhost"
 
 	client := session.SetupNATS(t)
-	sessions, err := client.OpenRegistry(session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
 	if err != nil {
 		t.Fatalf("failed to open session registry: %v", err)
 	}

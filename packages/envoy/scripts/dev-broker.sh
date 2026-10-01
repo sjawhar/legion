@@ -1,26 +1,21 @@
 #!/usr/bin/env bash
 # packages/envoy/scripts/dev-broker.sh
 #
-# AGENTC-393 Task 12: the local dev surface a human can drive without AWS or a real YubiKey. Boots
+# AGENTC-393 Task 12: the local dev surface a human can drive without AWS or Dispatch. Boots
 # Postgres (dev-postgres.sh, made idempotent here since that script has no guard of its own),
-# generates one software approver identity with agent-secrets-devkey (its "register --seed" mode —
-# the offline, no-live-broker-yet bootstrap), writes a scratch rules file (one automatic and one
-# approval-required secret, an approvers section seeding that identity) and a fake secrets file,
-# inserts the matching approver_key_seeds row directly (contract v9 ruling 9's break-glass path —
-# the running broker can never do this for its own first key), then starts cmd/broker against all
-# of it with -dev-attestation-root trusting devkey's own generated test CA instead of the embedded
-# Yubico roots. Prints the exports a second shell needs to drive agent-secrets-devkey against it.
+# writes a scratch rules file (one automatic and one approval-required secret, approved by
+# APPROVER_LOGIN) and a fake secrets file, then starts cmd/broker against them. Prints the exports
+# a second shell needs to drive agent-secrets and agent-secrets-devrelay against it: devrelay
+# stands in for Dispatch's credential-request relay, sending the broker's UI routes the UI bearer
+# and the approving human's login, as Dispatch does when a signed-in human clicks Approve.
 #
 # Each invocation creates and drops its own isolated Postgres database inside the shared
 # dispatch-pg container (named from this run's own WORK_DIR, below) and binds an OS-assigned
 # ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two agent sessions each running their own
-# dev broker stack never contend: every instance seeds a fresh software key for the same
-# hardcoded APPROVER_LOGIN and writes its own scratch rules file naming only its own key, and
-# approvers.Service.Reconcile tombstones any persisted approver_keys row a currently-loaded rules
-# file doesn't name — sharing one database, each instance's reload would tombstone the other's
-# live key out from under it. cmd/broker (AGENTC-833) binds before it reports anything and logs
-# the address it actually bound; this script waits for that line and reads the real port from it,
-# so a curl success can only ever mean this instance's own broker answered.
+# dev broker stack never see each other's enrollments, requests or grants. cmd/broker
+# (AGENTC-833) binds before it reports anything and logs the address it actually bound; this
+# script waits for that line and reads the real port from it, so a curl success can only ever mean
+# this instance's own broker answered.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,15 +32,12 @@ POSTGRES_CONTAINER="dispatch-pg"
 # once it's running (below).
 LISTEN_ADDR="127.0.0.1:0"
 PUBLIC_URL="http://127.0.0.1:0"
-UI_ORIGIN="${BROKER_UI_ORIGIN:-https://agent-secrets.invalid}"
 UI_TOKEN="${BROKER_UI_TOKEN:-dev}"
 APPROVER_LOGIN="sjawhar"
 
 WORK_DIR="$(mktemp -d /tmp/agent-secrets-dev.XXXXXX)"
-STATE_DIR="$WORK_DIR/devkey-state"
-DEVKEY_BIN="$WORK_DIR/agent-secrets-devkey"
+DEVRELAY_BIN="$WORK_DIR/agent-secrets-devrelay"
 BROKER_BIN="$WORK_DIR/broker"
-CA_PEM="$WORK_DIR/dev-attestation-root.pem"
 RULES_FILE="$WORK_DIR/agent-secret-rules.yaml"
 FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.env"
 BROKER_LOG="$WORK_DIR/broker.log"
@@ -99,30 +91,11 @@ echo "dev-broker: created isolated database $DB_NAME" >&2
 docker exec "$POSTGRES_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -q -c "create database ${DB_NAME};"
 
 # --- Build the two binaries this stack needs. ---
-echo "dev-broker: building agent-secrets-devkey and broker..." >&2
-( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$DEVKEY_BIN" ./cmd/agent-secrets-devkey )
+echo "dev-broker: building agent-secrets-devrelay and broker..." >&2
+( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$DEVRELAY_BIN" ./cmd/agent-secrets-devrelay )
 ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$BROKER_BIN" ./cmd/broker )
 
-# --- Migrate the fresh database before seeding it. A freshly created database has no schema yet,
-# but the break-glass approver_key_seeds insert below must land before the broker's own first
-# rules load: rules.NewCurrent's first load is synchronous and fatal on failure, and
-# approvers.Service.Reconcile refuses a "seed: true" rules-file key with no matching row, so the
-# table must exist and hold the row before "$BROKER_BIN" ever starts for real. -migrate-only runs
-# the same store.Migrate the real boot runs (idempotent; the real boot below runs it again as a
-# no-op) and exits without loading rules or serving. ---
-echo "dev-broker: migrating $DB_NAME..." >&2
-BROKER_DATABASE_URL="$POSTGRES_URL" "$BROKER_BIN" -migrate-only
-
-# --- Seed one software approver identity (offline: no live broker yet). ---
-echo "dev-broker: seeding a software approver key for $APPROVER_LOGIN..." >&2
-SEED_JSON="$("$DEVKEY_BIN" register --seed --login "$APPROVER_LOGIN" --origin "$UI_ORIGIN" --state "$STATE_DIR")"
-CREDENTIAL_ID="$(printf '%s' "$SEED_JSON" | jq -r '.credential_id')"
-AAGUID="$(printf '%s' "$SEED_JSON" | jq -r '.aaguid')"
-NONCE="$(printf '%s' "$SEED_JSON" | jq -r '.challenge_nonce')"
-REGISTRATION="$(printf '%s' "$SEED_JSON" | jq -c '.registration')"
-printf '%s' "$SEED_JSON" | jq -r '.ca_pem' > "$CA_PEM"
-
-# --- Scratch rules file: one automatic secret, one approval-required secret, the seeded key. ---
+# --- Scratch rules file: one automatic secret, one approval-required secret. ---
 cat > "$RULES_FILE" <<EOF
 version: 1
 secrets:
@@ -140,17 +113,6 @@ secrets:
     max_lifetime_seconds: 3600
     requesters:
       - {kind: box, operator: ${APPROVER_LOGIN}, decision: approval, approver: operator}
-approvers:
-  origin: ${UI_ORIGIN}
-  aaguids: ["${AAGUID}"]
-  logins:
-    ${APPROVER_LOGIN}:
-      keys:
-        - credential_id: "${CREDENTIAL_ID}"
-          registration:
-            challenge_nonce: "${NONCE}"
-            response: ${REGISTRATION}
-          seed: true
 EOF
 
 cat > "$FAKE_SECRETS_FILE" <<EOF
@@ -158,12 +120,6 @@ dev/agent-secrets/AGENT_SECRETS_PROOF_AUTOMATIC=automatic-dev-value
 dev/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL=approval-dev-value
 EOF
 chmod 600 "$FAKE_SECRETS_FILE"
-
-# --- Break-glass seed row (ruling 9): only an admin (here, this script) can seed a login's first
-# key; the running broker's own Reconcile refuses a "seed: true" file key with no matching row. ---
-echo "dev-broker: inserting approver_key_seeds row..." >&2
-docker exec -i "$POSTGRES_CONTAINER" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -q \
-  -c "insert into approver_key_seeds (login, credential_id) values ('${APPROVER_LOGIN}', '${CREDENTIAL_ID}') on conflict do nothing;"
 
 # --- Start the broker: BROKER_LISTEN_ADDR/BROKER_PUBLIC_URL of port 0 (above); its own log names
 # the real address once Listen succeeds. Output is teed to BROKER_LOG (read below) and to this
@@ -173,12 +129,11 @@ echo "dev-broker: starting broker..." >&2
 : >"$BROKER_LOG"
 BROKER_DATABASE_URL="$POSTGRES_URL" \
 BROKER_PUBLIC_URL="$PUBLIC_URL" \
-BROKER_UI_ORIGIN="$UI_ORIGIN" \
 BROKER_UI_TOKEN="$UI_TOKEN" \
 BROKER_RULES_FILE="$RULES_FILE" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
-"$BROKER_BIN" -dev-attestation-root "$CA_PEM" > >(tee -a "$BROKER_LOG" >&2) 2>&1 &
+"$BROKER_BIN" > >(tee -a "$BROKER_LOG" >&2) 2>&1 &
 BROKER_PID=$!
 
 # --- Both readiness loops below poll this instance's own process; fail loudly the moment it
@@ -234,18 +189,17 @@ dev-broker: ready.
 
   export AGENT_SECRETS_URL=$PUBLIC_URL
   export AGENT_SECRETS_UI_TOKEN=$UI_TOKEN
-  export AGENT_SECRETS_UI_ORIGIN=$UI_ORIGIN
-  export AGENT_SECRETS_DEVKEY_STATE=$STATE_DIR
+  export AGENT_SECRETS_APPROVER=$APPROVER_LOGIN
 
-  devkey binary:       $DEVKEY_BIN
+  devrelay binary:     $DEVRELAY_BIN
   fake secrets file:   $FAKE_SECRETS_FILE  (source -> value, for confirming a released grant)
   rules file:          $RULES_FILE
-  approver login:      $APPROVER_LOGIN (its software key's material lives at \$AGENT_SECRETS_DEVKEY_STATE)
+  approver login:      $APPROVER_LOGIN (devrelay approve/deny --login \$AGENT_SECRETS_APPROVER decides as this human)
   database:            $POSTGRES_URL  (this instance's own; created and dropped by this script)
 
   One automatic secret (AGENT_SECRETS_PROOF_AUTOMATIC) and one approval-required secret
   (AGENT_SECRETS_PROOF_APPROVAL, approver: $APPROVER_LOGIN) are configured. Drive it with
-  agent-secrets and \$DEVKEY_BIN in another shell; press Ctrl-C here to stop the broker.
+  agent-secrets and \$DEVRELAY_BIN in another shell; press Ctrl-C here to stop the broker.
 EOF
 
 wait "$BROKER_PID"

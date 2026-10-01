@@ -825,7 +825,7 @@ test("issue header gives the title the row's free space beside a short details l
     // A busy details line (whose-turn badge, one label, Route, Subscribers) that fits beside a
     // 12rem title but not beside the whole title: just below 1280 the title must keep at least
     // half the card rather than share the row and drop to its minimum. The line without the
-    // GitHub link is the one that used to squeeze (with the link it was too wide to share).
+    // GitHub link is the one that could squeeze (with the link it is too wide to share).
     await patchIssue(issue.key, {
       labels: ["api"],
       title: "Migrate the issue header to a single row",

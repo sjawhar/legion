@@ -191,6 +191,12 @@ export interface WriteAdvice {
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   readonly decision_blocks?: number;
+  /**
+   * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
+   * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
+   * little of the text before each. Omitted when there are none.
+   */
+  readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -820,6 +826,10 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope publishes
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
  * window shorter than that lets a GitHub redelivery publish a second copy.
+ *
+ * This window bounds a *delivery* retry, not a broadcast *create*:
+ * `CreateBroadcastInput.idempotency_key` is a database row that lives as long as its broadcast,
+ * so a repeated `POST /api/v1/broadcasts` is recognised with no window, however late it arrives.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -862,6 +872,29 @@ export interface MessageDelivery {
   readonly error: string | null;
   readonly reply_id: string | null;
   readonly created_at: string;
+  /**
+   * Whoever's send opened the attempt: the person who wrote or retried the message, or the session
+   * a bearer's retry named. A resume keeps it. Null on an attempt written before Dispatch recorded
+   * it, and absent from a Dispatch older than the field.
+   */
+  readonly requested_by?: Actor | null;
+  /**
+   * The attempt's session took the message as its user's own turn
+   * (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), and when. At most one attempt of
+   * a message is ever accepted; null on every other attempt, absent from a Dispatch older than the
+   * fields. The session said it took the message, so this outranks a `failed` state the send
+   * recorded afterwards.
+   */
+  readonly accepted_as?: "user_turn" | null;
+  readonly accepted_at?: string | null;
+}
+
+/**
+ * `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`'s answer: the attempt it accepted, and
+ * the body of the message as Dispatch stored it.
+ */
+export interface AcceptedMessageDelivery extends MessageDelivery {
+  readonly body: string;
 }
 
 export interface Message {
@@ -871,6 +904,11 @@ export interface Message {
   readonly body: string;
   readonly target: string | null;
   readonly in_reply_to: string | null;
+  /**
+   * The broadcast this message is one recipient's copy of; null for every other message, and
+   * absent from a Dispatch older than the field.
+   */
+  readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
 }
@@ -912,6 +950,17 @@ export interface MessageDeliveryEventPayload {
    *  it reached the listener and put nothing new on the session's subject. Absent means false. */
   readonly duplicate?: boolean;
   readonly error?: string;
+}
+
+/** `message.accepted`: the session an attempt went to took the message as its user's own turn.
+ *  It is never a second `message.delivery` receipt; the send still appends its own. `target` is
+ *  the message's own, `session:<recipient>` for a direct message. */
+export interface MessageAcceptedEventPayload {
+  readonly message_id: string;
+  readonly attempt: number;
+  readonly session_id: string;
+  readonly accepted_as: "user_turn";
+  readonly target: string;
 }
 
 export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
@@ -1361,6 +1410,10 @@ export type DispatchEvent =
       readonly payload: MessageDeliveryEventPayload;
     })
   | (DispatchEventBase & {
+      readonly type: "message.accepted";
+      readonly payload: MessageAcceptedEventPayload;
+    })
+  | (DispatchEventBase & {
       readonly type: "message.answered";
       readonly payload: MessageEventPayload;
     })
@@ -1711,6 +1764,15 @@ export interface CreateBroadcastInput {
   /** The sessions the human selected. A session named twice is one recipient; one that is no
    *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
   readonly session_ids: readonly string[];
+  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
+   *  at most 128 characters. The server answers a repeat (same human, same key, same body, mode
+   *  and session_ids) with the broadcast the first request made, 200 instead of 201, and refuses
+   *  a reuse of the key for a different request with 409 BROADCAST_KEY_REUSED, whose body names
+   *  the broadcast that already used the key as `broadcast_id`; that request is not sent.
+   *  Recognised for as long as the broadcast exists: there is no window (see
+   *  DELIVERY_DUPLICATE_WINDOW_MS). The dashboard sends a UUID per composed send; a script mints
+   *  its own. Required. */
+  readonly idempotency_key: string;
 }
 
 export interface IssueRead {
@@ -1946,8 +2008,8 @@ export const CommentEventPayloadSchema = z
   // clients are known to read today, but the wire payload always carries every
   // field the server model has. .passthrough() keeps a field this schema hasn't
   // caught up to riding along instead of silently vanishing when a consumer that
-  // reads it is added later — the failure mode that dropped ask_waiting_on/turn
-  // from a comment.created reply without any test catching it.
+  // reads it is added later, as ask_waiting_on and turn would vanish from a
+  // comment.created reply with no test to catch it.
   .passthrough();
 
 export const MessageEventPayloadSchema = z.object({
@@ -1969,6 +2031,9 @@ export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.ex
   body: z.string(),
   target: z.string(),
   in_reply_to: z.string().nullable(),
+  // The broadcast a frame's message is one recipient's copy of, as the frame claims it: a frame is
+  // untrusted, so neither its value nor its absence proves anything.
+  broadcast_id: z.string().nullish(),
   deliveries: z.array(z.unknown()),
   created_at: z.string(),
 });

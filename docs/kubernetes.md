@@ -23,6 +23,9 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
+- `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
+  CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
+  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/pi-envoy/roles/core/tester.md`, `core/reviewer.md`);
 - the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon resolves and validates its bundle at boot from that override or `role-prompts` beside its own executable, then snapshots it into its state directory before a pane can read it. It inlines that snapshot into each pod it runs, and `legion probe-image` resolves the task agents and skills the configured bundle names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). The role prompts are not part of the packed plugin (its `files` is `dist`), so the image supplies this explicit copy;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
@@ -65,9 +68,9 @@ commit the workflow built, then the Go `legion probe-image`: the same three prob
 daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the Go
 daemon API contract (`legion.goDaemonApiVersion`) and every task agent and skill Legion's prompts
 name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
-`oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality` in
-`agents/`, and the pair's rubrics and `ce-simplify-code` with Legion's other skills in
-`dist/skills`). The build has none of
+`oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
+planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
+`ce-simplify-code` with Legion's other skills in `dist/skills`). The build has none of
 the operator's model configuration, so it leaves those agents' models unresolved
 (`--skip-agent-models`), printing
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped go-daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
@@ -872,9 +875,10 @@ claim's pod and the image probe's.
   `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
   when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
   may not set, since they decide where Oh My Pi keeps the session a resume reads.
-- **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` as `@oracle`, both
-  review agents as `@review`, and `deep-worker`, which writes the implementer's code, as `@deep`.
-  The boot gate refuses, by agent, any whose role the operator's settings (`modelRoles`, or
+- **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
+  `plan-gap-analyst` as `@oracle`; both review agents and the planner's `plan-reviewer` as
+  `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`. The boot gate
+  refuses, by agent, any whose role the operator's settings (`modelRoles`, or
   `task.agentModelOverrides`) leave unconfigured, or whose model's key does not work, because Oh My
   Pi's task tool would quietly run it on the parent session's model.
   The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is

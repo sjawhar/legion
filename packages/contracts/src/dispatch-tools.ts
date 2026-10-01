@@ -160,21 +160,8 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
     );
 }
 
-export const SPEC_SECTIONS = [
-  "Summary",
-  "New since we talked",
-  "Acceptance",
-  "Requirements",
-  "Design",
-  "Errors",
-  "Testing",
-  "Rejected",
-] as const;
-
-const SPEC_WRITING_GUIDANCE =
-  `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` +
-  "Write for a reader who has not seen the code: plain sentences, every identifier expanded on " +
-  "first use, no coined shorthand; see skills/dispatch Writing for the human and Writing a spec.";
+const SPEC_WRITING_POINTER =
+  'Write a spec as the "Writing a spec" section of skill://dispatch says.';
 
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
@@ -184,8 +171,9 @@ export const ASK_QUESTION_MAX = 800;
 
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
- * query travels in the URL; percent-encoded at up to 9 bytes a unit, 1,000 stays under the load
- * balancer's 16 K request-line limit. Generated into Go as `contracts.SearchQueryMax`, which the
+ * query rides in the URL beside `project` and `limit`, so this refusal and `project`'s key rule
+ * are what keep the tool's URL under the load balancer's limit; `packages/contracts/AGENTS.md`
+ * "Search limits" owns that budget. Generated into Go as `contracts.SearchQueryMax`, which the
  * server enforces.
  */
 export const SEARCH_QUERY_MAX = 1000;
@@ -193,6 +181,10 @@ export const SEARCH_QUERY_MAX = 1000;
 /** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
  *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
 export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
+/** A whole project key, as the Dispatch server creates them (`projectKeyPattern`, and the
+ *  `projects.key` check constraint). */
+export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
@@ -247,7 +239,7 @@ export const dispatchToolSpecs = [
         .optional(),
       spec: z
         .string()
-        .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_GUIDANCE}`)
+        .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`)
         .optional(),
       labels: z
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
@@ -692,13 +684,13 @@ export const dispatchToolSpecs = [
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
-      "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
+      "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
       "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
-      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -828,13 +820,17 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1" },
+    example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
     description:
-      "Ask a human to approve a document at its current version - the exception path for a spec " +
-      "that departs from what was settled or proposes children, not a step for every issue. Opens an " +
-      "approval ask (Approve / Request changes) in the human's Inbox; the answer pins a review to the " +
-      "document version and arrives as artifact.approved or artifact.changes_requested. A later edit " +
-      "makes an approval stale; request again for the new version. Idempotent while a request is open. " +
+      "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
+      "Request changes) in the human's Inbox whose question names the document and version, " +
+      "followed by the summary; the answer pins a review to that version and arrives as " +
+      "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " +
+      "and writing it retracts an open request for an older version; request again for the new " +
+      "one. A repeat at the version an open request names returns that request unchanged. " +
+      "Refused, with nothing sent, while the document holds an open decision block, even when a " +
+      "human asked for approval: the refusal names each block; ask the human to answer or waive " +
+      "it first. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -845,6 +841,11 @@ export const dispatchToolSpecs = [
           "Project document artifact id, slug, or filename; primary document by default for an issue."
         )
         .optional(),
+      summary: z
+        .string({ min: 1 })
+        .describe(
+          "The proposals in this version the human hasn't already agreed to, in one to three sentences."
+        ),
     }),
     validation: documentOwnerValidation(true),
   },
@@ -933,6 +934,14 @@ export const dispatchToolSpecs = [
         .describe("Maximum results, 1-50; default 20.")
         .optional(),
     }),
+    // An empty project searches every project, as the server reads it.
+    validation: {
+      check: (value) => {
+        const { project } = value as { readonly project?: unknown };
+        return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: "project must be a project key such as CORE",
+    },
   },
   {
     name: "dispatch_issues",

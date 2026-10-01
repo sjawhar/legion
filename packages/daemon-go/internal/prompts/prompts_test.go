@@ -6,11 +6,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -170,6 +172,66 @@ func TestNewSnapshotsSharedRolePromptsBeforeComposing(t *testing.T) {
 	for _, path := range parts.RolePromptPaths {
 		if _, err := os.ReadFile(path); err != nil {
 			t.Errorf("read snapshot %s: %v", path, err)
+		}
+	}
+}
+
+// The planner this daemon composes from the shipped bundle runs the gap analyst before it drafts
+// and the plan reviewer after (LEGION-421), each a task agent the plugin ships in agents/, where Oh
+// My Pi finds it in a pane and in a pod; an agent missing there is one the boot gate refuses by
+// name. Only the shared headless residue dispatches them: the core is also composed with the
+// interactive fragment, whose subagent dispatches nothing, and the Go daemon's own parts leave the
+// checks to the shared text. The boot gate reads the same references (RoleReferences).
+func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) {
+	plugin := filepath.Join("..", "..", "..", "pi-envoy")
+	stateDir := t.TempDir()
+	composer, err := New(filepath.Join(plugin, "roles"), stateDir)
+	if err != nil {
+		t.Fatalf("New on the shipped bundle: %v", err)
+	}
+	parts, err := composer.Compose(claim.RolePlanner, false)
+	if err != nil {
+		t.Fatalf("Compose: %v", err)
+	}
+	var text strings.Builder
+	dispatched := promptrefs.New()
+	for _, path := range parts.RolePromptPaths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text.Write(body)
+		if err := dispatched.File(stateDir, path, "state"); err != nil {
+			t.Fatalf("references of %s: %v", path, err)
+		}
+	}
+	gap := strings.Index(text.String(), "`task(agent=\"plan-gap-analyst\")`")
+	review := strings.Index(text.String(), "`task(agent=\"plan-reviewer\")`")
+	if gap < 0 || review < gap {
+		t.Errorf("the composed planner dispatches the gap analyst at %d and the plan reviewer at %d, want the analyst first", gap, review)
+	}
+	want := []string{"plan-gap-analyst", "plan-reviewer"}
+	residue := []string{filepath.Join("state", "prompts", "shared", "planner.md")}
+	for _, agent := range want {
+		files, named := dispatched[promptrefs.TaskAgents][agent]
+		if !named {
+			t.Errorf("the composed planner does not dispatch task agent %s", agent)
+			continue
+		}
+		if !slices.Equal(files, residue) {
+			t.Errorf("task agent %s is dispatched by %q, want the headless residue %q alone", agent, files, residue)
+		}
+		if _, err := os.Stat(filepath.Join(plugin, "agents", agent+".md")); err != nil {
+			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
+		}
+	}
+	gated, err := RoleReferences(filepath.Join(plugin, "roles"))
+	if err != nil {
+		t.Fatalf("RoleReferences on the shipped bundle: %v", err)
+	}
+	for _, agent := range want {
+		if files := gated[promptrefs.TaskAgents][agent]; !slices.Equal(files, []string{filepath.Join("roles", "planner.md")}) {
+			t.Errorf("the boot gate's references name task agent %s from %q, want roles/planner.md", agent, files)
 		}
 	}
 }

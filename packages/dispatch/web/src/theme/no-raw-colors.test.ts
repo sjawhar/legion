@@ -95,7 +95,7 @@ describe("no raw Tailwind color utilities outside theme/", () => {
 });
 
 /**
- * The bug that motivated the two tests above: a class name built at runtime by concatenating a
+ * What the two tests above guard against: a class name built at runtime by concatenating a
  * prefix onto a swatch name (`` `${prefix}-${swatch.name}` ``) never appears as literal text in
  * any source file, so Tailwind's scanner cannot see it and silently drops it from the built
  * stylesheet (see `classes-in-build-css.ts`). This rejects the construction pattern itself

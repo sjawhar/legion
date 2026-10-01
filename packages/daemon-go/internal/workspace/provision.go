@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -78,7 +79,48 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := removeRepositoryIdentity(ctx, run, workspace.Clone); err != nil {
 		return Workspace{}, err
 	}
+	// Keeps every future `codegraph init`/`index` in this workspace — the host warm-up's, and a
+	// worker's own `codegraph` tool call inside a pod, which this function also provisions
+	// (cmd/legion workspace-init) — from ever getting its `.codegraph/` tracked. CodeGraph's own
+	// generated `.codegraph/.gitignore` is `*` then `!.gitignore`, so that one file stays visible
+	// to git; without this, jj's default auto-track snapshots it into the workspace's own change
+	// (confirmed empirically: `jj status` under an empty HOME showed `.codegraph/.gitignore`
+	// newly added after a bare `codegraph init`). `.git/info/exclude` is local to this shared
+	// clone, read by every workspace of it (git worktrees share one `info/exclude` through their
+	// common git directory) and by jj (confirmed the same way: with the line added first, the
+	// same `codegraph init` left `jj status` clean), so this needs no global git configuration
+	// anywhere a workspace of this clone is used.
+	if err := excludeCodegraphDirectory(workspace.Clone); err != nil {
+		return Workspace{}, err
+	}
 	return workspace, nil
+}
+
+// excludeCodegraphDirectory appends ".codegraph/" to cloneDir's ".git/info/exclude" unless a
+// line already matches it exactly, so repeated provisioning of the same clone writes it once.
+func excludeCodegraphDirectory(cloneDir string) error {
+	excludePath := filepath.Join(cloneDir, ".git", "info", "exclude")
+	existing, err := os.ReadFile(excludePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", excludePath, err)
+	}
+	for _, line := range strings.Split(string(existing), "\n") {
+		if line == ".codegraph/" {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(excludePath), err)
+	}
+	content := string(existing)
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += ".codegraph/\n"
+	if err := os.WriteFile(excludePath, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", excludePath, err)
+	}
+	return nil
 }
 
 // Bookmark is the jj bookmark an issue's workspace is on: its branch.

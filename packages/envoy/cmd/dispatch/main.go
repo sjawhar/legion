@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
@@ -36,7 +39,8 @@ import (
 )
 
 const (
-	defaultListenAddr = ":8766"
+	// defaultListenPort is the port when DISPATCH_PORT is unset; listenAddress joins it to the host.
+	defaultListenPort = "8766"
 	shutdownTimout    = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
@@ -68,6 +72,12 @@ type bootConfig struct {
 	// (required when AgentSecretsURL is set).
 	AgentSecretsURL   string
 	AgentSecretsToken string
+	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
+	ListenAddr string
+	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
+	// fence; the signing key is then per process.
+	DevSignIn bool
 }
 
 func main() {
@@ -98,6 +108,30 @@ func main() {
 	serverURL := ""
 	if envoyConfig.Dispatch != nil {
 		serverURL = envoyConfig.Dispatch.ServerURL
+	}
+	// The App credentials are read before anything connects, so the dev sign-in fence refuses a
+	// key it will not sign with before NATS or Postgres is dialled.
+	dataDir, err := defaultDataDir()
+	if err != nil {
+		slog.Error("dispatch: resolve data dir", "error", err)
+		os.Exit(1)
+	}
+	appCfg, appSource, err := loadAppCredentials(dataDir)
+	if err != nil {
+		slog.Error("dispatch: load app credentials", "error", err)
+		os.Exit(1)
+	}
+	if err := devSignInLoadedFence(boot, serverURL, appCfg, appSource); err != nil {
+		slog.Error("dispatch: dev sign-in", "error", err)
+		os.Exit(1)
+	}
+	if appCfg == nil {
+		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
+	} else {
+		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
+	}
+	if boot.DevSignIn {
+		slog.Warn("dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only", "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -157,32 +191,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	dataDir, err := defaultDataDir()
-	if err != nil {
-		slog.Error("dispatch: resolve data dir", "error", err)
-		os.Exit(1)
-	}
 	webDistDir, err := defaultWebDistDir()
 	if err != nil {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
 
-	signingKey, err := auth.LoadSigningKey(filepath.Join(dataDir, "signing-key"))
+	var signingKey string
+	if boot.DevSignIn {
+		signingKey, err = auth.NewSigningKey()
+	} else {
+		signingKey, err = auth.LoadSigningKey(filepath.Join(dataDir, "signing-key"))
+	}
 	if err != nil {
 		slog.Error("dispatch: load signing key", "error", err)
 		os.Exit(1)
-	}
-
-	appCfg, appSource, err := loadAppCredentials(dataDir)
-	if err != nil {
-		slog.Error("dispatch: load app credentials", "error", err)
-		os.Exit(1)
-	}
-	if appCfg == nil {
-		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
-	} else {
-		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource)
 	}
 
 	users := store.NewPgUserStore(database.Pool)
@@ -238,7 +261,6 @@ func main() {
 		Docs:           documentService,
 		Events:         broker,
 		App:            appCfg,
-		AppSource:      appSource,
 		GitHubAPIBase:  boot.GitHubAPIBase,
 		OIDC:           serviceTokens,
 		AgentStream:    agentStream,
@@ -248,6 +270,7 @@ func main() {
 		AgentSecretsToken: boot.AgentSecretsToken,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
+		DevSignIn:        boot.DevSignIn,
 	})
 
 	if err != nil {
@@ -279,23 +302,24 @@ func main() {
 	go architecture.Run(ctx, appCtx.Architecture())
 
 	handler := dispatchHandler(routes.New(appCtx), database, natsClient, buildCommit)
-	listenAddr, err := listenAddress()
-	if err != nil {
-		slog.Error("dispatch: resolve listen address", "error", err)
-		os.Exit(1)
-	}
 	server := &http.Server{
-		Addr:              listenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		// WriteTimeout remains zero because the event stream is long-lived.
 	}
-
+	// Bound before serving, so an address that cannot be taken ends the process with 1: a
+	// supervisor must not read a port clash as a clean stop.
+	listener, err := net.Listen("tcp", boot.ListenAddr)
+	if err != nil {
+		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
+		os.Exit(1)
+	}
+	serveErr := make(chan error, 1)
 	go func() {
-		slog.Info("dispatch: listening", "addr", listenAddr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("dispatch: listen", "error", err)
+		slog.Info("dispatch: listening", "addr", boot.ListenAddr)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
 			cancel()
 		}
 	}()
@@ -309,6 +333,12 @@ func main() {
 	}
 	if err := documentService.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("dispatch: shutdown document service", "error", err)
+	}
+	select {
+	case err := <-serveErr:
+		slog.Error("dispatch: serve", "error", err)
+		os.Exit(1)
+	default:
 	}
 }
 
@@ -363,24 +393,38 @@ func defaultWebDistDir() (string, error) {
 	return filepath.Join(cwd, "packages", "dispatch", "web", "dist"), nil
 }
 
-// loadAppCredentials returns (cfg, source, err). source is "env" or
-// "file:<path>" for diagnostic logging. Env wins over file; either may be
-// absent (returns nil, "", nil).
-func loadAppCredentials(dataDir string) (*auth.AppConfig, string, error) {
+// appCredentialSource is where loadAppCredentials found the App: the environment, or the data
+// dir's app.json at Path. The dev sign-in fence decides on it; String is the form the boot log
+// prints.
+type appCredentialSource struct {
+	FromFile bool
+	Path     string
+}
+
+func (s appCredentialSource) String() string {
+	if s.FromFile {
+		return "file:" + s.Path
+	}
+	return "env"
+}
+
+// loadAppCredentials returns the App and where it came from. The environment wins over the file;
+// either may be absent, which returns a nil App.
+func loadAppCredentials(dataDir string) (*auth.AppConfig, appCredentialSource, error) {
 	if cfg, err := auth.LoadAppFromEnv(); err != nil {
-		return nil, "", fmt.Errorf("load app from env: %w", err)
+		return nil, appCredentialSource{}, fmt.Errorf("load app from env: %w", err)
 	} else if cfg != nil {
-		return cfg, "env", nil
+		return cfg, appCredentialSource{}, nil
 	}
 	path := filepath.Join(dataDir, "app.json")
 	cfg, err := auth.ReadApp(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("read %s: %w", path, err)
+		return nil, appCredentialSource{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	if cfg == nil {
-		return nil, "", nil
+		return nil, appCredentialSource{}, nil
 	}
-	return cfg, "file:" + path, nil
+	return cfg, appCredentialSource{FromFile: true, Path: path}, nil
 }
 
 func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
@@ -400,6 +444,11 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	if boot.AgentToken == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
 	}
+	listenAddr, err := listenAddress(getenv)
+	if err != nil {
+		return bootConfig{}, err
+	}
+	boot.ListenAddr = listenAddr
 
 	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
 	case mode == "" || mode == "cookie":
@@ -452,7 +501,99 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		}
 	}
 
+	switch flag := getenv("DISPATCH_DEV_SIGNIN"); flag {
+	case "":
+	case "1":
+		if err := devSignInFence(boot, getenv); err != nil {
+			return bootConfig{}, err
+		}
+		boot.DevSignIn = true
+	default:
+		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
+	}
 	return boot, nil
+}
+
+// devSignInFence is the dev sign-in fence over the environment; devSignInLoadedFence covers what
+// main loads after it. With the flag any loopback client signs in as any allowlisted login, so the
+// process must listen, keep its data and reach the services that act on a human's word (NATS, the
+// secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
+// this machine alone, and sign its cookies with a key no other process holds.
+func devSignInFence(boot bootConfig, getenv func(string) string) error {
+	if boot.IdentityHeader != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
+	}
+	if !routes.LoopbackHostPort(boot.ListenAddr) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", getenv("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
+	}
+	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
+		return err
+	}
+	if getenv("DISPATCH_SIGNING_KEY") != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
+	}
+	if !boot.NATSDisabled && getenv(bus.AllowRemoteEnvVar) == "1" {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
+	}
+	if boot.AgentSecretsURL != "" {
+		if !routes.LoopbackURL(boot.AgentSecretsURL) {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
+		}
+	}
+	if !routes.LoopbackURL(boot.EnvoyURL) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 delivers through this machine's Envoy listener only: ENVOY_URL=%q must name 127.0.0.1, [::1] or localhost", boot.EnvoyURL)
+	}
+	return nil
+}
+
+// devSignInLoadedFence is the dev sign-in fence over what main loads after the environment: the
+// dashboard origin from envoy.json, and the GitHub App from the environment or the data dir's
+// app.json. With the flag a loopback client acts as an allowlisted human, and a human can make the
+// App act: saving an architecture source has the App probe and import the repository the caller
+// names. The private key is the credential that acts (githubapp.New builds no client without it,
+// the App JWT names the client ID, and nothing sends the numeric App ID), so:
+//   - a key from app.json, where a developer keeps the real App's key, is refused whatever the
+//     base;
+//   - a key from the environment may sign calls only to a loopback host. That checks the host, not
+//     what listens there: every App call hands a signed App JWT to whatever owns the port, so the
+//     key must be a throwaway, as the one packages/dispatch/e2e/run-server.sh generates.
+func devSignInLoadedFence(boot bootConfig, serverURL string, app *auth.AppConfig, source appCredentialSource) error {
+	if !boot.DevSignIn {
+		return nil
+	}
+	if _, err := routes.DevSignInOrigin(serverURL); err != nil {
+		return err
+	}
+	if app == nil || app.PEM == "" {
+		return nil
+	}
+	if source.FromFile {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 refuses the App private key in %s, whatever DISPATCH_GITHUB_API_BASE names: that file is where the real App's key is kept, and with the flag any loopback client can have the App sign calls. Pass a throwaway App in the environment instead (DISPATCH_APP_CLIENT_ID, DISPATCH_APP_CLIENT_SECRET and a generated DISPATCH_APP_PEM_B64, which take precedence over app.json), with DISPATCH_GITHUB_API_BASE naming a GitHub fake on a loopback host, as packages/dispatch/e2e/run-server.sh does", source.Path)
+	}
+	if !routes.LoopbackURL(boot.GitHubAPIBase) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 lets the App private key (DISPATCH_APP_PEM_B64) sign calls only to a loopback host: DISPATCH_GITHUB_API_BASE=%q (empty is https://api.github.com) must name 127.0.0.1, [::1] or localhost. Use a throwaway key: every App call hands a signed App JWT to whatever listens there", boot.GitHubAPIBase)
+	}
+	return nil
+}
+
+// loopbackDatabase refuses a DATABASE_URL with a host that is not this machine: the data a
+// dev-sign-in server serves to any local process must be a scratch database here. pgx parses
+// both the URL and the key=value forms, multi-host lists included, exactly as store.Open will.
+func loopbackDatabase(databaseURL string) error {
+	config, err := pgx.ParseConfig(databaseURL)
+	if err != nil {
+		return fmt.Errorf("DATABASE_URL: %w", err)
+	}
+	hosts := []string{config.Host}
+	for _, fallback := range config.Fallbacks {
+		hosts = append(hosts, fallback.Host)
+	}
+	for _, host := range hosts {
+		if !strings.HasPrefix(host, "/") && !routes.LoopbackName(host) {
+			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 serves a loopback database only: DATABASE_URL names host %q", host)
+		}
+	}
+	return nil
 }
 
 // agentSecretsToken resolves the secrets broker's UI bearer, reading
@@ -601,23 +742,28 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 	}
 }
 
-// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and
-// DISPATCH_PORT. An empty host binds every interface (the containerized
-// production default); local compose deployments set 127.0.0.1.
-func listenAddress() (string, error) {
-	host := strings.TrimSpace(os.Getenv("DISPATCH_LISTEN_HOST"))
-	port := strings.TrimSpace(os.Getenv("DISPATCH_PORT"))
+// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT (8766
+// when unset). An empty host binds every interface (the containerized production default);
+// local compose deployments set 127.0.0.1. An IPv6 host may be written with or without brackets:
+// one pair comes off here and JoinHostPort puts it back.
+func listenAddress(getenv func(string) string) (string, error) {
+	host := strings.TrimSpace(getenv("DISPATCH_LISTEN_HOST"))
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	port := strings.TrimSpace(getenv("DISPATCH_PORT"))
 	if port == "" {
-		return host + defaultListenAddr, nil
+		port = defaultListenPort
+	} else {
+		parsed, err := parsePositiveInt(port)
+		if err != nil {
+			return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
+		}
+		if parsed > 65535 {
+			return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
+		}
 	}
-	parsed, err := parsePositiveInt(port)
-	if err != nil {
-		return "", fmt.Errorf("invalid DISPATCH_PORT: %w", err)
-	}
-	if parsed > 65535 {
-		return "", fmt.Errorf("invalid DISPATCH_PORT: %q", port)
-	}
-	return host + ":" + port, nil
+	return net.JoinHostPort(host, port), nil
 }
 
 // openMigrated opens the database a DB subcommand works on and brings it to the current

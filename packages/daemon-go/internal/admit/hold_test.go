@@ -20,7 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-// Boot's Dispatch read is a snapshot with no actor on it, and an agent's own status write looks
+// Boot's Dispatch read is a snapshot with no actor on it, and a session's own status write looks
 // exactly like a human's in it. Dispatch says how far each issue's event log has run, so an issue
 // whose log is ahead of the record is left to the stream, which carries the actor and applies the
 // same change with it. An issue the stream has nothing newer for — a summary genuinely ahead of

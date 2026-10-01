@@ -59,7 +59,9 @@ type SendInput struct {
 }
 
 // SendResult identifies the listener envelope emitted for a successful delivery. Duplicate
-// reports that the stream already held this message, so nothing new reached the agent; the
+// reports that the stream already held this message, so it stored nothing new; the publish still
+// reached the agent's subject. What recognises that repeat, and for how long, is stated on
+// DELIVERY_DUPLICATE_WINDOW_MS in @legion/contracts (contracts.DeliveryDuplicateWindow here). The
 // envelope id then names an envelope JetStream discarded.
 type SendResult struct {
 	EnvelopeID string

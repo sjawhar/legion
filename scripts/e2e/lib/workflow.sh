@@ -19,9 +19,10 @@
 #                  production's)
 #   dispatch_actor the session every proof-human write names as its actor, or empty. A bearer caller
 #                  must name one (production Dispatch refuses the write otherwise, ACTOR_KIND); it
-#                  holds no claim, so the workflow reads its status writes as a human's. Empty, the
-#                  writes carry none and the human header alone says who wrote (a scratch
-#                  Dispatch's X-Dispatch-User)
+#                  holds no claim, so the daemon sets back its status write on a live root as it does
+#                  any outside session's, and a proof takes a tree out with `legion status` instead.
+#                  Empty, the writes carry none and the human header alone says who wrote (a scratch
+#                  Dispatch's X-Dispatch-User), which the workflow reads as a person's move
 #   pg_container   the container holding the daemon's Postgres database
 #   pr_number      the issue's pull request, once it exists
 #   smoke_file     the one product file that pull request's first implementation changed: the
@@ -69,13 +70,15 @@ dispatch_human() {
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
 }
-# new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
-# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and smoke_spec
-# as its primary document: the proof gives its architect no instruction, so what the tree is for
-# comes from the issue itself. A child carries neither, since it runs under its root's tree.
+# new_issue TITLE [PARENT] [SPEC] creates an issue in the run's project and prints its key. A root
+# carries the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and SPEC
+# as its primary document, smoke_spec when SPEC is unset or empty: the proof gives its architect no
+# instruction, so what the tree is for comes from the issue itself. A child carries neither, since
+# it runs under its root's tree.
 new_issue() {
-  local title=$1 parent=${2:-} payload
-  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$(smoke_spec)" \
+  local title=$1 parent=${2:-} spec=${3:-} payload
+  [ -n "$spec" ] || spec=$(smoke_spec)
+  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$spec" \
     'if $parent == "" then {project:$project,title:$title,labels:["legion"],spec:$spec,force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
   dispatch_human POST issues "$payload" | jq -er .key
 }
@@ -238,8 +241,7 @@ request_changes_as_reviewer() {
 reviewer_requested_changes() {
   local reviews
   # --paginate applies --jq to each page, so one line per matching review, counted after.
-  reviews=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "CHANGES_REQUESTED") | .id') || return 1
+  reviews=$(review_app_reviews '.state == "CHANGES_REQUESTED"' id) || return 1
   [ "$(grep -c . <<<"$reviews")" -ge "$1" ]
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
@@ -256,15 +258,30 @@ round_correction_pushed() {
   grep -qF -- "+$(round_line "$1")" <<<"$patches"
 }
 
-# REST names the review App's account legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`)
-# drops the suffix, and a user could hold the bare name. The approval must be of the current head.
+# review_app_reviews FILTER FIELD prints FIELD of each review the review App posted on the proof's
+# pull request that FILTER, a jq condition, selects. REST names the review App's account
+# legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`) drops the suffix, and a user could hold
+# the bare name.
+review_app_reviews() {
+  timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq ".[] | select(.user.login == \"legion-reviewer[bot]\" and ($1)) | .$2"
+}
+# reviewer_approved_head: the review App approved the pull request's current head.
 reviewer_approved_head() {
   local head approved
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
-  approved=$(timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
+  approved=$(review_app_reviews '.state == "APPROVED"' commit_id) || return 1
   grep -qx -- "$head" <<<"$approved"
 }
+# reviewer_commented: the review App submitted a COMMENT review on the proof's pull request. A reply
+# on a review thread is a COMMENTED review with an empty body, and is not one.
+reviewer_commented() {
+  local commented
+  commented=$(review_app_reviews '.state == "COMMENTED" and .body != ""' id) || return 1
+  [ -n "$commented" ]
+}
+# reviewer_completed ISSUE: the daemon recorded the reviewer's completion of the issue's open round.
+reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].workers.reviewer.handoffCommit // "") != ""' >/dev/null; }
 # approve_as_reviewer asks the reviewer for the round's last review and waits for it to approve the
 # head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/, since
 # the Go daemon has no .legion/ deletion step before Stage 7. The merge then carries the run's
@@ -522,6 +539,12 @@ notice_needle() { printf 'summary: %s on %s' "$1" "$2"; }
 notice_deliveries() {
   { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -cF -- "$3" || true
 }
+# notice_line ISSUE ROLE NEEDLE prints each Envoy delivery in the claim's session holding NEEDLE.
+notice_line() { { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$3" || true; }
+# architect_messages ISSUE ROLE counts the Envoy messages in the claim's session that ISSUE's
+# architect sent: the listener renders each with a reply_role naming its sender's role topic
+# (envoy-client's delivery.ts), which the proof's own steer and every other sender do not carry.
+architect_messages() { notice_deliveries "$1" "$2" "notifications.role.$(claim_token "$1" architect)"; }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
 # worker_sessions SESSIONS prints each phase-worker session file under SESSIONS and the role it
 # claims, tab-separated. A session's role is its newest Envoy role claim; an architect or controller
@@ -542,7 +565,7 @@ worker_notices() {
   while IFS=$'\t' read -r f role; do
     jq -R -r --arg file "${f##*/}" --arg role "$role" '
       fromjson? | select(.customType == "envoy-message") | (.content | tostring)
-      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up|checks-red) on [^\\n]*)")
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up|checks-red|review-stuck|status-reasserted) on [^\\n]*)")
       | "\($file) \($role) \(.summary)"' "$f"
   done < <(worker_sessions "$1")
 }
