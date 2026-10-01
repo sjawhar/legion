@@ -18,7 +18,11 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // worker's OMP: it dials the daemon's worker stream, and bridges OMP to it once acked. Its lines
 // go to stdout, which is what the pane shows; its exit status is OMP's. With --pod-safety, which
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
-// (podsafety.Apply, its overlay written to LEGION_STATE_DIR).
+// (podsafety.Apply, its overlay written to LEGION_STATE_DIR), and once OMP has actually started
+// the shim begins the CodeGraph warm-up in the background for the issue's workspace
+// (shim.Config.WarmCodegraph, internal/shim's spawnOnce): the pod init container builds no
+// index (#1647), and a tmux pane never sets this, since host provisioning already warms that
+// workspace (internal/daemon/outbox.go).
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
@@ -36,6 +40,7 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 
 	cfg, err := workerShimConfig(set, *connect, *bootTokenFile, *providerEnvDir, *keyDir, *tokenFile, *agentSecretsBin, flags.Args())
 	if err == nil && *podSafety {
+		cfg.WarmCodegraph = true
 		cfg.Env, err = podSafeEnvironment(cfg.Env)
 	}
 	if err != nil {

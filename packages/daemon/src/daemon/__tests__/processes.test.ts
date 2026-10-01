@@ -670,6 +670,22 @@ function manager(
     ) {
       return { ...result, stdout: "@42\n" };
     }
+    // `excludeCodegraphDirectory` (the last step of every provisioning) resolves the clone's
+    // git directory through this command; a test's own `run` override that does not special-case
+    // it, like most of this file's, answers every command with an empty stdout, which would
+    // otherwise make every one of those tests throw deep inside provisioning. Defaulted from the
+    // command's own `-R` argument, the one real `jj git root` always uses here.
+    if (
+      command[0] === "jj" &&
+      command[1] === "git" &&
+      command[2] === "root" &&
+      result.stdout.trim() === ""
+    ) {
+      const repoCloneDir = command[command.indexOf("-R") + 1];
+      if (repoCloneDir) {
+        return { ...result, stdout: `${repoCloneDir}/.git\n` };
+      }
+    }
     return result;
   };
   const injected: Omit<ProcessManagerDeps, "runtime" | "controllerRuntime"> = {
@@ -785,6 +801,14 @@ function manager(
     sleeps,
     published,
   };
+}
+
+/** A command these pane-lifecycle-counting "stale deadline" tests never mean to count: a
+ * provisioning step like `jj git root` (`excludeCodegraphDirectory`) or the un-awaited codegraph
+ * warm-up's own `sh -c ... codegraph ...` — real, but incidental, and asynchronous relative to
+ * these tests' own event-loop flushes, to what each one checks. */
+function isProvisioningNoise(command: string[]): boolean {
+  return command[0] === "jj" || (command[0] === "sh" && command[3] === "codegraph");
 }
 
 /** Common setup for running-worker-cap tests: a fresh single-root-tree `LegionState` wired to
@@ -965,6 +989,9 @@ describe("ProcessManager", () => {
         if (command[0] === "jj" && command[1] === "workspace" && command[2] === "add") {
           await mkdir(workspace, { recursive: true });
         }
+        if (command[0] === "jj" && command[1] === "git" && command[2] === "root") {
+          return { stdout: `${path.join(repo, ".git")}\n`, exitCode: 0 };
+        }
         if (command[3] === "has-session") return { stdout: "", exitCode: 1 };
         if (command[3] === "new-window") return { stdout: "@42 %1 12345\n", exitCode: 0 };
         return { stdout: "", exitCode: 0 };
@@ -1048,6 +1075,7 @@ describe("ProcessManager", () => {
       ],
       ["jj", "config", "list", "--repo", "--include-overridden", "-R", repo, "user.name"],
       ["jj", "config", "list", "--repo", "--include-overridden", "-R", repo, "user.email"],
+      ["jj", "git", "root", "--ignore-working-copy", "-R", repo],
       ["tmux", "-L", "legion-omp", "has-session", "-t", "legion-omp"],
       [
         "tmux",
@@ -9746,7 +9774,7 @@ describe("ProcessManager", () => {
         throw new Error("ECONNREFUSED");
       },
       run: async (command) => {
-        commands.push(command);
+        if (!isProvisioningNoise(command)) commands.push(command);
         if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
         if (command[3] === "new-session") {
           sessionExists = true;
@@ -9809,7 +9837,7 @@ describe("ProcessManager", () => {
         throw new Error("ECONNREFUSED");
       },
       run: async (command) => {
-        commands.push(command);
+        if (!isProvisioningNoise(command)) commands.push(command);
         if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
         if (command[3] === "new-session") {
           sessionExists = true;
@@ -9943,7 +9971,7 @@ describe("ProcessManager", () => {
         throw new Error("ECONNREFUSED");
       },
       run: async (command) => {
-        commands.push(command);
+        if (!isProvisioningNoise(command)) commands.push(command);
         if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
         if (command[3] === "new-session") {
           sessionExists = true;
@@ -10657,7 +10685,7 @@ describe("ProcessManager", () => {
         throw new Error("ECONNREFUSED");
       },
       run: async (command) => {
-        commands.push(command);
+        if (!isProvisioningNoise(command)) commands.push(command);
         if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
         if (command[3] === "new-session") {
           sessionExists = true;

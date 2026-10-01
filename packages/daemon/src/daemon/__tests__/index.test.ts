@@ -183,6 +183,10 @@ function daemonTestDependencies(
         if (command[0]?.endsWith("/tmux") && command[3] === "new-window") {
           return { stdout: "@42 %1 12345", stderr: "", exitCode: 0 };
         }
+        if (command[0]?.endsWith("/jj") && command[1] === "git" && command[2] === "root") {
+          const repoCloneDir = command[command.indexOf("-R") + 1];
+          if (repoCloneDir) return { stdout: `${repoCloneDir}/.git\n`, stderr: "", exitCode: 0 };
+        }
         return { stdout: "", stderr: "", exitCode: 0 };
       },
       resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
@@ -576,6 +580,11 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
+            if (command[0]?.endsWith("/jj") && command[1] === "git" && command[2] === "root") {
+              const repoCloneDir = command[command.indexOf("-R") + 1];
+              if (repoCloneDir)
+                return { stdout: `${repoCloneDir}/.git\n`, stderr: "", exitCode: 0 };
+            }
             if (command[0]?.endsWith("/tmux") && command[3] === "list-windows") {
               // reconcileAdmission's boot-time orphan reap: slow to prove
               // startDaemon does not resolve until it — and every promotion
@@ -818,6 +827,11 @@ describe("startDaemon", () => {
               const workspaceDir = command[3];
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "git" && command[2] === "root") {
+              const repoCloneDir = command[command.indexOf("-R") + 1];
+              if (repoCloneDir)
+                return { stdout: `${repoCloneDir}/.git\n`, stderr: "", exitCode: 0 };
             }
             if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };
@@ -1725,6 +1739,11 @@ describe("startDaemon", () => {
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
             }
+            if (command[0]?.endsWith("/jj") && command[1] === "git" && command[2] === "root") {
+              const repoCloneDir = command[command.indexOf("-R") + 1];
+              if (repoCloneDir)
+                return { stdout: `${repoCloneDir}/.git\n`, stderr: "", exitCode: 0 };
+            }
             if (command[0]?.endsWith("/tmux") && command[3] === "list-windows") {
               // reconcileAdmission's boot-time orphan reap: slow enough to observe whether
               // reconnectRoots (synchronous, no tmux calls of its own) has already armed the
@@ -2363,6 +2382,11 @@ describe("startDaemon", () => {
               const workspaceDir = command[3];
               if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
               await mkdir(workspaceDir, { recursive: true });
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "git" && command[2] === "root") {
+              const repoCloneDir = command[command.indexOf("-R") + 1];
+              if (repoCloneDir)
+                return { stdout: `${repoCloneDir}/.git\n`, stderr: "", exitCode: 0 };
             }
             if (command[0]?.endsWith("/tmux") && command[3] === "has-session") {
               return { stdout: "", stderr: "", exitCode: 0 };

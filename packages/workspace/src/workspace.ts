@@ -559,20 +559,39 @@ async function removeRepoScopedIdentity(
   }
 }
 
-/** Appends ".codegraph/" to repoCloneDir's ".git/info/exclude" unless a line already matches it
- * exactly, so repeated provisioning of the same clone writes it once. Keeps every future
- * `codegraph init`/`index` in a workspace of this clone — the host warm-up's own, and a worker's
- * `codegraph` tool call — from ever getting its `.codegraph/` tracked: CodeGraph's own generated
- * `.codegraph/.gitignore` is `*` then `!.gitignore`, so that one file stays visible to git, and
- * without this, jj's default auto-track would snapshot it into the workspace's own change
- * (confirmed empirically: `jj status` under an empty HOME showed `.codegraph/.gitignore` newly
- * added after a bare `codegraph init`). `.git/info/exclude` is local to this shared clone, read
- * by every workspace of it — git worktrees share one `info/exclude` through their common git
- * directory — and by jj (confirmed the same way: with the line added first, the same `codegraph
- * init` left `jj status` clean), so this needs no global git configuration anywhere a workspace
- * of this clone is used. */
-async function excludeCodegraphDirectory(repoCloneDir: string): Promise<void> {
-  const excludePath = path.join(repoCloneDir, ".git", "info", "exclude");
+/** Appends ".codegraph/" to the clone's git directory's "info/exclude" unless a line already
+ * matches it exactly, so repeated provisioning of the same clone writes it once. The directory
+ * comes from `jj git root`, not a hardcoded `<repoCloneDir>/.git`: a non-colocated clone has no
+ * `.git` at all (its backing repository lives under `.jj/repo/store/git`), and the hardcoded
+ * path would both miss the directory jj and git actually read and leave a stray, unused `.git/`
+ * behind. Keeps every future `codegraph init`/`index` in a workspace of this clone — the host
+ * warm-up's own, and a worker's `codegraph` tool call — from ever getting its `.codegraph/`
+ * tracked: CodeGraph's own generated `.codegraph/.gitignore` is `*` then `!.gitignore`, so that
+ * one file stays visible to git, and jj's default auto-track would snapshot it into the
+ * workspace's own change on a host with no global ignore for `.codegraph/`. The directory is
+ * read by every workspace of that clone — git worktrees share one `info/exclude` through their
+ * common git directory — and by jj the same way, so this needs no global git configuration
+ * anywhere a workspace of this clone is used. The write only appends: once the exact-line check
+ * above has passed, there is nothing already in the file this could clobber. */
+async function excludeCodegraphDirectory(
+  deps: ProvisionIssueWorkspaceDeps,
+  repoCloneDir: string
+): Promise<void> {
+  const root = await runChecked(deps, [
+    "jj",
+    "git",
+    "root",
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+  ]);
+  const gitDir = root.stdout.trim();
+  if (!path.isAbsolute(gitDir)) {
+    throw new Error(
+      `jj git root -R ${repoCloneDir} printed ${JSON.stringify(gitDir)}, want an absolute path`
+    );
+  }
+  const excludePath = path.join(gitDir, "info", "exclude");
   let existing = "";
   try {
     existing = await readFile(excludePath, "utf8");
@@ -582,7 +601,7 @@ async function excludeCodegraphDirectory(repoCloneDir: string): Promise<void> {
   if (existing.split("\n").includes(".codegraph/")) return;
   await mkdir(path.dirname(excludePath), { recursive: true });
   const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-  await writeFile(excludePath, `${existing}${separator}.codegraph/\n`, { mode: 0o600 });
+  await writeFile(excludePath, `${separator}.codegraph/\n`, { mode: 0o600, flag: "a" });
 }
 
 /** Where `issue`'s jj workspace lives under `stateDir` — the one path `provisionIssueWorkspace`
@@ -769,7 +788,7 @@ export async function provisionIssueWorkspace(
     "false",
   ]);
   await removeRepoScopedIdentity(deps, repoCloneDir);
-  await excludeCodegraphDirectory(repoCloneDir);
+  await excludeCodegraphDirectory(deps, repoCloneDir);
 
   return { repoCloneDir, workspaceDir, bookmark };
 }

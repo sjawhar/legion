@@ -36,13 +36,69 @@ var indexed sync.Map
 // provisioning for tmux panes, internal/daemon/outbox.go): the pod init container builds no index,
 // since it runs on the pod's registration path and its goroutines die with it.
 func WarmCodegraphIndexInBackground(dir string) {
+	startCodegraphWarmup(dir, warmCodegraphIndex)
+}
+
+// WarmCodegraphIndexInPodBackground is the worker-shim's pod entry point (internal/shim),
+// started once a pod's OMP child has actually begun, never before: it is warmCodegraphIndex
+// behind the cross-pod flock warmCodegraphIndexAcrossPods takes, since sibling phase-worker pods
+// of one issue tree share the tree-volume workspace directory.
+func WarmCodegraphIndexInPodBackground(dir string) {
+	startCodegraphWarmup(dir, warmCodegraphIndexAcrossPods)
+}
+
+// startCodegraphWarmup is WarmCodegraphIndexInBackground's and
+// WarmCodegraphIndexInPodBackground's shared goroutine and de-duplication: run starts in its own
+// goroutine and returns at once, and a second call for a directory whose warm-up is still in
+// flight in this process does nothing.
+func startCodegraphWarmup(dir string, run func(context.Context, string)) {
 	if _, busy := warming.LoadOrStore(dir, struct{}{}); busy {
 		return
 	}
 	go func() {
 		defer warming.Delete(dir)
-		warmCodegraphIndex(context.Background(), dir)
+		run(context.Background(), dir)
 	}()
+}
+
+// warmCodegraphIndexAcrossPods is warmCodegraphIndex's pod entry point: sibling phase-worker
+// pods of one issue tree share the same tree-volume workspace directory but run in separate PID
+// namespaces, so codegraphLockHeldByLiveProcess's PID check (kill(pid, 0) against this process's
+// own namespace) can never see another pod's builder — a live build in a sibling pod would read
+// as dead, and the repair would run `codegraph index` alongside it, corrupting the database the
+// same way an unguarded live-build race does on a single host (codegraph_test.go). This takes a
+// non-blocking flock on `<dir>+".codegraph.lock"` — a sibling of the workspace directory,
+// outside the jj working copy, so it is never auto-tracked, and distinct from workspace-init's
+// own per-repository `<clone>.lock` — before running the warm-up at all, and skips entirely,
+// logging once, if another pod already holds it. The lock is held for the warm-up's whole
+// duration: the same live-holder-holds, dead-holder-holds-nothing contract as workspace-init's
+// own flock (no lease, no mtime, no takeover — a crashed pod's lock dies with its last file
+// descriptor, and the kernel drops it).
+func warmCodegraphIndexAcrossPods(ctx context.Context, dir string) {
+	lockPath := dir + ".codegraph.lock"
+	file, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s could not open its cross-pod lock %s: %s\n", dir, lockPath, err)
+		return
+	}
+	defer file.Close()
+	if err := flockNonBlocking(int(file.Fd())); err != nil {
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: another pod holds %s\n", dir, lockPath)
+		return
+	}
+	defer func() { _ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN) }()
+	warmCodegraphIndex(ctx, dir)
+}
+
+// flockNonBlocking is flock(2) LOCK_EX|LOCK_NB, retried only across EINTR — the same pattern as
+// workspace-init's own non-blocking flock attempt (cmd/legion/workspace_init.go's flock).
+func flockNonBlocking(fd int) error {
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+	}
 }
 
 // warmCodegraphIndex mirrors the TypeScript daemon's ensureCodegraphIndex (research report
@@ -87,21 +143,15 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
 		return
 	}
-	// The lock read and the kill(pid, 0) syscall below are worth paying for only when a repair
-	// might actually run: a complete index already needs neither, and logging a "skipped" line
-	// for a lock some unrelated codegraph run holds at that moment, on an index that needed no
-	// repair, would be misleading.
-	complete := status.exitCode == 0 && json.Valid([]byte(status.stdout))
-	if complete {
-		initialized, indexComplete := codegraphStatus(status.stdout)
-		complete = initialized && indexComplete
-	}
-	lockLive := dirExists && !complete && codegraphLockHeldByLiveProcess(dir)
-	step := nextCodegraphStep(dirExists, lockLive, status.exitCode, status.stdout)
+	step := nextCodegraphStep(dirExists, status.exitCode, status.stdout)
 	if step == codegraphStepNone {
-		if lockLive {
-			fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: the index lock still names a live process\n", dir)
-		}
+		return
+	}
+	// The lock read and the kill(pid, 0) syscall are worth paying for only once a write step
+	// (init or index) is actually about to run: a complete index already returned above, so
+	// this can never log a misleading "skipped" line on an index that needed no repair.
+	if codegraphLockHeldByLiveProcess(dir) {
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: the index lock still names a live process\n", dir)
 		return
 	}
 	subcommand := "init"
@@ -140,12 +190,11 @@ const (
 // exists on disk — is consulted only as a fallback, when `status` failed to run or returned
 // something that is not even JSON (a corrupted database mid-build, an old CLI): there, an
 // existing directory still means `index` over `init`, since `init` on one only prints "Already
-// initialized" and exits 0, repairing nothing. lockLive — whether `.codegraph/codegraph.lock`
-// names a process that is still alive — always wins over an index repair: a build that is still
-// running also reports `index.state: "indexing"`, indistinguishable from one left partial by a
-// dead process, so this never relies on CodeGraph's own mtime-based staleness check to tell the
-// two apart.
-func nextCodegraphStep(dirExists, lockLive bool, statusExitCode int, statusStdout string) codegraphStep {
+// initialized" and exits 0, repairing nothing. Whether `.codegraph/codegraph.lock` names a live
+// process is the caller's concern, not this function's: it decides only which write step the
+// status and the directory call for, and the caller skips that step entirely, for either
+// `init` or `index`, while the lock names a live process.
+func nextCodegraphStep(dirExists bool, statusExitCode int, statusStdout string) codegraphStep {
 	if statusExitCode == 0 && json.Valid([]byte(statusStdout)) {
 		initialized, complete := codegraphStatus(statusStdout)
 		switch {
@@ -153,17 +202,12 @@ func nextCodegraphStep(dirExists, lockLive bool, statusExitCode int, statusStdou
 			return codegraphStepInit
 		case complete:
 			return codegraphStepNone
-		case lockLive:
-			return codegraphStepNone
 		default:
 			return codegraphStepIndex
 		}
 	}
 	if !dirExists {
 		return codegraphStepInit
-	}
-	if lockLive {
-		return codegraphStepNone
 	}
 	return codegraphStepIndex
 }

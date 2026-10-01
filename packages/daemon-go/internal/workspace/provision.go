@@ -83,23 +83,35 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	// worker's own `codegraph` tool call inside a pod, which this function also provisions
 	// (cmd/legion workspace-init) — from ever getting its `.codegraph/` tracked. CodeGraph's own
 	// generated `.codegraph/.gitignore` is `*` then `!.gitignore`, so that one file stays visible
-	// to git; without this, jj's default auto-track snapshots it into the workspace's own change
-	// (confirmed empirically: `jj status` under an empty HOME showed `.codegraph/.gitignore`
-	// newly added after a bare `codegraph init`). `.git/info/exclude` is local to this shared
-	// clone, read by every workspace of it (git worktrees share one `info/exclude` through their
-	// common git directory) and by jj (confirmed the same way: with the line added first, the
-	// same `codegraph init` left `jj status` clean), so this needs no global git configuration
-	// anywhere a workspace of this clone is used.
-	if err := excludeCodegraphDirectory(workspace.Clone); err != nil {
+	// to git, and jj's default auto-track snapshots it into the workspace's own change on a host
+	// with no global ignore for `.codegraph/`. The clone's git directory's `info/exclude` is
+	// read by every workspace of that clone (git worktrees share one `info/exclude` through
+	// their common git directory) and by jj the same way, so this needs no global git
+	// configuration anywhere a workspace of this clone is used.
+	if err := excludeCodegraphDirectory(ctx, run, workspace.Clone); err != nil {
 		return Workspace{}, err
 	}
 	return workspace, nil
 }
 
-// excludeCodegraphDirectory appends ".codegraph/" to cloneDir's ".git/info/exclude" unless a
-// line already matches it exactly, so repeated provisioning of the same clone writes it once.
-func excludeCodegraphDirectory(cloneDir string) error {
-	excludePath := filepath.Join(cloneDir, ".git", "info", "exclude")
+// excludeCodegraphDirectory appends ".codegraph/" to the clone's git directory's "info/exclude"
+// unless a line already matches it exactly, so repeated provisioning of the same clone writes it
+// once. The directory comes from `jj git root`, not a hardcoded `<cloneDir>/.git`: a
+// non-colocated clone has no `.git` at all (its backing repository lives under
+// `.jj/repo/store/git`), and the hardcoded path would both miss the directory jj and git
+// actually read and leave a stray, unused `.git/` behind. The write only appends: once the
+// exact-line check above has passed, there is nothing already in the file this could clobber,
+// and O_APPEND never truncates on a path shared with other provisioning of the same clone.
+func excludeCodegraphDirectory(ctx context.Context, run Runner, cloneDir string) error {
+	root, err := RunChecked(ctx, run, onClone(cloneDir, "git", "root"), nil, "")
+	if err != nil {
+		return err
+	}
+	gitDir := strings.TrimSpace(root.Stdout)
+	if !filepath.IsAbs(gitDir) {
+		return fmt.Errorf("jj git root -R %s printed %q, want an absolute path", cloneDir, gitDir)
+	}
+	excludePath := filepath.Join(gitDir, "info", "exclude")
 	existing, err := os.ReadFile(excludePath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %s: %w", excludePath, err)
@@ -112,12 +124,16 @@ func excludeCodegraphDirectory(cloneDir string) error {
 	if err := os.MkdirAll(filepath.Dir(excludePath), 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(excludePath), err)
 	}
-	content := string(existing)
-	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-		content += "\n"
+	file, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", excludePath, err)
 	}
-	content += ".codegraph/\n"
-	if err := os.WriteFile(excludePath, []byte(content), 0o600); err != nil {
+	defer file.Close()
+	prefix := ""
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		prefix = "\n"
+	}
+	if _, err := file.WriteString(prefix + ".codegraph/\n"); err != nil {
 		return fmt.Errorf("write %s: %w", excludePath, err)
 	}
 	return nil

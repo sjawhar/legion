@@ -1013,3 +1013,89 @@ func TestTheShimLogsAnExtensionError(t *testing.T) {
 
 	sh.log.awaitLine(t, "extension_error /opt/legion/pi-legion-envoy/dist/legion.js session_start: LEGION_DAEMON_URL is required for Legion", 1)
 }
+
+// With --pod-safety (cfg.WarmCodegraph true), the shim starts the CodeGraph warm-up for
+// LEGION_WORKSPACE only once the child has actually started — spawnOnce calls it right after
+// cmd.Start() succeeds, never before — and never lets it block the bridge: the daemon's RPC
+// round-trip and the child's own ready frame complete normally while a slow codegraph `status`
+// is still running.
+func TestWarmCodegraphStartsOnlyAfterOMPHasStartedAndNeverBlocksTheShim(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+
+	workspaceDir := t.TempDir()
+	callLog := filepath.Join(t.TempDir(), "calls.log")
+	binDir := t.TempDir()
+	release := filepath.Join(binDir, "release")
+	script := `#!/bin/sh
+printf '%s\t%s\n' "$1" "$PWD" >> '` + callLog + `'
+case "$1" in
+status) while [ ! -f '` + release + `' ]; do sleep 0.05; done; echo '{"initialized":false}' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codegraph"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
+	// workspace.WarmCodegraphIndexInPodBackground runs in this test process, not the OMP
+	// child, so exec.LookPath("codegraph") resolves against this process's own PATH — never
+	// cfg.Env, which only becomes the child's environment (spawnOnce's cmd.Env).
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	child := newOMP(t, "LEGION_WORKSPACE="+workspaceDir)
+	cfg := config(t, path, child)
+	cfg.WarmCodegraph = true
+	sh := run(t, cfg, newClock())
+
+	p := daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	p.expectRaw(t, "fake_ready")
+	if !child.started() {
+		t.Fatalf("the child's own ready frame reached the daemon before its marker was written; log:\n%s", sh.log)
+	}
+
+	// The bridge is not blocked: an ordinary RPC round-trip completes while codegraph's own
+	// `status` is still held on the release file below.
+	p.send(t, shimwire.GetState{ID: "probe"})
+	if raw := p.next(t).(shimwire.Response); raw.ID != "probe" {
+		t.Fatalf("the probe was answered as %#v", raw)
+	}
+
+	deadline := time.Now().Add(waitLimit)
+	for {
+		body, _ := os.ReadFile(callLog)
+		if strings.Contains(string(body), "status") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("codegraph status never ran for %s", workspaceDir)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	body, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "\t"+workspaceDir+"\n") {
+		t.Fatalf("codegraph calls = %q, want a status call with cwd %s", body, workspaceDir)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Waits for the warm-up's whole call (status, then the init it chose) to finish before this
+	// test returns and its t.TempDir() cleanups fire: the warm-up runs in its own goroutine,
+	// outliving the test function itself, so a pending `codegraph init` would otherwise race a
+	// cleanup that removes the very directory and binary it is about to exec.
+	deadline = time.Now().Add(waitLimit)
+	for {
+		body, _ := os.ReadFile(callLog)
+		if strings.Count(string(body), "\n") >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the warm-up's trailing codegraph call never finished; log:\n%s", body)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

@@ -78,14 +78,12 @@ export type CodegraphStep = "none" | "init" | "index";
  * exists on disk — is consulted only as a fallback, when `status` failed to run or returned
  * something that is not even JSON (a corrupted database mid-build, an old CLI): there, an
  * existing directory still means `index` over `init`, since `init` on one only prints "Already
- * initialized" and exits 0, repairing nothing. `lockLive` — whether `.codegraph/codegraph.lock`
- * names a process that is still alive — always wins over an index repair: a build that is still
- * running also reports `index.state: "indexing"`, indistinguishable from one left partial by a
- * dead process, so this never relies on CodeGraph's own mtime-based staleness check to tell the
- * two apart. */
+ * initialized" and exits 0, repairing nothing. Whether `.codegraph/codegraph.lock` names a live
+ * process is the caller's concern, not this function's: it decides only which write step the
+ * status and the directory call for, and the caller skips that step entirely, for either
+ * `"init"` or `"index"`, while the lock names a live process. */
 export function nextCodegraphStep(
   dirExists: boolean,
-  lockLive: boolean,
   statusExitCode: number,
   statusStdout: string
 ): CodegraphStep {
@@ -99,12 +97,10 @@ export function nextCodegraphStep(
     if (parsed !== undefined) {
       const { initialized, complete } = parseCodegraphStatus(statusStdout);
       if (!initialized) return "init";
-      if (complete) return "none";
-      return lockLive ? "none" : "index";
+      return complete ? "none" : "index";
     }
   }
-  if (!dirExists) return "init";
-  return lockLive ? "none" : "index";
+  return dirExists ? "index" : "init";
 }
 
 /** Reports whether `workspaceDir`'s `.codegraph/codegraph.lock` names a process that is still
@@ -584,15 +580,16 @@ export class TmuxRuntime implements Runtime {
    * partial (`initialized` true but `index.state` not `"complete"`) is repaired with `codegraph
    * index` rather than accepted as built — `codegraph init` on an already-initialized directory
    * only prints "Already initialized" and exits 0, so it cannot do this repair itself — unless
-   * the build that left it that way is still running: `nextCodegraphStep` skips the repair
-   * entirely while `.codegraph/codegraph.lock` names a live process. A second `codegraph index`
-   * started against a live build damages the shared SQLite database even when CodeGraph's own
-   * lock refuses it the write (observed: the second process exits on "Could not acquire file
-   * lock", and the live build still fails with "database disk image is malformed") — so this
-   * never lets a second process even attempt it, and never relies on CodeGraph's own mtime-based
-   * (2-minute) staleness check, which can hand the lock to a second writer regardless. A missing
-   * CLI or a failed build is logged loudly — never silently swallowed — and never fails or
-   * delays the launch: a worker without an index falls back to grep, per its role prompt. */
+   * the build that left it that way is still running: the caller skips the repair step
+   * entirely while `.codegraph/codegraph.lock` names a live process. A second `codegraph
+   * index` started against a live build damages the shared SQLite database even when
+   * CodeGraph's own lock refuses it the write (observed: the second process exits on "Could
+   * not acquire file lock", and the live build still fails with "database disk image is
+   * malformed") — so this never lets a second process even attempt it, and never relies on
+   * CodeGraph's own mtime-based (2-minute) staleness check, which can hand the lock to a
+   * second writer regardless. A missing CLI or a failed build is logged loudly — never
+   * silently swallowed — and never fails or delays the launch: a worker without an index
+   * falls back to grep, per its role prompt. */
   private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
     // createDaemonRunner merges `{ ...environment.paneEnv, ...options?.env }`, so an `env` option
     // here can only add variables, never remove the ones paneEnv already carries (which may
@@ -628,31 +625,16 @@ export class TmuxRuntime implements Runtime {
         }
         dirExists = false;
       }
-      // The lock read and the kill(pid, 0)/proc check below are worth paying for only when a
-      // repair might actually run: a complete index already needs neither, and logging a
-      // "skipped" line for a lock some unrelated codegraph run holds at that moment, on an index
-      // that needed no repair, would be misleading.
-      let complete = status.exitCode === 0;
-      if (complete) {
-        try {
-          JSON.parse(status.stdout);
-        } catch {
-          complete = false;
-        }
-      }
-      if (complete) {
-        const parsed = parseCodegraphStatus(status.stdout);
-        complete = parsed.initialized && parsed.complete;
-      }
-      const lockLive =
-        dirExists && !complete && (await codegraphLockHeldByLiveProcess(workspaceDir));
-      const step = nextCodegraphStep(dirExists, lockLive, status.exitCode, status.stdout);
-      if (step === "none") {
-        if (lockLive) {
-          console.error(
-            `[legion] codegraph warm-up for ${workspaceDir} skipped: the index lock still names a live process`
-          );
-        }
+      const step = nextCodegraphStep(dirExists, status.exitCode, status.stdout);
+      if (step === "none") return;
+      // The lock read and the kill(pid, 0)/proc check are worth paying for only once a write
+      // step (init or index) is actually about to run: a complete index already returned
+      // above, so this can never log a misleading "skipped" line on an index that needed no
+      // repair.
+      if (await codegraphLockHeldByLiveProcess(workspaceDir)) {
+        console.error(
+          `[legion] codegraph warm-up for ${workspaceDir} skipped: the index lock still names a live process`
+        );
         return;
       }
       if (step === "index") {

@@ -47,6 +47,10 @@ function recordingRun(jjLogCommitId = ""): {
       const workspaceDir = cmd[3];
       if (workspaceDir) await mkdir(workspaceDir, { recursive: true });
     }
+    if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+      const repoCloneDir = cmd[cmd.indexOf("-R") + 1];
+      if (repoCloneDir) return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
+    }
     return { exitCode: 0, stdout: "", stderr: "" };
   };
   return { run, commands };

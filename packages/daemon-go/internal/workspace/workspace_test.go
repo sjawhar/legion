@@ -775,6 +775,50 @@ func TestProvisionExcludesTheCodegraphDirectoryFromEveryWorkspaceOfTheClone(t *t
 	}
 }
 
+// On a non-colocated clone (`git.colocate = false`), `jj git root` reports a directory under
+// `.jj/repo/store/git`, not `<clone>/.git`: excludeCodegraphDirectory writes the exclude line
+// there, so a `codegraph init`'s tracked `.gitignore` still leaves `jj status` clean, and the
+// clone grows no stray, unused `.git/` of its own. Exercised directly rather than through
+// Provision, since the rest of this package's credential and identity steps hardcode `.git/`
+// and are unaffected by this change — a separate limitation, not this test's concern.
+func TestExcludeCodegraphDirectoryOnANonColocatedClone(t *testing.T) {
+	run := newLocalRunner(t)
+	t.Setenv("HOME", t.TempDir())
+	jjConfig := os.Getenv("JJ_CONFIG")
+	if err := os.WriteFile(jjConfig, []byte("[git]\ncolocate = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := localBareRemote(t)
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	runSetup(t, "", "jj", "git", "clone", remote, cloneDir)
+	if _, err := os.Stat(filepath.Join(cloneDir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("stat %s/.git = %v, want no .git on a non-colocated clone", cloneDir, err)
+	}
+
+	if err := excludeCodegraphDirectory(context.Background(), run, cloneDir); err != nil {
+		t.Fatalf("excludeCodegraphDirectory: %v", err)
+	}
+	excludePath := filepath.Join(cloneDir, ".jj", "repo", "store", "git", "info", "exclude")
+	body, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", excludePath, err)
+	}
+	if !slices.Contains(strings.Split(string(body), "\n"), ".codegraph/") {
+		t.Fatalf("%s = %q, want a \".codegraph/\" line", excludePath, body)
+	}
+
+	if err := os.Mkdir(filepath.Join(cloneDir, ".codegraph"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, ".codegraph", ".gitignore"), []byte("*\n!.gitignore\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := runSetup(t, cloneDir, "jj", "status")
+	if strings.Contains(status, "codegraph") {
+		t.Fatalf("jj status in %s = %q, want no .codegraph path tracked", cloneDir, status)
+	}
+}
+
 // git writes a relative worktree pointer between real paths, so provisioning finds its own entry
 // through a symlinked repos directory: it locks it, re-adds the workspace after its directory went,
 // and removal deletes it.

@@ -114,6 +114,10 @@ async function provisioningRun(
     if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
     await mkdir(workspaceDir, { recursive: true });
   }
+  if (command[0] === "jj" && command[1] === "git" && command[2] === "root") {
+    const repoCloneDir = command[command.indexOf("-R") + 1];
+    if (repoCloneDir) return { stdout: `${repoCloneDir}/.git\n`, stderr: "", exitCode: 0 };
+  }
   return { stdout: "", stderr: "", exitCode: 0 };
 }
 
@@ -1966,10 +1970,9 @@ describe("TmuxRuntime", () => {
 
 describe("codegraph warm-up", () => {
   // Pure table tests on nextCodegraphStep: no TmuxRuntime, no filesystem, no process needed.
-  it.each<[string, boolean, boolean, number, string, CodegraphStep]>([
+  it.each<[string, boolean, number, string, CodegraphStep]>([
     [
       "status valid, not initialized, no directory: init",
-      false,
       false,
       0,
       `{"initialized":false}`,
@@ -1978,7 +1981,6 @@ describe("codegraph warm-up", () => {
     [
       "status valid, not initialized, directory exists: init (untracked .codegraph)",
       true,
-      false,
       0,
       `{"initialized":false}`,
       "init",
@@ -1986,42 +1988,23 @@ describe("codegraph warm-up", () => {
     [
       "status valid, complete: none",
       true,
-      false,
       0,
       `{"initialized":true,"index":{"state":"complete"}}`,
       "none",
     ],
     [
-      "status valid, complete, lock live: none (complete wins, lock irrelevant)",
+      "status valid, partial: index",
       true,
-      true,
-      0,
-      `{"initialized":true,"index":{"state":"complete"}}`,
-      "none",
-    ],
-    [
-      "status valid, partial, no live lock: index",
-      true,
-      false,
       0,
       `{"initialized":true,"index":{"state":"indexing"}}`,
       "index",
     ],
-    [
-      "status valid, partial, live lock: none",
-      true,
-      true,
-      0,
-      `{"initialized":true,"index":{"state":"indexing"}}`,
-      "none",
-    ],
-    ["status failed, directory exists, no live lock: index", true, false, 1, "", "index"],
-    ["status failed, directory exists, live lock: none", true, true, 1, "", "none"],
-    ["status failed, no directory: init", false, false, 1, "", "init"],
-    ["status unparseable, directory exists: index", true, false, 0, "not json", "index"],
-    ["status unparseable, no directory: init", false, false, 0, "not json", "init"],
-  ])("%s", (_name, dirExists, lockLive, statusExitCode, statusStdout, want) => {
-    expect(nextCodegraphStep(dirExists, lockLive, statusExitCode, statusStdout)).toBe(want);
+    ["status failed, directory exists: index", true, 1, "", "index"],
+    ["status failed, no directory: init", false, 1, "", "init"],
+    ["status unparseable, directory exists: index", true, 0, "not json", "index"],
+    ["status unparseable, no directory: init", false, 0, "not json", "init"],
+  ])("%s", (_name, dirExists, statusExitCode, statusStdout, want) => {
+    expect(nextCodegraphStep(dirExists, statusExitCode, statusStdout)).toBe(want);
   });
 
   /** `TmuxRuntime`'s background warm-up has no public surface; this types-and-names the cast

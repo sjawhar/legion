@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const (
@@ -82,6 +83,11 @@ type Config struct {
 	Grace time.Duration
 	// Clock is the time the shim waits on; nil is the real one.
 	Clock Clock
+	// WarmCodegraph starts the CodeGraph warm-up (workspace.WarmCodegraphIndexInPodBackground)
+	// for LEGION_WORKSPACE once the child has actually started — set only by `--pod-safety`
+	// (cmd/legion/worker_shim.go): a tmux pane never sets it, since host provisioning already
+	// warms that workspace (internal/daemon/outbox.go).
+	WarmCodegraph bool
 }
 
 // Run bridges until the wrapped process exits and returns its exit status: its code, or 128 plus
@@ -323,6 +329,11 @@ func (s *shim) spawnOnce() bool {
 	_ = childStdout.Close()
 	s.child = cmd
 	s.stdin = shimwire.NewWriter(stdin)
+	if s.cfg.WarmCodegraph {
+		if dir := envValue(s.cfg.Env, "LEGION_WORKSPACE"); dir != "" {
+			workspace.WarmCodegraphIndexInPodBackground(dir)
+		}
+	}
 	s.log.Printf("[worker-shim] spawned %s (pid %d)", s.cfg.Argv[0], cmd.Process.Pid)
 	pumped := make(chan struct{})
 	go s.pump(stdout, pumped)

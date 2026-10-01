@@ -491,6 +491,11 @@ function identityProbe(repoCloneDir: string, key: string): string[] {
 function identityProbeCommands(repoCloneDir: string): string[][] {
   return [identityProbe(repoCloneDir, "user.name"), identityProbe(repoCloneDir, "user.email")];
 }
+/** The last command every provisioning runs (`excludeCodegraphDirectory`): resolves the clone's
+ * git directory through `jj git root` rather than assuming `<repoCloneDir>/.git`. */
+function excludeCodegraphDirectoryCommand(repoCloneDir: string): string[] {
+  return ["jj", "git", "root", "--ignore-working-copy", "-R", repoCloneDir];
+}
 
 describe("provisionIssueWorkspace", () => {
   test("clones a missing repository into a temporary sibling, renames it into place, then fetches and provisions its issue workspace", async () => {
@@ -522,6 +527,9 @@ describe("provisionIssueWorkspace", () => {
           }
           if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
             await mkdir(workspaceDir, { recursive: true });
+          }
+          if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+            return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
           }
           return { exitCode: 0, stdout: "", stderr: "" };
         },
@@ -558,6 +566,7 @@ describe("provisionIssueWorkspace", () => {
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
+      excludeCodegraphDirectoryCommand(repoCloneDir),
     ]);
     // The bookmark is created in the new workspace, on its own working copy — and a brand-new
     // issue has no bookmark to miss, so nothing is logged.
@@ -627,6 +636,9 @@ describe("provisionIssueWorkspace", () => {
           if (!directory) throw new Error("workspace add is missing its directory");
           await mkdir(directory, { recursive: true });
         }
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+          return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     };
@@ -688,6 +700,9 @@ describe("provisionIssueWorkspace", () => {
             if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
               await mkdir(workspaceDir, { recursive: true });
             }
+            if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+              return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
+            }
             return { exitCode: 0, stdout: "", stderr: "" };
           },
         })
@@ -705,6 +720,7 @@ describe("provisionIssueWorkspace", () => {
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
+      excludeCodegraphDirectoryCommand(repoCloneDir),
     ]);
     expect(calls.some((call) => call.cmd[1] === "bookmark" && call.cmd[2] !== "list")).toBeFalse();
     expect(logged).toEqual([]);
@@ -727,6 +743,9 @@ describe("provisionIssueWorkspace", () => {
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           expect(existsSync(path.dirname(workspaceDir))).toBeTrue();
           await mkdir(workspaceDir, { recursive: true });
+        }
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+          return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
@@ -843,10 +862,13 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       provisioningToken: async () => "installation-token",
       credentialHelper: pinnedHelper,
       commandTimeoutMs,
-      run: (cmd, opts) =>
-        cmd[0] === "git"
-          ? runCommand([SYSTEM_GIT, ...cmd.slice(1)], opts)
-          : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }),
+      run: (cmd, opts) => {
+        if (cmd[0] === "git") return runCommand([SYSTEM_GIT, ...cmd.slice(1)], opts);
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+          return Promise.resolve({ exitCode: 0, stdout: `${gitDir}\n`, stderr: "" });
+        }
+        return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      },
     });
 
     const configured = await runCommand([
@@ -951,6 +973,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       run: async (cmd: string[], opts?: RunCall["opts"]) => {
         calls.push({ cmd, opts });
         if (cmd[0] === "git") return runCommand([SYSTEM_GIT, ...cmd.slice(1)], opts);
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+          return { exitCode: 0, stdout: `${gitDir}\n`, stderr: "" };
+        }
         if (observeFetch && cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") {
           // jj is stubbed here; stand in for the git its fetch spawns with exactly the fetch's
           // environment, while the one-shot helper still exists (provisioning removes it once
@@ -1055,6 +1080,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") fetchEnv = opts?.env;
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           await mkdir(workspaceDir, { recursive: true });
+        }
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+          return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
@@ -1238,6 +1266,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           await mkdir(workspaceDir, { recursive: true });
         }
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+          return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     };
@@ -1260,6 +1291,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       fetchCommand(repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
+      excludeCodegraphDirectoryCommand(repoCloneDir),
     ]);
   });
 
@@ -1300,6 +1332,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
             if (cmd[2] === "unset" && !repoConfig.delete(key)) {
               return { exitCode: 1, stdout: "", stderr: `Error: "${key}" doesn't exist` };
             }
+          }
+          if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+            return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
           }
           return { exitCode: 0, stdout: "", stderr: "" };
         },
@@ -1356,6 +1391,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
               return { exitCode: 0, stdout: nameProbes === 1 ? 'user.name = "x"' : "", stderr: "" };
             }
             return { exitCode: 1, stdout: "", stderr: 'Error: "user.name" doesn\'t exist' };
+          }
+          if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+            return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
           }
           return { exitCode: 0, stdout: "", stderr: "" };
         },
@@ -1524,6 +1562,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         fetchCommand(repoCloneDir),
         ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
         ...identityProbeCommands(repoCloneDir),
+        excludeCodegraphDirectoryCommand(repoCloneDir),
       ]);
     }
   }, 60_000);
@@ -2287,6 +2326,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
               }
               await mkdir(workspaceDir, { recursive: true });
             }
+            if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+              return { exitCode: 0, stdout: `${gitDir}\n`, stderr: "" };
+            }
             return { exitCode: 0, stdout: "", stderr: "" };
           },
         })
@@ -2309,6 +2351,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
+      excludeCodegraphDirectoryCommand(repoCloneDir),
     ]);
     expect(logged).toEqual([]);
   });
@@ -2347,6 +2390,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
               }
               await mkdir(workspaceDir, { recursive: true });
             }
+            if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+              return { exitCode: 0, stdout: `${gitDir}\n`, stderr: "" };
+            }
             // The resolution too: jj 0.44 and 0.45 print nothing for a bookmark that is gone.
             return { exitCode: 0, stdout: "", stderr: "" };
           },
@@ -2368,6 +2414,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ["jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@"],
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
+      excludeCodegraphDirectoryCommand(repoCloneDir),
     ]);
     const bookmarkSet = calls.find((call) => call.cmd[1] === "bookmark" && call.cmd[2] === "set");
     expect(bookmarkSet?.opts?.cwd).toBe(workspaceDir);
@@ -2527,6 +2574,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
           await mkdir(workspaceDir, { recursive: true });
         }
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+          return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     };
@@ -2645,6 +2695,9 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           }
           if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
             await mkdir(workspaceDir, { recursive: true });
+          }
+          if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "root") {
+            return { exitCode: 0, stdout: `${repoCloneDir}/.git\n`, stderr: "" };
           }
           return { exitCode: 0, stdout: "", stderr: "" };
         },

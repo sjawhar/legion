@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -221,13 +222,12 @@ esac
 	}
 }
 
-// TestWarmCodegraphIndexInitializesAnUntrackedCodegraphDirectory: `.codegraph/` can exist
-// without a database — CodeGraph's own generated `.codegraph/.gitignore` is `*` then
-// `!.gitignore`, so that one file stays tracked, and a fresh workspace of a repository that
-// committed it starts with the directory present and `status` reporting `initialized:false`.
-// That must still run `init`, not `index` (which refuses: "CodeGraph not initialized"), and must
-// not consume the once-per-workspace repair budget.
-func TestWarmCodegraphIndexInitializesAnUntrackedCodegraphDirectory(t *testing.T) {
+// TestWarmCodegraphIndexInitializesWhenNotInitializedDespiteAnExistingDirectory: a `.codegraph/`
+// directory can exist with no database — CodeGraph's own generated `.codegraph/.gitignore` is
+// `*` then `!.gitignore`, so that one file stays tracked, and a fresh workspace of a repository
+// that committed it starts with the directory present and `status` reporting `initialized:false`.
+// That must still run `init`, not `index` (which refuses: "CodeGraph not initialized").
+func TestWarmCodegraphIndexInitializesWhenNotInitializedDespiteAnExistingDirectory(t *testing.T) {
 	callLog := filepath.Join(t.TempDir(), "calls.log")
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, ".codegraph"), 0o700); err != nil {
@@ -260,10 +260,12 @@ esac
 	}
 }
 
-// TestWarmCodegraphIndexInitializesAnUntrackedCodegraphDirectoryAgainstTheRealCli proves the
-// same case against the real codegraph CLI (not a stub): `.codegraph/` holding only its own
-// generated `.gitignore`, with no database.
-func TestWarmCodegraphIndexInitializesAnUntrackedCodegraphDirectoryAgainstTheRealCli(t *testing.T) {
+// TestWarmCodegraphIndexInitializesWhenNotInitializedDespiteAnExistingDirectoryAgainstTheRealCli
+// proves the same case against the real codegraph CLI (not a stub): `.codegraph/` holding only
+// its own generated `.gitignore`, with no database. Devbox-only: the `daemon-go` CI job installs
+// no `codegraph`, so this skips there and a green CI run is never evidence for this case; run it
+// locally on a machine with the real CLI on PATH.
+func TestWarmCodegraphIndexInitializesWhenNotInitializedDespiteAnExistingDirectoryAgainstTheRealCli(t *testing.T) {
 	if _, err := exec.LookPath("codegraph"); err != nil {
 		t.Skip("no codegraph CLI on PATH")
 	}
@@ -376,32 +378,90 @@ esac
 
 // TestNextCodegraphStep table-tests the pure decision warmCodegraphIndex runs on: a parsed
 // status decides outright (its `initialized:false` always means init, even when `.codegraph/`
-// exists); dirExists is consulted only when status failed or didn't parse; and a live lock
-// always wins over an index repair.
+// exists), and dirExists is consulted only when status failed or didn't parse. Whether
+// `.codegraph/codegraph.lock` names a live process is checked separately by the caller, not by
+// this function (TestWarmCodegraphIndexSkipsRepairWhileABuildIsLive covers that).
 func TestNextCodegraphStep(t *testing.T) {
 	for _, tc := range []struct {
-		name                string
-		dirExists, lockLive bool
-		statusExitCode      int
-		statusStdout        string
-		want                codegraphStep
+		name           string
+		dirExists      bool
+		statusExitCode int
+		statusStdout   string
+		want           codegraphStep
 	}{
-		{"status valid, not initialized, no directory: init", false, false, 0, `{"initialized":false}`, codegraphStepInit},
-		{"status valid, not initialized, directory exists: init (untracked .codegraph)", true, false, 0, `{"initialized":false}`, codegraphStepInit},
-		{"status valid, complete: none", true, false, 0, `{"initialized":true,"index":{"state":"complete"}}`, codegraphStepNone},
-		{"status valid, complete, lock live: none (complete wins, lock irrelevant)", true, true, 0, `{"initialized":true,"index":{"state":"complete"}}`, codegraphStepNone},
-		{"status valid, partial, no live lock: index", true, false, 0, `{"initialized":true,"index":{"state":"indexing"}}`, codegraphStepIndex},
-		{"status valid, partial, live lock: none", true, true, 0, `{"initialized":true,"index":{"state":"indexing"}}`, codegraphStepNone},
-		{"status failed, directory exists, no live lock: index", true, false, 1, ``, codegraphStepIndex},
-		{"status failed, directory exists, live lock: none", true, true, 1, ``, codegraphStepNone},
-		{"status failed, no directory: init", false, false, 1, ``, codegraphStepInit},
-		{"status unparseable, directory exists: index", true, false, 0, `not json`, codegraphStepIndex},
-		{"status unparseable, no directory: init", false, false, 0, `not json`, codegraphStepInit},
+		{"status valid, not initialized, no directory: init", false, 0, `{"initialized":false}`, codegraphStepInit},
+		{"status valid, not initialized, directory exists: init (untracked .codegraph)", true, 0, `{"initialized":false}`, codegraphStepInit},
+		{"status valid, complete: none", true, 0, `{"initialized":true,"index":{"state":"complete"}}`, codegraphStepNone},
+		{"status valid, partial: index", true, 0, `{"initialized":true,"index":{"state":"indexing"}}`, codegraphStepIndex},
+		{"status failed, directory exists: index", true, 1, ``, codegraphStepIndex},
+		{"status failed, no directory: init", false, 1, ``, codegraphStepInit},
+		{"status unparseable, directory exists: index", true, 0, `not json`, codegraphStepIndex},
+		{"status unparseable, no directory: init", false, 0, `not json`, codegraphStepInit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := nextCodegraphStep(tc.dirExists, tc.lockLive, tc.statusExitCode, tc.statusStdout); got != tc.want {
-				t.Fatalf("nextCodegraphStep(%v, %v, %d, %q) = %v, want %v", tc.dirExists, tc.lockLive, tc.statusExitCode, tc.statusStdout, got, tc.want)
+			if got := nextCodegraphStep(tc.dirExists, tc.statusExitCode, tc.statusStdout); got != tc.want {
+				t.Fatalf("nextCodegraphStep(%v, %d, %q) = %v, want %v", tc.dirExists, tc.statusExitCode, tc.statusStdout, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWarmCodegraphIndexAcrossPodsRunsExactlyOneBuildWhenTwoPodsRace proves the cross-pod
+// exclusion the flock exists for: two concurrent calls to warmCodegraphIndexAcrossPods for the
+// same workspace directory — the inner function, bypassing WarmCodegraphIndexInPodBackground's
+// own in-process `warming` map entirely, exactly as two sibling pods of one issue tree would
+// (each its own process, each with its own empty dedup map) — run `codegraph init` exactly
+// once; the second's flock attempt fails while the first still holds it, and it returns without
+// calling codegraph at all.
+func TestWarmCodegraphIndexAcrossPodsRunsExactlyOneBuildWhenTwoPodsRace(t *testing.T) {
+	callLog := filepath.Join(t.TempDir(), "calls.log")
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	release := filepath.Join(binDir, "release")
+	script := `#!/bin/sh
+printf '%s\n' "$1" >> '` + callLog + `'
+case "$1" in
+status) echo '{"initialized":false}' ;;
+init) while [ ! -f '` + release + `' ]; do sleep 0.05; done ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codegraph"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for range 2 {
+		go func() {
+			defer wg.Done()
+			warmCodegraphIndexAcrossPods(context.Background(), dir)
+		}()
+	}
+	// Lets the one that wins the flock reach its blocking `init` before releasing it: the
+	// loser's whole path (open, fail the non-blocking flock, log, return) is near-instant next
+	// to that, so by the time status has been logged once, the loser has already tried and
+	// failed.
+	waitFor(t, func() bool {
+		calls, _ := os.ReadFile(callLog)
+		return strings.Contains(string(calls), "status")
+	}, "the winning pod's codegraph status to run")
+	time.Sleep(200 * time.Millisecond)
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
+	calls, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read codegraph call log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if got := strings.Count(string(calls), "init\n"); got != 1 {
+		t.Fatalf("codegraph init ran %d times across two racing pods, want exactly 1; calls: %q", got, lines)
+	}
+	if got := strings.Count(string(calls), "status\n"); got != 1 {
+		t.Fatalf("codegraph status ran %d times across two racing pods, want exactly 1 (the loser's flock attempt must fail before it ever calls codegraph); calls: %q", got, lines)
 	}
 }
