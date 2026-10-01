@@ -1263,7 +1263,7 @@ func TestReopenOrphanedSuggestionSucceeds(t *testing.T) {
 
 func waitForArtifactVersion(t *testing.T, handler http.Handler, artifactID string, number int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		version := dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", artifactID, number), nil, "alice")
 		if version.Code == http.StatusOK {

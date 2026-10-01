@@ -69,6 +69,11 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# A TERM once whoever reads stderr has gone would otherwise end this script with the manifest still
+# rewritten: bash writes its Terminated notice for the interrupted pack to the dead stderr, and dies
+# of SIGPIPE before the EXIT trap puts the manifest back. The grant rig calls this with no
+# transcript tee to keep its stderr open.
+trap '' PIPE
 
 # Runs in one checkout take turns at the manifest: a run that started while another had it
 # rewritten would save that rewrite and put it back. The lock is on the manifest itself, which is
