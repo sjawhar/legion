@@ -176,6 +176,46 @@ func (r *Rig) UI(t *testing.T, method, path string, body any) (int, []byte) {
 	return r.Req(t, method, path, map[string]string{"Authorization": "Bearer " + uiToken}, body)
 }
 
+// DecideMachineLogin decides the pending machine login whose confirmation code is code, as the
+// operator does on Dispatch's machine-login page: it looks the login up by that code, then approves
+// or denies it naming Operator as the approver. It returns the launcher credential an approval
+// minted, "" for a denial, and fails t on any other answer.
+func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (credentialID string) {
+	t.Helper()
+	status, body := r.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
+	}
+	var looked struct {
+		RecordID string `json:"record_id"`
+		State    string `json:"state"`
+	}
+	if err := json.Unmarshal(body, &looked); err != nil || looked.State != "pending" || looked.RecordID == "" {
+		t.Fatalf("POST /v1/machine-logins/lookup answered %s (%v), want a pending record", body, err)
+	}
+	action, want := "deny", "denied"
+	if approve {
+		action, want = "approve", "approved"
+	}
+	status, body = r.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/"+action,
+		map[string]any{"approver": r.Operator, "code": code})
+	if status != http.StatusOK {
+		t.Fatalf("%s machine login = %d: %s", action, status, body)
+	}
+	var decided struct {
+		State        string  `json:"state"`
+		CredentialID *string `json:"credential_id"`
+	}
+	if err := json.Unmarshal(body, &decided); err != nil || decided.State != want ||
+		approve != (decided.CredentialID != nil && *decided.CredentialID != "") {
+		t.Fatalf("%s machine login answered %s (%v), want state %s and a credential id only for an approval", action, body, err, want)
+	}
+	if decided.CredentialID == nil {
+		return ""
+	}
+	return *decided.CredentialID
+}
+
 // MintPodToken mints a projected service-account token bound to podUID — the shape
 // enroll.K8sPodVerifier.Verify reads — signed by this Rig's own local OIDC issuer, which the
 // Rig's enroll.Service trusts as its PodVerifier (wired in NewRig). Mirrors

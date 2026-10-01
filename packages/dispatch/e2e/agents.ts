@@ -129,9 +129,10 @@ export async function getUnsubscribeCalls(): Promise<{ session_id: string; topic
 // with Dispatch activity of its own, so both are listed rows rather than folded into `Inactive` or
 // `No Dispatch activity`.
 // The Planner's open ask waits on the viewer, which puts it above the Reviewer. Neither carries a
-// `last_seen`, so the fake Envoy stamps each seed when it is made: this module is evaluated once
-// per Playwright worker, at the first spec that imports it, and a time computed here would age with
-// every spec the worker runs after that, until the sessions fold under `Inactive`.
+// `last_seen`: the fake Envoy answers every read of a session seeded without one with the current
+// time, so a shared seed never ages into Inactive. A time computed here would: this module is
+// evaluated once per Playwright worker, at the first spec that imports it, and the time would age
+// with every spec the worker runs after that, until the sessions fold under `Inactive`.
 export const plannerSession: FakeSession = {
   capabilities: ["aside", "btw"],
   dir: "/srv/planner",

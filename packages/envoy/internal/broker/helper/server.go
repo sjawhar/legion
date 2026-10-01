@@ -320,12 +320,14 @@ func (s *Server) login(ctx context.Context) Response {
 	return Response{OK: true, Code: code, LoginState: s.Broker.LoginStatus().State}
 }
 
-// loginStatus reports the current (or most recently settled) machine login; an empty
-// LoginState means none has ever run, and LoginRefused marks an "expired" that is a credential
-// the broker refused rather than a login nobody approved.
+// loginStatus reports the most recent machine login, current or settled, and whether the helper
+// holds a launcher credential; an empty LoginState means none has ever run. CredentialHeld stays
+// true through a re-login that is denied, expires or is pending while an earlier login's
+// credential is held, and LoginRefused marks a credential the broker refused rather than a login
+// nobody approved.
 func (s *Server) loginStatus() Response {
 	ls := s.Broker.LoginStatus()
-	return Response{OK: true, Code: ls.Code, LoginState: ls.State, LoginRefused: ls.Refused}
+	return Response{OK: true, Code: ls.Code, LoginState: ls.State, CredentialHeld: ls.CredentialHeld, LoginRefused: ls.Refused}
 }
 
 // enrollBox registers a box's key as kind box — a pass-through broker call requiring no

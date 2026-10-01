@@ -473,7 +473,8 @@ persisted subscriptions use `setInterests`, all from `e2e/agents.ts`. It also ho
 page the keyboard specs share: `seedAgents` (the Planner and Reviewer sessions, both listed, and two
 open issues for the picker) and `openAgents`, which waits for the page's heading before a key is
 pressed, since the keymap binds only once sign-in resolves. A session a shared helper seeds, as
-these two are, carries no `last_seen`, so the fake stamps one when the seed is made. A Playwright
+these two are, carries no `last_seen`, so the fake answers every read of it with the current time
+and it never ages into `Inactive`, however long the harness runs. A Playwright
 worker evaluates a helper module once, at the first spec that imports it, so a time computed at
 the helper's module scope ages with every spec the worker runs after that, until the Agents page
 folds the session under `Inactive` at 10 minutes. A spec's own module scope is evaluated when the
@@ -484,6 +485,15 @@ navigation, so a copy-button test asserts the written value rather than only the
 (`pressFinger` returns a finger to move and lift; `touchDrag`, `touchHold` and `centerOf` are the
 common shapes): `page.mouse` on a touch context still emits mouse events, which never reach
 dnd-kit's TouchSensor, so the board's long-press, tap and swipe rows on the `iphone` project use it.
+
+`e2e/workspace.ts` seeds one realistic workspace through the API — projects, issues across
+statuses, open, answered, snoozed and retracted asks, a spec decision block, a project document
+with an ask, a BTW mention answered by its session, a direct message and a broadcast whose
+recipient order is not alphabetical, from five sessions of which one has no Dispatch activity and
+one is twenty minutes stale — and `e2e/workspace.e2e.ts` asserts every human-only surface it fills
+(the Inbox's Mine view with its Later band, `/agents` with both folds, the broadcast page, an
+issue's Conversation). `seedWorkspace()` expects an empty database and returns the ids it made;
+it waits for the spec's decision block to be indexed, so `inboxRows` is exact when it resolves.
 
 `e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
 (`POST /api/v1/artifacts/_test/quiesce`, mounted by `DISPATCH_TEST_HOOKS=1`), which closes every

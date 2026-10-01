@@ -34,7 +34,6 @@ import type {
   IssueRead,
   IssueReferences,
   IssueRouteStatus,
-  IssueSummary,
   IssueSummaryPage,
   Message,
   MessageRead,
@@ -109,6 +108,44 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 }
+
+/**
+ * Why `answer` is not the page `listIssuePage` asked for, and whether asking again can change
+ * that; undefined when it is one. A JSON answer that is not a page is Dispatch's own and comes back
+ * the same; text (`#response` returns a body it could not read as JSON as its text) looks like a
+ * proxy or gateway in the way, which a retry can get past.
+ */
+function whyNotAPage(answer: unknown): string | undefined {
+  if (typeof answer === "string") {
+    return (
+      "text that is not a JSON page, which looks like a proxy or gateway page rather than " +
+      "Dispatch's own answer, so a retry may succeed."
+    );
+  }
+  let what: string;
+  if (Array.isArray(answer)) {
+    what =
+      `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` +
+      "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer as Partial<Record<keyof IssueSummaryPage, unknown>>;
+    const lacking = [
+      ...(Array.isArray(fields.issues) ? [] : ["an issues array"]),
+      ...(["total", "limit", "offset"] as const)
+        .filter((name) => typeof fields[name] !== "number")
+        .map((name) => `a numeric ${name}`),
+    ];
+    if (lacking.length === 0) return undefined;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return (
+    `${what}. Retrying will not help: the same request gets the same answer until that ` +
+    "Dispatch is upgraded or fixed."
+  );
+}
+
 /** JSON HTTP client for Dispatch's native-tool API. */
 export class DispatchClient {
   readonly #baseUrl: string;
@@ -135,48 +172,24 @@ export class DispatchClient {
   }
 
   /**
-   * One page of `GET /api/v1/issues?limit=&offset=`. This negotiates the answer's version rather
-   * than falling back: the hosts release this client when it merges while Dispatch deploys on its
-   * own schedule, so a client can meet a server older than itself. A Dispatch that pages answers
-   * `IssueSummaryPage`; one that predates paging ignores both parameters and answers every
-   * matching issue as an array, which is paged here as the server would have. Any other answer,
-   * a page missing one of its four fields included, is refused.
+   * One page of `GET /api/v1/issues?limit=&offset=`, used as Dispatch served it: `IssueSummaryPage`
+   * (sjawhar/legion#1612). Any other answer is refused, naming the request sent, what arrived and
+   * whether a retry can help; a bare array answered to this paged request means a Dispatch older
+   * than that change or a regression of it.
    */
   async listIssuePage(
     options: ListIssuesOptions,
     page: IssuePageRequest
   ): Promise<IssueSummaryPage> {
-    const answer: unknown = await this.#json("GET", ["api", "v1", "issues"], undefined, {
-      ...options,
-      limit: page.limit,
-      offset: page.offset,
-    });
-    // The array arm serves Dispatch deploys that predate #1612 (LEGION-406). Remove it once every
-    // Dispatch the hosts reach runs that change, the production deploy included: from then on an
-    // array answer to a paged request is a rollback or this bug returning, and is refused below.
-    if (Array.isArray(answer)) {
-      const issues = answer as IssueSummary[];
-      return {
-        issues: issues.slice(page.offset, page.offset + page.limit),
-        total: issues.length,
-        limit: page.limit,
-        offset: page.offset,
-      };
-    }
-    const served = answer as Partial<IssueSummaryPage> | null;
-    if (
-      typeof served !== "object" ||
-      served === null ||
-      !Array.isArray(served.issues) ||
-      typeof served.total !== "number" ||
-      typeof served.limit !== "number" ||
-      typeof served.offset !== "number"
-    ) {
-      throw new Error(
-        "GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues"
-      );
-    }
-    return served as IssueSummaryPage;
+    const path = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer: unknown = await this.#json("GET", path, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined) return answer as IssueSummaryPage;
+    throw new Error(
+      `GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` +
+        refusal
+    );
   }
 
   async listProjectArtifacts(project: string, unlinked = false): Promise<Artifact[]> {

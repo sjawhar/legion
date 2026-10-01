@@ -1,6 +1,7 @@
 import type { EditArtifactInput } from "@legion/contracts";
 import type {
   Actor,
+  Agent,
   AnswerAskInput,
   ArchitectureSource,
   ArchitectureTree,
@@ -11,6 +12,7 @@ import type {
   Ask,
   AskFollower,
   AskRead,
+  AskSnooze,
   BroadcastCreated,
   BroadcastRead,
   BroadcastSummary,
@@ -158,6 +160,26 @@ export function listIssues(project: string, options: ApiOptions = {}): Promise<I
 /** The viewer's Inbox rows, as the SPA's own `["inbox"]` query reads them. */
 export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
   return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
+}
+
+/** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until
+ *  `snoozedUntil` (RFC 3339, in the future). */
+export function snoozeAsk(
+  id: string,
+  snoozedUntil: string,
+  options: ApiOptions = {}
+): Promise<AskSnooze> {
+  return request<AskSnooze>(
+    `/api/v1/me/asks/${encodeURIComponent(id)}/snooze`,
+    "PUT",
+    { snoozed_until: snoozedUntil },
+    options
+  );
+}
+
+/** The Agents page's rows: every live Envoy session merged with its Dispatch activity. */
+export function listAgents(options: ApiOptions = {}): Promise<Agent[]> {
+  return request<Agent[]>("/api/v1/agents", "GET", undefined, options);
 }
 
 export function createIssue(
@@ -447,11 +469,18 @@ export function createAgentMessage(
   );
 }
 
+/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
+ *  the caller names its own, as a row that replays a request the page made does. */
 export function createBroadcast(
-  input: CreateBroadcastInput,
+  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
+  return request<BroadcastCreated>(
+    "/api/v1/broadcasts",
+    "POST",
+    { idempotency_key: crypto.randomUUID(), ...input },
+    options
+  );
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {

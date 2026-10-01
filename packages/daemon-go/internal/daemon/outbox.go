@@ -74,8 +74,15 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
 		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
+		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
+		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
-			return workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
+			provisioned, err := workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
+			if err != nil {
+				return workspace.Workspace{}, err
+			}
+			workspace.WarmCodegraphIndexInBackground(provisioned.Dir)
+			return provisioned, nil
 		},
 		remove: func(ctx context.Context, working workspace.Workspace) error {
 			return workspace.Remove(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
@@ -604,15 +611,13 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if err != nil {
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
-	provisioned, err := r.provision(ctx, workspace.Request{
+	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: credentialHelper(r.stateDir),
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
-	workspace.WarmCodegraphIndexInBackground(provisioned.Dir)
 	return nil
 }
 

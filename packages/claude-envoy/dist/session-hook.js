@@ -15174,6 +15174,27 @@ function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 }
+function whyNotAPage(answer) {
+  if (typeof answer === "string") {
+    return "text that is not a JSON page, which looks like a proxy or gateway page rather than " + "Dispatch's own answer, so a retry may succeed.";
+  }
+  let what;
+  if (Array.isArray(answer)) {
+    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer;
+    const lacking = [
+      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
+      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
+    ];
+    if (lacking.length === 0)
+      return;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
 
 class DispatchClient {
   token;
@@ -15194,25 +15215,13 @@ class DispatchClient {
     return this.#resolveIssue(issueReference);
   }
   async listIssuePage(options, page) {
-    const answer = await this.#json("GET", ["api", "v1", "issues"], undefined, {
-      ...options,
-      limit: page.limit,
-      offset: page.offset
-    });
-    if (Array.isArray(answer)) {
-      const issues = answer;
-      return {
-        issues: issues.slice(page.offset, page.offset + page.limit),
-        total: issues.length,
-        limit: page.limit,
-        offset: page.offset
-      };
-    }
-    const served = answer;
-    if (typeof served !== "object" || served === null || !Array.isArray(served.issues) || typeof served.total !== "number" || typeof served.limit !== "number" || typeof served.offset !== "number") {
-      throw new Error("GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues");
-    }
-    return served;
+    const path2 = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer = await this.#json("GET", path2, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined)
+      return answer;
+    throw new Error(`GET ${this.#url(path2, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
   }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);

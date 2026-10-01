@@ -13,9 +13,10 @@ import { createBroadcast, getBroadcast, listBroadcasts, replyToMessageDelivery }
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// No `last_seen`: the fixture stamps one at seeding time. A literal computed when this module
-// is imported ages with the whole suite, and a session ten minutes "old" folds under Inactive
-// rather than under the fold this spec opens - which is how long a full run takes to reach here.
+// No `last_seen`: the fixture answers every read of the session with the current time. A literal
+// computed when this module is imported ages with the whole suite, and a session ten minutes "old"
+// folds under Inactive rather than under the fold this spec opens - which is how long a full run
+// takes to reach here.
 const planner: FakeSession = {
   capabilities: ["aside", "btw", "steer"],
   dir: "/workspaces/planner",

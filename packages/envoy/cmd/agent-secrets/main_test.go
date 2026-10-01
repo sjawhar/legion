@@ -864,36 +864,54 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued pins login-status's read-only,
-// single-shot contract (AGENTC-834): it prints the bare state on stdout and its exit code is a
-// liveness probe — 0 only for "issued", 1 for every other terminal/pending state and for "none"
-// when login was never run (empty LoginState) — with a single helper call, never login's
-// mint-a-fresh-key-and-poll side effect. Every state with no credential and no login in flight
-// (never logged in, denied, or expired, which is also what a credential the broker rejected
-// becomes) says on stderr to run the login again.
-func TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued(t *testing.T) {
+// TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld pins login-status's read-only,
+// single-shot contract (AGENTC-834): it prints a bare state on stdout and its exit code is a
+// liveness probe — 0, printing "issued", while the helper holds a launcher credential, and 1 for
+// every login state with none, "none" when login was never run (empty LoginState) — with a single
+// helper call, never login's mint-a-fresh-key-and-poll side effect. A re-login still pending or
+// expired unapproved beside a held credential prints "issued" and names that login on stderr; a
+// helper from before credential_held sends "issued" alone exactly while it holds one. Every state
+// with no credential and no login in flight (never logged in, denied, or expired, which is also
+// what a credential the broker rejected becomes) says on stderr to run the login again, and a
+// login in flight outranks a refused credential.
+func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 	binary := buildAgentSecrets(t)
+	const held = "the helper still holds the launcher credential an earlier login issued"
 	for _, tc := range []struct {
-		state  string
+		name   string
+		resp   helper.Response
 		want   string
 		exit   int
 		remedy bool
+		notice string
 	}{
-		{"issued", "issued\n", 0, false},
-		{"pending", "pending\n", 1, false},
-		{"denied", "denied\n", 1, true},
-		{"expired", "expired\n", 1, true},
-		{"", "none\n", 1, true},
+		{name: "issued", resp: helper.Response{LoginState: "issued"}, want: "issued\n"},
+		{name: "pending", resp: helper.Response{LoginState: "pending"}, want: "pending\n", exit: 1},
+		{name: "denied", resp: helper.Response{LoginState: "denied"}, want: "denied\n", exit: 1, remedy: true},
+		{name: "expired", resp: helper.Response{LoginState: "expired"}, want: "expired\n", exit: 1, remedy: true},
+		{name: "none", resp: helper.Response{}, want: "none\n", exit: 1, remedy: true},
+		{name: "pending beside a refused credential", resp: helper.Response{LoginState: "pending", LoginRefused: true}, want: "pending\n", exit: 1},
+		{name: "pending beside a held credential", resp: helper.Response{LoginState: "pending", CredentialHeld: true}, want: "issued\n",
+			notice: "a machine login is waiting for approval (code KQ7M-X4PZ); " + held},
+		{name: "expired beside a held credential", resp: helper.Response{LoginState: "expired", CredentialHeld: true}, want: "issued\n",
+			notice: "the most recent machine login (code KQ7M-X4PZ) expired before anyone approved it; " + held},
 	} {
-		t.Run(tc.state, func(t *testing.T) {
-			sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{tc.state})
+		t.Run(tc.name, func(t *testing.T) {
+			tc.resp.OK, tc.resp.Code = true, "KQ7M-X4PZ"
+			sock, reqs := fakeHelper(t, tc.resp)
 			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
 				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
 			if exit != tc.exit || stdout != tc.want {
-				t.Fatalf("state %q: exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", tc.state, exit, stdout, tc.exit, tc.want, stderr)
+				t.Fatalf("exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", exit, stdout, tc.exit, tc.want, stderr)
 			}
 			if got := strings.Contains(stderr, "run: agent-secrets launcher login"); got != tc.remedy {
-				t.Fatalf("state %q: stderr = %q, want the login remedy: %v", tc.state, stderr, tc.remedy)
+				t.Fatalf("stderr = %q, want the login remedy: %v", stderr, tc.remedy)
+			}
+			if tc.notice != "" && stderr != "agent-secrets launcher login-status: "+tc.notice+"\n" {
+				t.Fatalf("stderr = %q, want %q", stderr, tc.notice)
+			}
+			if req := <-reqs; req.Op != "login-status" || len(reqs) != 0 {
+				t.Fatalf("helper calls: first %q, %d more; want one login-status", req.Op, len(reqs))
 			}
 		})
 	}
