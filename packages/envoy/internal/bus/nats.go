@@ -77,6 +77,10 @@ type Client struct {
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
+	// hookedConn is the connection the reconnect hooks last moved the state they keep onto, under
+	// mu; nil while a run since the last reconnect has not succeeded. The hooks are due while it is
+	// not Conn.
+	hookedConn *nats.Conn
 
 	// recovery state
 	recovering int32
@@ -301,6 +305,7 @@ func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client
 		}
 	}
 	c.Conn = nc
+	c.hookedConn = nc
 	c.js = js
 	return c, nil
 }
@@ -332,15 +337,14 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	}
 	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
 	// from it keeps working, so neither field is reassigned here.
-	if err := c.restoreSubscriptions(); err != nil {
-		if errors.Is(err, errStopped) {
-			// Stopped between the check above and the re-subscribe: same as that branch.
-			nc.Close()
-			return
-		}
-		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
-		go c.recover()
+	restoreErr := c.restoreSubscriptions()
+	if errors.Is(restoreErr, errStopped) {
+		// Stopped between the check above and the re-subscribe: same as that branch.
+		nc.Close()
 		return
+	}
+	if restoreErr != nil {
+		slog.Error("envoy nats resubscribe failed", slog.String("error", restoreErr.Error()))
 	}
 	// Drain stops the client before it takes the subscriptions to drain them, so a stop can land
 	// while restoreSubscriptions runs. The drain then owns the subscriptions and the connection, and
@@ -348,7 +352,10 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	if c.stopped() {
 		return
 	}
-	if err := c.runReconnectHooks(nc); err != nil {
+	// The hooks run whatever the restore returned: the state they move holds no subscription, and
+	// while a listener waits out the task that holds its durable, the durable's restore is refused
+	// by design while /v1 and the role lane already read that state.
+	if err := c.rewatch(nc); err != nil {
 		// A failure after the stop is the stop: a shutdown that began while a hook ran closed what
 		// the hook was reading through. recover reports that case the same way, with the error kept
 		// on the line in case a real failure coincided with the stop.
@@ -358,10 +365,15 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		}
 		slog.Error("envoy nats reconnect hook failed", slog.String("error", err.Error()))
 	}
+	if restoreErr != nil {
+		go c.recover()
+	}
 }
 
-// AddReconnectHook registers recovery for state that is attached to NATS but
-// not represented by Client subscriptions, such as KV watchers.
+// AddReconnectHook registers recovery for state that is attached to NATS but not represented by
+// Client subscriptions, such as KV watchers. The hooks run once at each reconnect in place and
+// once on each connection a recovery installs, whatever restoring the subscriptions returned; a
+// recovery runs them again only after a run on its connection failed.
 func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	if hook == nil {
 		return
@@ -369,6 +381,28 @@ func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	c.reconnectHooksMu.Lock()
 	c.reconnectHooks = append(c.reconnectHooks, hook)
 	c.reconnectHooksMu.Unlock()
+}
+
+// rewatch runs the reconnect hooks on conn and, once they all succeed, records conn as the
+// connection they moved state onto. Until then the hooks are due (hooksDue).
+func (c *Client) rewatch(conn *nats.Conn) error {
+	c.mu.Lock()
+	c.hookedConn = nil
+	c.mu.Unlock()
+	if err := c.runReconnectHooks(conn); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.hookedConn = conn
+	c.mu.Unlock()
+	return nil
+}
+
+// hooksDue reports whether the reconnect hooks have yet to move state onto the current connection.
+func (c *Client) hooksDue() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hookedConn != c.Conn
 }
 
 func (c *Client) runReconnectHooks(conn *nats.Conn) error {
@@ -579,7 +613,7 @@ func (c *Client) recover() {
 			slog.Info("envoy nats recovery cancelled")
 			return
 		}
-		if c.subscriptionsHealthy() {
+		if c.subscriptionsHealthy() && !c.hooksDue() {
 			slog.Info("envoy nats recovery: already healthy")
 			return
 		}
@@ -589,12 +623,15 @@ func (c *Client) recover() {
 		if err == nil {
 			failure = "envoy nats recovery resubscribe failed"
 			err = c.restoreSubscriptions()
-		}
-		if err == nil && !c.stopped() {
-			c.mu.Lock()
-			conn := c.Conn
-			c.mu.Unlock()
-			err = c.runReconnectHooks(conn)
+			// The hooks move onto a connection they have not reached whatever the restore returned,
+			// as onReconnect runs them, and once: a durable a listener waits out keeps the restore
+			// failing, attempt after attempt, while the hooks' state is already current.
+			if !c.stopped() && c.hooksDue() {
+				c.mu.Lock()
+				conn := c.Conn
+				c.mu.Unlock()
+				err = errors.Join(err, c.rewatch(conn))
+			}
 		}
 		// A failure after the stop is the stop: the dial it cancelled, a subscription the drain
 		// closed, a connection it refused to install. None of them is a recovery failure, but the

@@ -169,31 +169,7 @@ func TestACoreSubscriptionRecoversWhileTheJetStreamOneCannotBind(t *testing.T) {
 	defer client.Close()
 	publisher := testnats.Connect(t, uri)
 	defer publisher.Close()
-
-	const consumer = "held-elsewhere"
-	if _, err := client.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
-		Durable:        consumer,
-		DeliverSubject: natsgo.NewInbox(),
-		AckPolicy:      natsgo.AckExplicitPolicy,
-		FilterSubjects: bus.StreamSubjects(),
-	}); err != nil {
-		t.Fatalf("add the durable: %v", err)
-	}
-	holderConn := testnats.Connect(t, uri)
-	defer holderConn.Close()
-	holderJS, err := holderConn.JetStream()
-	if err != nil {
-		t.Fatalf("holder JetStream: %v", err)
-	}
-	if _, err := holderJS.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err != nil {
-		t.Fatalf("bind the durable as the other task: %v", err)
-	}
-	if err := holderConn.Flush(); err != nil {
-		t.Fatalf("flush the holder: %v", err)
-	}
-	if _, err := client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err == nil {
-		t.Fatal("bound a durable another connection holds")
-	}
+	waitOutHeldDurable(t, client, uri)
 
 	var received atomic.Int32
 	if _, err := client.SubscribeCore("notifications.role.held-durable", func(*natsgo.Msg) { received.Add(1) }); err != nil {
@@ -212,6 +188,92 @@ func TestACoreSubscriptionRecoversWhileTheJetStreamOneCannotBind(t *testing.T) {
 	})
 	if client.SubOK() {
 		t.Fatal("SubOK reports the durable bound while another connection holds it")
+	}
+}
+
+// The reconnect hooks re-point state no subscription holds, the listener's interest, session and
+// role stores among it, at the connection the bus now has. During the bind wait /v1 and the role
+// lane already read those stores while the durable's restore is refused by design, so the hooks
+// run once at each reconnect and on each replacement connection whatever that restore returned:
+// gated on it, a replaced connection left every store on the closed one until the durable bound.
+// Recovery keeps retrying the durable's restore, and does not run the hooks again for a connection
+// they already moved to.
+func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reconnect func(*bus.Client) error
+	}{
+		{name: "in place", reconnect: func(client *bus.Client) error { return client.Conn.ForceReconnect() }},
+		{name: "replaced connection", reconnect: func(client *bus.Client) error {
+			client.Conn.Close()
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, uri := startNATS(t)
+			client, err := bus.ConnectOwningStream([]string{uri})
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			defer client.Close()
+			waitOutHeldDurable(t, client, uri)
+			hooked := make(chan *natsgo.Conn, 8)
+			client.AddReconnectHook(func(conn *natsgo.Conn) error {
+				hooked <- conn
+				return nil
+			})
+
+			if err := tc.reconnect(client); err != nil {
+				t.Fatalf("reconnect: %v", err)
+			}
+			select {
+			case conn := <-hooked:
+				if conn != client.Conn {
+					t.Fatal("the reconnect hook ran on a connection the client no longer has")
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("the reconnect hook never ran while the durable refuses the bind")
+			}
+			if client.SubOK() {
+				t.Fatal("SubOK reports the durable bound while another connection holds it")
+			}
+			// Recovery's next attempts come 1 s and 3 s after its first.
+			time.Sleep(2500 * time.Millisecond)
+			if runs := len(hooked); runs != 0 {
+				t.Fatalf("the reconnect hook ran %d more time(s) for one reconnect", runs)
+			}
+		})
+	}
+}
+
+// waitOutHeldDurable puts client where a listener waiting out the task that holds its durable is:
+// a durable bound from another connection on uri, and client's own bind of it refused, which
+// leaves its JetStream subscription registered but unbound.
+func waitOutHeldDurable(t *testing.T, client *bus.Client, uri string) {
+	t.Helper()
+	const consumer = "held-elsewhere"
+	if _, err := client.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
+		Durable:        consumer,
+		DeliverSubject: natsgo.NewInbox(),
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		FilterSubjects: bus.StreamSubjects(),
+	}); err != nil {
+		t.Fatalf("add the durable: %v", err)
+	}
+	holderConn := testnats.Connect(t, uri)
+	t.Cleanup(holderConn.Close)
+	holderJS, err := holderConn.JetStream()
+	if err != nil {
+		t.Fatalf("holder JetStream: %v", err)
+	}
+	if _, err := holderJS.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err != nil {
+		t.Fatalf("bind the durable as the other task: %v", err)
+	}
+	if err := holderConn.Flush(); err != nil {
+		t.Fatalf("flush the holder: %v", err)
+	}
+	if _, err := client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err == nil {
+		t.Fatal("bound a durable another connection holds")
 	}
 }
 

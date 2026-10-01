@@ -14,10 +14,11 @@
 #
 # Verdict: a target fails when /v1/sessions answers anything but 200 at a tick where its /healthz
 # answered 200 (whatever its status, "starting" included), or when it never answers /v1/sessions 200
-# at all. A /v1 request that draws no HTTP answer at such a tick (the connection is refused or
-# dropped: the task stopped, or started, between the tick's two requests) is counted and shown, not
-# judged a refusal; a target that is gone or wedged for good still fails the second rule. A target
-# that never answers /healthz is unreached: named, not failed.
+# at all. A /v1 request that times out, or whose connection closes or resets without an answer,
+# counts as a non-200 answer. One that never connects right after /healthz answered (curl exit 7) is
+# counted and shown, not judged a refusal: a listener that stops closes its listening socket first,
+# so that is the task stopping between the tick's two requests. A target that never answers
+# /healthz is unreached: named, not failed.
 #
 # Exit codes:
 #   0 — at least one target answered /healthz, and every target that did passed.
@@ -58,7 +59,8 @@ Options:
 
 Output: one line per target per tick,
   ts target healthz_code healthz_status v1_code v1_error send_code dispatch_state
-tab-separated, "-" for a column that does not apply, then a summary.
+tab-separated, a code 000 when no whole answer came (v1_error then says why: no connection,
+timeout, empty reply, connection reset), "-" for a column that does not apply, then a summary.
 EOF
 }
 
@@ -179,6 +181,9 @@ if ((dispatching)); then
   printf 'Authorization: Bearer %s\n' "${dispatch_token//[$'\r\n\t ']/}" >"$dispatch_header"
 fi
 body_file="${work_dir}/body"
+exit_file="${work_dir}/exit"
+# never_connected is no_answer's reason for a request that found nothing listening.
+readonly never_connected="no connection"
 
 # field NAME prints the value of the last answer's "NAME" string field, or nothing. Every body the
 # probe reads is one line of JSON holding at most one such field.
@@ -186,16 +191,37 @@ field() {
   sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" "$body_file" | sed -n 1p
 }
 
-# request BASE TARGET METHOD PATH HEADER_FILE [BODY] prints the HTTP status, 000 when nothing
-# answered, and leaves the body in $body_file. TARGET is an address to connect to in place of
-# resolving the listener's host, or empty to resolve it as any client would.
+# request BASE TARGET METHOD PATH HEADER_FILE [BODY] prints the HTTP status of a request that drew a
+# whole answer, or 000 when it did not, and leaves the body in $body_file and curl's exit code in
+# $exit_file. TARGET is an address to connect to in place of resolving the listener's host, or empty
+# to resolve it as any client would.
 request() {
-  local base="$1" target="$2" method="$3" path="$4" header="$5" body="${6:-}"
+  local base="$1" target="$2" method="$3" path="$4" header="$5" body="${6:-}" code exit_code=0
   local args=(-sS -o "$body_file" -w '%{http_code}' --connect-timeout 1 --max-time 3 -X "$method" -H "@${header}")
   [[ -z "$target" ]] || args+=(--resolve "${host}:${port}:${target}")
   [[ -z "$body" ]] || args+=(-H 'Content-Type: application/json' --data "$body")
   : >"$body_file"
-  curl "${args[@]}" "${base}${path}" 2>/dev/null || true
+  code="$(curl "${args[@]}" "${base}${path}" 2>/dev/null)" || exit_code=$?
+  printf '%s\n' "$exit_code" >"$exit_file"
+  ((exit_code == 0)) || code=000
+  printf '%s' "$code"
+}
+
+# no_answer prints why the last request drew no whole answer, from curl's exit code: a name that
+# did not resolve (6), nothing listening at the address (7), a timeout (28: the 1 s connect or the
+# 3 s the probe allows a request), or a connection closed (52) or reset (56) without an answer,
+# which is what Go's net/http does when a handler panics.
+no_answer() {
+  local exit_code
+  exit_code="$(<"$exit_file")"
+  case "$exit_code" in
+    6) printf 'not resolved' ;;
+    7) printf '%s' "$never_connected" ;;
+    28) printf 'timeout' ;;
+    52) printf 'empty reply' ;;
+    56) printf 'connection reset' ;;
+    *) printf 'curl exit %s' "$exit_code" ;;
+  esac
 }
 
 # Per-target state, keyed by the target's label.
@@ -228,9 +254,11 @@ record() {
   [[ "$healthz_code" == 200 ]] || return 0
   count healthz_ok "$target"
   [[ "$v1_code" != 200 ]] || return 0
-  # Nothing answered /v1 right after /healthz did: the task stopped, or started, between the two
-  # requests. That is no answer from the listener, so it is shown but is not a refusal.
-  if [[ "$v1_code" == 000 ]]; then
+  # /v1 found nothing listening right after /healthz answered: a listener that stops closes its
+  # listening socket first, so the task stopped between the two requests. That is no answer from
+  # the listener, so it is shown but is not a refusal. Any other request that drew no answer reached
+  # a listener that failed it, and counts.
+  if [[ "$v1_code" == 000 && "$v1_error" == "$never_connected" ]]; then
     count unanswered "$target"
     return 0
   fi
@@ -278,7 +306,11 @@ probe_tick() {
     healthz_status="$(field status)"
     v1_code="$(request "$url" "$target" GET /v1/sessions "$envoy_header")"
     v1_error=""
-    [[ "$v1_code" == 200 ]] || v1_error="$(field error)"
+    if [[ "$v1_code" == 000 ]]; then
+      v1_error="$(no_answer)"
+    elif [[ "$v1_code" != 200 ]]; then
+      v1_error="$(field error)"
+    fi
     send_code="-"
     if [[ -n "$send_to" ]]; then
       send_code="$(request "$url" "$target" POST /v1/messages/send "$envoy_header" \
@@ -326,7 +358,7 @@ finish() {
       done
     fi
     if ((${unanswered[$target]:-0} > 0)); then
-      printf '  %d tick(s) where /v1 drew no answer right after /healthz answered 200 (the task stopped or started between the two requests; not a refusal)\n' \
+      printf '  %d tick(s) where /v1 found nothing listening right after /healthz answered 200 (the task stopped between the two requests; not a refusal)\n' \
         "${unanswered[$target]}"
     fi
   done

@@ -2074,15 +2074,22 @@ func durableHeldElsewhere(t *testing.T, uri, consumer string) (*bus.Client, *nat
 	if err != nil {
 		t.Fatalf("bind the durable as the old task: %v", err)
 	}
-	for deadline := time.Now().Add(5 * time.Second); ; {
+	waitFor(t, 5*time.Second, "the old task's durable to become push-bound", func() bool {
 		info, err := old.JS().ConsumerInfo(bus.Stream, consumer)
-		if err == nil && info.PushBound {
-			return old, holder
-		}
+		return err == nil && info.PushBound
+	})
+	return old, holder
+}
+
+// waitFor polls cond every 50 ms until it holds, and fails the test as waiting for desc once
+// timeout passes.
+func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(timeout); !cond(); {
 		if time.Now().After(deadline) {
-			t.Fatalf("the old task's durable never became push-bound: %v", err)
+			t.Fatalf("timed out waiting for %s", desc)
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -2233,6 +2240,56 @@ func TestBindListenerDurablePassesARefusalThrough(t *testing.T) {
 	}
 	if bind.attempts != 1 {
 		t.Fatalf("the bind made %d attempts at a refused durable, want 1", bind.attempts)
+	}
+}
+
+// A listener waiting out the task that holds its durable already serves /v1 and its role lane from
+// the interest, session and role stores, which its reconnect hook moves onto each new connection.
+// When nats.go gives up on the connection and the bus dials a replacement during that wait, the
+// durable's bind is still refused there, and the stores must move all the same: left on the closed
+// connection, every role lookup fails with "nats: connection closed", so the role lane reports
+// each role message it takes as delivery_failed until the durable binds.
+func TestTheStoresFollowAConnectionReplacedWhileTheDurableIsHeld(t *testing.T) {
+	uri := testnats.URL(t)
+	const (
+		machineID = "replaced-during-bind"
+		holderID  = "ses_replaced_during_bind"
+		role      = "replaced-during-bind-role"
+	)
+	consumer := "listener-" + machineID
+	durableHeldElsewhere(t, uri, consumer)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the replacement: %v", err)
+	}
+	t.Cleanup(client.Close)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the interest registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	caches := listenerCaches(registry, sessions, nil)
+	client.AddReconnectHook(func(conn *natsgo.Conn) error { return rewatchListenerKVWatchers(conn, caches) })
+	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, "envoy-listener-"+machineID); err != nil {
+		t.Fatalf("open the role lane: %v", err)
+	}
+	if _, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
+		t.Fatal("bound a durable the old task holds")
+	}
+	if _, err := registry.SetRole(holderID, machineID, role, false); err != nil {
+		t.Fatalf("claim %s: %v", role, err)
+	}
+
+	client.Conn.Close()
+	waitFor(t, 30*time.Second, "the role holder to be read on the replacement connection", func() bool {
+		holder, err := registry.RoleHolder(role)
+		return err == nil && holder == holderID
+	})
+	if client.SubOK() {
+		t.Fatal("SubOK reports the durable bound while the old task holds it")
 	}
 }
 

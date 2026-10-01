@@ -42,12 +42,13 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		holderID  = "ses_bind_window_holder"
 		role      = "bind-window-role"
 	)
-	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	uri := testnats.URL(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	holder := holdListenerDurable(t, client, machineID)
+	old, _ := durableHeldElsewhere(t, uri, "listener-"+machineID)
 
 	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), machineID,
 		"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET="+secret, "ENVOY_REVIEWER_APP_ID=1")
@@ -132,9 +133,8 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("/healthz while another task holds the durable: status %d %q, want 200 starting", status, answer)
 	}
 
-	if err := holder.Unsubscribe(); err != nil {
-		t.Fatalf("release the durable as the old task: %v", err)
-	}
+	// The old task exits, which releases its binding.
+	old.Close()
 	listener.waitHealthy(t)
 	listener.waitForOutput(t, "durable bound")
 }
@@ -164,21 +164,20 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	old.waitHealthy(t)
 	replacement := startListenerProcess(t, binary, uri, machineID)
 	replacement.waitForOutput(t, "subscribe failed, retrying")
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("old task:\n%s\nreplacement:\n%s", old.output.String(), replacement.output.String())
+		}
+	})
 
 	postListener(t, replacement.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
 	postListener(t, replacement.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, client, holderID)
 	// The old task learns the claim from the role and session buckets its caches follow.
-	for deadline := time.Now().Add(10 * time.Second); ; {
+	waitFor(t, 30*time.Second, "the old task to see "+holderID+" hold "+role, func() bool {
 		status, _ := callListener(t, old.port, http.MethodGet, "/v1/roles/"+role, "")
-		if status == http.StatusOK {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the old task never saw %s hold %s: GET /v1/roles/%s is %d", holderID, role, role, status)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return status == http.StatusOK
+	})
 
 	publish := func(body string) contracts.Envelope {
 		t.Helper()
@@ -204,7 +203,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 			}
 			keys[frame.DedupeKey]++
 		case <-time.After(10 * time.Second):
-			t.Fatalf("the holder received %d of %d role messages:\nold task:\n%s\nreplacement:\n%s", received, messages, old.output.String(), replacement.output.String())
+			t.Fatalf("the holder received %d of %d role messages", received, messages)
 		}
 	}
 	select {
@@ -245,12 +244,7 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 		}
 		return total
 	}
-	for deadline := time.Now().Add(10 * time.Second); handled() != 2; {
-		if time.Now().After(deadline) {
-			t.Fatalf("the two tasks handled the repeated key %d times, want 2:\nold task:\n%s\nreplacement:\n%s", handled(), old.output.String(), replacement.output.String())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waitFor(t, 10*time.Second, "the two tasks to handle the repeated key twice", func() bool { return handled() == 2 })
 	repeats := 0
 	for collecting := true; collecting; {
 		select {
@@ -273,26 +267,6 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	old.waitExit(t, "SIGTERM")
 	replacement.waitHealthy(t)
 	replacement.waitForOutput(t, "durable bound")
-}
-
-// holdListenerDurable creates machineID's durable as a listener creates it and binds it from
-// client, as the task a rolling deploy replaces holds it until that task stops. Unsubscribing the
-// returned subscription is that task letting go.
-func holdListenerDurable(t *testing.T, client *bus.Client, machineID string) *natsgo.Subscription {
-	t.Helper()
-	consumer := "listener-" + machineID
-	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
-	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
-	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
-	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
-	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
-		t.Fatalf("add the durable: %v", err)
-	}
-	holder, err := client.JS().Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
-	if err != nil {
-		t.Fatalf("bind the durable as the old task: %v", err)
-	}
-	return holder
 }
 
 // receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers

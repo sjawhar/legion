@@ -138,7 +138,8 @@ and let it run past the old task's exit. Options:
 
 Each tick prints one tab-separated line per target:
 `ts target healthz_code healthz_status v1_code v1_error send_code dispatch_state`
-(`000` when nothing answered, `-` for a column that does not apply; the Dispatch
+(`000` when no whole answer came, with `v1_error` naming why for `/v1`: `no connection`,
+`timeout`, `empty reply`, `connection reset`; `-` for a column that does not apply; the Dispatch
 attempt rides the name's line). On exit it prints, per target, when it was
 seen, how many ticks `/healthz` answered, and the `/v1` non-200 answers at the
 ticks `/healthz` answered 200, counted by `code:error` with the first and last
@@ -148,12 +149,16 @@ time, then the sends and Dispatch attempts by outcome, then the verdict.
 
 A target **fails** when `/v1/sessions` answers anything but 200 at any tick
 where its `/healthz` answered 200 (whatever its `status`, `starting` included),
-or when it never answers `/v1/sessions` 200 at all. A `/v1` request that draws no
-HTTP answer at such a tick (the connection is refused or dropped because the task
-stopped, or started, between the tick's two requests) is counted in the summary,
-not judged a refusal; a task that is gone or wedged for good still fails the
-second rule. A target that never answers `/healthz` is **unreached**: named in
-the summary, not failed (a stale A record during the handover is one).
+or when it never answers `/v1/sessions` 200 at all. A `/v1` request that times
+out (the probe allows 3 s, less than Dispatch's 5 s client timeout), or whose
+connection closes or resets without an answer (what Go's `net/http` does after
+a handler panics), is a non-200 answer: `000:timeout`, `000:empty reply`,
+`000:connection reset`. One that finds nothing listening right after `/healthz`
+answered (curl exit 7) is counted in the summary, not judged a refusal: a
+listener that stops closes its listening socket first, so the task stopped
+between the tick's two requests. A target that never answers `/healthz` is
+**unreached**: named in the summary, not failed (a stale A record during the
+handover is one).
 
 | Code | Meaning |
 |------|---------|

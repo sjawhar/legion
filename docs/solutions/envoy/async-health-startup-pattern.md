@@ -153,7 +153,7 @@ waiting" without triggering a container restart. Startup is not short. The NATS 
 10 attempts with a 5 s timeout each, 1 s apart (`internal/bus/nats.go`), so an unreachable NATS
 keeps the listener `starting` for about a minute before `log.Fatal`. The interest and session
 cache warm-ups are bounded at 30 s each. The durable's bind is polled every 2 s for up to 135 s
-(`bindListenerDurable`, `cmd/listener/main.go`), so a rolling deploy that waits for the old task's
+(`bindListenerDurable`, `cmd/listener/durable.go`), so a rolling deploy that waits for the old task's
 binding stays `starting` until the old task stops, while `/v1` and the webhooks already serve.
 
 Because a starting listener answers 200, a start that cannot succeed must end rather than wait:

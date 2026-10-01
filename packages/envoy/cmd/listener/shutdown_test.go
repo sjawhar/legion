@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"io"
 	"net"
 	"net/http"
 	"os/exec"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -116,14 +114,9 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 // NATS drains, nothing on the path is an error, and the durable the old task holds is left alone.
 func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T) {
 	const machineID = "sigterm-during-bind"
-	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
-	t.Cleanup(client.Close)
-	holder := holdListenerDurable(t, client, machineID)
+	old, holder := durableHeldElsewhere(t, testnats.URL(t), "listener-"+machineID)
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), machineID)
+	listener := startListenerProcess(t, buildListener(t), old.Conn.ConnectedUrl(), machineID)
 	listener.waitForOutput(t, "subscribe failed, retrying")
 	if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("SIGTERM: %v", err)
@@ -200,21 +193,8 @@ func buildListener(t *testing.T) string {
 // postListener calls a listener /v1 route as the test's shared-token caller and requires a 200.
 func postListener(t *testing.T, port int, path, body string) {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+strconv.Itoa(port)+path, strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("%s: %v", path, err)
-	}
-	request.Header.Set("Authorization", "Bearer "+listenerTestToken)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("%s: %v", path, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		var responseBody strings.Builder
-		_, _ = io.Copy(&responseBody, response.Body)
-		t.Fatalf("%s: status %d: %s", path, response.StatusCode, responseBody.String())
+	if status, answer := callListener(t, port, http.MethodPost, path, body); status != http.StatusOK {
+		t.Fatalf("%s: status %d: %s", path, status, answer)
 	}
 }
 

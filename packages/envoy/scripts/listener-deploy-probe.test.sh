@@ -50,13 +50,20 @@ chmod +x "${fake_bin_dir}/getent"
 # The fake task answers /healthz and GET /v1/sessions as its mode says: ok (both 200), starting
 # (main's shape while the durable is held: /healthz 200 "starting", /v1 503 "service starting" at
 # every tick), flap (/v1 200, then 503 at its second request, then 200), unauthorized (/v1 401),
-# exiting (/v1 200, 200, then the connection dropped with no answer, as a task that stops between a
-# tick's two requests leaves it), wedged (/v1 always dropped with no answer). Any /v1 request
-# without the probe's bearer is 401 too, so a pass also proves the bearer was sent.
+# exiting (/v1 200 twice, then the task stops right after it answers the next /healthz, so that
+# tick's /v1 finds nothing listening), unhealthy (/healthz 503 and /v1 503 at every tick). empty,
+# reset and slow fail /v1 at its first two requests and answer 200 at the third: empty closes the
+# connection without an answer and reset resets it, as Go's net/http does after a handler panics,
+# and slow answers after 4 s, past the probe's 3 s. Any /v1 request without the probe's bearer is
+# 401 too, so a pass also proves the bearer was sent.
 cat >"$server" <<'EOF'
 import http.server
 import json
+import os
+import socket
+import struct
 import sys
+import time
 
 address, port, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 v1_requests = 0
@@ -77,21 +84,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         global v1_requests
         if self.path == "/healthz":
-            return self.answer(200, {"status": "starting" if mode == "starting" else "healthy"})
+            if mode == "unhealthy":
+                return self.answer(503, {"status": "unhealthy"})
+            stopping = mode == "exiting" and v1_requests == 2
+            if stopping:
+                # The task stops as Go's server.Shutdown does: it stops listening first, then
+                # finishes the request in flight, and exits.
+                self.server.socket.shutdown(socket.SHUT_RDWR)
+            self.answer(200, {"status": "starting" if mode == "starting" else "healthy"})
+            if stopping:
+                self.connection.shutdown(socket.SHUT_WR)
+                os._exit(0)
+            return None
         if self.path == "/v1/sessions":
             v1_requests += 1
             if mode == "unauthorized" or self.headers.get("Authorization") != "Bearer probe-token":
                 return self.answer(401, {"error": "unauthorized"})
-            if mode == "wedged" or (mode == "exiting" and v1_requests == 3):
+            failing = v1_requests <= 2
+            if mode == "empty" and failing:
                 self.close_connection = True
                 return None
-            if mode == "starting" or (mode == "flap" and v1_requests == 2):
+            if mode == "reset" and failing:
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.connection.close()
+                self.close_connection = True
+                return None
+            if mode == "slow" and failing:
+                time.sleep(4)
+                try:
+                    return self.answer(200, [])
+                except OSError:
+                    # The probe gave up on the request and closed the connection.
+                    return None
+            if mode in ("starting", "unhealthy") or (mode == "flap" and v1_requests == 2):
                 return self.answer(503, {"error": "service starting"})
             return self.answer(200, [])
         return self.answer(404, {"error": "not found"})
 
 
-http.server.HTTPServer((address, port), Handler).serve_forever()
+http.server.ThreadingHTTPServer((address, port), Handler).serve_forever()
 EOF
 
 port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
@@ -187,20 +218,23 @@ expect_text 'target 127.0.0.2: unreached - ' "an unreached address"
 expect_text 'target 127.0.0.1: pass - ' "an unreached address"
 printf 'PASS: an address that never answers /healthz is named unreached and fails nothing (exit 0)\n'
 
-# (f) The old task stops between a tick's /healthz and its /v1: the /v1 request draws no answer.
-# That is the task leaving, not a refusal, and it served /v1 at every other tick.
+# (f) The old task stops between a tick's /healthz and its /v1: the /v1 request finds nothing
+# listening. That is the task leaving, not a refusal, and it served /v1 at every other tick.
 run_case exiting ok
 expect_status 0 "a task that stops mid-tick"
 expect_text 'target 127.0.0.1: pass - ' "a task that stops mid-tick"
-expect_text '  1 tick(s) where /v1 drew no answer right after /healthz answered 200' "a task that stops mid-tick"
+[[ "$(grep -c $'\t127.0.0.1\t200\thealthy\t000\tno connection\t-\t-$' "$output_file")" == 1 ]] ||
+  fail "a task that stops mid-tick: want one per-tick line for 127.0.0.1 with 200 healthy 000 no connection"
+expect_text '  1 tick(s) where /v1 found nothing listening right after /healthz answered 200' "a task that stops mid-tick"
 printf 'PASS: a task that stops between a tick'"'"'s two requests is shown, not failed (exit 0)\n'
 
-# (g) A task whose /v1 never answers at all while /healthz does still fails.
-run_case wedged ok
-expect_status 1 "a task whose /v1 never answers"
-expect_text 'target 127.0.0.1: fail - ' "a task whose /v1 never answers"
-expect_text '; /v1 never answered 200' "a task whose /v1 never answers"
-printf 'PASS: a task whose /v1 never answers while /healthz does fails the run (exit 1)\n'
+# (g) A task that answers /healthz at every tick but never serves /v1 fails, though no tick's
+# /healthz said 200.
+run_case unhealthy ok
+expect_status 1 "a task whose /v1 never answers 200"
+expect_text 'target 127.0.0.1: fail - ' "a task whose /v1 never answers 200"
+expect_text '; /v1 never answered 200' "a task whose /v1 never answers 200"
+printf 'PASS: a task whose /v1 never answers 200 while /healthz answers fails the run (exit 1)\n'
 
 # (h) Dispatch messages during the run: a fake Dispatch that takes only the request Dispatch's
 # POST /api/v1/issues/<KEY>/messages takes from a bearer (the session target, the mode, the bearer's
@@ -265,11 +299,35 @@ run_case ok ok --dispatch-url "http://127.0.0.1:${dispatch_port}" --dispatch-tok
 kill "$dispatch_pid" 2>/dev/null || true
 wait "$dispatch_pid" 2>/dev/null || true
 expect_status 0 "Dispatch messages during the run"
-[[ "$(grep -c $'\tprobe.test\t000\t-\t000\t-\t-\tfailed:service starting$' "$output_file")" == 1 ]] ||
+[[ "$(grep -c $'\tprobe.test\t000\t-\t000\tnot resolved\t-\tfailed:service starting$' "$output_file")" == 1 ]] ||
   fail "Dispatch messages during the run: want the first attempt's failed state on the name's line"
 expect_text 'failed:service starting=1' "Dispatch messages during the run"
 expect_text 'sent=1' "Dispatch messages during the run"
 printf 'PASS: each Dispatch message records its delivery attempt state, on ticks 1 and 3 at every 2\n'
+
+# (i) to (k): a task that serves /v1 by its last tick, after its first two /v1 requests drew no
+# answer at ticks its /healthz answered 200: a connection closed without an answer (Go's net/http
+# after a handler panic), a connection reset, and an answer later than the probe's 3 s. Each is a
+# request the listener failed, not a task that had stopped.
+run_case empty ok
+expect_status 1 "a task whose /v1 closes the connection without an answer"
+expect_text 'target 127.0.0.1: fail - ' "a task whose /v1 closes the connection without an answer"
+[[ "$(grep -c $'\t127.0.0.1\t200\thealthy\t000\tempty reply\t-\t-$' "$output_file")" == 2 ]] ||
+  fail "a task whose /v1 closes the connection without an answer: want two per-tick lines for 127.0.0.1 with 200 healthy 000 empty reply"
+expect_line '  2 x 000:empty reply' "a task whose /v1 closes the connection without an answer"
+printf 'PASS: a task whose /v1 closes the connection without an answer fails the run (exit 1)\n'
+
+run_case reset ok
+expect_status 1 "a task whose /v1 resets the connection"
+expect_text 'target 127.0.0.1: fail - ' "a task whose /v1 resets the connection"
+expect_line '  2 x 000:connection reset' "a task whose /v1 resets the connection"
+printf 'PASS: a task whose /v1 resets the connection fails the run (exit 1)\n'
+
+run_case slow ok
+expect_status 1 "a task whose /v1 answers after the probe's 3 s"
+expect_text 'target 127.0.0.1: fail - ' "a task whose /v1 answers after the probe's 3 s"
+expect_line '  2 x 000:timeout' "a task whose /v1 answers after the probe's 3 s"
+printf 'PASS: a task whose /v1 answers too late fails the run (exit 1)\n'
 
 stop_servers
 status=0
