@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -243,8 +244,10 @@ func TestAnAnchoredReadDecidesCancellationByItsOwnRequest(t *testing.T) {
 
 // A comment's or ask's anchor_block_error names a document error as the block route answers the
 // same error, since both reads place one block and writeHandlerError serves the route's error. A
-// failed room is DOC_SERVICE_UNAVAILABLE on both, whatever failed it: settlement's schema refusal
-// and a publish refused because the issue closed are causes another operation met, and the room
+// failed room is DOC_SERVICE_UNAVAILABLE on both, whatever failed it: both take that code before
+// any branch that reads a cause, so the cause another operation failed the room with - settlement's
+// schema refusal, its warm-up refused on a closed issue, or an error that would name an invalid
+// operation or a missing block on its own - never becomes this request's answer, and the room
 // serves the document again once it is evicted. A live tree outside the schema is DOC_SCHEMA on
 // both, and any other failure INTERNAL.
 func TestAnAnchoredReadNamesADocumentErrorAsTheBlockRouteDoes(t *testing.T) {
@@ -275,7 +278,9 @@ func TestAnAnchoredReadNamesADocumentErrorAsTheBlockRouteDoes(t *testing.T) {
 		code   string
 	}{
 		{"a room settlement's schema refusal failed", failedRoom(outsideSchema), http.StatusServiceUnavailable, codeDocServiceUnavailable},
-		{"a room a publish refused for a closed issue failed", failedRoom(fmt.Errorf("apply committed live document write: %w", docs.ErrIssueClosed)), http.StatusServiceUnavailable, codeDocServiceUnavailable},
+		{"a room whose settlement warm-up a closed issue refused failed", failedRoom(fmt.Errorf("document settlement failed 3 times: warm document for settlement: ygo/websocket: inject refused: %w", docs.ErrIssueClosed)), http.StatusServiceUnavailable, codeDocServiceUnavailable},
+		{"a room failed by an invalid operation's error", failedRoom(&docs.ErrInvalidOp{Field: "markdown", Reason: "a fragment the document cannot hold"}), http.StatusServiceUnavailable, codeDocServiceUnavailable},
+		{"a room failed by a missing block's error", failedRoom(fmt.Errorf("place block: %w", pmdoc.ErrTargetNotFound)), http.StatusServiceUnavailable, codeDocServiceUnavailable},
 		{"a live tree outside the schema", outsideSchema, http.StatusInternalServerError, codeDocSchema},
 		{"an unclassified failure", errors.New("unexpected document failure"), http.StatusInternalServerError, codeInternal},
 	} {
@@ -302,6 +307,30 @@ func TestAnAnchoredReadNamesADocumentErrorAsTheBlockRouteDoes(t *testing.T) {
 				if string(record["anchor_block_error"]) != `"`+test.code+`"` {
 					t.Fatalf("GET %s: anchor_block_error=%s, want %q, the block route's code", read.path, record["anchor_block_error"], test.code)
 				}
+			}
+		})
+	}
+}
+
+// A refusal of the caller's own write keeps its code when its reason wraps a schema refusal the
+// renderer gave, since writeHandlerError takes DOC_SCHEMA only after the refusals that name the
+// caller's input; the same refusal inside a failed room is that room's 503, which comes first.
+func TestAnAskBlockRefusalWhoseReasonIsASchemaRefusalStaysThatRefusal(t *testing.T) {
+	refusal := &docs.ErrInvalidAskBlock{Reason: fmt.Errorf("%w: ask \"ask-1\" renders outside the schema", docs.ErrDocSchema)}
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"the refusal itself", refusal, http.StatusBadRequest, "INVALID_ASK_BLOCK"},
+		{"a room the refusal failed", fmt.Errorf("%w: %w", docs.ErrServiceUnavailable, refusal), http.StatusServiceUnavailable, codeDocServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			(&server{}).writeHandlerError(recorder, test.err)
+			if recorder.Code != test.status || !strings.Contains(recorder.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("status=%d body=%s, want %d %s", recorder.Code, recorder.Body.String(), test.status, test.code)
 			}
 		})
 	}

@@ -258,20 +258,28 @@ const (
 )
 
 // documentErrorCode names an error a document operation returns when it could not read or serve
-// the document; ok is false for any other error. writeHandlerError and anchorBlock both name a
-// document error by it, so the two cannot name one error differently. A room or store that could
-// not serve the document is DOC_SERVICE_UNAVAILABLE whatever failed it: a failed room carries the
-// cause another operation failed it with (settlement's schema refusal, a publish refused because
-// the issue closed, a writer's cancelled commit), and the caller retries once the room is evicted,
-// when its own operation meets the document itself. A live tree outside the schema is DOC_SCHEMA.
-func documentErrorCode(err error) (code string, ok bool) {
+// the document, and is empty for any other error. writeHandlerError and anchorBlock both name a
+// document error by it, and both in one order, so the two cannot name one error differently.
+//
+// A room or store that could not serve the document is DOC_SERVICE_UNAVAILABLE whatever failed it,
+// so both take that code before any branch that reads the error's cause. A failed room carries the
+// error another operation failed it with - settlement's schema refusal, a settlement that failed
+// three times (its warm-up refused because the issue had closed, among others), a writer's commit
+// that failed or its client cancelled, a store write or load that failed - and that error says
+// nothing of this request: the caller retries once the room is evicted, and its retry meets the
+// document itself.
+//
+// A live tree outside the schema is DOC_SCHEMA, which both take only after the branches that name
+// the caller's own input or a block the document does not hold, so a refusal whose reason the
+// renderer gave (an ask block that cannot render) stays that refusal.
+func documentErrorCode(err error) string {
 	switch {
 	case errors.Is(err, docs.ErrServiceUnavailable):
-		return codeDocServiceUnavailable, true
+		return codeDocServiceUnavailable
 	case errors.Is(err, docs.ErrDocSchema):
-		return codeDocSchema, true
+		return codeDocSchema
 	}
-	return "", false
+	return ""
 }
 
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
@@ -282,6 +290,11 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		if apiErr.status == http.StatusInternalServerError {
 			slog.Error("dispatch: API handler failed", "code", apiErr.code, "error", err)
 		}
+		return
+	}
+	documentCode := documentErrorCode(err)
+	if documentCode == codeDocServiceUnavailable {
+		writeError(w, documentCode, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
 		return
 	}
 	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
@@ -381,12 +394,8 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
 		return
 	}
-	if code, ok := documentErrorCode(err); ok {
-		if code == codeDocServiceUnavailable {
-			writeError(w, code, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
-			return
-		}
-		writeError(w, code, http.StatusInternalServerError, err.Error())
+	if documentCode == codeDocSchema {
+		writeError(w, documentCode, http.StatusInternalServerError, err.Error())
 		slog.Error("dispatch: API document outside Proof schema", "error", err)
 		return
 	}

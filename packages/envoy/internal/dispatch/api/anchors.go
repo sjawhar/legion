@@ -112,28 +112,31 @@ func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner,
 // ask reads: no position for no anchor, an anchor naming no block, or a block the live document no
 // longer holds (a deleted row's cell). The position is one derived field of the read, so a
 // document it cannot read leaves the read standing: no position, and an AnchorBlockError naming
-// the error as writeHandlerError names a document error (documentErrorCode), or INTERNAL, as it
-// answers an unclassified failure, logged at WARN. Nor does it wait for a failed room's recovery
-// (docs.WithoutRecoveryWait), and a failed room is DOC_SERVICE_UNAVAILABLE whatever failed it: this
-// read never renders, so a settlement's schema refusal says nothing of whether it can place the
-// block once the room is evicted. Only a request that has gone away fails the read, and the
-// request's own context says so: a failed room's cause can carry another request's cancellation
-// (a writer whose client went away during its commit), which says nothing of this one.
+// the error as writeHandlerError names a document error (documentErrorCode, in its order), or
+// INTERNAL, as it answers an unclassified failure, logged at WARN. Nor does it wait for a failed
+// room's recovery (docs.WithoutRecoveryWait), and a failed room is DOC_SERVICE_UNAVAILABLE whatever
+// failed it, ahead of a missing block: the room's cause is another operation's, and this read
+// never renders, so it says nothing of whether the block can be placed once the room is evicted.
+// Only a request that has gone away fails the read, and the request's own context says so: a
+// failed room's cause can carry another request's cancellation (a writer whose client went away
+// during its commit), which says nothing of this one.
 func (s *server) anchorBlock(ctx context.Context, anchor *model.Anchor) (model.AnchorPosition, error) {
 	if anchor == nil || anchor.BlockID == nil || *anchor.BlockID == "" {
 		return model.AnchorPosition{}, nil
 	}
 	path, err := s.deps.Docs.BlockPath(docs.WithoutRecoveryWait(ctx), anchor.ArtifactID, *anchor.BlockID)
-	switch {
-	case err == nil:
+	if err == nil {
 		return model.AnchorPosition{AnchorBlock: &path}, nil
-	case errors.Is(err, pmdoc.ErrTargetNotFound):
-		return model.AnchorPosition{}, nil
+	}
+	code := documentErrorCode(err)
+	switch {
 	case ctx.Err() != nil:
 		return model.AnchorPosition{}, ctx.Err()
-	}
-	code, ok := documentErrorCode(err)
-	if !ok {
+	case code == codeDocServiceUnavailable:
+	case errors.Is(err, pmdoc.ErrTargetNotFound):
+		return model.AnchorPosition{}, nil
+	case code == codeDocSchema:
+	default:
 		code = codeInternal
 	}
 	slog.Warn("dispatch: answer a comment or ask read without its anchor's block position",

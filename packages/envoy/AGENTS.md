@@ -196,16 +196,20 @@ time and never stored or carried on lists and events; a block the live document 
 leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
 of those reads, so a document they cannot read does not fail them: the read answers 200 without
 `anchor_block` and with `anchor_block_error`, logged at WARN. `api.documentErrorCode` names that
-error for the read and for `writeHandlerError` alike, so `anchor_block_error` is the code the
-block route answers the same error with: `DOC_SERVICE_UNAVAILABLE` for a room or store that
-could not serve the document, whatever failed the room (a failed room carries its cause, which
-can be settlement's schema refusal or a publish refused because the issue closed, and the read
-never renders), `DOC_SCHEMA` for a live tree outside the schema, and `INTERNAL`, as
-`writeHandlerError` answers, for anything else. Only a request that has gone away fails, decided
-by that request's own context rather than the error, since a room a writer's cancelled commit
-failed carries that writer's `context.Canceled` in its cause. Nor does that read wait for a
-failed room's recovery (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once,
-where `GET /text`, `GET /blocks` and the block route wait.
+error for the read and for `writeHandlerError` alike, and both take its codes in one order, so
+`anchor_block_error` is the code the block route answers the same error with.
+`DOC_SERVICE_UNAVAILABLE` is a room or store that could not serve the document, taken before any
+cause the error carries: a failed room carries the error another operation failed it with
+(settlement's schema refusal, a settlement that failed three times - its warm-up refused because
+the issue had closed, among others - a writer's failed or cancelled commit, a failed store write
+or load), which says nothing of this request. `DOC_SCHEMA` is a live tree outside the schema,
+taken after the refusals that name the caller's own input or a missing block, so an ask block the
+renderer refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as
+`writeHandlerError` answers it. Only a request that has gone away fails, decided by that request's
+own context rather than the error, since a room a writer's cancelled commit failed carries that
+writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
+(`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
+`GET /blocks` and the block route wait.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
