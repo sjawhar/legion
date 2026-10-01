@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Agent, BroadcastRead, MessageDelivery } from "../../api/types";
+import type { Agent, BroadcastExclusion, BroadcastRead, MessageDelivery } from "../../api/types";
 
 import { BroadcastPage } from "./BroadcastPage";
 
@@ -64,14 +64,16 @@ function broadcast(deliveries: MessageDelivery[]): BroadcastRead {
   };
 }
 
-function renderBroadcast(read: BroadcastRead) {
+function renderBroadcast(read: BroadcastRead, state?: { excluded: readonly BroadcastExclusion[] }) {
   const getBroadcast = spyOn(api, "getBroadcast").mockResolvedValue(read);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue(agents);
   const createMessageDelivery = spyOn(api, "createMessageDelivery").mockResolvedValue(
     attempt({ attempt: 2, state: "sent" })
   );
   const view = render(
-    <MemoryRouter initialEntries={["/agents/broadcasts/broadcast-1"]}>
+    <MemoryRouter
+      initialEntries={[{ pathname: "/agents/broadcasts/broadcast-1", state }]}
+    >
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
@@ -91,6 +93,31 @@ function renderBroadcast(read: BroadcastRead) {
     view,
   };
 }
+
+test("a broadcast page keeps the server exclusion reason as written", async () => {
+  const serverExcluded = [
+    {
+      reason: "does not advertise btw",
+      session_id: "reviewer-session",
+      title: "Reviewer",
+    },
+  ] satisfies BroadcastExclusion[];
+  const page = renderBroadcast(broadcast([attempt({ state: "sent" })]), {
+    excluded: serverExcluded,
+  });
+
+  try {
+    expect(
+      await screen.findByText(
+        (_, element) =>
+          element?.textContent === "Excluded: Reviewer (does not advertise btw). Nothing was sent to them."
+      )
+    ).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
 
 // LEGION-233 review, P2. A send a worker is still carrying must offer nothing: the mode-change
 // buttons are a genuine second frame, and taking one while the worker was sending delivered the
@@ -125,6 +152,12 @@ test("a pending attempt nobody is carrying offers a same-mode retry and no mode 
       .getAllByRole("button")
       .map((button) => button.textContent);
     expect(buttons).toEqual(["Retry"]);
+    expect(
+      within(row).getByText(
+        (_, element) =>
+          element?.textContent === "Nobody is carrying this send. Retry uses Send again, which cannot deliver it twice."
+      )
+    ).toBeTruthy();
     fireEvent.click(within(row).getByRole("button", { name: "Retry" }));
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")

@@ -131,8 +131,8 @@ function BroadcastRecipientRow({
             Retry
           </button>
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
-            Nobody is carrying this send. Retry uses {latest?.delivery ?? delivery} again, which
-            cannot deliver it twice.
+            Nobody is carrying this send. Retry uses{" "}
+            {MODE_LABELS[latest?.delivery ?? delivery]} again, which cannot deliver it twice.
           </p>
         </div>
       ) : null}

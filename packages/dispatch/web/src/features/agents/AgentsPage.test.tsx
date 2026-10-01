@@ -7,7 +7,6 @@ import { MemoryRouter } from "react-router-dom";
 import { api } from "../../api/client";
 import type {
   Agent,
-  BroadcastCreated,
   InboxRow,
   IssueSummary,
   Message,
@@ -1586,24 +1585,13 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
   }
 });
 
-test("a broadcast composer labels its exclusion while the server create response keeps the wire name", () => {
+test("a broadcast composer labels a mode-mismatched recipient", () => {
   const [, reviewer] = agents;
   const composer = broadcastPlan(new Set([reviewer.session_id]), [reviewer], "btw");
-  const serverCreateResponse = {
-    excluded: [
-      {
-        reason: "does not advertise btw",
-        session_id: reviewer.session_id,
-        title: reviewer.title,
-      },
-    ],
-  } satisfies Pick<BroadcastCreated, "excluded">;
 
-  // The composer names modes through MODE_LABELS; Dispatch keeps server-stored diagnostics verbatim
-  // (`packages/dispatch/AGENTS.md`).
+  // `packages/dispatch/AGENTS.md:36-41` and `features/conversation/delivery.ts:8-12` name this
+  // composer-facing label.
   expect(composer.excluded[0]?.reason).toBe("does not advertise BTW");
-  expect(serverCreateResponse.excluded[0]?.reason).toBe("does not advertise btw");
-  expect(composer.excluded[0]?.reason).not.toBe(serverCreateResponse.excluded[0]?.reason);
 });
 
 test("a mode both recipients advertise takes the excluded one back in", async () => {
