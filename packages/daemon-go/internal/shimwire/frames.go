@@ -29,6 +29,7 @@ const (
 	TypeAgentStart             = "agent_start"
 	TypeAgentEnd               = "agent_end"
 	TypeShutdown               = "shutdown"
+	TypeAbort                  = "abort"
 	TypeAdoptWorkingCopy       = "adopt-working-copy"
 	TypeAdoptWorkingCopyResult = "adopt-working-copy-result"
 	TypeRPCChunk               = "rpc_chunk"
@@ -145,6 +146,14 @@ type GetState struct {
 	ID string `json:"id"`
 }
 
+// Abort asks OMP to end the turn it is running: it cancels the turn's tool children and the model
+// call, and answers once the agent is idle, keeping the process and its session. Its answer can
+// come before the agent_end that ends the turn on the wire, so that agent_end, not the answer, is
+// the turn's end.
+type Abort struct {
+	ID string `json:"id"`
+}
+
 // AgentStart is OMP beginning a turn. DeliveryID is set only on the shim's own synthetic replay
 // of a start it already observed (worker-shim.ts:365); OMP never sets it.
 type AgentStart struct {
@@ -199,6 +208,7 @@ func (NegotiateProtocol) FrameType() string            { return TypeNegotiatePro
 func (Prompt) FrameType() string                       { return TypePrompt }
 func (Response) FrameType() string                     { return TypeResponse }
 func (GetState) FrameType() string                     { return TypeGetState }
+func (Abort) FrameType() string                        { return TypeAbort }
 func (AgentStart) FrameType() string                   { return TypeAgentStart }
 func (AgentEnd) FrameType() string                     { return TypeAgentEnd }
 func (Shutdown) FrameType() string                     { return TypeShutdown }
@@ -235,6 +245,11 @@ func (f Response) MarshalJSON() ([]byte, error) {
 func (f GetState) MarshalJSON() ([]byte, error) {
 	type plain GetState
 	return marshalFrame(TypeGetState, plain(f))
+}
+
+func (f Abort) MarshalJSON() ([]byte, error) {
+	type plain Abort
+	return marshalFrame(TypeAbort, plain(f))
 }
 
 func (f AgentStart) MarshalJSON() ([]byte, error) {
@@ -368,6 +383,8 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[Response](trimmed)
 	case TypeGetState:
 		return decodeInto[GetState](trimmed)
+	case TypeAbort:
+		return decodeInto[Abort](trimmed)
 	case TypeAgentStart:
 		return decodeInto[AgentStart](trimmed)
 	case TypeAgentEnd:

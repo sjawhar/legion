@@ -37,6 +37,7 @@ type Conn struct {
 	adoptions   []Adoption
 	enrollments []string
 	shutdowns   int
+	aborts      int
 	state       runtime.ConnState
 	failures    map[string]error
 }
@@ -74,6 +75,15 @@ func (c *Conn) GetState(_ context.Context) (runtime.ConnState, error) {
 		return runtime.ConnState{}, err
 	}
 	return c.state, nil
+}
+
+// Abort records the daemon asking the agent to end its turn. It ends nothing: the test ends the
+// turn itself, as the stream's agent_end would (StreamTurnEnd).
+func (c *Conn) Abort(_ context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.aborts++
+	return c.failures["Abort"]
 }
 
 func (c *Conn) Shutdown(_ context.Context) error {
@@ -126,6 +136,13 @@ func (c *Conn) Shutdowns() int {
 	return c.shutdowns
 }
 
+// Aborts is how many times the agent was asked to end its turn.
+func (c *Conn) Aborts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.aborts
+}
+
 // SetStreaming is the agent's turn starting or ending, as `GetState` would report it.
 func (c *Conn) SetStreaming(streaming bool) {
 	c.mu.Lock()
@@ -148,6 +165,9 @@ func (c *Conn) FailGetState(err error) { c.fail("GetState", err) }
 
 // FailShutdown makes every later Shutdown return err.
 func (c *Conn) FailShutdown(err error) { c.fail("Shutdown", err) }
+
+// FailAbort makes every later Abort return err; FailAbort(nil) clears it.
+func (c *Conn) FailAbort(err error) { c.fail("Abort", err) }
 
 // FailAdoptWorkingCopy makes every later AdoptWorkingCopy return err.
 func (c *Conn) FailAdoptWorkingCopy(err error) { c.fail("AdoptWorkingCopy", err) }

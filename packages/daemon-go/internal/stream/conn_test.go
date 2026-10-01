@@ -557,6 +557,38 @@ func TestGetStateRefusesAnAnswerWithoutIsStreaming(t *testing.T) {
 	}
 }
 
+// Abort sends OMP's abort frame and returns on OMP's answer; the turn's end is the agent_end that
+// follows the answer, which is still a TurnEnd. A refusal is the agent's answer, never a refused
+// prompt.
+func TestAbortReturnsOnTheAnswerAndTheTurnEndsOnItsAgentEnd(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	conn := h.conn()
+	result := async(func() error { return conn.Abort(context.Background()) })
+	p.negotiate()
+	request := p.expect(shimwire.TypeAbort).(shimwire.Abort)
+	if request.ID == "" {
+		t.Fatal("the abort frame carries no request id, so its answer could not be told apart")
+	}
+	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("Abort = %v, want nil on OMP's answer", err)
+	}
+	p.send(shimwire.AgentEnd{})
+	if event := h.next(); event != (TurnEnd{Claim: testClaim}) {
+		t.Fatalf("event after the abort's answer = %#v, want the agent_end's TurnEnd", event)
+	}
+
+	refused := async(func() error { return conn.Abort(context.Background()) })
+	request = p.expect(shimwire.TypeAbort).(shimwire.Abort)
+	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeAbort, Success: false, Error: "no"})
+	err := awaitResult(t, refused)
+	var refusal *RefusedError
+	if !errors.As(err, &refusal) || errors.Is(err, runtime.ErrPromptRefused) {
+		t.Fatalf("a refused abort = %v, want a *RefusedError that is not a refused prompt", err)
+	}
+}
+
 // Negotiation is protocol v2, sent once per connection — before the first request OMP answers,
 // so every holder of a runtime.Conn gets a negotiated stream without asking for it.
 func TestNegotiationIsSentOnceAheadOfTheFirstAgentRequest(t *testing.T) {

@@ -173,13 +173,16 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Reason: reason})
 }
 
-// start starts the phase worker of the issue's current phase, a start stamped with that phase.
-func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
+// start starts the phase worker of the issue's current phase, a start stamped with that phase. A
+// start that takes the phase over from a role still at work in it names that role, quiesce, so it
+// waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
+// none.
+func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
 	if role == "" {
 		return nil
 	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
-		Generation: issue.Generation, Phase: issue.Phase})
+		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce})
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue

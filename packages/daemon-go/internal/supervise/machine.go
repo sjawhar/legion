@@ -305,6 +305,11 @@ type Machine struct {
 	askFirst bool
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
+	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
+	// phase (Quiesce), nil for none; quiesced is the newest such start that has found the claim out
+	// of a turn. Both are memory only (Quiesce).
+	interrupt *interrupt
+	quiesced  int64
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -377,6 +382,11 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.handle(ctx, ev)
+}
+
+// handle is Handle under the machine's lock, which its caller holds.
+func (m *Machine) handle(ctx context.Context, ev Event) error {
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
@@ -772,13 +782,15 @@ func (m *Machine) retire(ctx context.Context) error {
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it, no send talks to
-// it and no suspension is held for its turn any more, and the process the claim records, when it
-// records one, moves into previous — the claim no longer runs it (it was stopped, found dead, or
-// left behind), and the next launch of the same session waits it out.
+// it, no suspension is held for its turn and no turn of it is interrupted any more (the interrupt's
+// start finds it over, quiesced), and the process the claim records, when it records one, moves
+// into previous — the claim no longer runs it (it was stopped, found dead, or left behind), and the
+// next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.forgetSend()
 	m.held = nil
+	m.interruptOver()
 	if e := m.claim.Enrollment; e != nil {
 		m.revoke(*e)
 		m.claim.Enrollment = nil

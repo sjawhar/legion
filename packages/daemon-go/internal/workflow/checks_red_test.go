@@ -39,16 +39,22 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 		// settles is the commit the red settlement names: the head, or the code head a handoff-only
 		// push replaced.
 		settles string
+		// uncompleted seeds the reviewer's row without its completion: its round still at work.
+		uncompleted bool
+		// quiesce is the role the implementer's start waits for: the one CI took the phase from
+		// before it completed, none when it had completed.
+		quiesce claim.Role
 	}{
-		{"in testing", phase.Testing, "testing", false, false, false, phase.Implementing, ""},
-		{"in reviewing", phase.Reviewing, "needs_review", false, false, false, phase.Implementing, ""},
-		{"a planned red in testing", phase.Testing, "testing", true, false, false, phase.Testing, ""},
-		{"in implementing", phase.Implementing, "in_progress", false, false, false, phase.Implementing, ""},
-		{"on the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing, ""},
-		{"on the reviewer's handoff-only head, its round half in", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing, ""},
-		{"on a code head whose round has decided", phase.Reviewing, "needs_review", false, false, true, phase.Implementing, ""},
-		{"on the code head, carried to the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing, "code"},
-		{"on the code head, carried to the reviewer's handoff-only head", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing, "code"},
+		{"in testing", phase.Testing, "testing", false, false, false, phase.Implementing, "", false, claim.RoleTester},
+		{"in reviewing", phase.Reviewing, "needs_review", false, false, false, phase.Implementing, "", false, ""},
+		{"in reviewing, the reviewer's round not completed", phase.Reviewing, "needs_review", false, false, false, phase.Implementing, "", true, claim.RoleReviewer},
+		{"a planned red in testing", phase.Testing, "testing", true, false, false, phase.Testing, "", false, ""},
+		{"in implementing", phase.Implementing, "in_progress", false, false, false, phase.Implementing, "", false, ""},
+		{"on the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing, "", false, ""},
+		{"on the reviewer's handoff-only head, its round half in", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing, "", false, ""},
+		{"on a code head whose round has decided", phase.Reviewing, "needs_review", false, false, true, phase.Implementing, "", false, ""},
+		{"on the code head, carried to the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing, "code", false, ""},
+		{"on the code head, carried to the reviewer's handoff-only head", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing, "code", false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -63,6 +69,9 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			if tc.from == phase.Reviewing {
 				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"}
+				if tc.uncompleted {
+					reviewer.HandoffCommit, reviewer.Summary = "", ""
+				}
 				if tc.decided {
 					reviewer.Decision = &record.ReviewDecision{State: "changes_requested", Body: "rename the widget", Head: "head"}
 				}
@@ -97,9 +106,12 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 				}
 				return
 			}
-			var task string
-			if err := pool.QueryRow(context.Background(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'").Scan(&task); err != nil {
+			var task, quiesce string
+			if err := pool.QueryRow(context.Background(), "select payload->>'task', coalesce(payload->>'quiesce', '') from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'").Scan(&task, &quiesce); err != nil {
 				t.Fatalf("read the implementer's start: %v", err)
+			}
+			if claim.Role(quiesce) != tc.quiesce {
+				t.Fatalf("the implementer's start waits for %q, want %q", quiesce, tc.quiesce)
 			}
 			want := "CI is red at head: python-cli-tests / test (pytest)"
 			if tc.decided {
