@@ -27,8 +27,8 @@ import {
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { statusText } from "../project/board-model";
-import { referenceRouteFromHref } from "../refs/RefLink";
 import { referenceTriggerProps } from "../refs/RefPreview";
+import { referenceRouteFromHref } from "../refs/routes";
 import { DIALOG_SCOPE, useKeymap } from "../shell/keymap";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";

@@ -286,6 +286,44 @@ export function parseProjectPath(pathname: string, search = ""): ProjectRoute | 
   );
 }
 
+/** The reference a `dispatch://` URL or a same-origin dashboard path names; undefined for an
+ * external link or a dashboard path that is not an issue/document reference. */
+export function referenceRouteFromHref(
+  href: string,
+  appOrigin: string = window.location.origin
+): DispatchReferenceRoute | undefined {
+  if (href.startsWith("dispatch://")) {
+    return parseDispatchReference(href);
+  }
+  let url: URL;
+  try {
+    url = new URL(href, appOrigin);
+  } catch {
+    return undefined;
+  }
+  if (url.origin !== appOrigin) {
+    return undefined;
+  }
+  const route =
+    parseIssuePath(url.pathname, url.search) ?? parseProjectPath(url.pathname, url.search);
+  if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
+    return undefined;
+  }
+  // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
+  // `parseProjectPath` already applies to a project document. Without it a search hit's hover
+  // card previewed the document instead of the comment the reader is about to open.
+  if (!isProjectRoute(route) && (route.kind === "spec" || route.kind === "artifact")) {
+    const item = itemFromSearch(url.search);
+    if (item === null) {
+      return undefined;
+    }
+    if (item !== undefined) {
+      return { id: item.id, key: route.key, kind: item.kind };
+    }
+  }
+  return route;
+}
+
 export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if ("project" in route) {
     return `dispatch://${route.project}/artifact/${encodeURIComponent(route.slug)}${

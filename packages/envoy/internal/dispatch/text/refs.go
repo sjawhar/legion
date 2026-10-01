@@ -7,12 +7,16 @@ import (
 	"strings"
 )
 
-// referencePattern stops a reference at whitespace, an angle bracket, a quote or a backtick, none
-// of which a Dispatch reference or a URL holds, so a reference in a code span ends at its closing
-// backtick. A dispatch:// reference also stops at a square bracket, which it never holds either:
-// a document stores `<dispatch://CORE-1>` as the link `[dispatch://CORE-1](dispatch://CORE-1)`,
-// whose text would otherwise run into its target as one unparseable reference.
-var referencePattern = regexp.MustCompile("dispatch://[^\\s<>\"'`\\[\\]]+|https?://[^\\s<>\"'`]+")
+// referenceEnd is every character that ends a reference: whitespace (the Unicode space separators
+// a no-break or ideographic space belongs to as well), an angle or square bracket, a quote or a
+// backtick. No Dispatch reference holds one, so a reference in a code span ends at its closing
+// backtick, and the link a document stores for the autolink `<dispatch://CORE-1>`,
+// `[dispatch://CORE-1](dispatch://CORE-1)`, is two references to CORE-1 rather than one
+// unparseable one. The dashboard composer reads text by the same rule, and
+// `testdata/dispatch-text-references.json` is the table both are tested against.
+const referenceEnd = `\t\n\f\r \p{Z}<>"'` + "`" + `\[\]`
+
+var referencePattern = regexp.MustCompile(`(?:dispatch|https?)://[^` + referenceEnd + `]+`)
 var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$`)
 var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
 var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
@@ -85,34 +89,24 @@ func ExtractAt(body, serverURL string) []Located {
 
 // trimReference drops what trails a reference in prose: sentence punctuation, the `*`, `_` and `~`
 // that close emphasis and strikethrough around it (GFM's autolinks drop the same characters,
-// keeping them inside a link), and a closing bracket that opens nowhere in the reference.
+// keeping them inside a link), and a closing parenthesis that opens nowhere in the reference. It
+// counts the parentheses once and walks back from the end, so a run of closers costs one pass.
 func trimReference(raw string) string {
-	for {
-		trimmed := strings.TrimRight(raw, ".,;:!?*_~")
-		if trimmed != raw {
-			raw = trimmed
-			continue
-		}
-		if raw == "" {
-			return raw
-		}
-		last := raw[len(raw)-1]
-		var opener byte
-		switch last {
+	opened, closed := strings.Count(raw, "("), strings.Count(raw, ")")
+	end := len(raw)
+	for ; end > 0; end-- {
+		switch raw[end-1] {
+		case '.', ',', ';', ':', '!', '?', '*', '_', '~':
 		case ')':
-			opener = '('
-		case ']':
-			opener = '['
-		case '>':
-			opener = '<'
+			if opened >= closed {
+				return raw[:end]
+			}
+			closed--
 		default:
-			return raw
+			return raw[:end]
 		}
-		if strings.Count(raw, string(opener)) >= strings.Count(raw, string(last)) {
-			return raw
-		}
-		raw = raw[:len(raw)-1]
 	}
+	return ""
 }
 
 func parseDispatch(value string) (Ref, bool) {

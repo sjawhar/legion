@@ -67,11 +67,9 @@ import {
   buildDispatchReference,
   buildIssuePath,
   buildProjectPath,
-  type DispatchRoute,
+  type DispatchReferenceRoute,
   isProjectRoute,
-  parseDispatchReference,
-  parseIssuePath,
-  parseProjectPath,
+  referenceRouteFromHref,
 } from "../refs/routes";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { useAgents } from "./useAgents";
@@ -208,30 +206,54 @@ export interface ComposerReference {
   reference: string;
 }
 
-export function trimReference(value: string): string {
-  return value.replace(/[),.;:!?]+$/, "");
+/**
+ * The reference-shaped spans in text: `dispatch://` references and `http(s)://` URLs, each ending
+ * at whitespace (Unicode space separators included), an angle or square bracket, a quote or a
+ * backtick, then trimmed by `trimReference`. It is the rule the server's `text.ExtractAt` indexes
+ * mentions by, and `DISPATCH_TEXT_REFERENCES` in `@legion/contracts` is the table both are tested
+ * against.
+ */
+const referencePattern = /(?:dispatch|https?):\/\/[^\t\n\f\r \p{Z}<>"'`[\]]+/gu;
+
+export function referenceSpans(text: string): { start: number; value: string }[] {
+  return Array.from(text.matchAll(referencePattern), (match) => ({
+    start: match.index,
+    value: trimReference(match[0]),
+  }));
 }
 
-function composerReference(route: DispatchRoute): ComposerReference | undefined {
-  if (isProjectRoute(route)) {
-    return route.kind === "document"
-      ? { href: buildProjectPath(route), reference: buildDispatchReference(route) }
-      : undefined;
+/**
+ * Drops what trails a reference in prose: sentence punctuation, the `*`, `_` and `~` that close
+ * emphasis and strikethrough around it (GFM's autolinks drop the same characters, keeping them
+ * inside a link), and a closing parenthesis that opens nowhere in the reference. It counts the
+ * parentheses once and walks back from the end, so a run of closers costs one pass.
+ */
+function trimReference(value: string): string {
+  let opened = 0;
+  let closed = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value.charAt(index);
+    if (char === "(") opened += 1;
+    else if (char === ")") closed += 1;
   }
-  return { href: buildIssuePath(route), reference: buildDispatchReference(route) };
+  let end = value.length;
+  for (; end > 0; end -= 1) {
+    const char = value.charAt(end - 1);
+    if (char === ")") {
+      if (opened >= closed) break;
+      closed -= 1;
+    } else if (!".,;:!?*_~".includes(char)) {
+      break;
+    }
+  }
+  return value.slice(0, end);
 }
 
-function appReference(value: string, appOrigin: string): ComposerReference | undefined {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return undefined;
-  }
-  if (url.origin !== appOrigin) return undefined;
-  const route =
-    parseIssuePath(url.pathname, url.search) ?? parseProjectPath(url.pathname, url.search);
-  return route === undefined ? undefined : composerReference(route);
+function composerReference(route: DispatchReferenceRoute): ComposerReference {
+  return {
+    href: isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route),
+    reference: buildDispatchReference(route),
+  };
 }
 
 export function composerReferences(
@@ -239,14 +261,9 @@ export function composerReferences(
   appOrigin = window.location.origin
 ): ComposerReference[] {
   const references: ComposerReference[] = [];
-  for (const raw of body.match(/(?:dispatch:\/\/|https?:\/\/)\S+/g) ?? []) {
-    const value = trimReference(raw);
-    const reference = value.startsWith("dispatch://")
-      ? (() => {
-          const route = parseDispatchReference(value);
-          return route === undefined ? undefined : composerReference(route);
-        })()
-      : appReference(value, appOrigin);
+  for (const { value } of referenceSpans(body)) {
+    const route = referenceRouteFromHref(value, appOrigin);
+    const reference = route === undefined ? undefined : composerReference(route);
     if (
       reference !== undefined &&
       !references.some((item) => item.reference === reference.reference)

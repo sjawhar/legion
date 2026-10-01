@@ -1,0 +1,109 @@
+[
+  {
+    "body": "Tied to dispatch://CORE-1 here.",
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Tied to **dispatch://CORE-1** here.",
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "Tied to `dispatch://CORE-1` here.",
+    "refs": [
+      "dispatch://CORE-1"
+    ]
+  },
+  {
+    "body": "_dispatch://CORE-1/spec_, ~~dispatch://CORE-2~~ and __dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222__.",
+    "refs": [
+      "dispatch://CORE-1/spec",
+      "dispatch://CORE-2",
+      "dispatch://CORE-3/ask/22222222-2222-4222-8222-222222222222"
+    ]
+  },
+  {
+    "body": "`dispatch://CORE-5`/`dispatch://CORE-6`",
+    "refs": [
+      "dispatch://CORE-5",
+      "dispatch://CORE-6"
+    ]
+  },
+  {
+    "body": "See [dispatch://CORE-7/spec](dispatch://CORE-7/spec).",
+    "refs": [
+      "dispatch://CORE-7/spec"
+    ]
+  },
+  {
+    "body": "See [**dispatch://CORE-8**](dispatch://CORE-8).",
+    "refs": [
+      "dispatch://CORE-8"
+    ]
+  },
+  {
+    "body": "(**https://dispatch.test/issues/CORE-4**)",
+    "refs": [
+      "dispatch://CORE-4"
+    ]
+  },
+  {
+    "body": "See [https://dispatch.test/issues/CORE-9](https://dispatch.test/issues/CORE-9).",
+    "refs": [
+      "dispatch://CORE-9"
+    ]
+  },
+  {
+    "body": "See [**https://dispatch.test/issues/CORE-9/spec**](https://dispatch.test/issues/CORE-9/spec).",
+    "refs": [
+      "dispatch://CORE-9/spec"
+    ]
+  },
+  {
+    "body": "(see dispatch://CORE-10).",
+    "refs": [
+      "dispatch://CORE-10"
+    ]
+  },
+  {
+    "body": "Quoted \"dispatch://CORE-11\", 'dispatch://CORE-12' and <dispatch://CORE-13>.",
+    "refs": [
+      "dispatch://CORE-11",
+      "dispatch://CORE-12",
+      "dispatch://CORE-13"
+    ]
+  },
+  {
+    "body": "A no-break space after dispatch://CORE-14 and an ideographic one after dispatch://CORE-15　end",
+    "refs": [
+      "dispatch://CORE-14",
+      "dispatch://CORE-15"
+    ]
+  },
+  {
+    "body": "~~dispatch://CORE/artifact/handbook-md~~ and **dispatch://CORE-17/artifact/design-md@v3**",
+    "refs": [
+      "dispatch://CORE/artifact/handbook-md",
+      "dispatch://CORE-17/artifact/design-md@v3"
+    ]
+  },
+  {
+    "body": "`https://dispatch.test/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444`;",
+    "refs": [
+      "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444"
+    ]
+  },
+  {
+    "body": "*https://example.com/~ops/snake_case_path?glob=*.md* and https://dispatch.test/issues/CORE-16_",
+    "refs": [
+      "dispatch://CORE-16"
+    ]
+  },
+  {
+    "body": "Broken: **dispatch://CORE-1x**, dispatch://CORE-1_suffix, `dispatch://core-1`, ~~dispatch://CORE~~ and _dispatch://CORE-0_.",
+    "refs": []
+  }
+]

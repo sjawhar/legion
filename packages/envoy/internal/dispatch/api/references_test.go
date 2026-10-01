@@ -372,28 +372,23 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 	}
 }
 
-// A spec seeded at issue creation that cites an issue in bold and another project's issue in a
-// code span, as LEGION-437's did, mentions both, and so does an autolink, which the spec stores as
-// a link whose text is its target. The source of each mention is the spec document, not the issue
+// A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
+// span and a third project's issue as an autolink, which the spec stores as a link whose text is
+// its target, mentions all three. The source of each mention is the spec document, not the issue
 // that owns it: the issue node writes no mention, and each target's backlink names the spec.
 func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "LEGION")
 	createReferenceAPIProject(t, handler, "AGENTC")
+	createReferenceAPIProject(t, handler, "CORE")
 	sameProject := createReferenceAPIIssue(t, handler, "LEGION")
 	otherProject := createReferenceAPIIssue(t, handler, "AGENTC")
-	autolinkedResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
-		"project": "LEGION", "title": "Autolinked target",
-	}, "alice")
-	if autolinkedResponse.Code != http.StatusCreated {
-		t.Fatalf("create autolinked target: status=%d body=%s", autolinkedResponse.Code, autolinkedResponse.Body.String())
-	}
-	autolinked := decodeBody[model.Issue](t, autolinkedResponse)
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+	autolinked := createReferenceAPIIssue(t, handler, "CORE")
+	response := createIssueRequest(t, handler, map[string]any{
 		"project": "LEGION", "title": "Due dates",
 		"spec": "Tied to **dispatch://" + sameProject.Key + "** and `dispatch://" + otherProject.Key + "`, " +
 			"see <dispatch://" + autolinked.Key + ">.\n",
-	}, "alice")
+	})
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create issue with spec: status=%d body=%s", response.Code, response.Body.String())
 	}
