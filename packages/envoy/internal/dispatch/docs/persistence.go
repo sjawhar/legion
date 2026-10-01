@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -94,6 +95,13 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+		// ygo refuses an update declaring more than maxUpdateItems items with the same error it
+		// gives a malformed one. The server encoded this update itself, so when its header
+		// declares more than the cap, the cap is the cause and the document is the caller's to
+		// shrink (LEGION-465); any other refusal of a server-encoded update is a fault to log.
+		if items, ok := updateItems(update); ok && items > maxUpdateItems {
+			return 0, fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
+		}
 		return 0, err
 	}
 	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
@@ -610,3 +618,22 @@ func (s *Service) documentRooms(ctx context.Context, what, sql string, args ...a
 }
 
 var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
+
+// maxUpdateItems is the most items one V1 document update may carry: ygo's maxV2Items, which it
+// does not export. TestUploadRefusesADocumentTooLargeToStore (api) holds the two together: a
+// document encoding to more than this is refused by ygo and answered as CAP_EXCEEDED with the count.
+const maxUpdateItems = 1 << 20
+
+// updateItems is the number of items a V1 update of one client declares in its header: the
+// client count, then that client's item count. A server-authored update - a seed, or a replace on
+// one fork - has exactly one client; an update of several would need the whole update decoded to
+// count, and answers false.
+func updateItems(update []byte) (uint64, bool) {
+	decoder := encoding.NewDecoder(update)
+	clients, err := decoder.ReadVarUint()
+	if err != nil || clients != 1 {
+		return 0, false
+	}
+	items, err := decoder.ReadVarUint()
+	return items, err == nil
+}
