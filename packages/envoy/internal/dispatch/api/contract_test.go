@@ -1,6 +1,7 @@
-// contract_test.go is Task 2's contract layer (plan-overview.md v9's own lesson: "every fake had
-// been built from the client's assumption"): it mounts the real broker handlers (brokerapi.
-// Register with real services on BROKER_TEST_DATABASE_URL, exactly as the broker/api tests do)
+// contract_test.go is Task 2's contract layer (the shared broker contract's own lesson,
+// dispatch://AGENTC-393/artifact/plan-overview-md: "every fake had been built from the client's
+// assumption"): it mounts the real broker handlers (brokerapi.Register with real services on
+// BROKER_TEST_DATABASE_URL, exactly as the broker/api tests do)
 // behind an httptest.Server, wires Dispatch's own routes to relay to it, and drives every UI
 // action through DISPATCH's routes as a signed-in human — proving the proxy round-trips a real
 // broker, which decides by the login Dispatch names, not a fake built from agentsecrets.Client's
