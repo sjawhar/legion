@@ -137,6 +137,70 @@ test("the palette lists the issue page's actions, guarded like their buttons, an
   }
 });
 
+test("stop-word searches show empty results without Retry", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Stop word search" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openIssue(page, issue.key, "Stop word search");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const input = page.getByRole("combobox", { name: "Search" });
+
+    for (const query of ["down", "up", "is", "the"]) {
+      await page.keyboard.press("Control+k");
+      await input.fill(query);
+      await expect(dialog.getByText(`No results for "${query}"`)).toBeVisible();
+      await expect(dialog.getByRole("alert")).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Retry" })).toHaveCount(0);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+    }
+  } finally {
+    await context.close();
+  }
+});
+
+test("a failed palette search keeps its Retry action", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Failed palette search" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    let searches = 0;
+    await page.route(
+      (url) => url.pathname === "/api/v1/search",
+      async (route) => {
+        searches += 1;
+        await route.fulfill({
+          body: JSON.stringify({ code: "INTERNAL", error: "search index unavailable" }),
+          contentType: "application/json",
+          status: 500,
+        });
+      }
+    );
+    await openIssue(page, issue.key, "Failed palette search");
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const input = page.getByRole("combobox", { name: "Search" });
+    await input.fill("astrolabe");
+
+    const failure = dialog.getByRole("alert");
+    await expect(failure).toHaveText(/Search failed\./);
+    const retry = failure.getByRole("button", { name: "Retry" });
+    await expect(retry).toBeVisible();
+    const searchesBeforeRetry = searches;
+    await retry.click();
+    await expect.poll(() => searches).toBeGreaterThan(searchesBeforeRetry);
+  } finally {
+    await context.close();
+  }
+});
+
 test("/ searches only, and a query that is no action's start lists the hits above the actions", async ({
   browser,
 }, testInfo) => {
@@ -430,7 +494,7 @@ test("a query that holds a card move further in moves no card on Enter", async (
     const actions = dialog.getByRole("group", { name: "Actions" });
     // Each query sits inside a move's label without starting it: the move is offered, and only
     // an arrow can highlight it, so Enter, even once the search has answered, moves nothing.
-    // `down` is all stop words to the server, which refuses it, and the move stays unhighlighted
+    // `down` has no searchable term, so it returns no hits, and the move stays unhighlighted
     // through that answer too.
     for (const [query, move] of [
       ["status", "Move card to the next status"],

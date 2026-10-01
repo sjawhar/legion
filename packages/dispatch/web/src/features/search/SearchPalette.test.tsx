@@ -700,8 +700,8 @@ test("closes the palette when navigation changes", async () => {
   }
 });
 
-test("shows QueryError when the search request fails", async () => {
-  const search = spyOn(api, "search").mockRejectedValue(new Error("network unavailable"));
+test("shows a retryable failure when the search request fails", async () => {
+  const search = spyOn(api, "search").mockRejectedValue(new Error("500"));
   const view = renderPalette();
 
   try {
@@ -709,6 +709,7 @@ test("shows QueryError when the search request fails", async () => {
       target: { value: "astrolabe" },
     });
     expect((await screen.findByRole("alert")).textContent).toContain("Search failed.");
+    expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
   } finally {
     search.mockRestore();
     view.unmount();

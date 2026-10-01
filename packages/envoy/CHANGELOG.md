@@ -90,6 +90,8 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+- A search that contains only stop words now returns `200` with no results, so every consumer
+  can show an empty result rather than a retryable failure.
 
 - A targeted message's delivery claim no longer deadlocks with the session's reply to the same
   message: it takes the message row `FOR NO KEY UPDATE`, as the new accept does, which the
