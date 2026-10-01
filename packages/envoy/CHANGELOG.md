@@ -32,8 +32,10 @@
 - Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the
-  session took it, still naming its author, and only when the streamed text is the stored one.
-  The Agents page shows an attempt the session accepted as delivered to the session's
+  session took it, still naming its author, and only when the streamed text is the stored one;
+  one the session took between a run's last queue or aside poll and its `agent_end` reaches the
+  stream untagged and shows twice (`packages/pi-envoy/AGENTS.md`). The Agents page shows an
+  attempt the session accepted as delivered to the session's
   conversation, with no retry, even after a later `failed`; every other attempt keeps its states
   (LEGION-394). Every label the dashboard composes for a mode now uses the composer's names (Send,
   Aside, BTW), the card's mode-change buttons included ("Use BTW instead", "Use Send instead",

@@ -51,9 +51,11 @@ export function AgentRuntimeThread({
   const messages = useMemo(() => {
     const storedMessages = stored.flatMap((read) => [read.message, ...read.replies]);
     // A person's direct message the session took as its own user turn is in the stream too,
-    // tagged with its Dispatch id: it shows once, where the session took it, still naming whoever
-    // wrote it. Any bus client can publish a tag, so only a person's stored message can be one,
-    // and only a streamed message saying exactly what that person sent replaces its stored copy.
+    // normally tagged with its Dispatch id: then it shows once, where the session took it, still
+    // naming whoever wrote it. An untagged one is returned unchanged and its stored copy is never
+    // taken, so it shows twice (`packages/pi-envoy/AGENTS.md` says which turns go untagged). Any
+    // bus client can publish a tag, so only a person's stored message can be one, and only a
+    // streamed message saying exactly what that person sent replaces its stored copy.
     const byID = new Map(
       storedMessages
         .filter((message) => message.author.kind === "user")

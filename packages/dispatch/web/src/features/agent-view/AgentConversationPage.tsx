@@ -80,13 +80,13 @@ export function AgentConversationPage(): ReactNode {
   const [sendError, setSendError] = useState<string | null>(null);
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
   // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
-  // stream carries tagged with this message's id, and the thread shows it once; one the session
-  // takes between a run's last queue or aside poll and its `agent_end` goes untagged and shows
-  // twice (`packages/pi-envoy/AGENTS.md`). A BTW, an issue message, and any message to a session
-  // that takes no user turn from Envoy (a Claude Code session) arrive as notices the stream has no
-  // frame for, and the session answers them through dispatch_message, which the stream shows only
-  // as that tool call. Without these the thread would show replies to messages the human cannot
-  // see, and no replies at all. Seeing them here is reading them.
+  // stream carries tagged with this message's id, and the thread shows it once; one the stream
+  // carries untagged shows twice (`packages/pi-envoy/AGENTS.md`, the phase-worker section, says
+  // when). A BTW, an issue message, and any message to a session that takes no user turn from
+  // Envoy (a Claude Code session) arrive as notices the stream has no frame for, and the session
+  // answers them through dispatch_message, which the stream shows only as that tool call. Without
+  // these the thread would show replies to messages the human cannot see, and no replies at all.
+  // Seeing them here is reading them.
   const queryClient = useQueryClient();
   const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);

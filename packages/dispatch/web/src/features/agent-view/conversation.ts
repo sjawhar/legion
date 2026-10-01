@@ -173,7 +173,9 @@ export interface DispatchTurn {
 /**
  * The Dispatch message each streamed user message delivered, by streamed message id: a person's
  * direct message the session took as its own user turn is tagged with its Dispatch id, and the
- * view shows Dispatch's stored copy of it no longer once the text is the same. The bus is open to
+ * view stops showing Dispatch's stored copy of it once the text is the same. A turn the session
+ * left untagged is not in the map, so its stored copy keeps showing beside it
+ * (`packages/pi-envoy/AGENTS.md` says which turns go untagged). The bus is open to
  * any client, so a tag counts only as the publisher's contract puts it, a string on a user
  * message; any other is ignored rather than taking the message with it, since a message shown
  * twice beats one lost. The text is read from the frame's own parts, which on a user message are

@@ -46,8 +46,8 @@ the injected user message with the message id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
 message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the
 first user message with the sent text, remembered under its host timestamp, forgotten at the run's
-`agent_end`, so one sent in between the run's last queue or aside poll and that `agent_end` is missed
-and shows twice; the phase-worker section below says what that costs a phase worker).
+`agent_end`; a turn the record misses shows twice, and the phase-worker section below says which
+turns those are and what a miss costs a phase worker).
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own
