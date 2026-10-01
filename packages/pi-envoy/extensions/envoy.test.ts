@@ -3110,7 +3110,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("structured delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "envoy",
         at: "1970-01-01T00:00:00Z",
         id: "evt-toon-structured",
@@ -3154,7 +3154,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("plain-text delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "envoy",
         at: "1970-01-01T00:00:00Z",
         id: "evt-toon-plain-text",
@@ -3197,7 +3197,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("peer delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "ses_peer",
         at: "1970-01-01T00:00:00Z",
         id: "evt-peer-message",
@@ -3242,7 +3242,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("human delivery was not injected");
     expect(decode(content)).toEqual({
       envoy: {
-        to: "you (ses_…)",
+        to: "you (ses_omp)",
         from: "human",
         at: "1970-01-01T00:00:00Z",
         id: "evt-human-message",
@@ -3284,7 +3284,7 @@ describe("envoy OMP extension", () => {
     if (content === undefined) throw new Error("echo delivery was not injected");
     const note = decode(content) as { envoy: Record<string, unknown> };
     expect(note.envoy).toEqual({
-      to: "you (ses_…)",
+      to: "you (ses_omp)",
       from: "ses_omp",
       at: "1970-01-01T00:00:00Z",
       id: "evt-self-echo",

@@ -38308,6 +38308,16 @@ function dispatchPayload(event) {
   const parsed = schema.safeParse(event.payload);
   return parsed.success ? parsed.data : event.payload;
 }
+function hasTarget(value) {
+  return isObject2(value) && "target" in value;
+}
+function dispatchPayloadForReader(event, sessionID) {
+  const payload = dispatchPayload(event);
+  if (!hasTarget(payload))
+    return payload;
+  const target = payload.target;
+  return target === `session:${sessionID}` ? { ...payload, target: `you (${target})` } : payload;
+}
 function dispatchAskQuestion(comment) {
   return comment?.ask_question !== undefined && comment.ask_question !== "" ? textHead(comment.ask_question) : undefined;
 }
@@ -38533,7 +38543,7 @@ function renderInbound(raw, sessionID, subject2) {
           owner: dispatchOwner(frame.event, topic),
           type: frame.event.type,
           actor: frame.event.actor,
-          ...compactRecord ?? { payload: dispatchPayload(frame.event) }
+          ...compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }
         };
         dispatchActor = frame.event.actor;
       } else {
@@ -38574,7 +38584,7 @@ function renderInbound(raw, sessionID, subject2) {
     ...dispatchIssue === undefined ? [] : [dispatchIssue]
   ].join(", ") || undefined;
   const rendered = {
-    ...envelope2.topic === agentSubject(sessionID) ? { to: `you (${sessionID.slice(0, 4)}\u2026)` } : {},
+    ...envelope2.topic === agentSubject(sessionID) ? { to: `you (${sessionID})` } : {},
     from: senderLabel(envelope2),
     at: inboundTimestamp(envelope2.issued_at),
     id: envelope2.event_id ?? "unknown",
