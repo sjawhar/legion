@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, getArtifactText } from "./api";
-import { connectedDot, documentEditor, typeAtEnd } from "./editor";
+import { connectedDot, documentEditor, placeCaret } from "./editor";
 import { plainHttpHost } from "./plain-http-origin";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -57,7 +57,12 @@ test("a document opens and takes a new paragraph with no page error", async ({ b
     await expect(documentEditor(page)).toContainText("Ship it.");
     await expect(connectedDot(page)).toHaveText("connected");
 
-    await typeAtEnd(page, typed);
+    // Not `typeAtEnd`: its click and Control+End race the editor's own selection handling
+    // (ProseMirror writes its selection back to the page 20 ms after focus), and the paragraph can
+    // then open above the heading. `placeCaret` hands the editor a selectionchange it reads at once.
+    await placeCaret(page, "after", "Ship it.");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type(typed);
     // Its own paragraph: a failed Enter leaves the text appended to "Ship it." instead.
     await expect(documentEditor(page).locator("p", { hasText: typed })).toHaveText(typed);
     await expect
