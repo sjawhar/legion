@@ -108,6 +108,41 @@ func TestVerifyMarkWaitsForTheBrowserUpdate(t *testing.T) {
 	}
 }
 
+// Bob's browser comments on "quick brown", Alice's on "brown": the server reads each comment's own
+// whole text, so neither Send is refused as a missing anchor and neither quote is cut.
+func TestVerifyMarkFindsEachOfTwoCommentsOverOneWord(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick brown", pmdoc.Attrs{"id": "c1", "by": "user:bob"})
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "brown", pmdoc.Attrs{"id": "c2", "by": "user:alice"})
+	for id, want := range map[string]string{"c1": "quick brown", "c2": "brown"} {
+		anchored, err := service.VerifyMark(context.Background(), artifactID, MarkComment, id)
+		if err != nil || anchored.Quote != want {
+			t.Fatalf("VerifyMark(%s) = %q, %v; want %q", id, anchored.Quote, err, want)
+		}
+	}
+}
+
+// An API caller's quote anchor over text another comment covers leaves that comment whole.
+func TestMarkQuoteKeepsAnotherRecordOfTheKindOnTheSameText(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	for _, step := range []struct{ id, quote string }{{"c1", "quick brown"}, {"c2", "brown"}} {
+		anchored, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+			Kind: MarkComment, ID: step.id, By: model.Actor{Kind: "session", ID: "s1"},
+		}, step.quote, nil)
+		if err != nil || anchored.Quote != step.quote {
+			t.Fatalf("MarkQuote(%s) = %q, %v", step.id, anchored.Quote, err)
+		}
+	}
+	tree := liveTree(t, service, artifactID)
+	for id, want := range map[string]string{"c1": "quick brown", "c2": "brown"} {
+		if _, quote, ok := pmdoc.FindMark(tree, "proofComment", id); !ok || quote != want {
+			t.Fatalf("FindMark(%s) = %q %t, want %q", id, quote, ok, want)
+		}
+	}
+}
+
 func TestSuggestionKindReadsBrowserMark(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "The quick brown fox")
@@ -354,14 +389,22 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 	service.settle = 20 * time.Millisecond
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	askID := insertAnchoredAsk(t, service, artifactID, "brown")
+	outerID := insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000003", "quick brown")
+	innerID := insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000004", "brown")
 
 	editLiveTree(t, service, artifactID, replaceRun("brown", "browner"))
 	waitFor(t, time.Second, "anchor refresh to browner", func() bool {
 		anchor := loadAskAnchor(t, service, askID)
-		return anchor.Quote == "browner" && !anchor.Orphaned
+		return anchor.Quote == "browner" && !anchor.Orphaned && loadCommentAnchor(t, service, innerID).Quote == "browner"
 	})
 	if anchor := loadAskAnchor(t, service, askID); anchor.Quote != "browner" || anchor.Orphaned {
 		t.Fatalf("refreshed anchor = %#v, want browner and not orphaned", anchor)
+	}
+	// The run both comments share was rewritten: each comment's refresh reads its own whole text.
+	for id, want := range map[string]string{outerID: "quick browner", innerID: "browner"} {
+		if anchor := loadCommentAnchor(t, service, id); anchor.Quote != want || anchor.Orphaned {
+			t.Fatalf("comment %s anchor = %#v, want %q and not orphaned", id, anchor, want)
+		}
 	}
 
 	editLiveTree(t, service, artifactID, deleteRun("browner"))
@@ -595,6 +638,10 @@ func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	askID := insertAnchoredAsk(t, service, artifactID, "brown")
 	commentID := insertAnchoredComment(t, service, artifactID, "fox")
+	// Two comments of which one covers part of the other: re-anchoring the second must not cut
+	// the first.
+	outerID := insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000003", "quick brown")
+	innerID := insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000004", "brown")
 
 	if _, err := service.ReplaceText(context.Background(), artifactID, "A quick brown dog and a slow brown cat", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text: %v", err)
@@ -607,8 +654,17 @@ func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 	if anchor := loadAskAnchor(t, service, askID); anchor.Orphaned || anchor.Quote != "brown" {
 		t.Fatalf("ask anchor after replace = %#v, want first brown mark", anchor)
 	}
-	if _, quote, found := pmdoc.FindMark(liveTree(t, service, artifactID), "dispatchAsk", askID); !found || quote != "brown" {
+	tree := liveTree(t, service, artifactID)
+	if _, quote, found := pmdoc.FindMark(tree, "dispatchAsk", askID); !found || quote != "brown" {
 		t.Fatalf("ask mark after replace = %q found=%t, want brown", quote, found)
+	}
+	for id, want := range map[string]string{outerID: "quick brown", innerID: "brown"} {
+		if _, quote, found := pmdoc.FindMark(tree, "proofComment", id); !found || quote != want {
+			t.Fatalf("comment %s after replace = %q found=%t, want %q", id, quote, found, want)
+		}
+		if anchor := loadCommentAnchor(t, service, id); anchor.Orphaned || anchor.Quote != want {
+			t.Fatalf("comment %s anchor after replace = %#v, want %q", id, anchor, want)
+		}
 	}
 }
 
@@ -746,7 +802,11 @@ func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string)
 
 func insertAnchoredComment(t *testing.T, service *Service, artifactID, quote string) string {
 	t.Helper()
-	const id = "00000000-0000-4000-8000-000000000002"
+	return insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000002", quote)
+}
+
+func insertAnchoredCommentWithID(t *testing.T, service *Service, artifactID, id, quote string) string {
+	t.Helper()
 	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
 		Kind: MarkComment,
 		ID:   id,

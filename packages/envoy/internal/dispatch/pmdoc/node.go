@@ -47,8 +47,26 @@ var markTypes = map[string]bool{
 
 var yattrMarkSuffix = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
 
+// sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
+// one type (the record marks, which may overlap: anchorMarkTypes), by id, and by their attributes
+// only when the ids tie. Every positional comparison of two mark sets (marksEqual, run joining)
+// relies on it.
 func sortMarks(marks []Mark) {
-	sort.Slice(marks, func(i, j int) bool { return marks[i].Type < marks[j].Type })
+	sort.Slice(marks, func(i, j int) bool { return markLess(marks[i], marks[j]) })
+}
+
+func markLess(left, right Mark) bool {
+	if left.Type != right.Type {
+		return left.Type < right.Type
+	}
+	leftID, _ := left.Attrs["id"].(string)
+	rightID, _ := right.Attrs["id"].(string)
+	if leftID != rightID {
+		return leftID < rightID
+	}
+	leftJSON, _ := json.Marshal(canonicalAttrs(left.Attrs))
+	rightJSON, _ := json.Marshal(canonicalAttrs(right.Attrs))
+	return string(leftJSON) < string(rightJSON)
 }
 
 func marksEqual(left, right []Mark) bool {
