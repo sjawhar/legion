@@ -17,12 +17,12 @@ import {
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import {
+  createDeliveryDedupe,
   type DispatchDelivery,
   expectsLaneReceipt,
   inboundTimestamp,
   postDeliveryReply,
   type RenderInboundResult,
-  rememberBounded,
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
@@ -353,7 +353,7 @@ export default function envoyExtension(pi: PiApi): void {
   };
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
-  const dedupeKeys = new Set<string>();
+  const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
@@ -641,12 +641,11 @@ export default function envoyExtension(pi: PiApi): void {
     // also reaches the issue's own topic (every subscriber, not just the
     // removed session), so this only fires for a removal naming us.
     for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) closeIntentionally(topic);
-    const dedupeKey = rendered.envelope?.dedupe_key;
-    const duplicate = dedupeKey !== undefined && dedupeKeys.has(dedupeKey);
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    if (!duplicate && !rendered.skip) {
+    const claim = rendered.skip ? undefined : delivered.claim(rendered.envelope);
+    if (claim !== undefined) {
       const envelope = rendered.envelope;
       if (envelope !== undefined) {
         inbox.unshift({
@@ -657,14 +656,20 @@ export default function envoyExtension(pi: PiApi): void {
         });
         if (inbox.length > 50) inbox.pop();
       }
+      // An error reply means the agent was not handed the frame: Dispatch records the attempt
+      // failed, and a same-mode re-send of it must reach this session again, so the claim is
+      // released before the reply goes out. A BTW side turn adds nothing to the transcript, so
+      // running it again for that re-send repeats no work the session kept.
+      const refuse = async (delivery: DispatchDelivery, error: string): Promise<void> => {
+        claim.release();
+        await postDispatchReply(delivery, { error });
+      };
       try {
         if (rendered.rejectedDelivery !== undefined) {
           console.warn(
             `[envoy] rejecting malformed Dispatch targeted delivery ${rendered.rejectedDelivery.id}`
           );
-          await postDispatchReply(rendered.rejectedDelivery, {
-            error: "Invalid Dispatch targeted delivery frame",
-          });
+          await refuse(rendered.rejectedDelivery, "Invalid Dispatch targeted delivery frame");
         } else if (rendered.malformedDelivery === true) {
           console.warn(
             "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
@@ -673,19 +678,15 @@ export default function envoyExtension(pi: PiApi): void {
           const answer = sideTurn(pi, activeSessionContext);
           if (shuttingDown) {
             // A session that is shutting down starts no model call, but a frame can still drain in.
-            await postDispatchReply(rendered.delivery, {
-              error: "This OMP session is shutting down",
-            });
+            await refuse(rendered.delivery, "This OMP session is shutting down");
           } else if (answer === undefined) {
-            await postDispatchReply(rendered.delivery, {
-              error: "This OMP host does not support BTW delivery",
-            });
+            await refuse(rendered.delivery, "This OMP host does not support BTW delivery");
           } else {
             try {
               const reply = await answer({ prompt: rendered.delivery.body });
               await postDispatchReply(rendered.delivery, { body: reply.replyText });
             } catch (error) {
-              await postDispatchReply(rendered.delivery, { error: messageFor(error) });
+              await refuse(rendered.delivery, messageFor(error));
             }
           }
         } else {
@@ -708,13 +709,13 @@ export default function envoyExtension(pi: PiApi): void {
           }
         }
       } catch (error) {
+        claim.release();
         console.warn(
           `[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`,
           error
         );
         throw error;
       }
-      if (dedupeKey !== undefined) rememberBounded(dedupeKeys, dedupeKey, 1000);
     }
   };
 
