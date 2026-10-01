@@ -73,9 +73,10 @@ completion leaves the issue in reviewing until you finish.
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
   with `'~docs/solutions'` appended, which must print nothing. *The READY packet*: the merger
   always posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
-  (the shape `packages/pi-envoy/roles/merger.md` defines), then the PR body's `Outcome:` and
-  `Not proven / risk:` lines quoted from the `## For the reviewer` block at that same head (or
-  one line saying the body carries no brief — the packet still publishes), then the `--summary`
+  (the shape `packages/pi-envoy/roles/merger.md` defines), then the PR body's `Outcome:` line and
+  its `Not proven / risk:` value — every bullet under that label joined with `; ` on the one
+  READY line, or `none` — quoted from the `## For the reviewer` block at that same head (or one
+  line saying the body carries no brief — the packet still publishes), then the `--summary`
   output and the PR body's gate facts, as a `dispatch_message` on the issue. When the `Legion
   addressing` line names a merge queue, it also publishes the same packet there with
   `envoy_publish`; a 404 means the Dispatch message remains the durable notice and the merger

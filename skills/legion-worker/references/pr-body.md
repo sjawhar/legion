@@ -4,9 +4,9 @@ Part of `skill://legion-worker`. Read it before you write or edit any line of th
 body, put a `proof` array in a handoff, verify another phase's proof, or run the simplify pass.
 Every path it cites is in sjawhar/legion.
 
-## The READY format
+## The pull request body template
 
-The implementer writes the PR body in the READY format from the moment the PR opens, and every
+The implementer writes the PR body from this template from the moment the PR opens, and every
 later phase keeps it current rather than replacing it:
 
 ```
