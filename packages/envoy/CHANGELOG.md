@@ -24,7 +24,7 @@
   Dispatch recorded as failed, `ACCEPT_STALE`) or 403
   `ACCEPT_FORBIDDEN`. It appends `message.accepted`, which reaches the dashboard's event stream
   and never NATS, since the outbox publishes no issue-less event. Every delivery attempt now reads
-  `requested_by` (who asked for it, kept on a resume, null before migration 0053), `accepted_at`
+  `requested_by` (who asked for it, kept on a resume, null before migration 0054), `accepted_at`
   and `accepted_as` (LEGION-394).
 
 ### Changed

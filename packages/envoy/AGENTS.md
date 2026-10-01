@@ -1281,7 +1281,7 @@ typo is refused rather than answered as a retry.
 
 Every attempt records `requested_by`, the actor whose send opened it (the message's author, the
 person or bearer who retried it, the human whose reply inherited the thread's target; kept on a
-resume; null on a row from before migration 0053), and at most one attempt of a message records
+resume; null on a row from before migration 0054), and at most one attempt of a message records
 `accepted_at` and `accepted_as: "user_turn"`: the session it went to took it as its user's own turn,
 through `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` (its conditions are that route's
 row in `packages/envoy/cmd/dispatch/AGENTS.md`, whose requester checks read `requested_by`). What
