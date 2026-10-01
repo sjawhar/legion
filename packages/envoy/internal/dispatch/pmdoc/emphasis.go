@@ -3,7 +3,9 @@ package pmdoc
 import (
 	"reflect"
 
+	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
@@ -83,6 +85,28 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	block.Advance(node.OriginalLength)
 	pc.PushDelimiter(node)
 	return node
+}
+
+// strikethrough is Goldmark's GFM parser with a guard for delimiter runs it already refuses.
+// Goldmark refuses a `~` whose preceding character is `~`, but it scans that run before doing so.
+// Returning before the scan preserves its result and makes one run linear (LEGION-465).
+type strikethrough struct{}
+
+func (strikethrough) Extend(markdown goldmark.Markdown) {
+	markdown.Parser().AddOptions(parser.WithInlineParsers(util.Prioritized(newStrikethroughGuard(), 500)))
+}
+
+type strikethroughGuard struct{ parser.InlineParser }
+
+func newStrikethroughGuard() strikethroughGuard {
+	return strikethroughGuard{InlineParser: extension.NewStrikethroughParser()}
+}
+
+func (g strikethroughGuard) Parse(parent ast.Node, block text.Reader, context parser.Context) ast.Node {
+	if block.PrecendingCharacter() == '~' {
+		return nil
+	}
+	return g.InlineParser.Parse(parent, block, context)
 }
 
 // emphasisDelimiters pairs an opener and a closer of one character. CommonMark's rule of three

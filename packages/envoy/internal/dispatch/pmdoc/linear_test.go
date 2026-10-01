@@ -33,3 +33,47 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 		}
 	}
 }
+
+// The shapes a sweep found after the ones above, each quadratic before LEGION-465 finished: a
+// text of one delimiter character, whose every character was escaped by a scan of its whole run;
+// many `[^` before one `]`, whose every label was case-folded to look it up among the footnote
+// labels; a text of many line feeds, whose every line joined the rest of the text to ask whether
+// only whitespace followed; and a run of `~` in a paragraph, which goldmark's strikethrough parser
+// scanned again from every `~` in it. Before the fix 128 KiB of each text took 18-115 s to render
+// and 32 KiB of `[^a` 7.7 s; each bound is at least ten times the time measured after it.
+func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
+	paragraph := func(text string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
+	}
+	definition := func(label string) *Node {
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": label}, Children: []*Node{paragraph("x")}}
+	}
+	labels := strings.Repeat("[^a", (4<<20)/3) + "]"
+	for _, test := range []struct {
+		name string
+		doc  *Node
+	}{
+		{"a run of *", &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("*", 4<<20))}}},
+		{"a run of _", &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("_", 4<<20))}}},
+		{"a run of ~", &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("~", 4<<20))}}},
+		{"[^a before one ] with no footnote", &Node{Type: "doc", Children: []*Node{paragraph(labels)}}},
+		{"[^a before one ] with a short label defined", &Node{Type: "doc", Children: []*Node{paragraph(labels), definition("a")}}},
+		{"[^a before one ] with a long label defined", &Node{Type: "doc", Children: []*Node{paragraph(labels), definition(strings.Repeat("b", 1000))}}},
+		{"line feeds", &Node{Type: "doc", Children: []*Node{paragraph(strings.Repeat("a\n", 2<<20))}}},
+	} {
+		started := time.Now()
+		if _, err := Render(test.doc); err != nil {
+			t.Fatalf("render 4 MiB of %s: %v", test.name, err)
+		}
+		if elapsed := time.Since(started); elapsed > 30*time.Second {
+			t.Errorf("render of 4 MiB of %s took %s, want under 30 s", test.name, elapsed)
+		}
+	}
+	started := time.Now()
+	if _, err := Parse("a" + strings.Repeat("~", 1<<20)); err != nil {
+		t.Fatalf("parse a run of 1 MiB of ~: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 30*time.Second {
+		t.Errorf("parse of a run of 1 MiB of ~ took %s, want under 30 s", elapsed)
+	}
+}
