@@ -163,8 +163,9 @@ the route's topic, where a label only marks the issue; it carries no workflow st
 TypeScript daemon does not read it.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
-is a human approving the root issue's spec document at a version in Dispatch: the architect
-requests it with `dispatch_request_approval` and registers the document id and version with the
+is a human approving the root issue's spec document at a version in Dispatch: once the spec's
+decision blocks are settled, the architect requests it with `dispatch_request_approval` and a
+summary of what the tree will do, and registers the document id and version with the
 daemon, and the daemon opens the gate on the `artifact.approved` event for that document at its
 current version — or at registration itself, when Dispatch already shows the human approved that
 version before the architect registered (the daemon reads the approval; it never writes one). A

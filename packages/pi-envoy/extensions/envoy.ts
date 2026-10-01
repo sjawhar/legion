@@ -228,7 +228,7 @@ const ASK_SELF_CHECK_TIMEOUT_MS = 60_000;
 const ASK_CHECKS_PER_PERIOD = 5;
 
 const UNASKED_WAIT_REMINDER =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask, naming exactly what you need and from whom.";
 
 /** Tools whose success means the agent opened the ask itself, so the nudge has nothing to say. */
 const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];

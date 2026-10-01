@@ -28,10 +28,10 @@ left open <thread URL> — newest reply by <login> is not its opener's or the Le
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
 
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
+Negative control: <deliberately broken input or call> → <refusal or failure observed>.
 
 **E2E (tester):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
+Negative control: <deliberately broken input or call> → <refusal or failure observed>.
 Verified the implementer's proof by <re-running its command | driving the same surface independently>.
 
 **Production:** <what was checked in production, how, what was observed> — merge commit <sha>.
@@ -46,7 +46,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
 as the exact command or run id, what was observed, the head SHA, and one negative control —
-a deliberately broken input and the refusal or failure observed. The surface is
+a deliberately broken input or call and the refusal or failure observed. The surface is
 **production-like** — the repository's real-process test harness and fixtures, a sandbox
 repository, a real browser, a devN stack, staging, or a local stack with real migrations, one that
 has the resource the change touches — and each `E2E` line carries a **link** to that run,
