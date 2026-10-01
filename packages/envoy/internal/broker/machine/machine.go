@@ -214,7 +214,12 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	// key check of another transaction's event insert (the sweeper's 'expired') takes `for key
 	// share` on this row, which `for update` would block while this transaction then waited on
 	// that insert's unique-index entry, a deadlock; the weaker lock lets that insert commit, and
-	// this decision's own insert then answers ErrAlreadyDecided.
+	// this decision's own insert then hits that same unique index. Decisions of one record
+	// serialize on this lock, so the only other writer that can win that index while this
+	// transaction holds it is the sweeper's ExpirePending — a concurrent decision never reaches
+	// the insert at all; it queues on this same lock and reads the sweeper's event from the
+	// switch below instead. So that collision always means the login expired while this decision
+	// was in flight, and the insert answers ErrLoginExpired, never ErrAlreadyDecided.
 	var canonical, storedCode string
 	var createdAt time.Time
 	var expired bool
@@ -290,7 +295,8 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, credential_id, actor) values ($1,$2,$3,$4,$5)`,
 		recordID, event, login, credID, "human:"+login); store.IsUniqueViolation(err) {
-		return "", "", ErrAlreadyDecided
+		// Only ExpirePending can win this race: see the row-lock comment above.
+		return "", "", ErrLoginExpired
 	} else if err != nil {
 		return "", "", err
 	}

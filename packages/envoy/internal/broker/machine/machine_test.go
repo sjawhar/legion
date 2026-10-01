@@ -5,12 +5,12 @@ import (
 	"errors"
 	"os"
 	"regexp"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
@@ -375,7 +375,8 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 // TestApplyDecisionRefusesALoginPastItsExpiry pins that a machine login past its own expires_at is
 // decided no more, before the sweeper has written its 'expired' event as well as after: approve and
 // deny both answer ErrLoginExpired, whose message says the login expired rather than that it was
-// decided, and neither mints a credential or records a decision.
+// decided, and neither mints a credential or records a decision — including after the sweep has
+// actually run, which writes exactly the one 'expired' event and nothing a later decision adds to.
 func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
@@ -390,25 +391,37 @@ func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 	}
 	for _, approve := range []bool{true, false} {
 		_, _, err := svc.ApplyDecision(ctx, view.RecordID, approve, testApprover, code)
-		if err == nil || !strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "decided") {
-			t.Fatalf("ApplyDecision(approve=%v) past the login's expiry = %v, want a refusal saying it expired", approve, err)
+		if !errors.Is(err, ErrLoginExpired) {
+			t.Fatalf("ApplyDecision(approve=%v) before the sweep = %v, want ErrLoginExpired", approve, err)
+		}
+	}
+	if err := svc.ExpirePending(ctx, time.Now()); err != nil {
+		t.Fatalf("ExpirePending: %v", err)
+	}
+	for _, approve := range []bool{true, false} {
+		_, _, err := svc.ApplyDecision(ctx, view.RecordID, approve, testApprover, code)
+		if !errors.Is(err, ErrLoginExpired) {
+			t.Fatalf("ApplyDecision(approve=%v) after the sweep = %v, want ErrLoginExpired", approve, err)
 		}
 	}
 	var events, credentials int
 	if err := svc.Store.Pool.QueryRow(ctx, `select (select count(*) from credential_request_events where record_id=$1),
-		(select count(*) from launcher_credentials where record_id=$1)`, view.RecordID).Scan(&events, &credentials); err != nil || events != 0 || credentials != 0 {
-		t.Fatalf("after the refused decisions: %d events, %d credentials, %v; want none", events, credentials, err)
+		(select count(*) from launcher_credentials where record_id=$1)`, view.RecordID).Scan(&events, &credentials); err != nil || events != 1 || credentials != 0 {
+		t.Fatalf("after the refused decisions: %d events, %d credentials, %v; want 1 event (the sweep's own), 0 credentials", events, credentials, err)
 	}
 }
 
 // TestASweepWhileADecisionHoldsItsRowLockCommits pins ApplyDecision's row-lock level, with no
 // seam in the service. A second transaction holds launcher_credentials exclusively, so an
 // approving decision takes the record's row lock, passes every check and waits at its mint insert.
+// While it waits there, a third connection's own `for no key update nowait` on the same row
+// proves the lock is actually held (55P03), not just that its level would be right if it existed.
 // The sweeper's 'expired' insert checks its foreign key with `for key share` on that row, which
 // `for no key update` leaves free: the sweep commits while the decision holds the lock, and once
-// the table is released the decision's own event insert answers ErrAlreadyDecided, minting
-// nothing. Under `for update` the sweep waits on the decision instead; the sweep's own
-// lock_timeout makes that wait this test's failure (55P03), not a hang.
+// the table is released the decision's own event insert hits the sweeper's terminal event and
+// answers ErrLoginExpired — never ErrAlreadyDecided, since this is the sweeper's write, not a
+// second human decision — minting nothing. Under `for update` the sweep waits on the decision
+// instead; the sweep's own lock_timeout makes that wait this test's failure (55P03), not a hang.
 func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
@@ -443,6 +456,11 @@ func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
 		decided <- err
 	}()
 	waitForLockWait(t, ctx, svc.Store, "insert into launcher_credentials%", decided)
+	_, probeErr := svc.Store.Pool.Exec(ctx, `select 1 from credential_requests where id=$1 for no key update nowait`, view.RecordID)
+	var pgErr *pgconn.PgError
+	if !(errors.As(probeErr, &pgErr) && pgErr.Code == "55P03") {
+		t.Fatalf("probe the record's row lock while the decision holds it = %v, want SQLSTATE 55P03 (lock not available)", probeErr)
+	}
 	swept := sweeper.ExpirePending(ctx, time.Now().Add(svc.PendingTTL+time.Minute))
 	if err := holder.Rollback(ctx); err != nil {
 		t.Fatal(err)
@@ -450,8 +468,8 @@ func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
 	if swept != nil {
 		t.Fatalf("ExpirePending while a decision holds the record's row lock = %v, want it to commit", swept)
 	}
-	if err := <-decided; !errors.Is(err, ErrAlreadyDecided) {
-		t.Fatalf("ApplyDecision once the sweep committed = %v, want ErrAlreadyDecided", err)
+	if err := <-decided; !errors.Is(err, ErrLoginExpired) {
+		t.Fatalf("ApplyDecision once the sweep committed = %v, want ErrLoginExpired", err)
 	}
 	if state, _, err := svc.recordState(ctx, view.RecordID); err != nil || state != "expired" {
 		t.Fatalf("recordState = %q, %v, want expired", state, err)

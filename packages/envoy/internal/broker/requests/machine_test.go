@@ -432,7 +432,8 @@ func TestExpirePendingWritesTheExpiredEventAndFlipsTheRequest(t *testing.T) {
 // TestApplyDecisionRefusesARecordPastItsExpiry pins that a record past its expiry is decided no
 // more, before the sweeper has expired it as well as after: approve and deny both answer
 // ErrExpired, whose message says the record expired rather than that it was decided, and neither
-// writes a decision or a grant.
+// writes a decision or a grant — including after the sweep has actually run, which writes exactly
+// the one 'expired' event and nothing a later decision adds to.
 func TestApplyDecisionRefusesARecordPastItsExpiry(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()
@@ -443,14 +444,23 @@ func TestApplyDecisionRefusesARecordPastItsExpiry(t *testing.T) {
 	}
 	for _, approve := range []bool{true, false} {
 		dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, approver)
-		if err == nil || !strings.Contains(err.Error(), "expired") || strings.Contains(err.Error(), "decided") {
-			t.Fatalf("ApplyDecision(approve=%v) past the record's expiry = %+v, %v, want a refusal saying it expired", approve, dec, err)
+		if !errors.Is(err, ErrExpired) {
+			t.Fatalf("ApplyDecision(approve=%v) before the sweep = %+v, %v, want ErrExpired", approve, dec, err)
+		}
+	}
+	if _, err := m.ExpirePending(ctx, time.Now()); err != nil {
+		t.Fatalf("ExpirePending: %v", err)
+	}
+	for _, approve := range []bool{true, false} {
+		dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, approver)
+		if !errors.Is(err, ErrExpired) {
+			t.Fatalf("ApplyDecision(approve=%v) after the sweep = %+v, %v, want ErrExpired", approve, dec, err)
 		}
 	}
 	var events, grants int
 	if err := m.Store.Pool.QueryRow(ctx, `select (select count(*) from credential_request_events where record_id=$1),
-		(select count(*) from grants where request_id=$2)`, *req.RecordID, req.ID).Scan(&events, &grants); err != nil || events != 0 || grants != 0 {
-		t.Fatalf("after the refused decisions: %d events, %d grants, %v; want none", events, grants, err)
+		(select count(*) from grants where request_id=$2)`, *req.RecordID, req.ID).Scan(&events, &grants); err != nil || events != 1 || grants != 0 {
+		t.Fatalf("after the refused decisions: %d events, %d grants, %v; want 1 event (the sweep's own), 0 grants", events, grants, err)
 	}
 }
 

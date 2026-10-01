@@ -2,9 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
-	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
@@ -48,7 +47,11 @@ func TestMigrateIsIdempotentAndCreatesTables(t *testing.T) {
 
 // TestTerminalEventNamesMatchTheDecisionIndex pins record.TerminalEventNames to the predicate of
 // credential_request_decision, the partial unique index that holds a record to one terminal
-// event, so the Go list and the index cannot drift apart.
+// event, so the Go list and the index cannot drift apart. It compares the whole deparsed
+// predicate Postgres reports, built fresh from the Go list, rather than extracting the quoted
+// literals out of it: a predicate reshaped around the same literals (`event not in (...)`, or one
+// naming an unrelated column such as `actor in (...)`) must fail this test on its own, not only
+// the sweeper and lock tests that happen to depend on the real predicate.
 func TestTerminalEventNamesMatchTheDecisionIndex(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, testDatabaseURL(t))
@@ -68,12 +71,14 @@ func TestTerminalEventNamesMatchTheDecisionIndex(t *testing.T) {
 	if !found {
 		t.Fatalf("credential_request_decision = %q, want a partial index", definition)
 	}
-	var indexed []string
-	for _, match := range regexp.MustCompile(`'([a-z_]+)'::text`).FindAllStringSubmatch(predicate, -1) {
-		indexed = append(indexed, match[1])
+	names := record.TerminalEventNames()
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = fmt.Sprintf("'%s'::text", name)
 	}
-	if names := record.TerminalEventNames(); !slices.Equal(names, indexed) {
-		t.Fatalf("record.TerminalEventNames() = %v, credential_request_decision's predicate names %v (%s)", names, indexed, predicate)
+	want := fmt.Sprintf("(event = ANY (ARRAY[%s]))", strings.Join(quoted, ", "))
+	if predicate != want {
+		t.Fatalf("credential_request_decision's predicate = %q, want %q (from record.TerminalEventNames() = %v)", predicate, want, names)
 	}
 }
 
