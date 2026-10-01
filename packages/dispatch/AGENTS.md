@@ -6,13 +6,11 @@ production build from `web/dist`.
 
 ## Reaching production
 
-An image-pin merge in the deployment repository does not deploy Dispatch by itself: the shared
-Envoy/Dispatch image has separate listener and Dispatch paths, so Dispatch can remain on its
-previous image until that repository's `dispatch-deploy.yml` runs manually on `main`. That workflow
-is an independent Pulumi project with its own concurrency group. Treat `/healthz`'s `commit` and
-`schema_version`, not a green workflow run, as deployment evidence; run 36803610735 completed at
-02:03:29Z only after it observed commit `92c892d4` and schema 52. A pull request that needs
-deployed Dispatch behavior states that deployment dependency in its body.
+An image-pin merge and Dispatch deployment are separate steps: the listener can move while Dispatch
+remains on a previous image until the deployment repository's manually dispatched `dispatch-deploy.yml`
+runs on `main`. A pull request whose behavior depends on a deployed Dispatch server states that
+dependency in its body. For the image-pin comparison and `/healthz` deployment evidence, see
+`packages/envoy/cmd/dispatch/AGENTS.md`.
 
 ## Layout
 
