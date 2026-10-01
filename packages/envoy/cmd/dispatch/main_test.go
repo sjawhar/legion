@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -921,6 +923,102 @@ func TestResolveBootConfigDevSignInRefusesARemoteEnvoyListener(t *testing.T) {
 	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": "https://listener.example.com", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
 		t.Errorf("a remote listener without the flag: %v, want accepted", err)
 	}
+}
+
+// devSignInOrigin is a dashboard origin the dev sign-in fence accepts.
+const devSignInOrigin = "http://127.0.0.1:8799"
+
+// With the flag a loopback client acts as any allowlisted human, and a human can have the App probe
+// and import any repository it is installed on, so an App private key from the environment may
+// sign calls only to a loopback host.
+func TestDevSignInRefusesAnAppKeyThatReachesGitHub(t *testing.T) {
+	withKey := &auth.AppConfig{ClientID: "Iv1.app", ClientSecret: "secret", PEM: "app private key"}
+	fromEnv := appCredentialSource{}
+	// Unset, the App calls https://api.github.com.
+	for _, base := range []string{"", "https://api.github.com", "http://10.0.0.5:9022", "http://127.0.0.1@api.github.com"} {
+		err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": base}), devSignInOrigin, withKey, fromEnv)
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_GITHUB_API_BASE="+strconv.Quote(base)) || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
+			t.Errorf("DISPATCH_GITHUB_API_BASE=%q: err = %v, want a refusal naming DISPATCH_GITHUB_API_BASE and DISPATCH_APP_PEM_B64", base, err)
+		}
+	}
+	// The e2e harness points the App at its fake GitHub on 127.0.0.1 (packages/dispatch/e2e/run-server.sh).
+	for _, base := range []string{"http://127.0.0.1:9022", "http://localhost:9022", "http://[::1]:9022"} {
+		if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": base}), devSignInOrigin, withKey, fromEnv); err != nil {
+			t.Errorf("DISPATCH_GITHUB_API_BASE=%s: %v, want a loopback host accepted", base, err)
+		}
+	}
+	// No App, or an App without its private key, signs no App call.
+	for _, app := range []*auth.AppConfig{nil, {ClientID: "Iv1.app", ClientSecret: "secret"}} {
+		if err := devSignInLoadedFence(devSignInBoot(t, nil), devSignInOrigin, app, fromEnv); err != nil {
+			t.Errorf("App %+v: %v, want accepted", app, err)
+		}
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_DEV_SIGNIN": ""}), devSignInOrigin, withKey, fromEnv); err != nil {
+		t.Errorf("an App key reaching GitHub without the flag: %v, want accepted", err)
+	}
+}
+
+// The dashboard origin comes from envoy.json, which main reads after the environment, so the fence
+// over loaded values checks it, before anything connects.
+func TestDevSignInLoadedFenceRefusesAPublicOrigin(t *testing.T) {
+	const public = "https://dispatch.example.com"
+	if err := devSignInLoadedFence(devSignInBoot(t, nil), public, nil, appCredentialSource{}); err == nil || !strings.Contains(err.Error(), "DISPATCH_SERVER_URL") {
+		t.Errorf("origin %s with the flag: err = %v, want a refusal naming DISPATCH_SERVER_URL", public, err)
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_DEV_SIGNIN": ""}), public, nil, appCredentialSource{}); err != nil {
+		t.Errorf("origin %s without the flag: %v, want accepted", public, err)
+	}
+}
+
+// app.json is where a developer keeps the real App's key, and a loopback base proves only where the
+// port is, not that a fake owns it. So with the flag a key from app.json is refused whatever the
+// base, naming the file and the environment key that replaces it, while a throwaway key in the
+// environment with a loopback fake boots, as packages/dispatch/e2e/run-server.sh's does.
+func TestDevSignInRefusesAnAppJSONKeyWhateverTheBase(t *testing.T) {
+	const fake = "http://127.0.0.1:9022"
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "app.json")
+	if err := os.WriteFile(path, []byte(`{"clientId":"Iv1.file","clientSecret":"secret","pem":"app private key"}`), 0o600); err != nil {
+		t.Fatalf("write app.json: %v", err)
+	}
+	t.Setenv("DISPATCH_APP_CLIENT_ID", "")
+	app, source, err := loadAppCredentials(dataDir)
+	if err != nil || app == nil {
+		t.Fatalf("loadAppCredentials from app.json: %+v, %v", app, err)
+	}
+	for _, base := range []string{fake, "http://localhost:9022", "http://[::1]:9022", "", "https://api.github.com"} {
+		err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": base}), devSignInOrigin, app, source)
+		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") {
+			t.Errorf("a key in app.json, DISPATCH_GITHUB_API_BASE=%q: err = %v, want a refusal naming %s and DISPATCH_APP_PEM_B64", base, err, path)
+		}
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_DEV_SIGNIN": ""}), devSignInOrigin, app, source); err != nil {
+		t.Errorf("a key in app.json without the flag: %v, want accepted", err)
+	}
+
+	t.Setenv("DISPATCH_APP_CLIENT_ID", "Iv1.env")
+	t.Setenv("DISPATCH_APP_CLIENT_SECRET", "secret")
+	t.Setenv("DISPATCH_APP_PEM_B64", base64.StdEncoding.EncodeToString([]byte("throwaway key")))
+	app, source, err = loadAppCredentials(dataDir)
+	if err != nil || app == nil {
+		t.Fatalf("loadAppCredentials from the environment: %+v, %v", app, err)
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, map[string]string{"DISPATCH_GITHUB_API_BASE": fake}), devSignInOrigin, app, source); err != nil {
+		t.Errorf("a key in DISPATCH_APP_PEM_B64 with a loopback fake: %v, want accepted", err)
+	}
+	if err := devSignInLoadedFence(devSignInBoot(t, nil), devSignInOrigin, app, source); err == nil || !strings.Contains(err.Error(), "DISPATCH_APP_PEM_B64") || strings.Contains(err.Error(), path) {
+		t.Errorf("a key in DISPATCH_APP_PEM_B64, DISPATCH_GITHUB_API_BASE unset: err = %v, want a refusal naming DISPATCH_APP_PEM_B64 and not %s", err, path)
+	}
+}
+
+// devSignInBoot resolves devSignInEnvironment(overrides), which the boot fence accepts.
+func devSignInBoot(t *testing.T, overrides map[string]string) bootConfig {
+	t.Helper()
+	boot, err := resolveBootConfig(devSignInEnvironment(overrides))
+	if err != nil {
+		t.Fatalf("resolveBootConfig(%v): %v", overrides, err)
+	}
+	return boot
 }
 
 func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
