@@ -1,20 +1,23 @@
 import { type ReactNode, useId } from "react";
 
-import {
-  primaryButtonBg,
-  primaryButtonRefusal,
-  secondaryButtonCompactRefusal,
-} from "../theme/classes";
+import { primaryButton, secondaryButtonCompact } from "../theme/classes";
+
+/** Each look whole, refused or not: the `refused:` variant (`styles.css`) paints `disabled` and
+ *  `aria-disabled` alike, so a look states its cannot-press state once. */
+const LOOKS = {
+  primary: primaryButton,
+  "secondary-compact": secondaryButtonCompact,
+} as const;
 
 /**
- * A button that says why it cannot be pressed: the filled primary, or the compact outlined
- * secondary (`look`). A refusal is `aria-disabled` rather than `disabled`, so the button stays in
- * the tab order and its reason reaches a keyboard and a screen reader: on `title`, and through
- * `aria-describedby` on the line that shows it (`refusalShownBy`), or, where no line on screen
- * does, on a hidden one of the button's own. A click on a refused button does nothing, a submit
- * button's included, so the refusal holds whatever the host's handler checks; a form's other ways
- * to submit (Ctrl/Cmd+Enter) remain the host's to refuse. Only `busy` - a press already in
- * flight, which its label names - disables it outright.
+ * A button that says why it cannot be pressed, in one of `LOOKS`. A refusal is `aria-disabled`
+ * rather than `disabled`, so the button stays in the tab order and its reason reaches a keyboard
+ * and a screen reader: on `title`, and through `aria-describedby` on the line that shows it
+ * (`refusalShownBy`), or, where no line on screen does, on a hidden one of the button's own. A
+ * click on a refused button does nothing, a submit button's included, so the refusal holds
+ * whatever the host's handler checks; a form's other ways to submit (Ctrl/Cmd+Enter) remain the
+ * host's to refuse. Only `busy` - a press already in flight, which its label names - disables it
+ * outright.
  */
 export function RefusableButton({
   busy,
@@ -34,7 +37,7 @@ export function RefusableButton({
   readonly className?: string;
   /** The id of a line on screen that bears on the press, read after the reason. */
   readonly describedBy?: string;
-  readonly look?: "primary" | "secondary";
+  readonly look?: keyof typeof LOOKS;
   readonly onPress?: () => void;
   /** Why the button cannot be pressed, or null while it can. */
   readonly refusal: string | null;
@@ -50,7 +53,7 @@ export function RefusableButton({
       <button
         aria-describedby={description === "" ? undefined : description}
         aria-disabled={refusal === null ? undefined : true}
-        className={`${look === "primary" ? `rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonRefusal}` : secondaryButtonCompactRefusal} ${className}`}
+        className={`${LOOKS[look]} ${className}`}
         disabled={busy !== undefined}
         onClick={(event) => {
           if (refusal !== null) {

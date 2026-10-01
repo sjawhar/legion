@@ -66,7 +66,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { deliveryAttempts } from "./attempts";
 import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
-import { broadcastPlan, broadcastSendState, exclusionLine } from "./broadcast-plan";
+import { broadcastPlan, broadcastSendState } from "./broadcast-plan";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import {
   AGENT_ROW_SELECTOR,
@@ -1176,19 +1176,11 @@ function BroadcastComposer({
   const plan = broadcastPlan(selected, agents, delivery);
   const { excluded, recipients } = plan;
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
-  // and refuses a send over it; saying so before Send saves the round trip.
+  // and refuses a send over it; saying so before Send saves the round trip. The notice line is
+  // Send's reason when it refuses for the limit or for nobody to reach; otherwise it still bears
+  // on the send, so Send is described by it.
   const sendState = broadcastSendState(plan, delivery, body);
   const noticeId = useId();
-  // The notice slot holds one line, highest first: the limit, then the exclusions. Over the limit
-  // and with nobody to reach, the line is Send's reason; otherwise an Excluded line still bears on
-  // the send, so Send is described by it. The limit hiding the Excluded line hides no name: every
-  // excluded session's chip still carries its reason.
-  const reasonOnNotice = sendState.kind === "limit" || sendState.kind === "nobody";
-  const notice = reasonOnNotice
-    ? sendState.reason
-    : excluded.length > 0
-      ? exclusionLine(excluded)
-      : null;
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
   // so it takes about a third of a phone screen: the heading on one line, the recipients in one
@@ -1201,7 +1193,7 @@ function BroadcastComposer({
   return (
     <section
       aria-label="Broadcast"
-      className={`max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
+      className={`max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:sticky narrow-or-short:bottom-0 narrow-or-short:z-10 narrow-or-short:mt-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
     >
       <h2
         className={`text-sm font-semibold narrow-or-short:col-span-full narrow-or-short:truncate short:col-span-1 ${textPrimaryOnCanvas}`}
@@ -1253,22 +1245,22 @@ function BroadcastComposer({
         rows={3}
         value={body}
       />
-      {notice === null ? null : (
+      {sendState.notice === null ? null : (
         <p className={composerLine} id={noticeId}>
-          {notice}
+          {sendState.notice}
         </p>
       )}
       <RefusableButton
         className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
-        describedBy={notice === null || reasonOnNotice ? undefined : noticeId}
+        describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
         onPress={() =>
           onSend({
             input: { body, delivery, session_ids: recipients.map((agent) => agent.session_id) },
             selected: [...selected],
           })
         }
-        refusal={sendState.kind === "ready" ? null : sendState.reason}
-        refusalShownBy={reasonOnNotice ? noticeId : undefined}
+        refusal={sendState.refusal}
+        refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
       >
         {sendState.label}
       </RefusableButton>
@@ -1309,15 +1301,16 @@ export function AgentsPage(): ReactNode {
   // The draft is page state too: the composer unmounts whenever the selection empties, and
   // clearing a selection to pick again must not throw away a typed message or its mode. Send
   // hands the message to the queue and clears it with the selection; Restore draft, on a send the
-  // server refused, puts the message, its mode and its selection back. Any message in the draft
-  // was started after that press cleared it, so Restore draft refuses rather than replace it.
+  // server refused, puts the message, its mode and its selection back. Any message or selection
+  // here was started after that press cleared both, so Restore draft refuses rather than replace
+  // it - the same test the queue uses to hold off opening a broadcast while another is begun.
   const [draft, setDraft] = useState("");
   const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
-  const queue = useBroadcastQueue(draft.trim() !== "" || selected.size > 0);
-  const restoreRefusal =
-    draft.trim() === ""
-      ? null
-      : "Restore draft would replace the message you have started. Send it or clear it first.";
+  const composing = draft.trim() !== "" || selected.size > 0;
+  const queue = useBroadcastQueue(composing);
+  const restoreRefusal = composing
+    ? "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first."
+    : null;
   const showComposer = selected.size > 0 && agents.length > 0;
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
@@ -1419,9 +1412,11 @@ export function AgentsPage(): ReactNode {
         </>
       )}
       {/* The sends sit outside the composer and outside the list, so a send's row outlives both:
-          the composer goes at every press, and the list empties when no agent is connected. */}
+          the composer goes at every press, and the list empties when no agent is connected. On a
+          narrow or short screen only the composer sticks (the wrapper is `contents`), and the
+          strip stays at the end of the list: the composer alone fills the screen's budget. */}
       {queue.rows.length === 0 && !showComposer ? null : (
-        <div className="sticky bottom-0 z-10 mt-3 space-y-2">
+        <div className="sticky bottom-0 z-10 mt-3 space-y-2 narrow-or-short:contents">
           {queue.rows.length === 0 ? null : (
             <BroadcastSends
               onRestore={(row) => {

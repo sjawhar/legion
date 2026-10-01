@@ -855,6 +855,65 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
   }
 });
 
+// The budget is what stays on screen, so this measures the outermost box that sticks, found by
+// its computed style, not the composer by name: with a refused send's row present, which the rows
+// above never have, a strip inside that box would count against the 45%. A `display: contents`
+// element generates no box, so it sticks nothing.
+test("on a narrow or short screen a refused send's row stays out of the sticky block, which holds 45% with the message filled", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+  await setLiveSessions(planners(40, 40));
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 664, width: 390 });
+    await refuseBroadcasts(page);
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    const sends = page.getByRole("region", { name: "Sends" });
+    await header.click();
+    await message.fill("Refused before the measure.");
+    await composer.getByRole("button", { name: "Send to 40" }).click();
+    await expect(sends.getByRole("status")).toHaveText(/^Could not send to 40 agents: /);
+    await header.click();
+
+    for (const size of [
+      { height: 664, width: 390 },
+      { height: 664, width: 640 },
+      { height: 664, width: 700 },
+      { height: 390, width: 844 },
+      { height: 375, width: 667 },
+    ]) {
+      const at = `${size.width}x${size.height}`;
+      await page.setViewportSize(size);
+      await fillUntilStable(message);
+      const block = await composer.evaluate((section) => {
+        let sticky: Element | null = null;
+        for (let node: Element | null = section; node !== null; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (style.position === "sticky" && style.display !== "contents") sticky = node;
+        }
+        const strip = document.querySelector('section[aria-label="Sends"]');
+        return {
+          height: sticky?.getBoundingClientRect().height ?? Number.POSITIVE_INFINITY,
+          holdsStrip: strip === null || sticky === null || sticky.contains(strip),
+          stripHeight: strip?.getBoundingClientRect().height ?? 0,
+        };
+      });
+      expect.soft(block.stripHeight, `${at}: the refused row is on the page`).toBeGreaterThan(0);
+      expect.soft(block.holdsStrip, `${at}: the strip is outside the sticky block`).toBe(false);
+      expect.soft(block.height, at).toBeLessThanOrEqual(size.height * 0.45);
+    }
+  } finally {
+    await alice.close();
+  }
+});
+
 const NOTICE = /^(At most \d+ recipients|Excluded:)/;
 const NOTICE_SIZES = [
   { height: 664, width: 390 },
@@ -1094,12 +1153,12 @@ test("a typed broadcast survives clearing the selection and picking again, and a
     await expect(failed.getByRole("status")).toHaveText(
       "Could not send to 2 agents: Envoy listener unreachable"
     );
-    // A message started since that press would be lost to Restore draft, so it refuses, and says
-    // why under its row, until the composer is empty again. Playwright waits out a click on an
-    // `aria-disabled` button, so the refused press is forced.
+    // A message or a selection started since that press would be lost to Restore draft, so it
+    // refuses, and says why under its row, until both are cleared. Playwright waits out a click
+    // on an `aria-disabled` button, so the refused press is forced.
     const restore = failed.getByRole("button", { name: "Restore draft" });
     const why =
-      "Restore draft would replace the message you have started. Send it or clear it first.";
+      "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first.";
     await header.click();
     await message.fill("Started since.");
     await expect(restore).toBeDisabled();
@@ -1108,6 +1167,14 @@ test("a typed broadcast survives clearing the selection and picking again, and a
     await restore.click({ force: true });
     await expect(message).toHaveValue("Started since.");
     await message.fill("");
+    await expect(restore).toBeDisabled();
+    await restore.click({ force: true });
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })
+    ).toBeVisible();
+    await expect(message).toHaveValue("");
+    await header.click();
+    await expect(composer).toHaveCount(0);
     await expect(restore).toBeEnabled();
     await restore.click();
     await expect(message).toHaveValue("Keep this draft.");
@@ -1176,13 +1243,22 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     await expect(row("Second.").getByRole("status")).toHaveText("Queued: to 2 agents");
     // One at a time: the second has not left the browser while the first is unanswered.
     expect(posted).toMatchObject([{ body: "First." }]);
-
+    // The reader switches to another tab while the first is on the wire. The second still goes
+    // the moment the first is answered: a hidden tab holds nothing back. This sets the two inputs
+    // TanStack's `focusManager` reads.
+    const setVisibility = (state: "hidden" | "visible") =>
+      page.evaluate((value) => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value });
+        document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+      }, state);
+    await setVisibility("hidden");
     held[0]?.resolve();
     await expect(row("First.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     await expect(row("Second.").getByRole("status")).toHaveText("Sending to 2 agents…");
     await expect.poll(() => posted).toMatchObject([{ body: "First." }, { body: "Second." }]);
     // Nothing navigates while a send is still out.
     await expect(page).toHaveURL(/\/agents$/);
+    await setVisibility("visible");
 
     held[1]?.resolve();
     await expect(row("Second.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
@@ -1257,6 +1333,69 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
       delivery: "aside",
       session_ids: pair.map((session) => session.session_id),
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a human-paced double click on one Retry sends that message once, and never the refused row beside it", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
+  const pair = planners(40, 40).slice(0, 2);
+  await setLiveSessions(pair);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posted: { body: string }[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
+        posted.push(request.postDataJSON());
+      }
+    });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    const sends = page.getByRole("region", { name: "Sends" });
+    const row = (body: string) => sends.getByRole("listitem").filter({ hasText: body });
+
+    const refusal = await refuseBroadcasts(page);
+    for (const body of ["Retried once.", "Never retried."]) {
+      await header.click();
+      await message.fill(body);
+      await composer.getByRole("button", { name: "Send to 2" }).click();
+      await expect(row(body).getByRole("status")).toHaveText(/^Could not send to 2 agents: /);
+    }
+    refusal.allow();
+
+    // Newest first, so the row double-clicked is the lower one and the other refused row sits
+    // right above it. Two clicks 120 ms apart at one point, as a hand makes them: the retried row
+    // keeps its place rather than jumping to the top as a new press would, so nothing shifts down
+    // into the pointer and the second click lands on that row again.
+    await expect(sends.getByRole("listitem").first()).toContainText("Never retried.");
+    const retry = row("Retried once.").getByRole("button", { name: "Retry" });
+    const box = await retry.boundingBox();
+    if (box === null) throw new Error("Retry has no box to click");
+    const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await page.mouse.click(point.x, point.y);
+    await page.waitForTimeout(120);
+    await page.mouse.click(point.x, point.y);
+    await expect(
+      row("Retried once.").getByRole("link", { name: "Sent to 2 agents" })
+    ).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(posted.map((request) => request.body)).toEqual([
+      "Retried once.",
+      "Never retried.",
+      "Retried once.",
+    ]);
+    await expect(sends.getByRole("listitem").last()).toContainText("Retried once.");
+    await expect(row("Never retried.").getByRole("status")).toHaveText(
+      /^Could not send to 2 agents: /
+    );
   } finally {
     await alice.close();
   }

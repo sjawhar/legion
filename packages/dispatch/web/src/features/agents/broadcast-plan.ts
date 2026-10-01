@@ -18,17 +18,19 @@ export interface BroadcastPlan {
   readonly recipients: readonly Agent[];
 }
 
-/**
- * What Send says about the send it would make, one case each: it can be pressed (`ready`), or it
- * refuses for an empty message, for the recipient limit, or because the chosen mode reaches
- * nobody selected. Every refusal carries its `reason`; the label is a count except when there is
- * nobody to count.
- */
-export type BroadcastSendState =
-  | { readonly kind: "ready"; readonly label: string }
-  | { readonly kind: "empty"; readonly label: string; readonly reason: string }
-  | { readonly kind: "limit"; readonly label: string; readonly reason: string }
-  | { readonly kind: "nobody"; readonly label: string; readonly reason: string };
+/** What the composer shows about the send it would make: Send's label, the one notice line, and
+ *  why Send refuses, if it does. */
+export interface BroadcastSendState {
+  readonly label: string;
+  /** The composer's one notice line, highest first: the limit, nobody reached, or the Excluded
+   *  line; null when none applies. */
+  readonly notice: string | null;
+  /** Why Send refuses, or null while it can be pressed. */
+  readonly refusal: string | null;
+  /** Whether `notice` is the refusal, rather than a line beside a Send that can be pressed or
+   *  refuses for an empty message. */
+  readonly refusalOnNotice: boolean;
+}
 
 /**
  * What sending the current selection would do: the sessions it reaches, and the selected
@@ -64,10 +66,7 @@ export function broadcastPlan(
  * The Excluded line: every selected session the send leaves out, with its reason, and, when the
  * mode is why nobody is reached, the mode that would reach the most of them (`hint`).
  */
-export function exclusionLine(
-  excluded: readonly BroadcastExclusionPlan[],
-  hint: string | null = null
-): string {
+function exclusionLine(excluded: readonly BroadcastExclusionPlan[], hint: string | null): string {
   const named = excluded
     .map((item) => `${sessionLabel(item.sessionID, item.agent?.title)} (${item.reason})`)
     .join(", ");
@@ -76,14 +75,17 @@ export function exclusionLine(
 }
 
 /**
- * Which of its reasons stops Send, if any. A button that only counts - `Send to 0` - reads as a
- * number, not a refusal, so a selection none of whom this mode reaches reads `No recipient`, and
- * its reason is the Excluded line, which names each session and why. When the mode is what leaves
- * everyone out, that line ends by naming the mode that reaches the most of them - by what it would
- * do, not by the control that picks it, so it holds however the mode is chosen. The limit outranks
- * an empty message, and the cause it hides is the empty box, which the reader can see. The limit's
- * reason is also its notice line, word for word. An empty selection has no composer, so it is no
- * case here.
+ * What the composer says about the send, and where. The notice slot holds one line, highest
+ * first: the recipient limit, then the Excluded line. Over the limit, or with nobody to reach,
+ * that line is why Send refuses; otherwise an Excluded line is context beside Send, and an empty
+ * message is Send's own reason, with no line of its own. A button that only counts - `Send to 0`
+ * - reads as a number, not a refusal, so a selection none of whom this mode reaches reads
+ * `No recipient`. When the mode is what leaves everyone out, the Excluded line ends by naming the
+ * mode that reaches the most of them - by what it would do, not by the control that picks it, so
+ * it holds however the mode is chosen. The limit outranks an empty message, and the cause it
+ * hides is the empty box, which the reader can see; the limit hiding the Excluded line hides no
+ * name, since every excluded chip carries its reason. An empty selection has no composer, so it
+ * is no case here.
  */
 export function broadcastSendState(
   { excluded, recipients }: BroadcastPlan,
@@ -92,16 +94,16 @@ export function broadcastSendState(
 ): BroadcastSendState {
   const label = `Send to ${recipients.length}`;
   if (recipients.length > MAX_BROADCAST_RECIPIENTS) {
-    return {
-      kind: "limit",
-      label,
-      reason: `At most ${MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach ${recipients.length}.`,
-    };
+    const limit = `At most ${MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach ${recipients.length}.`;
+    return { label, notice: limit, refusal: limit, refusalOnNotice: true };
   }
   if (recipients.length > 0) {
-    return body.trim() === ""
-      ? { kind: "empty", label, reason: "Type a message first." }
-      : { kind: "ready", label };
+    return {
+      label,
+      notice: excluded.length === 0 ? null : exclusionLine(excluded, null),
+      refusal: body.trim() === "" ? "Type a message first." : null,
+      refusalOnNotice: false,
+    };
   }
   // No recipient means every selected session is excluded, and the composer mounts only with a
   // selection, so `excluded` is the whole selection here.
@@ -118,5 +120,6 @@ export function broadcastSendState(
       : excluded.length === 1
         ? `Sending as ${best.mode} would reach it.`
         : `Sending as ${best.mode} would reach ${best.count} of them.`;
-  return { kind: "nobody", label: "No recipient", reason: exclusionLine(excluded, hint) };
+  const nobody = exclusionLine(excluded, hint);
+  return { label: "No recipient", notice: nobody, refusal: nobody, refusalOnNotice: true };
 }

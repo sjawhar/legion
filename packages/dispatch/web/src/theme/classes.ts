@@ -550,18 +550,18 @@ export const offlineDotBg = "bg-slate-400 dark:bg-slate-600";
  * raw `text-white` literal. */
 export const primaryButtonBg = "bg-sky-700 text-white";
 export const primaryButtonHoverBg = "hover:bg-sky-800";
-export const primaryButtonEnabledHoverBg = "enabled:hover:bg-sky-800";
+/** The primary hover while the button can be pressed: `not-refused:` (`styles.css`) skips a
+ *  `disabled` button and one refused with `aria-disabled` alike. */
+export const primaryButtonEnabledHoverBg = "not-refused:hover:bg-sky-800";
 export const PRIMARY_BUTTON_DISABLED_BG = pair(P.SLATE_300, P.SLATE_700);
-/** A primary button that cannot be pressed: slate-700 on slate-300 (slate-300 on slate-700 in
- * dark), 6.97:1 either way, since its label may be the only thing on screen saying why. */
+/** A primary button that cannot be pressed, `disabled` or refused with `aria-disabled` (the
+ * `refused:` variant, `styles.css`): slate-700 on slate-300 (slate-300 on slate-700 in dark),
+ * 6.97:1 either way, since its label may be the only thing on screen saying why. */
 export const primaryButtonDisabled =
-  "disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-700 dark:disabled:bg-slate-700 dark:disabled:text-slate-300";
-/** Everything `components/RefusableButton.tsx` paints over `primaryButtonBg`, in one string so
- * the halves cannot be split: the refused look for `aria-disabled` as well as `disabled` (a
- * refused button stays focusable, so its reason reaches a keyboard), and a hover that skips a
- * refused button - `enabled:` still matches one, so `primaryButtonEnabledHoverBg` would paint
- * over the refusal. */
-export const primaryButtonRefusal = `enabled:not-aria-disabled:hover:bg-sky-800 ${primaryButtonDisabled} aria-disabled:cursor-not-allowed aria-disabled:bg-slate-300 aria-disabled:text-slate-700 dark:aria-disabled:bg-slate-700 dark:aria-disabled:text-slate-300`;
+  "refused:cursor-not-allowed refused:bg-slate-300 refused:text-slate-700 dark:refused:bg-slate-700 dark:refused:text-slate-300";
+/** The whole primary button `components/RefusableButton.tsx` draws: shape, colours, the hover
+ *  while it can be pressed and the look while it cannot. */
+export const primaryButton = `rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`;
 
 registerText(
   "primary button text (resting)",
@@ -581,8 +581,10 @@ registerText(
 
 export const secondaryButtonText = "text-slate-700 dark:text-slate-300";
 export const secondaryButtonBorder = "border-slate-300 dark:border-slate-700";
-export const secondaryButtonHoverBorder = "hover:border-sky-500 dark:hover:border-sky-400";
-export const secondaryButtonDisabledText = "disabled:text-slate-400 dark:disabled:text-slate-600";
+export const secondaryButtonHoverBorder =
+  "not-refused:hover:border-sky-500 dark:not-refused:hover:border-sky-400";
+/** A secondary button that cannot be pressed, `disabled` or refused (`refused:`, `styles.css`). */
+export const secondaryButtonDisabledText = "refused:text-slate-400 dark:refused:text-slate-600";
 
 /** An input/select/textarea's resting border and background, plus its focus border. Pass
  * `recessed: true` when the control sits inside a `SURFACE` card (its dark background needs to
@@ -596,15 +598,9 @@ export function inputClasses(recessed: boolean): string {
     : "border-slate-300 bg-white focus:border-sky-600 dark:border-slate-700 dark:bg-slate-900 dark:focus:border-sky-400";
 }
 
-const secondaryButtonCompactShape =
-  "min-h-11 shrink-0 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap sm:min-h-7 sm:px-2";
 /** The compact secondary button the Architecture lists, the component picker and the broadcast
  *  Sends strip share: a 44 px tap target through phone widths, 28 px from `sm`. */
-export const secondaryButtonCompact = `${secondaryButtonCompactShape} ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`;
-/** `secondaryButtonCompact` for `components/RefusableButton.tsx`, in one string as
- *  `primaryButtonRefusal` is: a hover that skips a refused button, and the refused look - the
- *  secondary text on `SURFACE_MUTED`, a pair registered above. */
-export const secondaryButtonCompactRefusal = `${secondaryButtonCompactShape} ${secondaryButtonBorder} ${secondaryButtonText} not-aria-disabled:hover:border-sky-500 dark:not-aria-disabled:hover:border-sky-400 ${secondaryButtonDisabledText} aria-disabled:cursor-not-allowed aria-disabled:bg-slate-100 dark:aria-disabled:bg-slate-800`;
+export const secondaryButtonCompact = `min-h-11 shrink-0 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap sm:min-h-7 sm:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`;
 
 // ---------------------------------------------------------------------------------------------
 // The navigation rail: a deliberately constant-dark surface (unlike everything else in this

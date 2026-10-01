@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -1479,13 +1479,13 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
   }
 });
 
-test("Restore draft refuses, and says why on screen, while the composer holds a message started since the refused send", async () => {
+test("Restore draft refuses, and says why on screen, while the composer holds a message or a selection started since the refused send", async () => {
   const page = renderAgents();
   page.createBroadcast.mockImplementationOnce(async () => {
     throw new Error("Envoy listener unreachable");
   });
   const reason =
-    "Restore draft would replace the message you have started. Send it or clear it first.";
+    "Restore draft would replace the broadcast you have started. Send it, or clear its message and selection, first.";
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -1515,12 +1515,21 @@ test("Restore draft refuses, and says why on screen, while the composer holds a 
     expect(message()).toHaveProperty("value", "Started since.");
     expect(within(sends).getByText(/^Could not send to 1 agent/)).toBeTruthy();
 
-    // Once the composer is empty again the refused send's message comes back.
+    // An empty message with agents ticked since is a broadcast begun too: Restore draft would
+    // replace the selection, so it still refuses.
     fireEvent.change(message(), { target: { value: "" } });
+    expect(restore.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(restore);
+    expect(planner).toHaveProperty("checked", true);
+    expect(message()).toHaveProperty("value", "");
+
+    // With nothing begun, the refused send's message and selection come back.
+    fireEvent.click(planner);
     expect(restore.getAttribute("aria-disabled")).toBeNull();
     expect(within(sends).queryByText(reason)).toBeNull();
     fireEvent.click(restore);
     expect(message()).toHaveProperty("value", "Keep this.");
+    expect(planner).toHaveProperty("checked", true);
     expect(screen.queryByRole("region", { name: "Sends" })).toBeNull();
   } finally {
     page.view.unmount();
@@ -1528,7 +1537,55 @@ test("Restore draft refuses, and says why on screen, while the composer holds a 
   }
 });
 
-test("Send says which of its reasons stops it, and names the mode that would reach a selection this one reaches none of", () => {
+// TanStack resumes a paused mutation only while the tab is visible (`focusManager`), so a queue
+// built on a mutation `scope` would hold the second send until the reader came back to the tab.
+test("a queued broadcast goes out as soon as the one ahead is answered, with the tab hidden by then", async () => {
+  const page = renderAgents();
+  const held = Promise.withResolvers<void>();
+  page.createBroadcast.mockImplementationOnce(async (input) => {
+    await held.promise;
+    return {
+      author: { id: "alice", kind: "user" },
+      body: input.body,
+      created_at: "2026-09-14T00:00:00Z",
+      delivery: input.delivery,
+      excluded: [],
+      id: "broadcast-held",
+      recipients: [],
+    };
+  });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = within(region).getByRole("checkbox", { name: "Select Planner for broadcast" });
+    // Each press in a task of its own: the queue drops a second press in the same task.
+    for (const body of ["First.", "Second."]) {
+      fireEvent.click(planner);
+      fireEvent.change(within(region).getByRole("textbox", { name: "Broadcast message" }), {
+        target: { value: body },
+      });
+      fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
+      await screen.findByTitle(body);
+    }
+    const sends = screen.getByRole("region", { name: "Sends" });
+    expect(within(sends).getByText("Queued: to 1 agent")).toBeTruthy();
+    expect(page.createBroadcast).toHaveBeenCalledTimes(1);
+
+    focusManager.setFocused(false);
+    held.resolve();
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
+    expect(page.createBroadcast.mock.calls.map(([input]) => input.body)).toEqual([
+      "First.",
+      "Second.",
+    ]);
+  } finally {
+    focusManager.setFocused(undefined);
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Send says which of its reasons stops it, where that reason is shown, and the mode that would reach a selection this one reaches none of", () => {
   const [planner, reviewer] = agents;
   const deaf = { ...reviewer, capabilities: [], session_id: "deaf-session", title: "Deaf" };
   const state = (
@@ -1538,53 +1595,83 @@ test("Send says which of its reasons stops it, and names the mode that would rea
     body = "Report status."
   ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
   const both = [planner.session_id, reviewer.session_id];
-
   const tail = "Nothing is sent to them, and no other mode is substituted.";
+  // Nobody reached: the label stops counting, and the Excluded line is the notice and the reason.
+  const nobody = (line: string) => ({
+    label: "No recipient",
+    notice: line,
+    refusal: line,
+    refusalOnNotice: true,
+  });
 
   // Every selected session has left the registry: the line names each by its ID, and no mode
   // would help.
-  expect(state(both, [], "btw")).toEqual({
-    kind: "nobody",
-    label: "No recipient",
-    reason: `Excluded: session:planner-… (no live session), session:reviewer… (no live session). ${tail}`,
-  });
+  expect(state(both, [], "btw")).toEqual(
+    nobody(
+      `Excluded: session:planner-… (no live session), session:reviewer… (no live session). ${tail}`
+    )
+  );
   // One gone, one without the mode: each with its own cause, then the mode that reaches the
   // live one.
-  expect(state(both, [reviewer], "btw")).toEqual({
-    kind: "nobody",
-    label: "No recipient",
-    reason: `Excluded: session:planner-… (no live session), Reviewer (does not advertise btw). ${tail} Sending as aside would reach 1 of them.`,
-  });
+  expect(state(both, [reviewer], "btw")).toEqual(
+    nobody(
+      `Excluded: session:planner-… (no live session), Reviewer (does not advertise btw). ${tail} Sending as aside would reach 1 of them.`
+    )
+  );
   // The hint picks the mode that reaches the most: aside reaches both, btw only the Planner.
-  expect(state(both, agents, "steer")).toMatchObject({
-    reason: expect.stringMatching(/ Sending as aside would reach 2 of them\.$/),
-  });
+  expect(state(both, agents, "steer").refusal).toMatch(
+    / Sending as aside would reach 2 of them\.$/
+  );
   // One session alone is "it"; a session advertising nothing gets no hint at all.
-  expect(state([reviewer.session_id], [reviewer], "btw")).toMatchObject({
-    reason: expect.stringMatching(/ Sending as aside would reach it\.$/),
+  expect(state([reviewer.session_id], [reviewer], "btw").refusal).toMatch(
+    / Sending as aside would reach it\.$/
+  );
+  expect(state([deaf.session_id], [deaf], "btw")).toEqual(
+    nobody(`Excluded: Deaf (does not advertise btw). ${tail}`)
+  );
+
+  // Someone reached: the label counts, and an Excluded line is context beside Send, never its
+  // reason, with no hint since the mode reaches someone.
+  const reviewerLeftOut = `Excluded: Reviewer (does not advertise btw). ${tail}`;
+  expect(state(both, agents, "btw")).toEqual({
+    label: "Send to 1",
+    notice: reviewerLeftOut,
+    refusal: null,
+    refusalOnNotice: false,
   });
-  expect(state([deaf.session_id], [deaf], "btw")).toEqual({
-    kind: "nobody",
-    label: "No recipient",
-    reason: `Excluded: Deaf (does not advertise btw). ${tail}`,
+  // An empty message is Send's own reason, beside the same line.
+  expect(state(both, agents, "btw", "  ")).toEqual({
+    label: "Send to 1",
+    notice: reviewerLeftOut,
+    refusal: "Type a message first.",
+    refusalOnNotice: false,
   });
-  // Reachable sessions keep the count as the label. The limit outranks an empty message.
+  expect(state([planner.session_id], agents, "btw")).toEqual({
+    label: "Send to 1",
+    notice: null,
+    refusal: null,
+    refusalOnNotice: false,
+  });
+
+  // The limit outranks an empty message and the Excluded line alike.
   const crowd = Array.from({ length: 101 }, (_, index) => ({
     ...planner,
     session_id: `crowd-${index}`,
   }));
-  const everyone = crowd.map((agent) => agent.session_id);
-  expect(state(everyone, crowd, "btw", "")).toEqual({
-    kind: "limit",
+  const limit = "At most 100 recipients per broadcast; this one would reach 101.";
+  expect(
+    state(
+      [...crowd.map((agent) => agent.session_id), reviewer.session_id],
+      [...crowd, reviewer],
+      "btw",
+      ""
+    )
+  ).toEqual({
     label: "Send to 101",
-    reason: "At most 100 recipients per broadcast; this one would reach 101.",
+    notice: limit,
+    refusal: limit,
+    refusalOnNotice: true,
   });
-  expect(state([planner.session_id], agents, "btw", "  ")).toEqual({
-    kind: "empty",
-    label: "Send to 1",
-    reason: "Type a message first.",
-  });
-  expect(state([planner.session_id], agents, "btw")).toEqual({ kind: "ready", label: "Send to 1" });
 });
 
 test("the header checkbox follows the filters and its count never hides a selected row the filter hides", async () => {
