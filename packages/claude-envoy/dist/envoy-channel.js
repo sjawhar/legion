@@ -38997,8 +38997,10 @@ function redactBearer(text, bearer) {
   const length = Math.min(BEARER_PIECE, bearer.length);
   const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
   const covered = new Uint8Array(scanned.length);
-  for (let at = 0;at + length <= bearer.length; at++) {
-    const piece = bearer.slice(at, at + length);
+  const pieces = new Set;
+  for (let at = 0;at + length <= bearer.length; at++)
+    pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
     let found = scanned.indexOf(piece);
     while (found !== -1) {
       covered.fill(1, found, found + length);
@@ -40527,8 +40529,8 @@ function writeMayHaveLanded(error48) {
   return !(error48 instanceof DispatchServiceError) || error48.status >= 500;
 }
 function withAccount(error48, account) {
-  const message = error48 instanceof Error ? error48.message : String(error48);
-  const told = /[.!?]$/.test(message) ? `${message} ${account.charAt(2).toUpperCase()}${account.slice(3)}` : `${message}${account}`;
+  const message = messageFor(error48);
+  const told = /[.!?]$/.test(message) ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}` : `${message}; ${account}`;
   return new Error(told, { cause: error48 });
 }
 async function executeDispatchTool(input) {
@@ -40700,9 +40702,9 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error48) {
-          const told = writeMayHaveLanded(error48) ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "; the reason was not posted, so the close was not sent";
+          const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error48 instanceof DispatchServiceError)
-            throw refusalWithCode(error48, told);
+            throw refusalWithCode(error48, `; ${told}`);
           throw withAccount(error48, told);
         }
       }
@@ -40725,11 +40727,11 @@ async function executeDispatchTool(input) {
         const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
-        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
         const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
         const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
-          throw refusalWithCode(error48, taken + landed);
+          throw refusalWithCode(error48, `${taken}; ${landed}`);
         throw withAccount(error48, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;

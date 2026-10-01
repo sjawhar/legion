@@ -2848,6 +2848,25 @@ describe("executeDispatchTool", () => {
       headers: { "Content-Type": "text/html" },
     });
 
+  // A request that got no answer, the client's timeout and a transport error, each with the
+  // message the client reports for it. The reason's post and the close's PATCH each add their own
+  // account after it, as a sentence of its own, since both messages end one.
+  const unanswered = [
+    [
+      (): Response => {
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      },
+      "The operation timed out.",
+    ],
+    [
+      (): Response => {
+        throw new TypeError("fetch failed");
+      },
+      "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
+        "changed, restart this agent process so it picks up the new configuration.",
+    ],
+  ] as const;
+
   // Whether the reason was posted follows one rule with the close's PATCH: only an answer sent
   // before the reason could be stored proves it was not. That is Dispatch's own 4xx, or a
   // gateway's answer that never reached Dispatch: a 408 or 429 (its own timeout or rate limit,
@@ -2882,19 +2901,7 @@ describe("executeDispatchTool", () => {
         () => refusal(500, "INTERNAL", "internal server error"),
         `INTERNAL: internal server error${unknown}`,
       ],
-      [
-        (): Response => {
-          throw new DOMException("The operation timed out.", "TimeoutError");
-        },
-        `The operation timed out.${unknownSentence}`,
-      ],
-      [
-        (): Response => {
-          throw new TypeError("fetch failed");
-        },
-        "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
-          `changed, restart this agent process so it picks up the new configuration.${unknownSentence}`,
-      ],
+      ...unanswered.map(([fail, told]) => [fail, `${told}${unknownSentence}`] as const),
       [
         (): Response => {
           throw new Error(refused);
@@ -3016,19 +3023,7 @@ describe("executeDispatchTool", () => {
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
     for (const [patch, expected] of [
-      [
-        (): Response => {
-          throw new DOMException("The operation timed out.", "TimeoutError");
-        },
-        `The operation timed out.${unknownSentence}`,
-      ],
-      [
-        (): Response => {
-          throw new TypeError("fetch failed");
-        },
-        "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
-          `changed, restart this agent process so it picks up the new configuration.${unknownSentence}`,
-      ],
+      ...unanswered.map(([fail, told]) => [fail, `${told}${unknownSentence}`] as const),
       [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`],
       [
         () => gatewayPage(502, "Bad Gateway"),

@@ -249,16 +249,20 @@ const BEARER_PIECE = 8;
  * limit is found (one that runs past it reads up to `BEARER_PIECE - 1` characters beyond), so a
  * run is redacted whole however the limit or another copy cuts it. Redaction changes the length,
  * so the text is cut to the limit only afterwards, and nothing from past the limit moves into it.
- * Each piece is one native scan of that slice, so the work is bounded by the limit and the
- * bearer's length, whatever the size of the body.
+ * Each distinct piece is one native scan of that slice, and no two distinct pieces of one length
+ * match at the same position, so the marking is bounded by the slice and the scans by the limit and
+ * the bearer's length, whatever the size of the body. Searching again for a repeated piece would
+ * mark the same matches again: a bearer of one character repeated would mark every position of the
+ * slice once per piece.
  */
 function redactBearer(text: string, bearer: string): string {
   if (bearer === "") return text.slice(0, EXCERPT_SCAN_LIMIT);
   const length = Math.min(BEARER_PIECE, bearer.length);
   const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
   const covered = new Uint8Array(scanned.length);
-  for (let at = 0; at + length <= bearer.length; at++) {
-    const piece = bearer.slice(at, at + length);
+  const pieces = new Set<string>();
+  for (let at = 0; at + length <= bearer.length; at++) pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
     let found = scanned.indexOf(piece);
     while (found !== -1) {
       covered.fill(1, found, found + length);

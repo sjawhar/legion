@@ -1799,15 +1799,15 @@ function writeMayHaveLanded(error: unknown): boolean {
 }
 
 /**
- * An error that is no refusal (a timeout, a transport error) with `account`, a clause starting
- * "; ", after its message: joined to it, or as a sentence of its own after a message that ends
- * one ("The operation timed out.", "… able to access the url?").
+ * An error that is no refusal (a timeout, a transport error) with `account`, the caller's clause
+ * on what its call did, after its message: joined to it with "; ", or as a sentence of its own
+ * after a message that ends one ("The operation timed out.", "… able to access the url?").
  */
 function withAccount(error: unknown, account: string): Error {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = messageFor(error);
   const told = /[.!?]$/.test(message)
-    ? `${message} ${account.charAt(2).toUpperCase()}${account.slice(3)}`
-    : `${message}${account}`;
+    ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}`
+    : `${message}; ${account}`;
   return new Error(told, { cause: error });
 }
 
@@ -2041,9 +2041,9 @@ export async function executeDispatchTool(
           // The close's PATCH below follows the same rule: only an answer sent before the reason
           // could be stored proves it was not posted.
           const told = writeMayHaveLanded(error)
-            ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
-            : "; the reason was not posted, so the close was not sent";
-          if (error instanceof DispatchServiceError) throw refusalWithCode(error, told);
+            ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
+            : "the reason was not posted, so the close was not sent";
+          if (error instanceof DispatchServiceError) throw refusalWithCode(error, `; ${told}`);
           throw withAccount(error, told);
         }
       }
@@ -2078,7 +2078,7 @@ export async function executeDispatchTool(
         // The reason is on the issue, so a blind retry would post it a second time: the error
         // says where the first one is, and whether the close may have landed anyway. A gateway's
         // timeout or rate limit refused nothing there is to fix.
-        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
         const fix =
           error instanceof DispatchGatewayError && error.transient
             ? ""
@@ -2086,7 +2086,8 @@ export async function executeDispatchTool(
         const landed = writeMayHaveLanded(error)
           ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`
           : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
-        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken + landed);
+        if (error instanceof DispatchServiceError)
+          throw refusalWithCode(error, `${taken}; ${landed}`);
         throw withAccount(error, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;

@@ -781,6 +781,31 @@ describe("DispatchClient", () => {
     expect(message).not.toContain("after the limit");
   });
 
+  // Nothing checks a bearer's length or its characters on load, and the excerpt is built on the
+  // host's event loop. A bearer of one character repeated is thousands of pieces that are all the
+  // same, and searching the 64 KiB slice once for each of them marks every position again per
+  // piece: seconds for this one. Each distinct piece is searched once. The bound is generous so a
+  // loaded machine passes and a search per piece does not.
+  test("redacts a bearer of one character repeated from a 64 KiB body in bounded time", async () => {
+    const { fetchImpl } = fakeFetch([
+      new Response("x".repeat(64 * 1024), {
+        status: 502,
+        headers: { "Content-Type": "text/html" },
+      }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "x".repeat(2048), fetchImpl);
+    const started = performance.now();
+
+    const message = await client.getIssue("DSP-1").then(
+      () => "",
+      (error: Error) => error.message
+    );
+
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(message).toContain('("[redacted]")');
+    expect(message).not.toContain("xxxxxxxx");
+  });
+
   // A body of nothing but markup is not empty, and an agent told it was would look for a gateway
   // that sent nothing. The answer gives the body's size in bytes and says none of it reads as
   // text, or none of what the excerpt reads when the body runs past that.
