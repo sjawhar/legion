@@ -85,18 +85,18 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // doc comment). Its exit code is a liveness probe scripts can use directly, the same distinction
 // the doctor and installer checks in ~/.dotfiles need and, before this verb existed, had no
 // side-effect-free way to make (AGENTC-834): 0 while the helper holds a launcher credential, which
-// prints "issued"; 1 while it holds none, printing the most recent login's state ("pending",
+// prints "issued"; 1 while it holds none, printing the state the helper reports ("pending",
 // "denied", "expired", or "none" when no login has run). A re-login that was denied, expired
 // unapproved or is still pending leaves the credential an earlier login installed in place, and
 // the helper keeps enrolling sessions with it, so that still prints "issued" and exits 0, and
 // stderr names the most recent login and its code. A helper from before credential_held reports
-// only the most recent login, which reads "issued" exactly while its credential is held. A
-// credential the broker refused prints "expired", the word the dotfiles launcher gate matches,
-// and when the helper says so (login_refused) stderr says the broker refused it and why that can
-// happen. Any other "expired" gets the neutral line: a login that expired before anyone approved
-// it reads the same, and so does a refused credential on a helper from before login_refused,
-// which keeps running until it restarts. Every answer with no credential says on stderr what to
-// do about it.
+// only the most recent login, which reads "issued" exactly while its credential is held. The
+// helper reports a credential the broker refused as "expired", the word the dotfiles launcher
+// gate matches, unless a login is pending, and when it says so (login_refused) stderr says the
+// broker refused it and why that can happen. Any other "expired" gets the neutral line: a login
+// that expired before anyone approved it reads the same, and so does a refused credential on a
+// helper from before login_refused, which keeps running until it restarts. Every answer with no
+// credential says on stderr what to do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
@@ -128,9 +128,6 @@ func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "agent-secrets launcher login-status: the most recent machine login (code %s) expired before anyone approved it; %s\n", resp.Code, held)
 		}
 		return 0
-	}
-	if resp.LoginRefused && state != "pending" {
-		state = "expired"
 	}
 	fmt.Fprintln(stdout, state)
 	switch {

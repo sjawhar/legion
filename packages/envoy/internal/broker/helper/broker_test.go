@@ -519,6 +519,43 @@ func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 	}
 }
 
+// TestALoginStartedAsTheCredentialIsRefusedReportsItsOwnOutcome: a refusal clears the credential
+// and records that the broker refused it, and a login that starts afterwards resets that record.
+// A login the operator starts while the refusal is being recorded must not lose its reset, or a
+// re-login denied afterwards reads as a refused credential rather than as the denial it is. The
+// test hook starts the login between the clear and the record; it returns once the login has
+// recorded its pending state, or after 200 ms while the login waits for the refusal to finish.
+func TestALoginStartedAsTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "sjawhar")
+	f.mu.Lock()
+	f.loginOutcome = "denied"
+	f.mu.Unlock()
+	login := make(chan error, 1)
+	b.testClearHook = func() {
+		go func() {
+			_, err := b.Login(context.Background(), "helper-host")
+			login <- err
+		}()
+		select {
+		case err := <-login:
+			login <- err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	if err := b.clearOnInvalid(b.cred.Load(), rejected); !errors.Is(err, errNoCredential) {
+		t.Fatal(err)
+	}
+	if err := <-login; err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.login.Load().State == "denied" })
+	if got := b.LoginStatus(); got.State != "denied" || got.Refused || got.CredentialHeld {
+		t.Fatalf("a login started as the credential was refused, then denied: %+v, want denied, not refused, no credential", got)
+	}
+}
+
 // TestDeniedAndExpiredLoginsSurfaceTheirState drives the fake through both terminal non-issued
 // outcomes and confirms a later Login, once the prior one is no longer pending, starts completely
 // fresh rather than reusing the denied/expired attempt's key.

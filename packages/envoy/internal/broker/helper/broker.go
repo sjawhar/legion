@@ -44,11 +44,13 @@ type machineCredential struct {
 // human-facing confirmation code, the opaque id the helper polls the broker with, and its state,
 // beside whether the helper holds a launcher credential. Those are separate facts, since a
 // re-login that is denied, expires unapproved or is still pending leaves the credential an
-// earlier login installed in place, and the helper keeps enrolling sessions with it. "expired" is
-// both a pending login nobody approved in time and an issued one whose credential the broker has
-// since refused (clearOnInvalid); the token stays "expired" for the second, since the dotfiles
-// launcher gate matches the state words. Refused says the broker refused the credential the
-// helper held and no login has started since, so the helper holds none.
+// earlier login installed in place, and the helper keeps enrolling sessions with it. Refused says
+// the broker refused the credential the helper held and no login has started since, so the helper
+// holds none; State then reads "expired" whatever the most recent login's was, unless that login
+// is still pending. "expired" is the word the dotfiles launcher gate matches and the one an older
+// client prints its refusal line for, and an older client must never read "issued" for a
+// credential the helper no longer holds. "expired" is otherwise a pending login nobody approved in
+// time.
 type loginState struct {
 	Code, PendingID, State string // the most recent login; State: pending|issued|denied|expired
 	CredentialHeld         bool   // the helper holds a launcher credential, whichever login installed it
@@ -69,14 +71,18 @@ type Broker struct {
 	Log *slog.Logger
 
 	cred    atomic.Pointer[machineCredential]
-	refused atomic.Bool                // clearOnInvalid cleared cred, and no login has started since
 	loginMu sync.Mutex                 // one login at a time
 	login   atomic.Pointer[loginState] // most recent login: code, pendingID, state
-	// stateMu is held by every write of cred and of login, and by LoginStatus while it reads the
-	// two, so login-status never pairs one moment's login with another's credential. The two stay
-	// atomics so a reader of only one (HasCredential, launcherProof, Login's pending check) takes
-	// no lock.
+	// stateMu is held by every write of cred, login and refused, and by LoginStatus while it reads
+	// the three, so login-status never pairs one moment's login with another's credential, and a
+	// refusal is recorded with the clear that caused it. cred and login stay atomics so a reader of
+	// only one (HasCredential, launcherProof, Login's pending check) takes no lock.
 	stateMu sync.Mutex
+	refused bool // clearOnInvalid cleared cred, and no login has started since; guarded by stateMu
+	// testClearHook, when set, runs in clearOnInvalid between clearing the credential and
+	// recording the refusal. It exists only so a test can start a login there; no production
+	// caller sets it.
+	testClearHook func()
 
 	installedMu sync.Mutex
 	installed   chan struct{} // closed, then replaced, each time a credential is installed
@@ -182,42 +188,45 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 	if out.PendingID == "" || out.Code == "" {
 		return "", fmt.Errorf("broker returned no pending_id/code")
 	}
-	b.refused.Store(false)
 	b.recordLogin(&loginState{Code: out.Code, PendingID: out.PendingID, State: "pending"})
 	go b.pollLogin(key, out.PendingID, out.Code, operator)
 	return out.Code, nil
 }
 
 // LoginStatus reports the most recent machine login, current or settled, and whether the helper
-// holds a launcher credential; the zero value means no login has ever run. An issued login whose
-// credential is gone reads "expired" and refused, since only clearOnInvalid ever clears the
-// credential. A login that did not issue says nothing about the credential an earlier one
-// installed: CredentialHeld does. The login and the credential are read under stateMu, so the
-// answer is the login and the credential of one moment: a new login recorded between two unlocked
-// reads can no longer make an older issued login read refused.
+// holds a launcher credential; the zero value means no login has ever run. A login that did not
+// issue says nothing about the credential an earlier one installed: CredentialHeld does. Once the
+// broker has refused the credential, and until a new login starts, every state but pending reads
+// "expired" and refused; an issued login is among them, since only clearOnInvalid ever clears a
+// credential an issued login installed. The login, the credential and the refusal are read under
+// stateMu, so the answer is all three of one moment.
 func (b *Broker) LoginStatus() loginState {
 	b.stateMu.Lock()
-	ls, cred := b.login.Load(), b.cred.Load()
+	ls, cred, refused := b.login.Load(), b.cred.Load(), b.refused
 	b.stateMu.Unlock()
 	if ls == nil {
 		return loginState{}
 	}
 	out := *ls
 	out.CredentialHeld = cred != nil
-	if !out.CredentialHeld {
-		out.Refused = b.refused.Load()
-		if out.State == "issued" {
-			out.State, out.Refused = "expired", true
+	if !out.CredentialHeld && refused {
+		out.Refused = true
+		if out.State != "pending" {
+			out.State = "expired"
 		}
 	}
 	return out
 }
 
-// recordLogin records ls as the current machine login.
+// recordLogin records ls as the current machine login. A pending one is a new login, which ends
+// the record of a refused credential in the same write.
 func (b *Broker) recordLogin(ls *loginState) {
 	b.stateMu.Lock()
 	defer b.stateMu.Unlock()
 	b.login.Store(ls)
+	if ls.State == "pending" {
+		b.refused = false
+	}
 }
 
 // HasCredential reports whether the helper holds a launcher credential, the one thing every
@@ -331,9 +340,11 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 // its clock-skew window or for a URL other than its own (an AGENT_SECRETS_URL that does not match
 // the broker's public URL). It never auto-relogins. cred is the credential the refused call was
 // signed with, and only that one is cleared: a refusal that arrives after another login has
-// installed a new credential leaves the new one alone. With the credential gone, LoginStatus
-// reports it refused, whatever the most recent login's state, so login-status — the probe every
-// launcher decides on — stops reporting a credential the helper no longer holds.
+// installed a new credential leaves the new one alone. The clear and the record that the broker
+// refused it are one write under stateMu, so LoginStatus reports the credential refused, whatever
+// the most recent login's state, and a login that starts meanwhile resets that record after it,
+// never before. login-status — the probe every launcher decides on — then stops reporting a
+// credential the helper no longer holds.
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
@@ -341,9 +352,14 @@ func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	}
 	b.stateMu.Lock()
 	cleared := b.cred.CompareAndSwap(cred, nil)
+	if cleared {
+		if b.testClearHook != nil {
+			b.testClearHook()
+		}
+		b.refused = true
+	}
 	b.stateMu.Unlock()
 	if cleared {
-		b.refused.Store(true)
 		b.logger().Warn("launcher credential refused; cleared", "credential_id", cred.id, "code", be.Code)
 	}
 	return errNoCredential

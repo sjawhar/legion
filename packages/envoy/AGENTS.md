@@ -1472,17 +1472,18 @@ helper answers, exits 0 while the helper holds a launcher credential and prints 
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
 login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
-(`credential_held` beside `login_state`, which stays the most recent login's state for
-`launcher login`'s own poll). A helper from before that field reports only the most recent login,
-so there a denied re-login still reads `denied` and exits 1 until the helper restarts on a release
-that carries it. With no credential held, login-status exits 1 and prints the most recent login's
-state (`pending`, `denied`, `expired`, or `none` before any login). Once the broker refuses the
+(`credential_held` beside `login_state`, the most recent login's state, which `launcher login`'s
+own poll reads). A helper from before that field reports only the most recent login, so there a
+denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
+carries it. With no credential held, login-status exits 1 and prints the most recent login's state
+(`pending`, `denied`, `expired`, or `none` before any login), except once the broker refuses the
 held credential (401 `LAUNCHER_INVALID`, which it answers for an expired or revoked credential and
 for any launcher proof it cannot verify, such as clock skew or an `AGENT_SECRETS_URL` that is not
-the broker's public URL), login-status reads `expired`, the word the dotfiles launcher gate
-matches, until another login starts, and stderr says the broker refused it when the helper
-reports that (`login_refused`); a helper from before that field gets the plain "the last machine
-login is expired". The helper logs every change of the credential: `machine login issued`
+the broker's public URL): from then until another login starts, the helper reports every state but
+`pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
+client exits 1 on it too, and stderr says the broker refused it when the helper reports that
+(`login_refused`); a helper from before that field gets the plain "the last machine login is
+expired". The helper logs every change of the credential: `machine login issued`
 (credential id, and the operator the login was signed with) when a login installs one, and
 `launcher credential refused; cleared` (credential id, the broker's code) when a refusal clears it.
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
