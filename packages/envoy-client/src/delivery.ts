@@ -433,6 +433,17 @@ function dispatchPayload(event: DispatchEvent): unknown {
   return parsed.success ? parsed.data : event.payload;
 }
 
+function hasTarget(value: unknown): value is { readonly target: unknown } {
+  return isObject(value) && "target" in value;
+}
+
+function dispatchPayloadForReader(event: DispatchEvent, sessionID: string): unknown {
+  const payload = dispatchPayload(event);
+  if (!hasTarget(payload)) return payload;
+  const target = payload.target;
+  return target === `session:${sessionID}` ? { ...payload, target: `you (${target})` } : payload;
+}
+
 // A comment.created reply to an ask carries the question text (ask_question) alongside
 // the ask id, so the frame names the question head the way an ask event does; `re:` stays
 // the ask's ref.
@@ -728,7 +739,7 @@ export function renderInbound(
           owner: dispatchOwner(frame.event, topic),
           type: frame.event.type,
           actor: frame.event.actor,
-          ...(compactRecord ?? { payload: dispatchPayload(frame.event) }),
+          ...(compactRecord ?? { payload: dispatchPayloadForReader(frame.event, sessionID) }),
         };
         dispatchActor = frame.event.actor;
       } else {
@@ -796,9 +807,7 @@ export function renderInbound(
       ...(dispatchIssue === undefined ? [] : [dispatchIssue]),
     ].join(", ") || undefined;
   const rendered = {
-    ...(envelope.topic === agentSubject(sessionID)
-      ? { to: `you (${sessionID.slice(0, 4)}…)` }
-      : {}),
+    ...(envelope.topic === agentSubject(sessionID) ? { to: `you (${sessionID})` } : {}),
     from: senderLabel(envelope),
     at: inboundTimestamp(envelope.issued_at),
     id: envelope.event_id ?? "unknown",
