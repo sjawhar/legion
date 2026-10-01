@@ -11,6 +11,7 @@ import type {
   IssueSummary,
   Message,
   MessageDelivery,
+  MessageDeliveryMode,
   MessageRead,
   UserAgentStates,
 } from "../../api/types";
@@ -1720,7 +1721,7 @@ test("Send says which of its reasons stops it, where that reason is shown, and t
   const state = (
     selected: readonly string[],
     live: readonly Agent[],
-    delivery: "aside" | "btw" | "steer",
+    delivery: MessageDeliveryMode,
     body = "Report status."
   ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
   const both = [planner.session_id, reviewer.session_id];

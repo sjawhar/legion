@@ -3,9 +3,9 @@ import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contrac
 import type { Agent, MessageDeliveryMode } from "../../api/types";
 import { MODE_LABELS } from "../conversation/delivery";
 import { sessionLabel } from "../refs/actor";
-
-/** A session a broadcast would leave out, worded the way the server reports it, so the
- *  composer and the create response say the same thing. */
+/** A session a broadcast would leave out, with its composer-facing reason named through
+ *  `MODE_LABELS`. The server's stored diagnostic keeps the wire name
+ *  (`packages/dispatch/AGENTS.md`). */
 export interface BroadcastExclusionPlan {
   /** The live session the chosen mode leaves out; absent when it has left the registry. */
   readonly agent: Agent | undefined;
