@@ -112,7 +112,11 @@ Every margin — issue and standalone project document — owns anchored comment
 document (Proof's model): cards with document-relative placement, document-mark highlighting,
 suggestions, replies, resolved-thread disclosure, and the phone thread dialog. Clicking a
 highlighted mark opens its thread in the margin (the compact sheet on small viewports) and never
-navigates away from the document. Issue margins additionally show Pinned and their Ask section;
+navigates away from the document. Two readers' comments, suggestions or asks may cover the same
+text: the record marks declare `excludes: ''` (the pinned fork's schema for comments and
+suggestions, `packages/proof-editor/src/dispatch-marks.ts` for asks), so their spans nest and a
+click opens the innermost mark's thread, and removing a mark removes that mark's instance, never
+the type over its range. Issue margins additionally show Pinned and their Ask section;
 pinned events retain their original event body and have an `Unpin` action, so a pin made before a
 comment lifecycle event began folding into its comment turn remains removable.
 
