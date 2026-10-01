@@ -382,11 +382,6 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.handle(ctx, ev)
-}
-
-// handle is Handle under the machine's lock, which its caller holds.
-func (m *Machine) handle(ctx context.Context, ev Event) error {
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}

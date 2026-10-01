@@ -115,24 +115,34 @@ func TestQuiesceWaitsForAPromptOnItsWay(t *testing.T) {
 	}
 }
 
-// A turn the interrupt does not end within the stop timeout is cut off as a held suspension is: the
-// claim is suspended, its session kept, and the start goes on.
-func TestQuiesceSuspendsATurnThatOutlastsTheStopTimeout(t *testing.T) {
+// An interrupted turn is waited for however long it outlasts the stop timeout: the start stays held,
+// the claim is never suspended or stopped for it, and its abort is not sent again once the agent has
+// taken it. The turn's end lets the start go on, the claim still on its launch and its session.
+func TestQuiesceWaitsPastTheStopTimeoutForTheInterruptedTurnToEnd(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
+	before := h.claim()
 	if err := h.m.Quiesce(h.ctx, 7); !errors.Is(err, ErrQuiesceHeld) {
 		t.Fatalf("Quiesce mid-turn = %v, want ErrQuiesceHeld", err)
 	}
-	h.advance(testStop)
-	if err := h.m.Quiesce(h.ctx, 7); !errors.Is(err, ErrQuiesceHeld) || !h.claim().SuspensionHeld {
-		t.Fatalf("Quiesce past the stop timeout = %v, held %t; want ErrQuiesceHeld and the suspension held", err, h.claim().SuspensionHeld)
+	for ask := range 3 {
+		h.advance(10 * testStop)
+		if err := h.m.Quiesce(h.ctx, 7); !errors.Is(err, ErrQuiesceHeld) {
+			t.Fatalf("Quiesce %d stop timeouts after the interrupt = %v, want ErrQuiesceHeld", 10*(ask+1), err)
+		}
 	}
-	h.advance(testStop)
-	if got := h.claim(); got.State != StateSuspended || got.Session != session || len(h.calls("Suspend")) != 1 {
-		t.Fatalf("after the held suspension's timeout the claim is %s on %q with %d suspensions, want suspended once on its session", got.State, got.Session, len(h.calls("Suspend")))
+	if got := h.claim(); got.State != StateWorking || got.SuspensionHeld || len(h.calls("Suspend")) != 0 || len(h.calls("Release")) != 0 || h.conn.Aborts() != 1 {
+		t.Fatalf("past the stop timeout the claim is %s, suspension held %t, with %d suspensions, %d releases and %d aborts; want working, none held, never stopped, interrupted once",
+			got.State, got.SuspensionHeld, len(h.calls("Suspend")), len(h.calls("Release")), h.conn.Aborts())
 	}
+	h.must(StreamTurnEnd{Claim: h.token})
 	if err := h.m.Quiesce(h.ctx, 7); err != nil {
-		t.Fatalf("Quiesce of the suspended claim = %v, want nil", err)
+		t.Fatalf("Quiesce after the interrupted turn ended = %v, want nil", err)
+	}
+	after := h.claim()
+	if after.State != StateIdle || after.Generation != before.Generation || after.Session != before.Session ||
+		after.Locator == nil || *after.Locator != *before.Locator || len(h.calls("Suspend")) != 0 || len(h.calls("Release")) != 0 {
+		t.Fatalf("after the interrupted turn ended the claim is %+v, want idle on the same launch and session, never stopped", after)
 	}
 }
 
