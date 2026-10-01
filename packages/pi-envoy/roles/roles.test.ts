@@ -158,7 +158,7 @@ const dispatched = (text: string) =>
 const frontmatter = (file: string) => {
   const match = /^---\n([\s\S]*?)\n---\n/.exec(readFileSync(path.join(agentsDir, file), "utf8"));
   if (!match) throw new Error(`${file} has no frontmatter`);
-  return Bun.YAML.parse(match[1]) as { name?: unknown; model?: unknown; tools?: unknown };
+  return Bun.YAML.parse(match[1]) as Record<string, unknown>;
 };
 // Every phase worker's parts in the order both daemons compose them
 // (packages/daemon/src/daemon/processes.ts, packages/daemon-go/internal/prompts/prompts.go).
@@ -187,19 +187,17 @@ describe("the planner's plan checks", () => {
     }
   });
 
-  // The core is also composed with the interactive fragment, whose subagent dispatches nothing, so
-  // the dispatches live in the headless residue alone.
-  test("the headless planner runs the gap analyst before the plan is drafted and the reviewer after; its core dispatches neither", () => {
+  // The core dispatching neither is the mode-neutral rule above (headlessOnly's `agent="`).
+  test("the headless planner runs the gap analyst before the plan is drafted and the reviewer after", () => {
     const gap = planner.indexOf('task(agent="plan-gap-analyst")');
     const review = planner.indexOf('task(agent="plan-reviewer")');
     expect(gap).toBeGreaterThan(-1);
     expect(review).toBeGreaterThan(gap);
     expect(dispatched(planner).sort()).toEqual(["plan-gap-analyst", "plan-reviewer"]);
     expect(dispatched(read("planner.md")).sort()).toEqual(["plan-gap-analyst", "plan-reviewer"]);
-    expect(dispatched(read("core", "planner.md"))).toEqual([]);
   });
 
-  test("both checks are read-only and run on the deployment's oracle and review roles", () => {
+  test("both checks are read-only, blocking, and run on the deployment's oracle and review roles", () => {
     const readOnly = new Set(["read", "glob", "grep", "find", "lsp", "ast_grep", "todo"]);
     for (const [agent, model] of [
       ["plan-gap-analyst", "@oracle"],
@@ -207,6 +205,8 @@ describe("the planner's plan checks", () => {
     ]) {
       const declared = frontmatter(`${agent}.md`);
       expect(declared.model, agent).toEqual([model]);
+      // The planner waits for each check before it drafts or revises.
+      expect(declared.blocking, `${agent} is blocking`).toBe(true);
       expect(typeof declared.tools, `${agent} lists its tools`).toBe("string");
       const tools = String(declared.tools)
         .split(",")

@@ -8,6 +8,9 @@ description: |
 # this agent a model, through modelRoles.oracle or a task.agentModelOverrides entry for it (docs/kubernetes.md, Operator configuration).
 model: ["@oracle"]
 tools: read, glob, grep, todo
+# The planner waits for the analysis before it drafts; without this, Oh My Pi runs a task agent in
+# the background whenever async jobs are enabled.
+blocking: true
 color: yellow
 ---
 

@@ -5,8 +5,9 @@
 # disabled, as scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs: Bedrock twice (a
 # node's instance role is its key), Google, and the local servers Oh My Pi uses with no key.
 # Records merge key by key across settings layers, so every role Legion's prompts reach is named:
-# the shipped review, oracle and deep-worker agents' @review, @oracle and @deep, and the bundled
-# scout's @smol and reviewer's @slow.
+# the shipped review, oracle and deep-worker agents' @review, @oracle and @deep (the planner's
+# plan-reviewer and plan-gap-analyst run on @review and @oracle), and the bundled scout's @smol and
+# reviewer's @slow.
 enabledModels:
   - anthropic/*-legion
 disabledProviders:
