@@ -160,7 +160,7 @@ error surfaces verbatim through `ApiError`'s message, never reworded.
 `KeysPage.tsx` (`/credentials/keys`, linked from an "Approver keys" section on `/settings`) lists
 the signed-in login's own keys and offers **Register key** (begin → `createCredential` → finish,
 rendering the broker's returned rules-file YAML entry in a copyable `<pre>` with the instruction
-to add it to `agent-c`'s `agent-secret-rules.yaml`) and, once a key is freshly registered,
+to add it to the deployment repository's `agent-secret-rules.yaml`) and, once a key is freshly registered,
 **Endorse with another key** (an assertion by an already-live key over that new key's id/hash,
 finishing into an endorsement YAML block) — a freshly registered key has no persisted
 `approver_keys` row yet (the broker's rules-file reconciliation is what actually admits it), so

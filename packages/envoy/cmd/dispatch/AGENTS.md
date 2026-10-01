@@ -32,8 +32,9 @@ legion commit the image build stamped (`main.buildCommit`, from the Dockerfile's
 `LEGION_COMMIT` build argument, which the release workflow sets to its
 `github.sha` and which must be a full sha or empty; `null` in an unstamped
 build), and `schema_version`, `max(version)` from `schema_migrations`, read by
-the same probe query (`null` whenever `db` is false). agent-c's dispatch-apply
-lane compares both with the image pin it applied and that commit's migrations.
+the same probe query (`null` whenever `db` is false). The deployment repository's
+dispatch-apply lane compares both with the image pin it applied and that commit's
+migrations.
 
 Migration 0010 adds stored generated `search` columns; Postgres maintains them on writes and no
 application code writes or refreshes them.
