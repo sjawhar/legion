@@ -1479,13 +1479,15 @@ carries it. With no credential held, login-status exits 1 and prints the most re
 (`pending`, `denied`, `expired`, or `none` before any login), except once the broker refuses the
 held credential (401 `LAUNCHER_INVALID`, which it answers for an expired or revoked credential and
 for any launcher proof it cannot verify, such as clock skew or an `AGENT_SECRETS_URL` that is not
-the broker's public URL): from then until another login starts, the helper reports every state but
-`pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
+the broker's public URL): from then until a login starts or settles, the helper reports every state
+but `pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
 client exits 1 on it too, and stderr says the broker refused it when the helper reports that
 (`login_refused`); a helper from before that field gets the plain "the last machine login is
-expired". The helper logs every change of the credential: `machine login issued`
-(credential id, and the operator the login was signed with) when a login installs one, and
-`launcher credential refused; cleared` (credential id, the broker's code) when a refusal clears it.
+expired". A re-login pending at the refusal reports its own outcome once it settles, so its
+`launcher login` prints `denied` for a denial. The helper logs every change of the credential:
+`machine login issued` (credential id, and the operator the login was signed with) when a login
+installs one, and `launcher credential refused; cleared` (credential id, the broker's code) when a
+refusal clears it.
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
 job stamps in (`internal/buildversion`), `devel` for any other build, and the helper's startup
 line (`agent-secrets-helper listening`) carries the same version.

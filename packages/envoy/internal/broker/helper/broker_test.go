@@ -519,40 +519,72 @@ func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 	}
 }
 
-// TestALoginStartedAsTheCredentialIsRefusedReportsItsOwnOutcome: a refusal clears the credential
-// and records that the broker refused it, and a login that starts afterwards resets that record.
-// A login the operator starts while the refusal is being recorded must not lose its reset, or a
-// re-login denied afterwards reads as a refused credential rather than as the denial it is. The
-// test hook starts the login between the clear and the record; it returns once the login has
-// recorded its pending state, or after 200 ms while the login waits for the refusal to finish.
-func TestALoginStartedAsTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.T) {
+// TestLoginStatusReadsARefusalWithTheClearThatCausedIt: a refusal clears the credential and
+// records that the broker refused it in one write under stateMu. A login-status read between the
+// two would find no credential and no refusal, and report the denied re-login before it as the
+// answer, where the answer is the refused credential. The test hook reads login-status between the
+// clear and the record; it waits up to 200 ms for that read, which returns at once unless the lock
+// holds it back until the refusal is recorded.
+func TestLoginStatusReadsARefusalWithTheClearThatCausedIt(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "sjawhar")
+	held := b.cred.Load()
 	f.mu.Lock()
 	f.loginOutcome = "denied"
 	f.mu.Unlock()
-	login := make(chan error, 1)
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.LoginStatus().State == "denied" })
+	read := make(chan loginState, 1)
 	b.testClearHook = func() {
-		go func() {
-			_, err := b.Login(context.Background(), "helper-host")
-			login <- err
-		}()
+		go func() { read <- b.LoginStatus() }()
 		select {
-		case err := <-login:
-			login <- err
+		case got := <-read:
+			read <- got
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
 	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
-	if err := b.clearOnInvalid(b.cred.Load(), rejected); !errors.Is(err, errNoCredential) {
+	if err := b.clearOnInvalid(held, rejected); !errors.Is(err, errNoCredential) {
 		t.Fatal(err)
 	}
-	if err := <-login; err != nil {
+	if got := <-read; got.State != "expired" || !got.Refused || got.CredentialHeld {
+		t.Fatalf("login-status read as the credential was refused after a denied re-login: %+v, want expired, refused, no credential", got)
+	}
+}
+
+// TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome: a re-login is waiting for
+// approval when the broker refuses the credential an earlier login installed. While it waits,
+// login-status reads it pending and the credential refused. Once the operator denies it, it reads
+// denied and no longer refused: its outcome is newer than the refusal, and `launcher login`, which
+// reads the same answer, must tell the operator it was denied.
+func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "sjawhar")
+	held := b.cred.Load()
+	f.mu.Lock()
+	f.loginOutcome = "pending"
+	f.mu.Unlock()
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return b.login.Load().State == "denied" })
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	if err := b.clearOnInvalid(held, rejected); !errors.Is(err, errNoCredential) {
+		t.Fatal(err)
+	}
+	if got := b.LoginStatus(); got.State != "pending" || !got.Refused || got.CredentialHeld {
+		t.Fatalf("a re-login pending when the credential was refused: %+v, want pending, refused, no credential", got)
+	}
+	f.mu.Lock()
+	f.loginOutcome = "denied"
+	f.mu.Unlock()
+	deadline := time.Now().Add(15 * time.Second) // pollLogin backs off 2 s, then 4 s, between polls
+	for b.login.Load().State == "pending" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if got := b.LoginStatus(); got.State != "denied" || got.Refused || got.CredentialHeld {
-		t.Fatalf("a login started as the credential was refused, then denied: %+v, want denied, not refused, no credential", got)
+		t.Fatalf("that re-login once denied: %+v, want denied, not refused, no credential", got)
 	}
 }
 

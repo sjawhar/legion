@@ -92,11 +92,11 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // stderr names the most recent login and its code. A helper from before credential_held reports
 // only the most recent login, which reads "issued" exactly while its credential is held. The
 // helper reports a credential the broker refused as "expired", the word the dotfiles launcher
-// gate matches, unless a login is pending, and when it says so (login_refused) stderr says the
-// broker refused it and why that can happen. Any other "expired" gets the neutral line: a login
-// that expired before anyone approved it reads the same, and so does a refused credential on a
-// helper from before login_refused, which keeps running until it restarts. Every answer with no
-// credential says on stderr what to do about it.
+// gate matches, until a login starts or settles (a login still pending reads "pending"), and
+// when it says so (login_refused) stderr says the broker refused it and why that can happen. Any
+// other "expired" gets the neutral line: a login that expired before anyone approved it reads the
+// same, and so does a refused credential on a helper from before login_refused, which keeps
+// running until it restarts. Every answer with no credential says on stderr what to do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])

@@ -50,7 +50,7 @@ type Response struct {
 	State          string        `json:"state,omitempty"`           // register: enrolling | enrolled
 	LoginState     string        `json:"login_state,omitempty"`     // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
 	CredentialHeld bool          `json:"credential_held,omitempty"` // login-status: the helper holds a launcher credential, whatever the most recent login's state
-	LoginRefused   bool          `json:"login_refused,omitempty"`   // login-status: the broker refused the credential the helper held, and no login has started since
+	LoginRefused   bool          `json:"login_refused,omitempty"`   // login-status: the broker refused the credential the helper held, and no login has started or settled since
 	LeaseExpires   string        `json:"lease_expires,omitempty"`   // enroll-box: RFC3339Nano
 	Proof          string        `json:"proof,omitempty"`
 	RequestObject  string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS

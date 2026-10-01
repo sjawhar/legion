@@ -10,15 +10,7 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"os"
-	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -107,77 +99,5 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 // code with the command's exit status and stderr once its poll has read the decision.
 func launcherLogin(t *testing.T, rig *brokertest.Rig, binary, sock, action string) (code string, exit int, stderr string) {
 	t.Helper()
-	cmd := exec.Command(binary, "launcher", "login")
-	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_URL="+rig.URL, "AGENT_SECRETS_KEY_DIR=", "AGENT_SECRETS_APPROVE_URL=")
-	var errOut strings.Builder
-	cmd.Stderr = &errOut
-	out, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer out.Close()
-	cmd.Stdout = w
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	w.Close()
-	var waitErr error
-	waited := make(chan struct{})
-	go func() { waitErr = cmd.Wait(); close(waited) }()
-	t.Cleanup(func() { _ = cmd.Process.Kill(); <-waited })
-	lines := bufio.NewScanner(out)
-	if !lines.Scan() {
-		<-waited
-		t.Fatalf("launcher login printed no code; stderr %q", errOut.String())
-	}
-	code, ok := strings.CutPrefix(lines.Text(), "machine login code: ")
-	if !ok {
-		t.Fatalf("launcher login's first line is %q, want the machine login code", lines.Text())
-	}
-	go func() { // the rest of stdout, so the command never blocks writing it
-		for lines.Scan() {
-		}
-	}()
-
-	status, body := rig.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
-	}
-	var looked struct {
-		RecordID   string `json:"record_id"`
-		Challenges struct {
-			Approve string `json:"approve"`
-			Deny    string `json:"deny"`
-		} `json:"challenges"`
-	}
-	if err := json.Unmarshal(body, &looked); err != nil {
-		t.Fatalf("decode lookup: %v (body: %s)", err, body)
-	}
-	encoded := looked.Challenges.Approve
-	if action == "deny" {
-		encoded = looked.Challenges.Deny
-	}
-	challenge, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil || len(challenge) == 0 {
-		t.Fatalf("decode the %s challenge %q: %v", action, encoded, err)
-	}
-	assertion := rig.Approver.Assert(t, brokertest.RPID, brokertest.Origin, challenge)
-	status, body = rig.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/"+action,
-		map[string]any{"assertion": json.RawMessage(assertion), "code": code})
-	if status != http.StatusOK {
-		t.Fatalf("%s machine login = %d: %s", action, status, body)
-	}
-
-	select {
-	case <-waited:
-	case <-time.After(30 * time.Second):
-		_ = cmd.Process.Kill()
-		<-waited
-		t.Fatalf("launcher login never read the %s decision; stderr %q", action, errOut.String())
-	}
-	var exitErr *exec.ExitError
-	if waitErr != nil && !errors.As(waitErr, &exitErr) {
-		t.Fatalf("launcher login: %v", waitErr)
-	}
-	return code, cmd.ProcessState.ExitCode(), errOut.String()
+	return launcherLoginThen(t, rig, binary, sock, action, nil)
 }
