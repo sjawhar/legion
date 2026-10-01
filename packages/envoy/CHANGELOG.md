@@ -56,6 +56,9 @@
 
 ### Changed
 
+- A markdown document uploaded as an artifact is at most 1 MiB, the bound an issue's spec and
+  every edit already have; other artifacts keep the 25 MiB limit. The dashboard shows the
+  server's message for a refused upload (LEGION-465).
 - The stream stores an envelope under a MsgId, and so recognises its repeat, when its dedupe key was
   minted once for its message: the listener's own `publish.<id>` and `agent.<session>.<id>`, and the
   same around the shared transport's UUID idempotency key (`contracts.MintedDedupeKeyPattern`,
@@ -139,6 +142,12 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+
+- Saving a document, comment, ask, or message with a long run of underscore-joined characters
+  no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
+  in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
+  one update's 1,048,576-item cap is now refused as `413 CAP_EXCEEDED` with its item count instead
+  of `500` (LEGION-465).
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
