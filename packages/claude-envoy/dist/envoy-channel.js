@@ -38936,6 +38936,21 @@ function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
 }
+function notAPage(answer) {
+  if (Array.isArray(answer)) {
+    return `a bare array of ${answer.length} entries, the unpaged listing: a Dispatch older than ` + "sjawhar/legion#1612, which pages it, or a regression of that change";
+  }
+  if (answer === null)
+    return "null";
+  if (typeof answer !== "object")
+    return `a ${typeof answer}`;
+  const fields = answer;
+  const lacking = [
+    ...Array.isArray(fields.issues) ? [] : ["an issues array"],
+    ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
+  ];
+  return `an object without ${lacking.join(" or ")}`;
+}
 
 class DispatchClient {
   token;
@@ -38961,20 +38976,11 @@ class DispatchClient {
       limit: page.limit,
       offset: page.offset
     });
-    if (Array.isArray(answer)) {
-      const issues = answer;
-      return {
-        issues: issues.slice(page.offset, page.offset + page.limit),
-        total: issues.length,
-        limit: page.limit,
-        offset: page.offset
-      };
-    }
     const served = answer;
-    if (typeof served !== "object" || served === null || !Array.isArray(served.issues) || typeof served.total !== "number" || typeof served.limit !== "number" || typeof served.offset !== "number") {
-      throw new Error("GET /api/v1/issues answered neither a page ({issues, total, limit, offset}) nor an array of issues");
+    if (typeof served === "object" && served !== null && Array.isArray(served.issues) && typeof served.total === "number" && typeof served.limit === "number" && typeof served.offset === "number") {
+      return served;
     }
-    return served;
+    throw new Error(`GET /api/v1/issues?limit=${page.limit}&offset=${page.offset} asked for a page ` + `({issues, total, limit, offset}) and got ${notAPage(answer)}`);
   }
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
