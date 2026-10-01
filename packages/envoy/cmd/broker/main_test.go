@@ -55,8 +55,8 @@ func TestNonZeroPortPublicURLIsFineEvenWithRulesS3URI(t *testing.T) {
 // config.Load to succeed — the refusal must run before store.Open, so no real Postgres or AWS
 // credential, and no successful bind, is ever needed), and asserts the process exits non-zero
 // naming the port-0 refusal on stderr and never logs "broker listening": a regression that runs
-// the guard after Listen would still refuse eventually, but only after already printing that
-// line and binding a real socket.
+// the guard after Listen would still refuse eventually, but only after already printing that line
+// and binding a real socket.
 func TestMainRefusesPortZeroPublicURLWithRulesS3URI(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "broker")
 	build := exec.Command("go", "build", "-o", binPath, ".")

@@ -184,8 +184,9 @@ export const ASK_QUESTION_MAX = 800;
 
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
- * query travels in the URL; percent-encoded at up to 9 bytes a unit, 1,000 stays under the load
- * balancer's 16 K request-line limit. Generated into Go as `contracts.SearchQueryMax`, which the
+ * query rides in the URL beside `project` and `limit`, so this refusal and `project`'s key rule
+ * are what keep the tool's URL under the load balancer's limit; `packages/contracts/AGENTS.md`
+ * "Search limits" owns that budget. Generated into Go as `contracts.SearchQueryMax`, which the
  * server enforces.
  */
 export const SEARCH_QUERY_MAX = 1000;
@@ -193,6 +194,10 @@ export const SEARCH_QUERY_MAX = 1000;
 /** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
  *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
 export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
+/** A whole project key, as the Dispatch server creates them (`projectKeyPattern`, and the
+ *  `projects.key` check constraint). */
+export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
@@ -933,6 +938,14 @@ export const dispatchToolSpecs = [
         .describe("Maximum results, 1-50; default 20.")
         .optional(),
     }),
+    // An empty project searches every project, as the server reads it.
+    validation: {
+      check: (value) => {
+        const { project } = value as { readonly project?: unknown };
+        return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: "project must be a project key such as CORE",
+    },
   },
   {
     name: "dispatch_issues",

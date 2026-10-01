@@ -36641,6 +36641,7 @@ var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+var PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -36960,7 +36961,14 @@ var dispatchToolSpecs = [
       }).describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z2.string().describe("Optional project key to search within.").optional(),
       limit: z2.number({ int: true, min: 1, max: 50 }).describe("Maximum results, 1-50; default 20.").optional()
-    })
+    }),
+    validation: {
+      check: (value) => {
+        const { project } = value;
+        return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: "project must be a project key such as CORE"
+    }
   },
   {
     name: "dispatch_issues",
@@ -39327,8 +39335,14 @@ function renderAdvice(tool, key, advice, opts) {
   const openAsks = advice.your_open_asks;
   const writesSinceHuman = advice.session_writes_since_human;
   const lines = [];
+  const unparsed = advice.unparsed_openers;
+  if (unparsed !== undefined && unparsed.count > 0 && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
+    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
+    const subject2 = unparsed.count === 1 ? "1 typed-block opening in this document is text, not a block" : `${unparsed.count} typed-block openings in this document are text, not blocks`;
+    lines.push(`${subject2}: ${quoted}. An opening like \`:::ask{\u2026}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`);
+  }
   if (advice.decision_blocks === 0 && opts.isPrimarySpec === true && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
-    lines.push('No decision blocks in this spec \u2014 nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
+    lines.push('This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
   }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
     const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
@@ -39787,7 +39801,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
     problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
-    if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
+    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push("project must be a project key such as CORE");
     }
     const refDocument = ref?.owner.kind === "project" ? ref.artifact ?? ref.id : undefined;

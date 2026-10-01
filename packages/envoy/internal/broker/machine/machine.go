@@ -71,7 +71,7 @@ type Service struct {
 const jtiRetentionMargin = time.Minute
 
 // confirmationAlphabet has 32 symbols, none easily confused with another (no 0/O, no 1/I), so a
-// random byte maps onto it without bias. Moved here verbatim from the deleted launcher package.
+// random byte maps onto it without bias.
 const confirmationAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 // confirmationCode is eight random symbols from confirmationAlphabet as XXXX-XXXX.
@@ -91,8 +91,7 @@ func confirmationCode() (string, error) {
 }
 
 // hashPendingID is the sha256 of a pending id — machine_login_polls' primary key, so the raw
-// capability a machine polls with is never itself stored. Moved here verbatim from the deleted
-// launcher package.
+// capability a machine polls with is never itself stored.
 func hashPendingID(raw string) []byte {
 	sum := sha256.Sum256([]byte(raw))
 	return sum[:]

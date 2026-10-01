@@ -285,6 +285,7 @@ func operatorClaim() OperatorClaim {
 			ConfirmedAt: &delivered,
 			Interrupted: true,
 		},
+		SuspensionHeld: true,
 	}
 }
 

@@ -95,8 +95,8 @@ func main() {
 	// boot has already run (config, the port-0 public-URL guard, migrations, the first rules
 	// load) — the only way any caller, dev-broker.sh included, can learn which process holds an
 	// address is the log line
-	// below, printed only once this exact Listen call has already succeeded. A shared fixed dev
-	// port used to let a losing instance's own readiness curl see a different, already-running
+	// below, printed only once this exact Listen call has already succeeded. With a shared fixed
+	// dev port, a losing instance's own readiness curl could see a different, already-running
 	// instance's healthz answer and report "ready" pointing at the wrong broker; splitting
 	// Listen from Serve and logging only after a real bind closes that regardless of how the
 	// address is chosen, and dev-broker.sh's BROKER_LISTEN_ADDR=127.0.0.1:0 makes a same-port

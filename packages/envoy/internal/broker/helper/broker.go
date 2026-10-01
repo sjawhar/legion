@@ -67,6 +67,11 @@ type Broker struct {
 	cred    atomic.Pointer[machineCredential]
 	loginMu sync.Mutex                 // one login at a time
 	login   atomic.Pointer[loginState] // pending login: code, pendingID, state
+	// stateMu is held by every write of cred and of login, and by LoginStatus while it reads the
+	// two, so login-status never pairs one moment's login with another's credential. The two stay
+	// atomics so a reader of only one (HasCredential, launcherProof, Login's pending check) takes
+	// no lock.
+	stateMu sync.Mutex
 
 	installedMu sync.Mutex
 	installed   chan struct{} // closed, then replaced, each time a credential is installed
@@ -172,7 +177,7 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 	if out.PendingID == "" || out.Code == "" {
 		return "", fmt.Errorf("broker returned no pending_id/code")
 	}
-	b.login.Store(&loginState{Code: out.Code, PendingID: out.PendingID, State: "pending"})
+	b.recordLogin(&loginState{Code: out.Code, PendingID: out.PendingID, State: "pending"})
 	go b.pollLogin(key, out.PendingID, out.Code, operator)
 	return out.Code, nil
 }
@@ -180,18 +185,28 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 // LoginStatus reports the current (or most recently settled) machine login; the zero value means
 // none has ever run. A login whose credential clearOnInvalid has since cleared reads "expired",
 // with Refused set: the credential is the one source of whether an issued login still holds, and
-// only clearOnInvalid ever clears it (pollLogin installs the credential before it records
-// "issued").
+// only clearOnInvalid ever clears it. Both are read under stateMu, so the answer is the login and
+// the credential of one moment: a new login recorded between two unlocked reads can no longer
+// make an older issued login read refused.
 func (b *Broker) LoginStatus() loginState {
-	ls := b.login.Load()
+	b.stateMu.Lock()
+	ls, cred := b.login.Load(), b.cred.Load()
+	b.stateMu.Unlock()
 	if ls == nil {
 		return loginState{}
 	}
 	out := *ls
-	if out.State == "issued" && b.cred.Load() == nil {
+	if out.State == "issued" && cred == nil {
 		out.State, out.Refused = "expired", true
 	}
 	return out
+}
+
+// recordLogin records ls as the current machine login.
+func (b *Broker) recordLogin(ls *loginState) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
+	b.login.Store(ls)
 }
 
 // HasCredential reports whether the helper holds a launcher credential, the one thing every
@@ -212,10 +227,13 @@ func (b *Broker) CredentialInstalled() <-chan struct{} {
 	return b.installed
 }
 
-// installCredential makes cred the helper's launcher credential, then wakes every waiter on
-// CredentialInstalled.
-func (b *Broker) installCredential(cred *machineCredential) {
+// installCredential makes cred the helper's launcher credential and issued the login that minted
+// it, in one write under stateMu, then wakes every waiter on CredentialInstalled.
+func (b *Broker) installCredential(cred *machineCredential, issued *loginState) {
+	b.stateMu.Lock()
 	b.cred.Store(cred)
+	b.login.Store(issued)
+	b.stateMu.Unlock()
 	b.installedMu.Lock()
 	defer b.installedMu.Unlock()
 	if b.installed != nil {
@@ -236,12 +254,11 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code, operator stri
 		if state, credentialID, ok := b.readLoginStatus(ctx, pendingID); ok {
 			switch state {
 			case "issued":
-				b.installCredential(&machineCredential{key: key, id: credentialID})
-				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: "issued"})
+				b.installCredential(&machineCredential{key: key, id: credentialID}, &loginState{Code: code, PendingID: pendingID, State: "issued"})
 				b.logger().Info("machine login issued; the helper holds a launcher credential", "credential_id", credentialID, "operator", operator)
 				return
 			case "denied", "expired":
-				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: state})
+				b.recordLogin(&loginState{Code: code, PendingID: pendingID, State: state})
 				return
 			}
 		}
@@ -311,7 +328,10 @@ func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
 		return err
 	}
-	if b.cred.CompareAndSwap(cred, nil) {
+	b.stateMu.Lock()
+	cleared := b.cred.CompareAndSwap(cred, nil)
+	b.stateMu.Unlock()
+	if cleared {
 		b.logger().Warn("launcher credential refused; cleared", "credential_id", cred.id, "code", be.Code)
 	}
 	return errNoCredential

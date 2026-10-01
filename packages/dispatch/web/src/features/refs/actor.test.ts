@@ -61,7 +61,7 @@ test("a session a service token authenticated keeps the service account after th
       titles
     )
   ).toBe("Planner (as legion/dispatch)");
-  // Two namespaces' `default` are different identities that used to read alike.
+  // Two namespaces' `default` are different identities, so they must not read alike.
   expect(
     actorLabel({
       id: "other-session",

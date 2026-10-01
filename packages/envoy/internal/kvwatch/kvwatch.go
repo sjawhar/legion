@@ -352,9 +352,9 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 
 // logWarmUp logs the line that says what one initial scan cost: the cache, the bucket, how long it
 // took, the live keys the scan delivered, the delete markers it streamed past to find them, and how
-// it ended. A restart's own log then names its cost, which is what LEGION-374 could not read off a
-// 17-25 s readiness gap. The two counts are disjoint, as the role restore line's are: a marker is
-// not a key the cache keeps, and one total of both reads as keys the warm-up failed to apply.
+// it ended, so a restart's own log names what a slow readiness spent (LEGION-374). The two counts
+// are disjoint, as the role restore line's are: a marker is not a key the cache keeps, and one
+// total of both reads as keys the warm-up failed to apply.
 // entries counts what the scan delivered, which is what sizes the replay; a cache can hold fewer,
 // since each one evicts a value it cannot decode. A scan the idle timer gave up on logs the same
 // line at WARN, since the cache behind it is short of the bucket.

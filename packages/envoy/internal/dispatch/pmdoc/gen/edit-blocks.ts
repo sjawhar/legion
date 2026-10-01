@@ -1,21 +1,28 @@
-// edit-blocks.ts <base64 Yjs update>: loads the live document as the browser editor's sync plugin
-// does (initProseMirrorDoc), types "x" at the end of the first header cell, "y" at the end of the
-// first body cell and "z" at the end of the first code block, sets the first image's alt text to
-// "alt2", writes the edit back as that plugin does (updateYFragment, with the mapping that keeps
-// untouched nodes), and prints the resulting update. The plugin rewrites each node an edit touches
-// with the attributes the editor holds, so each of those carries its schema's defaults into the
-// live document.
-import { readFileSync } from "node:fs";
+// edit-blocks.ts <base64 Yjs update> <out>: loads the live document as the browser editor's sync
+// plugin does (initProseMirrorDoc), types "x" at the end of the first header cell, "y" at the end
+// of the first body cell and "z" at the end of the first code block, sets the first image's alt
+// text to "alt2", writes the edit back as that plugin does (updateYFragment, with the mapping that
+// keeps untouched nodes), and writes the resulting update's bytes to <out>, never stdout
+// (genResult, update_test.go). The plugin rewrites each node an edit touches with the attributes
+// the editor holds, so each of those carries its schema's defaults into the live document.
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Transform } from "prosemirror-transform";
-import * as Y from "yjs";
-import { initProseMirrorDoc, updateYFragment } from "y-prosemirror";
 import { createHeadlessProof } from "@legion/proof-editor/headless";
+import { Transform } from "prosemirror-transform";
+import { initProseMirrorDoc, updateYFragment } from "y-prosemirror";
+import * as Y from "yjs";
 
-const blockSchema = JSON.parse(readFileSync(join(import.meta.dir, "..", "schema", "blocks.json"), "utf8"));
+const [update, out] = process.argv.slice(2);
+if (!update || !out) {
+  console.error("usage: bun edit-blocks.ts <base64 Yjs update> <out>");
+  process.exit(2);
+}
+const blockSchema = JSON.parse(
+  readFileSync(join(import.meta.dir, "..", "schema", "blocks.json"), "utf8")
+);
 const { schema } = await createHeadlessProof({ blockSchema });
 const ydoc = new Y.Doc();
-Y.applyUpdate(ydoc, Buffer.from(process.argv[2], "base64"));
+Y.applyUpdate(ydoc, Buffer.from(update, "base64"));
 const fragment = ydoc.getXmlFragment("prosemirror");
 const { doc, meta } = initProseMirrorDoc(fragment, schema);
 const tr = new Transform(doc);
@@ -50,4 +57,4 @@ if (image < 0) {
 }
 tr.setNodeMarkup(image, undefined, { ...tr.doc.nodeAt(image)?.attrs, alt: "alt2" });
 ydoc.transact(() => updateYFragment(ydoc, fragment, tr.doc, meta));
-console.log(Buffer.from(Y.encodeStateAsUpdate(ydoc)).toString("base64"));
+writeFileSync(out, Y.encodeStateAsUpdate(ydoc));

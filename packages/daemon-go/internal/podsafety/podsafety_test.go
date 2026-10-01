@@ -138,6 +138,8 @@ func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T)
 func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
 	omp := testbin.OMP(t)
 	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	testbin.OMPHome(t, omp, home)
 	repo := filepath.Join(dir, "repo")
 	if err := os.MkdirAll(filepath.Join(repo, ".omp"), 0o700); err != nil {
 		t.Fatal(err)
@@ -159,7 +161,7 @@ func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
 		"the operator's overlay wins":                    {pod: []string{"PI_CONFIG_FILES=" + operator}, want: "https://operator.example/compact"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			env := append([]string{"HOME=" + filepath.Join(dir, "home"), "PATH=/usr/bin:/bin"}, tc.pod...)
+			env := append([]string{"HOME=" + home, "PATH=/usr/bin:/bin"}, tc.pod...)
 			if !tc.noApply {
 				var err error
 				if env, err = Apply(env, t.TempDir()); err != nil {

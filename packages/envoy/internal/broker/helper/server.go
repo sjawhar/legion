@@ -180,7 +180,8 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 // the wait, and that one reading decides both: an unenrolled session's reply says NO_CREDENTIAL
 // exactly when the wait was skipped for want of a credential, whatever a login or a refusal
 // changed meanwhile. A session whose enrollment lapsed waits for its re-enrollment, since a lapse
-// reopens its ready channel (markLapsed).
+// reopens its ready channel (markLapsed). The reply's id, state and error come from one snapshot,
+// so a lapse landing after the wait cannot give it an id from before and a state from after.
 func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 	credential := s.Broker.HasCredential()
 	if wait > 0 && credential {
@@ -190,7 +191,8 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		case <-sess.stop:
 		}
 	}
-	resp := Response{OK: true, EnrollmentID: sess.EnrollmentID(), RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: sess.State(), Error: sess.LastError()}
+	st := sess.snapshot()
+	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
 	if resp.EnrollmentID == "" && !credential {
 		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
@@ -201,14 +203,15 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 // enrolling (NOT_ENROLLED) while the helper holds a launcher credential, and without one the
 // helper enrolls no one until a human logs it in, so the session has no broker identity
 // (NO_CREDENTIAL). NOT_ENROLLED names the last attempt's failure when there is one: an enroll
-// error, or a lapse's refused renew (markLapsed).
-func (s *Server) notEnrolled(sess *Session) Response {
+// error, or a lapse's refused renew (markLapsed). st is the snapshot the caller found unenrolled,
+// so the failure named is the one that goes with that answer.
+func (s *Server) notEnrolled(st enrollmentState) Response {
 	if !s.Broker.HasCredential() {
 		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
 	}
 	msg := "this session is not enrolled with the broker yet"
-	if last := sess.LastError(); last != "" {
-		msg += "; last attempt: " + last
+	if st.LastError != "" {
+		msg += "; last attempt: " + st.LastError
 	}
 	return Response{Code: CodeNotEnrolled, Error: msg}
 }
@@ -245,9 +248,10 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 	if !ok {
 		return resp
 	}
-	id := sess.EnrollmentID()
+	st := sess.snapshot()
+	id := st.EnrollmentID
 	if id == "" {
-		return s.notEnrolled(sess)
+		return s.notEnrolled(st)
 	}
 	compact, err := proof.Sign(sess.Key, id, method, url, time.Now())
 	if err != nil {
@@ -272,8 +276,8 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 	if !ok {
 		return resp
 	}
-	if sess.EnrollmentID() == "" {
-		return s.notEnrolled(sess)
+	if st := sess.snapshot(); st.EnrollmentID == "" {
+		return s.notEnrolled(st)
 	}
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {

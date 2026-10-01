@@ -176,7 +176,7 @@ test("emitted document item hrefs select and scroll their anchored thread", asyn
   const { issue } = await seedIssue();
   // Anchored writes are seeded one at a time. Each holds its transaction across the document
   // work that stamps the mark, so concurrent ones queue on the server's connection pool
-  // instead of overlapping (LEGION-215 CI hang).
+  // instead of overlapping (LEGION-215).
   const comments = [
     await createComment(issue.key, {
       anchor: { artifact: "spec", quote: "astrolabe" },

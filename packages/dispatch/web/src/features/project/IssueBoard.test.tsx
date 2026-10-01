@@ -130,7 +130,7 @@ test("the whole card is the drag activator: no Reorder button, no status pill, s
     expect(card.tagName).toBe("ARTICLE");
     expect(card.getAttribute("tabindex")).toBe("-1");
     expect(within(board).queryAllByRole("button", { name: /^Reorder/ })).toHaveLength(0);
-    // The column header names the status; the card no longer repeats it.
+    // The column header names the status; the card does not repeat it.
     expect(within(card).queryByText("Triage")).toBeNull();
     expect(within(card).getByRole("link", { name: /CORE-1/ })).toBeDefined();
     expect(within(card).getByRole("combobox", { name: "Priority of CORE-1" })).toBeDefined();

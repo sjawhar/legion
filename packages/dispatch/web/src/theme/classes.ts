@@ -10,7 +10,7 @@ import * as P from "./palette";
  * silently omits it from the built stylesheet. `classes-in-build-css.ts`, run with
  * `bun run check:classes` after the production build, checks every token below against the output
  * CSS; `no-raw-colors.test.ts` additionally rejects a hyphen glued directly onto a template
- * expression in this very file, so the bug that motivated both checks cannot come back.
+ * expression in this very file, the construction that assembles a class name at runtime.
  *
  * Nothing outside `theme/` should write a `bg-`/`text-`/`border-`/`ring-`/`placeholder-` color
  * literal directly — `no-raw-colors.test.ts` greps `web/src` (excluding `theme/`) for exactly

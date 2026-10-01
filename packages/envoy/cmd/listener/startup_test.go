@@ -35,7 +35,7 @@ func TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		secret    = "bind-window-secret"
 		delivery  = "delivery-bind-window"
 	)
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
@@ -118,13 +118,11 @@ func TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 // It must start healthy over them and serve the ordinary keys beside them: one stored role must not
 // keep every listener from starting.
 func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
-	t.Cleanup(func() { resetListenerTestState(t, client.Conn); clearKVBucket(t, client.Conn, cistore.Bucket) })
 	bucket := func(name string, ttl time.Duration) natsgo.KeyValue {
 		t.Helper()
 		kv, err := client.JS().KeyValue(name)

@@ -1747,12 +1747,12 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 }
 
 // LEGION-271, acceptance 3 and 6. The key is scoped to the mode, so a retry in a different mode
-// must reach the agent - and it must not ride on the stranded attempt's row, which
-// recordPendingMessageDelivery used to resume while overwriting its mode. That would publish a
-// second frame under one attempt number and make the history lie. The stranded attempt is
-// settled failed as superseded, with its own message.delivery receipt, and the new mode gets a
-// row pinned to the session the stranded row named. A role: message takes the same path without
-// a 409: the new attempt's route is that pinned session, not whoever holds the role now.
+// must reach the agent - and it must not ride on the stranded attempt's row: resuming that row
+// while overwriting its mode would publish a second frame under one attempt number and make the
+// history lie. The stranded attempt is settled failed as superseded, with its own message.delivery
+// receipt, and the new mode gets a row pinned to the session the stranded row named. A role:
+// message takes the same path without a 409: the new attempt's route is that pinned session, not
+// whoever holds the role now.
 func TestRetryInAnotherModeSupersedesTheStrandedAttempt(t *testing.T) {
 	for _, target := range []string{"session:s1", "role:planner"} {
 		t.Run(target, func(t *testing.T) {
