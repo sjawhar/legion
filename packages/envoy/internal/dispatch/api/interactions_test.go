@@ -1058,14 +1058,12 @@ func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T
 	}
 }
 
-// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent reproduces a
-// regression an adversarial review found: a legacy open anchored ask whose
-// ask.opened event has been pruned is still readable through GET
-// /api/v1/asks/{id} (attachOpenedEventIDs falls back across
-// ask.opened/answered/resolved/edited), but the anchor-refresh cascade used a
-// stricter ask.opened-only lookup and aborted the whole document mutation
-// with a load error when that row's anchor needed refreshing. The fix shares
-// attachOpenedEventIDs's fallback (events.OpenedEventIDs) between both paths.
+// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent: a legacy open anchored ask whose
+// ask.opened event has been pruned is still readable through GET /api/v1/asks/{id}
+// (attachOpenedEventIDs falls back across ask.opened/answered/resolved/edited), and the
+// anchor-refresh cascade must find it the same way: a stricter ask.opened-only lookup there would
+// abort the whole document mutation with a load error when that row's anchor needs refreshing.
+// Both paths share attachOpenedEventIDs's fallback (events.OpenedEventIDs).
 func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Legacy ask fallback", "The quick brown fox")
@@ -1085,7 +1083,7 @@ func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T
 		t.Fatalf("delete ask.opened event: %v", err)
 	}
 
-	// The read API still serves this legacy row, via the same fallback the fix now shares.
+	// The read API serves this legacy row through the same fallback.
 	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
 	if read.Code != http.StatusOK {
 		t.Fatalf("read legacy ask: status=%d body=%s", read.Code, read.Body.String())
@@ -1879,9 +1877,8 @@ func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
 	}
 }
 
-// AGENTC-193's spec grew versions 13 through 19 from edits that left it byte-identical, because
-// the batch's `summary` reached NamedVersion unconditionally. A batch that changes nothing mints
-// nothing and says so, with or without a summary.
+// A batch that changes nothing mints nothing and says so, with or without a summary: a `summary`
+// that reached NamedVersion unconditionally would version a byte-identical document.
 func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
 	for _, test := range []struct {
 		name    string

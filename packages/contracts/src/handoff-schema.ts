@@ -249,9 +249,9 @@ const nonEmptySkillList = z.array(z.string().trim().min(1)).min(1);
 
 /** Write-time contract for a plan handoff: every downstream role's skill list is present and
  * non-empty, so a plan that names no skills is refused before it reaches the branch. A legitimate
- * "nothing applies" is the single entry `none: <what was looked through and why nothing fits>`
- * (Sami, AGENTC-370, 2026-09-18: a nascent project may have no agent skills yet). Read-time
- * validation (`planSchema`) stays tolerant so plans committed before this rule still load. */
+ * "nothing applies" is the single entry `none: <what was looked through and why nothing fits>`,
+ * since a nascent project may have no agent skills yet. Read-time validation (`planSchema`) stays
+ * tolerant so plans committed before this rule still load. */
 const planWriteSchema = planSchema.extend({
   requiredSkills: z
     .object({

@@ -1952,8 +1952,8 @@ export const CommentEventPayloadSchema = z
   // clients are known to read today, but the wire payload always carries every
   // field the server model has. .passthrough() keeps a field this schema hasn't
   // caught up to riding along instead of silently vanishing when a consumer that
-  // reads it is added later — the failure mode that dropped ask_waiting_on/turn
-  // from a comment.created reply without any test catching it.
+  // reads it is added later, as ask_waiting_on and turn would vanish from a
+  // comment.created reply with no test to catch it.
   .passthrough();
 
 export const MessageEventPayloadSchema = z.object({

@@ -440,10 +440,9 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 		t.Fatalf("recovery uses a fresh key and a new enrollment for the same runtime_id: %+v", sess.Info())
 	}
 	// The recovered session's own goroutine revokes the old enrollment before its first enroll
-	// call (the AGENTC-834 thermonuclear review's finding on Recover's ordering, fixed by
-	// revoking the session's lapsed id at the top of enrollLoop): by the time sess reads
-	// "enrolled" above, the old id must already be revoked, so this poll should already find it
-	// on the first check.
+	// call (AGENTC-834 thermonuclear review, Recover's ordering; enrollLoop revokes the session's
+	// lapsed id first): by the time sess reads "enrolled" above, the old id must already be
+	// revoked, so this poll should already find it on the first check.
 	revokeDeadline := time.Now().Add(5 * time.Second)
 	for {
 		r.fake.mu.Lock()
@@ -532,7 +531,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.cancel() // the helper dies; keys are gone with it
 	time.Sleep(100 * time.Millisecond)
 	// Hold the old row "live" for 300ms once srv2.Recover asks to revoke it: nothing has issued
-	// a DELETE for this broker yet, so this is that first (and, under the fix, only) one.
+	// a DELETE for this broker yet, so this is that first (and only) one.
 	r.fake.mu.Lock()
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
@@ -586,14 +585,13 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 }
 
 // TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff is the regression for
-// the Important finding on the third fix pass (AGENTC-834 thermonuclear review): enrollLoop's
-// revoke-before-enroll guard calls revokeLapsed synchronously, and revokeLapsed retries
-// indefinitely with backoff — so if the re-pinned session ends (Registry.Remove, exactly what
-// retire/unregister would do) while that revoke is genuinely stuck retrying against a failing
-// broker, the prior id would be abandoned: retire's own revoke only ever touches
-// sess.EnrollmentID(), still empty at this point since this session never reached its first
-// successful Enroll, and once Registry.Remove drops the record a later restart's Recover has no
-// way to find the prior id either. revokeLapsed therefore hands the id to the same bounded,
+// AGENTC-834: enrollLoop's revoke-before-enroll guard calls revokeLapsed synchronously, and
+// revokeLapsed retries indefinitely with backoff — so if the re-pinned session ends
+// (Registry.Remove, exactly what retire/unregister would do) while that revoke is genuinely stuck
+// retrying against a failing broker, the prior id would be abandoned: retire's own revoke only
+// ever touches sess.EnrollmentID(), still empty at this point since this session never reached its
+// first successful Enroll, and once Registry.Remove drops the record a later restart's Recover has
+// no way to find the prior id either. revokeLapsed therefore hands the id to the same bounded,
 // independent s.revoke used elsewhere whenever it gives up because the session ended rather than
 // because ctx was canceled. fakeBroker's revokeFailFirst answers every revoke with a 503 (an
 // unreachable broker, not merely a slow one) until the session has ended and its own retry loop

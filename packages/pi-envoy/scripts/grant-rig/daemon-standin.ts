@@ -14,17 +14,25 @@
  * mintedGrantId?}`. The rig driver (`run.ts`) reads that log to count grant mints per shell
  * command and to check which redemptions succeeded.
  *
- * Usage: `bun daemon-standin.ts <port> <log file> <boot token file>`
+ * Usage: `bun daemon-standin.ts <port> <log file> <boot token file> [<project> <issue> <role>]`
+ * The role token defaults to project `l12rig`, issue `RIG-1`, role `implementer`; the skill
+ * scenarios (`../skill-scenarios/rig.sh`) name their own.
  * Prints `listening on http://127.0.0.1:<port>` once the socket is open.
  */
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
-import { LegionDaemonApi, roleToken } from "@legion/contracts";
+import { isLegionRole, LegionDaemonApi, roleToken } from "@legion/contracts";
 
 const GRANT_TTL_MS = 60_000;
 /** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
  * since the worker claims this token on the real Envoy and Envoy rejects uppercase. */
-const ROLE_TOKEN = roleToken("l12rig", "RIG-1", "implementer");
+const [portArg, logFile, bootTokenFile, project = "l12rig", issue = "RIG-1", role = "implementer"] =
+  Bun.argv.slice(2);
+if (!isLegionRole(role)) {
+  console.error(`${role} is not a Legion role`);
+  process.exit(2);
+}
+const ROLE_TOKEN = roleToken(project, issue, role);
 const SESSION_SECRET = "rig-secret";
 const GIT_TOKEN = "rig-token";
 
@@ -37,9 +45,10 @@ interface LogLine {
   readonly mintedGrantId?: string;
 }
 
-const [portArg, logFile, bootTokenFile] = Bun.argv.slice(2);
 if (portArg === undefined || logFile === undefined || bootTokenFile === undefined) {
-  console.error("usage: bun daemon-standin.ts <port> <log file> <boot token file>");
+  console.error(
+    "usage: bun daemon-standin.ts <port> <log file> <boot token file> [<project> <issue> <role>]"
+  );
   process.exit(2);
 }
 const expectedBootToken = (await Bun.file(bootTokenFile).text()).trim();

@@ -100,8 +100,7 @@ secrets:
 // exist to make safe: approver: login:<name> is accepted at parse time with zero declared keys
 // (a login can be named in the approvers section before its first key is registered), but
 // Evaluate then refuses the approval outright rather than resolving to an approver nobody can
-// ever assert as — the same "approval with nobody to approve" refusal that previously fired for
-// an unknown issue_assignee.
+// ever assert as — an "approval with nobody to approve".
 func TestApprovalDeniesWhenApproverHasNoLiveKeys(t *testing.T) {
 	data := withApprovers(oneSecret("{kind: pod, decision: approval, approver: 'login:bob'}"))
 	data = append(data, []byte("    bob: {}\n")...)

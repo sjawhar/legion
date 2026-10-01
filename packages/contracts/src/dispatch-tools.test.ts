@@ -453,9 +453,8 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  // Sami, 2026-09-24, answering "may agents set issue priority (P0–P3), or only propose it for
-  // you?" on dispatch://LEGION/artifact/issue-status-conventions-md: "Agents may set". Only
-  // priority was ruled on, so rank stays the board's and is still refused.
+  // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
+  // rank stays the board's and is refused.
   test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
     const schema = schemaFor("dispatch_issue_update");
 
@@ -563,10 +562,10 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
-  // A mistyped `with` (`replace:`) used to be stripped by Zod's default strip mode, so the call
-  // validated with `with` simply absent - which the server reads as the one `with` that deletes
-  // the match. The edit applied, 200, and the quoted prose was gone with nothing to tell the
-  // model. Every key of an op but `op` is optional, so an unknown key is the only signal there is.
+  // A mistyped `with` (`replace:`) stripped by Zod's default strip mode would validate with `with`
+  // simply absent - which the server reads as the one `with` that deletes the match: the edit would
+  // apply, 200, and the quoted prose would be gone with nothing to tell the model. Every key of an
+  // op but `op` is optional, so an unknown key is the only signal there is.
   test("rejects a document edit op carrying an unknown key rather than stripping it", () => {
     const schema = schemaFor("dispatch_doc_edit");
     const target = { issue: "DSP-1", artifact: "spec" };

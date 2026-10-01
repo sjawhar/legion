@@ -106,6 +106,29 @@
 
 ### Changed
 
+- The `dispatch` and `legion-worker` skills state each rule without the incident story, provenance
+  quote or attribution that came with it; every rule, command and example stays, and a decision
+  keeps its bare `dispatch://` link (LEGION-386). The legion-worker skill now names the four rules
+  deployment instructions never override: no deferrals, bringing the base in only on a real
+  conflict or a retarget, the implementer's own proof on a production-like surface at the head
+  that merges (an applied simplify head included), and the implementer's production check after
+  the merge.
+- The `dispatch` skill's gate 2 states as instructions what only its deleted story implied: put
+  the measurement and the size of the affected population in the ask, and when the measurement
+  shows one fix cannot repair most of that population and another fix can, drop the first rather
+  than offer it cut down to the part it reaches; an option not to act, such as a permission ask's
+  Hold, is not a fix and stays (LEGION-386). On the skill scenario rig, an agent asked which of
+  three options to take, where an export shows one reaches 18 of 430, left it out in 7 of 10 runs
+  with the rule's first wording ("drops an option the measurement shows cannot work"), against 1
+  of 10 with the story and 0 of 10 with gate 2's sentences deleted. With this final wording it
+  left the option out in 10 of 10 runs, five run by the implementer and five independently by the
+  acceptance tester. That is no improvement over the first wording's 7 of 10 (one-sided Fisher
+  p ≈ 0.11), and it says nothing about the clause that keeps an option not to act, which no
+  scenario exercises (LEGION-444).
+- The `legion-worker` skill names the six fields of a handoff `proof` entry (`criterion`,
+  `surface`, `command`, `observed`, `headSha`, `negativeControl`) where it describes
+  `handoff_write`, and the tester's role text points there (LEGION-386); before, a tester found
+  them in the implement handoff it read or in the CLI's refusal of its write.
 - `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
   not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
   which the load balancer in front of production Dispatch answers with a bare HTML `414` when it

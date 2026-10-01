@@ -41,10 +41,8 @@ conversation.
 
 ## Writing for the human
 
-Sami, 2026-09-12, on what Legion had been producing: "It's completely incomprehensible. It's just
-compressed jargon nonsense. I have no idea what the fuck it's saying." Every spec, ask, comment,
-message, and PR body is read by a person who has not read the code, does not share this session's
-vocabulary, and is often on a phone. Write for that person.
+Every spec, ask, comment, message, and PR body is read by a person who has not read the code, does
+not share this session's vocabulary, and is often on a phone. Write for that person.
 
 - Plain English, full sentences, one idea per sentence. Never repo shorthand or nouns you coined:
   not "fix 8c", "READY-target", "PR B", "spec@v3", "the pair", "the packet" — say what the thing is.
@@ -65,8 +63,8 @@ vocabulary, and is often on a phone. Write for that person.
   shapes the sentence under it.
 - Before posting, test it: could Sami, reading only this text on his phone, know what he is being
   told or asked? If not, rewrite it. Length is not the problem; density is.
-- When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options. Inferred from the AGENTC-186 12-hour-cap incident (platform PO, 2026-09-17).
-- When a Dispatch message states a root cause, include the reproducing command or test in that same message. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started. Inferred from the astro lane's 2026-09-16 retro (platform PO, 2026-09-17).
+- When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options.
+- When a Dispatch message states a root cause, include the reproducing command or test in that same message. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started.
 
 ## Writing a spec
 
@@ -103,9 +101,7 @@ after the section on models.
 A decision a human must make is an `:::ask` block at the end of the section that discusses it,
 carrying the options, what each costs, and your recommendation. Never gather decisions into a
 list, at the top, at the bottom or in an "open questions" section, and never ask one as a
-standalone `dispatch_ask` that points at the spec. Sami, LEGION-204 comment, 2026-09-20 14:47Z,
-verbatim: "Adding a bunch of decision blocks at the top is terrible!! Decisions should be in
-context in the spec".
+standalone `dispatch_ask` that points at the spec.
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
@@ -125,10 +121,8 @@ it, with 2–4 options, a recommendation, and surrounding prose that explains th
 A spec that already has the pile is repaired with `move`, not rewritten: `dispatch_doc_edit` with
 `{ op: "move", block: "<block-uuid>", after: "<the last sentence of the section that discusses it>" }` relocates
 the block and keeps its ask, its answer and its followers; the context paragraphs that were lifted
-out of Design move the same way, and the emptied section is deleted (the same repair, made on
-AGENTC-397 after Sami's 2026-09-20 request: "move the decisions items to be in context of their
-discussion in the spec, not just all piled up at the start with no context"). An ask block has two
-ids that differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
+out of Design move the same way, and the emptied section is deleted. An ask block has two ids that
+differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
 
 See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
 [Asking](#asking) to decide whether the question is a real decision at all.
@@ -179,8 +173,7 @@ When a symptom and its cause sit on different issues, the work accrues to the ca
 the symptom's issue carries a pointer to it. Before posting a measurement or finding, search
 Dispatch for the failing identity's or component's name, and post on the issue whose title names
 the fix, not the one naming the symptom. A symptom issue gathering messages with no human response
-is the tell. (The production freeze was iterated on AGENTC-546, the failing gate, while its cause
-and answer sat on AGENTC-1010.)
+is the tell.
 
 ## Claim the issue before you work it
 
@@ -210,11 +203,7 @@ field, and choosing your next issue are in [Working an issue](skill://dispatch/r
 
 ### Before you ask
 
-Sami, 2026-09-16, verbatim, rejecting two asks the same night: "All of these \"decisions\" are
-completely disconnected from any discussion of design or trade-offs. This is not a very useful way
-of having this discussion" (on a report-table shape), and "What's a fenced PutObject or phantom
-eval_id? What's an R4 model header? What exactly is the question or uncertainty here?" (on a
-production import). Every `dispatch_ask` passes four gates first:
+Every `dispatch_ask` passes four gates first:
 
 1. **Does it need his authority, taste, or risk appetite?** This is the bar for a decision
    written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Technical
@@ -222,19 +211,18 @@ production import). Every `dispatch_ask` passes four gates first:
    internals are your lane's to decide and record in the spec. Two things still go to the
    platform PO over Envoy: a contract between two lanes, and a halt condition (a change to IAM,
    deletion or exposure of production data, anything that reaches a customer). The PO takes those
-   to Sami as a Dispatch ask; you do not open one yourself, even as a permission ask under gate 2
-   (Sami, 2026-09-25, AGENTC-34 §12).
+   to Sami as a Dispatch ask; you do not open one yourself, even as a permission ask under gate 2.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
    only a human can authorise — a production write, an external send, a console action — and then
    the question is that action in one sentence, with options that name its outcomes (below).
    Measure before you write: how many are affected, whether anything reaches the path, what the
    current state already is. The measurement decides whether a human is needed at all, and when
-   one is, it turns a research request he cannot answer into a decision he can — an ask whose
-   lead was "accept this or build a workaround", with nobody knowing whether anyone was affected,
-   was unanswerable until a measurement showed the usage could not be observed at all; the same
-   ask, carrying that and the size of the affected population, was answered at once, and another
-   lost an option outright when the measurement showed it could not repair most of the affected.
+   one is, it turns a research request he cannot answer into a decision he can. Put the
+   measurement and the size of the affected population in the ask. When the measurement shows one
+   fix cannot repair most of that population and another fix can, drop the first, rather than
+   offering it cut down to the part it reaches. An option not to act, such as a permission ask's
+   Hold, is not a fix, and it stays.
    Report what the measurement could **not** establish, with its own control: "I found no
    evidence" and "there is no evidence to find" read alike and mean opposite things, and a
    control that shares the query's blind spot proves neither. Before you say you are waiting on
@@ -296,13 +284,8 @@ passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; c
 with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
 message above", or "as attached".
 
-**Pointing at another message is a defect, not a shortcut.** Sami, 2026-09-17, verbatim, on an
-ask that read "the settings listed in my comment just above" after a long procedure had been posted
-as a comment: "you just dump information into messages and then add a new ask that references a
-previous message in prose with no link or no context whatsoever and uses compressed shorthand
-jargon." The ask view does not show the issue's comments, so that ask was unanswerable; "Cloud
-Identity licence check / 2SV override / 1-day grace" was shorthand he had never used. The rules
-that follow from it:
+**Pointing at another message is a defect, not a shortcut:** the ask view does not show the
+issue's comments. The rules:
 
 - An ask that names another message in prose — "my comment above", "the procedure I posted",
   "see the earlier message" — is retracted by the PO as failing the gates. Put the content IN the
@@ -326,7 +309,7 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17). A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
 
 **Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
 an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
@@ -364,10 +347,6 @@ An ask you opened is yours until it is answered or you resolve it. When the answ
 other way — Sami said it live, a later comment settled it, or the question became moot because the
 design moved — resolve it yourself with `dispatch_resolve_ask` in the same turn you learn that.
 Never leave it for the human to clear.
-
-Sami, AGENTC-27 `rules-derivation-2026-09-17.md` row R04, verbatim: "I think this was answered
-live. If not, please reask." The same pattern left him closing asks as `Dismissed`, `Settled`, and
-`Resolved I think`: noise the human had to clear.
 
 Every later write on the issue answers `You still have an open ask on …` and names it. Treat that
 as the checklist: if it is still needed, leave it; if it was answered elsewhere, resolve it with
@@ -443,9 +422,7 @@ Uploading one (`dispatch_artifact`, its slugs, versions and Markdown rules) is i
 
 ## Structure over stream
 
-Dispatch is a structured workspace, never a message stream (Sami, 2026-09-13, verbatim: "strange
-to me that agents keep trying to use dispatch as a giant stream of messages instead of
-high-signal, structured conversation"). The structure IS the product:
+Dispatch is a structured workspace, never a message stream. The structure IS the product:
 
 - **One issue per piece of work.** A new deliverable — an email to send, a document to review, a
   decision with its own lifecycle — gets its own issue with the content as the issue's document

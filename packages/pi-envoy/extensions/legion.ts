@@ -232,9 +232,9 @@ function isSingleLegionCommand(command: unknown): boolean {
 
 // Every Legion issue workspace is a `jj workspace` of one shared clone, so they all share one
 // operation log: `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite it for
-// every tree at once (LEGION-45: one worker's `jj undo` rewrote nine of another tree's commits).
-// The tool_call hook refuses them in every phase-worker pane. `restore`/`revert` are operation-log
-// commands only under `op`/`operation`; `jj restore <paths>` is file-level and stays allowed.
+// every tree at once (LEGION-45). The tool_call hook refuses them in every phase-worker pane.
+// `restore`/`revert` are operation-log commands only under `op`/`operation`; `jj restore <paths>`
+// is file-level and stays allowed.
 const JJ_LOG_REWRITE_WORDS = ["undo", "abandon"];
 const JJ_OP_WORDS = ["op", "operation"];
 const JJ_OP_LOG_REWRITE_WORDS = ["restore", "revert"];
