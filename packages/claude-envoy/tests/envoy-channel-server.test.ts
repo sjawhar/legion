@@ -468,6 +468,65 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
   }
 })
 
+// The forwarder releases the claim of a frame Claude Code was not handed, so the re-send of a
+// Dispatch frame the channel answered with an error is answered again rather than dropped as a
+// repeat of its dedupe key.
+test("a Dispatch frame the channel answered with an error is answered again when re-sent", async () => {
+  const control = JSON.parse(
+    rejectedFrameRaw.replaceAll(
+      "44444444-4444-4444-8444-444444444444",
+      "55555555-5555-4555-8555-555555555555",
+    ),
+  )
+  const replied: string[] = []
+  const controlAnswered = Promise.withResolvers<void>()
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      const path = new URL(request.url).pathname
+      replied.push(path)
+      if (path.includes("55555555")) controlAnswered.resolve()
+      return Response.json({})
+    },
+  })
+  const previous = { ...process.env }
+  process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
+  process.env["DISPATCH_TOKEN"] = "reply-token"
+  const nats = new FakeNats()
+  const notifier = new FakeNotifier()
+  const stateDirectory = await scratchState()
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", process.cwd()), stateDirectory, {
+      connection: nats,
+      notifier,
+    }),
+  )
+
+  try {
+    nats.emit(directSubject, rejectedFrameRaw)
+    // The listener mints a fresh event id for the re-send; its dedupe key is the first send's.
+    nats.emit(
+      directSubject,
+      JSON.stringify({ ...JSON.parse(rejectedFrameRaw), event_id: "resend" }),
+    )
+    // One subscription's frames are delivered in order, so the control's answer comes after
+    // whatever the channel did with the re-send.
+    nats.emit(
+      directSubject,
+      JSON.stringify({ ...control, event_id: "control", dedupe_key: "dispatch-control" }),
+    )
+    await controlAnswered.promise
+
+    expect(notifier.notifications).toEqual([])
+    expect(replied.filter((path) => path.includes("44444444"))).toHaveLength(2)
+  } finally {
+    await session.shutdown()
+    server.stop(true)
+    process.env = previous
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
 test("answers a malformed targeted comment through its supplied comment reply address", async () => {
   const replies: Array<{
     readonly path: string
