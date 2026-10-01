@@ -893,6 +893,8 @@ test("the margin removes the composer's mark when the composer is cancelled or r
     // The document always knew which mark was the composer's, so a selection-bar action that cut
     // into it counted as the composer's own write.
     expect(reopened.held).toEqual(["m-2", null]);
+    // The replaced document's log stays frozen: once the document reopened onto `reopened`, the
+    // margin told `fake` nothing more.
     expect(fake.held).toEqual([null, "m-1", "m-1-ask", "m-2"]);
   } finally {
     view.unmount();

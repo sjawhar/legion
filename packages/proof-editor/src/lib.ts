@@ -166,8 +166,10 @@ export interface ProofEditorHandle extends TypedBlockCommands {
    *  ./dispatch-marks.ts's module doc for why dispatchAsk marks are outside
    *  this system. */
   applyRemoteMarks(metadata: Record<string, StoredMark>, options?: { hydrateAnchors?: boolean }): void;
-  /** Removes a record mark by id — a comment, suggestion or ask span, recorded or provisional.
-   *  See ./record-mark-retype.ts for why upstream's `deleteMark` is not it. */
+  /** Removes the margin composer's provisional record mark - a comment, suggestion or ask - from
+   *  every span it covers, text and inline atoms alike. The removal is the composer's own, so it
+   *  is never an undo step, and it leaves no tombstone and touches no metadata the way upstream's
+   *  `deleteMark` does; it is not for a recorded mark. See ./record-mark-retype.ts. */
   removeMark(markId: string): void;
   /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
    *  margin composer's kind switch needs; a refusal names why nothing changed. */

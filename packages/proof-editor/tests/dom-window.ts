@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
  * `!("document" in globalThis)`.
  */
 export async function withDomWindow<T>(run: (window: Window) => Promise<T> | T): Promise<T> {
-  const window = new Window({ url: "http://localhost/" });
+  const window = new Window();
   const previous = (["document", "window"] as const).map(
     (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const
   );

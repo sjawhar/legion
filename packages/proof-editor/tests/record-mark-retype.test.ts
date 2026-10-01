@@ -2,7 +2,12 @@ import { expect, test } from "bun:test";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { comment, getMarks, marksPluginKey } from "proof-sdk-upstream/src/editor/plugins/marks";
 import { createAskMark } from "../src/dispatch-marks";
-import { findRecordMark, removeRecordMark, retypeMark } from "../src/record-mark-retype";
+import {
+  findRecordMark,
+  RECORD_MARK_TYPES,
+  removeRecordMark,
+  retypeMark,
+} from "../src/record-mark-retype";
 import { withMarksEditor } from "./marks-editor";
 
 const BY = "alice";
@@ -147,5 +152,79 @@ test("removeRecordMark removes a provisional comment the unified marks system ca
     expect(removeRecordMark(view, start.id)).toBe(true);
     expect(marksInDoc(view)).toEqual([]);
     expect(removeRecordMark(view, start.id)).toBe(false);
+  });
+});
+
+/** Every record mark on an inline node - text or an inline image - as `node:markType#id`. */
+function recordMarksOnInline(view: EditorView): string[] {
+  const marks: string[] = [];
+  view.state.doc.descendants((node) => {
+    if (!node.isInline) return true;
+    for (const mark of node.marks) {
+      if (RECORD_MARK_TYPES.has(mark.type.name)) {
+        marks.push(`${node.type.name}:${mark.type.name}#${mark.attrs.id}`);
+      }
+    }
+    return true;
+  });
+  return marks;
+}
+
+/** Where the first inline image and the first occurrence of `word` sit in `view`'s document. */
+function positions(view: EditorView, word: string): { image: number; wordEnd: number } {
+  let image = -1;
+  let wordEnd = -1;
+  view.state.doc.descendants((node, pos) => {
+    if (node.type.name === "image" && image === -1) image = pos;
+    const at = node.isText ? (node.text ?? "").indexOf(word) : -1;
+    if (at !== -1 && wordEnd === -1) wordEnd = pos + at + word.length;
+    return true;
+  });
+  if (image === -1 || wordEnd === -1) throw new Error("the document has no image or no word");
+  return { image, wordEnd };
+}
+
+test("a retype and a removal over a selection with an inline image leave no record mark on the image", async () => {
+  // The bar's `addMark` marks an inline image inside the selection as well as the text.
+  await withMarksEditor("The quick ![pic](/p.png) brown fox", ({ view }) => {
+    const { wordEnd } = positions(view, "brown");
+    const start = comment(view, "quick \n brown", BY, "", { from: 5, to: wordEnd });
+    expect(recordMarksOnInline(view)).toContain(`image:proofComment#${start.id}`);
+    const ask = retypeMark(view, start.id, "ask", BY);
+    if ("refused" in ask) throw new Error(`the ask retype was refused: ${ask.refused}`);
+    expect(recordMarksOnInline(view).filter((mark) => mark.includes(start.id))).toEqual([]);
+    expect(recordMarksOnInline(view)).toContain(`image:dispatchAsk#${ask.markId}`);
+    removeRecordMark(view, ask.markId);
+    expect(recordMarksOnInline(view)).toEqual([]);
+  });
+});
+
+test("a retype keeps a mark that starts on an inline image whole", async () => {
+  await withMarksEditor("The ![pic](/p.png) brown fox", ({ view }) => {
+    const { image, wordEnd } = positions(view, "brown");
+    const start = comment(view, "\n brown", BY, "", { from: image, to: wordEnd });
+    expect(findRecordMark(view.state.doc, start.id)).toEqual({
+      range: { from: image, to: wordEnd },
+      type: "proofComment",
+    });
+    const ask = retypeMark(view, start.id, "ask", BY);
+    if ("refused" in ask) throw new Error(`the ask retype was refused: ${ask.refused}`);
+    expect(recordMarksOnInline(view)).toEqual([
+      `image:dispatchAsk#${ask.markId}`,
+      `text:dispatchAsk#${ask.markId}`,
+    ]);
+  });
+});
+
+test("retypeMark refuses a kind whose mark another record holds on an inline image in the range", async () => {
+  await withMarksEditor("The quick ![pic](/p.png) brown fox", ({ view }) => {
+    // Bob's recorded comment covers only the image; a comment of Alice's over "quick [image]
+    // brown" would cut it off the image.
+    const { image, wordEnd } = positions(view, "brown");
+    const bob = comment(view, "\n", "bob", "", { from: image, to: image + 1 });
+    const alice = createAskMark(view, { from: 5, to: wordEnd }, BY);
+    if (alice === null) throw new Error("the ask mark was not written");
+    expect(retypeMark(view, alice.id, "comment", BY)).toEqual({ refused: "overlaps" });
+    expect(recordMarksOnInline(view)).toContain(`image:proofComment#${bob.id}`);
   });
 });

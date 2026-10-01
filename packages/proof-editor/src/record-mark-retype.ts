@@ -53,7 +53,8 @@ export interface RetypeRefusal {
 export type RetypeOutcome = RetypedMark | RetypeRefusal;
 
 /** The record mark `markId` as the document holds it: its type, and the range from the start of
- *  its first text run to the end of its last. Null when the document does not hold it. */
+ *  its first inline run to the end of its last. Inline atoms such as an image count: the bar's
+ *  `addMark` marks them with the text. Null when the document does not hold it. */
 export function findRecordMark(
   doc: ProseMirrorNode,
   markId: string
@@ -62,7 +63,7 @@ export function findRecordMark(
   let to = -1;
   let type = "";
   doc.descendants((node, pos) => {
-    if (!node.isText) return true;
+    if (!node.isInline) return true;
     const held = node.marks.find(
       (mark) => RECORD_MARK_TYPES.has(mark.type.name) && mark.attrs.id === markId
     );
@@ -92,7 +93,8 @@ export function isRecordMarkRemoval(transaction: Transaction): boolean {
   return transaction.getMeta(recordMarkRemoval) === composerRemoval;
 }
 
-/** Whether any text in `range` carries a mark of `type` under an id other than `markId`. */
+/** Whether any inline node in `range` - text or an atom such as an image - carries a mark of
+ *  `type` under an id other than `markId`. */
 function rangeHoldsAnother(
   doc: ProseMirrorNode,
   range: MarkRange,
@@ -101,20 +103,20 @@ function rangeHoldsAnother(
 ): boolean {
   let held = false;
   doc.nodesBetween(range.from, range.to, (node) => {
-    if (held || !node.isText) return !held;
+    if (held || !node.isInline) return !held;
     held = node.marks.some((mark) => mark.type.name === type && mark.attrs.id !== markId);
     return !held;
   });
   return held;
 }
 
-/** Removes every span of the record mark `markId`, whatever its type. Answers whether a span was
- *  removed. The transaction is labelled as the composer's own removal, so it is not an undo step
- *  (./record-mark-history.ts). */
+/** Removes every span of the record mark `markId`, whatever its type, from text and from inline
+ *  atoms such as an image alike. Answers whether a span was removed. The transaction is labelled
+ *  as the composer's own removal, so it is not an undo step (./record-mark-history.ts). */
 export function removeRecordMark(view: EditorView, markId: string): boolean {
   let transaction = view.state.tr.setMeta(recordMarkRemoval, composerRemoval);
   view.state.doc.descendants((node, pos) => {
-    if (!node.isText) return true;
+    if (!node.isInline) return true;
     for (const mark of node.marks) {
       if (RECORD_MARK_TYPES.has(mark.type.name) && mark.attrs.id === markId) {
         transaction = transaction.removeMark(pos, pos + node.nodeSize, mark);

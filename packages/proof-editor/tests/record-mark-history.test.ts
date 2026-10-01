@@ -140,7 +140,9 @@ test("a bar Comment that cuts into another record's mark keeps its undo step", a
     const bob = comment(view, "quick brown", "bob", "", RANGE);
     const alice = comment(view, "brown", BY, "", BROWN);
     expect(spansOf(view, bob.id)).toEqual([{ from: 5, to: 11 }]);
-    expect(depths().history).toBe(1);
+    // Both managers hold the step: the positive control for every `yjs: 0` above, which would
+    // also read 0 if y-prosemirror's UndoManager had stopped recording.
+    expect(depths()).toEqual({ history: 1, yjs: 1 });
     press("Mod-z");
     expect(spansOf(view, bob.id)).toEqual([RANGE]);
     expect(spansOf(view, alice.id)).toEqual([]);
@@ -174,7 +176,8 @@ test("the reader's own edits stay undoable", async () => {
   await withMarksEditor(SENTENCE, ({ depths, press, view }) => {
     view.dispatch(view.state.tr.insertText("!", 20, 20));
     expect(view.state.doc.textContent).toBe("The quick brown fox!");
-    expect(depths().history).toBe(1);
+    // Both managers record the reader's own edit (the positive control, as above).
+    expect(depths()).toEqual({ history: 1, yjs: 1 });
     press("Mod-z");
     expect(view.state.doc.textContent).toBe("The quick brown fox");
     press("Mod-Shift-z");
