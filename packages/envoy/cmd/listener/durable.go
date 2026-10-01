@@ -54,6 +54,11 @@ func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string)
 // it is asked: no retry can succeed, so the listener's startup exits at once.
 var errListenerDurableRefused = errors.New("listener durable refused")
 
+// durableRefusedLine is the line a start logs when it refuses its durable, at the check after the
+// NATS connect and at the bind. The deployed durable-refusal metric filter matches it exactly
+// (agent-c meta/infra/pulumi/components/envoy/listener.py), so both sites use this constant.
+const durableRefusedLine = "subscribe refused, shutting down"
+
 // listenerDurableRefusal refuses an existing durable carrying a setting the listener's consumer
 // policy fixes and NATS cannot change in place, so the drift correction could never apply it:
 //   - An idle heartbeat. The bus logs nats.ErrConsumerNotActive at WARN because only KV watchers'

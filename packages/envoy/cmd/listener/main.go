@@ -524,7 +524,7 @@ func main() {
 	// for healthy and stop the one it replaces. Nothing serves yet, so the start ends at once. A
 	// lookup that fails is left to the bind, which retries it.
 	if _, err := listenerDurable(client, consumer); errors.Is(err, errListenerDurableRefused) {
-		logger.Error("subscribe refused, shutting down", slog.String("error", err.Error()))
+		logger.Error(durableRefusedLine, slog.String("error", err.Error()))
 		client.Conn.Close()
 		os.Exit(1)
 	} else if err != nil {
@@ -683,28 +683,26 @@ func main() {
 	// refusable since that check.
 	bind, err := bindListenerDurable(stopping, client, consumer, jetStreamDeliveryHandler(deliveryConfig), logger, durableBindInterval, durableBindDeadline)
 	// A start the bind ends shuts down in order: /v1 and the role lane already serve, and no
-	// background loop has started yet.
-	switch {
-	case err == nil:
-	case errors.Is(err, errListenerDurableRefused):
-		logger.Error("subscribe refused, shutting down", slog.String("error", err.Error()))
-		shutdownListener(logger, server, client, caches, listenerLoops{})
-	case errors.Is(err, errListenerDurableBindExhausted):
-		logger.Error("subscribe failed after max attempts, shutting down",
-			slog.String("error", err.Error()),
-			slog.Int("attempts", bind.attempts),
-			slog.Int64("waited_ms", bind.waited.Milliseconds()),
-		)
-		shutdownListener(logger, server, client, caches, listenerLoops{})
-	case stopping.Err() != nil:
-		logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()), slog.String("phase", "durable bind"))
-		shutdownListener(logger, server, client, caches, listenerLoops{})
-	default:
-		logger.Error("durable bind failed, shutting down",
-			slog.String("error", err.Error()),
-			slog.Int("attempts", bind.attempts),
-			slog.Int64("waited_ms", bind.waited.Milliseconds()),
-		)
+	// background loop has started yet. shutdownListener exits, so nothing below runs on an error.
+	if err != nil {
+		switch {
+		case errors.Is(err, errListenerDurableRefused):
+			logger.Error(durableRefusedLine, slog.String("error", err.Error()))
+		case errors.Is(err, errListenerDurableBindExhausted):
+			logger.Error("subscribe failed after max attempts, shutting down",
+				slog.String("error", err.Error()),
+				slog.Int("attempts", bind.attempts),
+				slog.Int64("waited_ms", bind.waited.Milliseconds()),
+			)
+		case stopping.Err() != nil:
+			logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()), slog.String("phase", "durable bind"))
+		default:
+			logger.Error("durable bind failed, shutting down",
+				slog.String("error", err.Error()),
+				slog.Int("attempts", bind.attempts),
+				slog.Int64("waited_ms", bind.waited.Milliseconds()),
+			)
+		}
 		shutdownListener(logger, server, client, caches, listenerLoops{})
 	}
 	deps.Store(ready)

@@ -2901,7 +2901,7 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 	if strings.Contains(body, `test_messages_naked 1`) {
 		t.Fatalf("terminal refusal must not NAK the fanout envelope, got %s", body)
 	}
-	if logs := harness.logs.String(); strings.Contains(logs, "listener exception publish failed") {
+	if logs := harness.logs.String(); strings.Contains(logs, exceptionPublishFailedLine) {
 		t.Fatalf("capability refusal must publish its exception successfully:\n%s", logs)
 	}
 }
