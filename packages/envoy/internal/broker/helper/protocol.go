@@ -41,19 +41,20 @@ type Request struct {
 // Code NO_CREDENTIAL while the helper holds no launcher credential to enroll it with), and a
 // login/login-status reply carries the confirmation code in Code while OK is true.
 type Response struct {
-	OK            bool          `json:"ok"`
-	Code          string        `json:"code,omitempty"`
-	Error         string        `json:"error,omitempty"`
-	EnrollmentID  string        `json:"enrollment_id,omitempty"`
-	RuntimeID     string        `json:"runtime_id,omitempty"`
-	Operator      string        `json:"operator,omitempty"`
-	State         string        `json:"state,omitempty"`         // register: enrolling | enrolled
-	LoginState    string        `json:"login_state,omitempty"`   // login/login-status: pending|issued|denied|expired
-	LoginRefused  bool          `json:"login_refused,omitempty"` // login-status: "expired" because the broker refused the issued credential
-	LeaseExpires  string        `json:"lease_expires,omitempty"` // enroll-box: RFC3339Nano
-	Proof         string        `json:"proof,omitempty"`
-	RequestObject string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
-	Sessions      []SessionInfo `json:"sessions,omitempty"`
+	OK             bool          `json:"ok"`
+	Code           string        `json:"code,omitempty"`
+	Error          string        `json:"error,omitempty"`
+	EnrollmentID   string        `json:"enrollment_id,omitempty"`
+	RuntimeID      string        `json:"runtime_id,omitempty"`
+	Operator       string        `json:"operator,omitempty"`
+	State          string        `json:"state,omitempty"`           // register: enrolling | enrolled
+	LoginState     string        `json:"login_state,omitempty"`     // login/login-status: the most recent login's pending|issued|denied|expired
+	CredentialHeld bool          `json:"credential_held,omitempty"` // login-status: the helper holds a launcher credential, whatever the most recent login's state
+	LoginRefused   bool          `json:"login_refused,omitempty"`   // login-status: the broker refused the credential the helper held, and no login has started since
+	LeaseExpires   string        `json:"lease_expires,omitempty"`   // enroll-box: RFC3339Nano
+	Proof          string        `json:"proof,omitempty"`
+	RequestObject  string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
+	Sessions       []SessionInfo `json:"sessions,omitempty"`
 }
 
 // SessionInfo is one registered session as `sessions` lists it: never a key.

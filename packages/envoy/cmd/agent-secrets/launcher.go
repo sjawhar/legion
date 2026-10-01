@@ -79,21 +79,24 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdLauncherLoginStatus implements "launcher login-status": a read-only, single-shot query of
-// the helper's current (or most recently settled) machine login state, with no side effect —
-// unlike re-running "login" itself, which mints a fresh key and opens a brand-new pending
-// machine-login record even while a credential is already issued (Broker.Login only
-// short-circuits a login that is still *pending*, per its own doc comment). Its exit code is a
-// liveness probe scripts can use directly: 0 only when the state is "issued", 1 for
-// "pending"/"denied"/"expired" and for "" (login never run) — the same distinction the doctor
-// and installer checks in ~/.dotfiles need and, before this verb existed, had no side-effect-free
-// way to make (AGENTC-834). An issued login whose credential the broker later refused reads
-// "expired", the word the dotfiles launcher gate matches, and when the helper says so
-// (login_refused) stderr says the broker refused it and why that can happen. Any other
-// "expired" gets the neutral line: a login that expired before anyone approved it reads the
-// same, and so does a refused credential on a helper from before login_refused, which keeps
-// running until it restarts. The state is the most recent login's: a re-login that was denied,
-// expired or is still pending reads that way even while the credential an earlier login
-// installed is still held. Every state but "issued" says on stderr what to do about it.
+// the helper's machine login, with no side effect — unlike re-running "login" itself, which mints
+// a fresh key and opens a brand-new pending machine-login record even while a credential is
+// already issued (Broker.Login only short-circuits a login that is still *pending*, per its own
+// doc comment). Its exit code is a liveness probe scripts can use directly, the same distinction
+// the doctor and installer checks in ~/.dotfiles need and, before this verb existed, had no
+// side-effect-free way to make (AGENTC-834): 0 while the helper holds a launcher credential, which
+// prints "issued"; 1 while it holds none, printing the most recent login's state ("pending",
+// "denied", "expired", or "none" when no login has run). A re-login that was denied, expired
+// unapproved or is still pending leaves the credential an earlier login installed in place, and
+// the helper keeps enrolling sessions with it, so that still prints "issued" and exits 0, and
+// stderr names the most recent login and its code. A helper from before credential_held reports
+// only the most recent login, which reads "issued" exactly while its credential is held. A
+// credential the broker refused prints "expired", the word the dotfiles launcher gate matches,
+// and when the helper says so (login_refused) stderr says the broker refused it and why that can
+// happen. Any other "expired" gets the neutral line: a login that expired before anyone approved
+// it reads the same, and so does a refused credential on a helper from before login_refused,
+// which keeps running until it restarts. Every answer with no credential says on stderr what to
+// do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
@@ -113,15 +116,29 @@ func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	if state == "" {
 		state = "none"
 	}
+	if resp.CredentialHeld || state == "issued" {
+		fmt.Fprintln(stdout, "issued")
+		const held = "the helper still holds the launcher credential an earlier login issued"
+		switch state {
+		case "pending":
+			fmt.Fprintf(stderr, "agent-secrets launcher login-status: a machine login is waiting for approval (code %s); %s\n", resp.Code, held)
+		case "denied":
+			fmt.Fprintf(stderr, "agent-secrets launcher login-status: the most recent machine login (code %s) was denied; %s\n", resp.Code, held)
+		case "expired":
+			fmt.Fprintf(stderr, "agent-secrets launcher login-status: the most recent machine login (code %s) expired before anyone approved it; %s\n", resp.Code, held)
+		}
+		return 0
+	}
+	if resp.LoginRefused && state != "pending" {
+		state = "expired"
+	}
 	fmt.Fprintln(stdout, state)
 	switch {
-	case state == "issued":
-		return 0
 	case state == "pending":
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: a machine login is waiting for approval (code %s)\n", resp.Code)
 	case state == "none":
 		fmt.Fprintln(stderr, "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login")
-	case state == "expired" && resp.LoginRefused:
+	case resp.LoginRefused:
 		fmt.Fprintln(stderr, "agent-secrets launcher login-status: the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login")
 	default:
 		fmt.Fprintf(stderr, "agent-secrets launcher login-status: the last machine login is %s; run: agent-secrets launcher login\n", state)
