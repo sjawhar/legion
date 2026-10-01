@@ -241,8 +241,7 @@ request_changes_as_reviewer() {
 reviewer_requested_changes() {
   local reviews
   # --paginate applies --jq to each page, so one line per matching review, counted after.
-  reviews=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "CHANGES_REQUESTED") | .id') || return 1
+  reviews=$(review_app_reviews '.state == "CHANGES_REQUESTED"' id) || return 1
   [ "$(grep -c . <<<"$reviews")" -ge "$1" ]
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
@@ -259,15 +258,30 @@ round_correction_pushed() {
   grep -qF -- "+$(round_line "$1")" <<<"$patches"
 }
 
-# REST names the review App's account legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`)
-# drops the suffix, and a user could hold the bare name. The approval must be of the current head.
+# review_app_reviews FILTER FIELD prints FIELD of each review the review App posted on the proof's
+# pull request that FILTER, a jq condition, selects. REST names the review App's account
+# legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`) drops the suffix, and a user could hold
+# the bare name.
+review_app_reviews() {
+  timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq ".[] | select(.user.login == \"legion-reviewer[bot]\" and ($1)) | .$2"
+}
+# reviewer_approved_head: the review App approved the pull request's current head.
 reviewer_approved_head() {
   local head approved
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
-  approved=$(timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
+  approved=$(review_app_reviews '.state == "APPROVED"' commit_id) || return 1
   grep -qx -- "$head" <<<"$approved"
 }
+# reviewer_commented: the review App submitted a COMMENT review on the proof's pull request. A reply
+# on a review thread is a COMMENTED review with an empty body, and is not one.
+reviewer_commented() {
+  local commented
+  commented=$(review_app_reviews '.state == "COMMENTED" and .body != ""' id) || return 1
+  [ -n "$commented" ]
+}
+# reviewer_completed ISSUE: the daemon recorded the reviewer's completion of the issue's open round.
+reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].workers.reviewer.handoffCommit // "") != ""' >/dev/null; }
 # approve_as_reviewer asks the reviewer for the round's last review and waits for it to approve the
 # head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/, since
 # the Go daemon has no .legion/ deletion step before Stage 7. The merge then carries the run's
@@ -527,6 +541,10 @@ notice_deliveries() {
 }
 # notice_line ISSUE ROLE NEEDLE prints each Envoy delivery in the claim's session holding NEEDLE.
 notice_line() { { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$3" || true; }
+# architect_messages ISSUE ROLE counts the Envoy messages in the claim's session that ISSUE's
+# architect sent: the listener renders each with a reply_role naming its sender's role topic
+# (envoy-client's delivery.ts), which the proof's own steer and every other sender do not carry.
+architect_messages() { notice_deliveries "$1" "$2" "notifications.role.$(claim_token "$1" architect)"; }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
 # worker_sessions SESSIONS prints each phase-worker session file under SESSIONS and the role it
 # claims, tab-separated. A session's role is its newest Envoy role claim; an architect or controller

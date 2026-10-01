@@ -1780,12 +1780,54 @@ send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implement
 wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
-send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. Your decision is APPROVE, submitted as legion-reviewer[bot]; take the round's steps in the order your role gives, and complete the reviewer handoff."
+# A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
+# The daemon leaves the issue in reviewing and tells the architect, naming the head. The proof's
+# instructions hold every agent until a targeted message gives its next operation, so the driver
+# then tells the architect only to handle that notice as its role says, naming no topic, head or
+# decision: the architect takes those from the notice, asks the reviewer for the decision over
+# Envoy, and the reviewer's approval ends the round. The proof asks the reviewer nothing more, and
+# counts only messages the architect sent after the reviewer's completion. An architect acting on
+# the notice unprompted, as it must where no driver holds it, is not what this checkpoint proves
+# (LEGION-413).
+send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is APPROVE."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
 until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"
 note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
+until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_number" reviewer_commented
+until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
+# The ask baseline is read here, not before the reviewer is instructed: the notice is written in the
+# completion's own transaction and the architect needs a model turn after it, so no real ask can
+# precede this read, while a message the architect sent the reviewer earlier in the round (a reply to
+# the reviewer's own round report) stays out of the count, the path and the saved lines.
+asked_before=$(architect_messages "$tree1" reviewer)
+# At the completion, before the architect can have asked anything: no approval yet, and the round
+# still open.
+early_approvals=$(review_app_reviews '.state == "APPROVED"' id) || fail "read the reviews on pull request #$pr_number"
+[ -z "$early_approvals" ] || fail "the reviewer approved pull request #$pr_number before anyone asked it for the round's decision"
+issue_phase "$tree1" reviewing >/dev/null || fail "$tree1 left reviewing on a round no review decided"
+until_true 300 "the review-stuck notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle review-stuck "$tree1")"
+stuck=$(notice_line "$tree1" architect "$(notice_needle review-stuck "$tree1")" | head -1 || true)
+printf '%s\n' "$stuck" >"$evidence/notice-review-stuck.jsonl"
+# The head the notice names is the one the completion left, which GitHub's current head can have
+# moved past since: it must be a commit of the pull request, and the reviewer's completion wrote it.
+stuck_head=$(grep -oE 'APPROVE of head [0-9a-f]{40}' <<<"$stuck" | head -1 | awk '{print $4}' || true)
+[ -n "$stuck_head" ] || fail "the review-stuck notice on $tree1's architect names no head: $stuck"
+pr_commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha') || fail "read the commits of pull request #$pr_number"
+grep -qx -- "$stuck_head" <<<"$pr_commits" || fail "the review-stuck notice names $stuck_head, which is no commit of pull request #$pr_number"
+grep -qF -- "the reviewer's completion" <<<"$stuck" || fail "the review-stuck notice was not written by the reviewer's completion: $stuck"
+note "the reviewer commented and completed; $tree1 stayed in reviewing and its architect was told review-stuck naming $stuck_head (kept in $evidence/notice-review-stuck.jsonl)"
+# What the checkpoint proves is that a stuck round got unstuck. An ask the architect made on its own,
+# before the driver sent its message, is the production behaviour, so it counts too, as the stronger
+# pass, and the run notes it.
+asked_unprompted=$(architect_messages "$tree1" reviewer)
+send_agent "$tree1" architect "Stage 4b proof review-stuck operation: handle the daemon's review-stuck notice on $tree1 now, exactly as your role says to handle a review-stuck notice."
+architect_asked() { [ "$(architect_messages "$tree1" reviewer)" -gt "$asked_before" ]; }
+until_true 900 "$tree1's architect, sent the review-stuck operation, to ask the reviewer for the round's decision" architect_asked
+notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" architect)" | tail -n +"$((asked_before + 1))" >"$evidence/architect-ask.jsonl"
+[ "$asked_unprompted" -le "$asked_before" ] || note "the architect asked the reviewer before the driver's message"
 until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
+note "the architect asked the reviewer over Envoy (kept in $evidence/architect-ask.jsonl), and the reviewer's approval of the head ended the round"
 until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
 if issue_phase "$tree1" retro >/dev/null; then
   wait_for_worker "$tree1" implementer

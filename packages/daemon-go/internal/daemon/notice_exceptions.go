@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -23,7 +24,7 @@ import (
 // notification stream, so the report goes over core NATS and reaches only a subscriber connected
 // when it is sent; the TypeScript daemon subscribes to the same subjects
 // (packages/daemon/src/daemon/events.ts).
-const noticeExceptionSubjects = "notifications.envoy.exceptions." + roleTopicPrefix + "*"
+const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleTopicPrefix + "*"
 
 // The listener's liveness windows for a role holder (packages/envoy/internal/session): a session's
 // registration lives for listenerSessionTTL after its last heartbeat (registry.go), delivery drops
@@ -266,7 +267,7 @@ func (r *outbox) exceptionNotice(exception roleLaneException) (reportedNotice, b
 	if !ok {
 		return reportedNotice{}, false
 	}
-	token, isRole := strings.CutPrefix(exception.OriginalTopic, roleTopicPrefix)
+	token, isRole := strings.CutPrefix(exception.OriginalTopic, notify.RoleTopicPrefix)
 	if !isRole || !strings.HasPrefix(token, "legion-"+r.project+"-") || !strings.HasSuffix(token, "-"+string(claim.RoleArchitect)) {
 		return reportedNotice{}, false
 	}

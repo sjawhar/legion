@@ -31,7 +31,8 @@ type Config struct {
 	MergeQueueRole string
 	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
-	// by it is never a fix attempt, and a red on its red tests is planned. Empty matches no push.
+	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits can be
+	// the reviewer's answer to a round it left undecided (reviewersAnswer). Empty matches no one.
 	ReviewAppLogin string
 }
 
@@ -65,6 +66,12 @@ func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 }
 
 func (e *Engine) now() time.Time { return e.cfg.Clock().UTC() }
+
+// byReviewApp says whether login is the review App's bot (Config.ReviewAppLogin). With no login
+// configured, it is no one's.
+func (e *Engine) byReviewApp(login string) bool {
+	return e.cfg.ReviewAppLogin != "" && login == e.cfg.ReviewAppLogin
+}
 
 // Apply changes workflow-owned phase state for one durable intake fact. It never performs I/O;
 // every externally visible consequence is an outbox row committed with the record change.
@@ -329,7 +336,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 		row.LastHandoff = fact.Commit
 	}
-	row.Claim, row.HandoffCommit, row.Verdict, row.Summary = fact.Claim, fact.Commit, fact.Verdict, fact.Summary
+	row.Claim, row.HandoffCommit, row.Verdict, row.Summary, row.CompletedAt = fact.Claim, fact.Commit, fact.Verdict, fact.Summary, e.now()
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -356,7 +363,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
 	case phase.Reviewing:
-		_, err := e.advanceReview(ctx, tx, *issue, pr)
+		_, err := e.settleRound(ctx, tx, *issue, row, pr, round{}, byCompletion)
 		return intake.Result{}, err
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
@@ -471,10 +478,11 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
+	prior := *pr
 	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
 	*pr = classify.ApplyPush(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
 		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
-		ByReviewApp: e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin,
+		ByReviewApp: e.byReviewApp(fact.Pusher),
 		// A push that does not say it was not forced - a listener that predates the field - is
 		// read as forced: its changed paths cannot then be trusted to describe the head it replaced.
 		Forced: fact.Forced == nil || *fact.Forced != "false"})
@@ -482,12 +490,17 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		return intake.Result{}, err
 	}
 	// A push classified after its head arrived can be what lets an approval of an earlier head
-	// stand, so an open review is asked again.
+	// stand, or what shows the current head carries code the approved one does not, so the round
+	// is settled again.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil {
+	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
 		return intake.Result{}, err
 	}
-	_, err = e.advanceReview(ctx, tx, *issue, pr)
+	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), byPush)
 	return intake.Result{}, err
 }
 
@@ -624,22 +637,32 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 		return intake.Result{}, err
 	}
 	// A review round held open may already have both of its halves: the reviewer completed before
-	// the hold, and its review was recorded while held. The round ends here, and the reviewer is
-	// started only if it is still open - a second completion of the same commit would be refused as
-	// not new.
+	// the hold, and its review was recorded while held. The round ends here (reviewRound), or goes
+	// back to implementing on a red code head that settled while held, and the reviewer is started
+	// only if it is still open - a second completion of the same commit would be refused as not new.
+	// A round its reviewer completed that nothing would end is stuck: the reviewer's task says why,
+	// so the restarted reviewer decides it. The architect, who ordered the retry, is told nothing: a
+	// notice now would read as the reviewer's answer to its request.
+	reason := "retry held phase"
 	if from == phase.Reviewing {
 		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err
 		}
-		if _, err := e.advanceReview(ctx, tx, *issue, pr); err != nil {
+		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+		if err != nil {
 			return intake.Result{}, err
 		}
-		if issue, err = e.store.Issue(ctx, tx, issue.Key); err != nil || issue == nil || issue.Phase != phase.Reviewing {
+		// The retry tells nothing of a stuck round: passed as its own before, it is stuck the same way.
+		r := reviewRound(*issue, reviewer, pr)
+		if moved, err := e.settleRound(ctx, tx, *issue, reviewer, pr, r, ""); err != nil || moved {
 			return intake.Result{}, err
+		}
+		if r.outcome == roundStuck {
+			reason += ": " + r.reason
 		}
 	}
-	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
+	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, reason))
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {
