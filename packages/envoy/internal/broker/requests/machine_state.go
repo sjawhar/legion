@@ -420,8 +420,9 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]expiredRe
 // otherwise the request is denied. It re-reads the record body, recomputes its id, refuses any
 // login but the record's own approver (record.ErrNotApprover) whatever the record's state,
 // re-verifies the embedded request object, and writes the event (naming that login), the request
-// transition and the audit row in one transaction. A non-pending record is ErrTerminal for its
-// approver: a duplicate or late decision changes nothing. The enrollment row is locked before the
+// transition and the audit row in one transaction. A non-pending record, or one past its
+// pending_expires_at that the sweeper has not yet expired, is ErrTerminal for its approver: a
+// duplicate or late decision changes nothing. The enrollment row is locked before the
 // request row — the same order every other enrollment-then-request writer in this package takes
 // them in, so none of them deadlock.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
@@ -443,8 +444,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var requestID, state string
 	var lifetime int
-	if err := tx.QueryRow(ctx, `select id, state, lifetime_seconds from requests where record_id=$1 for update`, recordID).
-		Scan(&requestID, &state, &lifetime); err != nil {
+	var expired bool
+	if err := tx.QueryRow(ctx, `select id, state, lifetime_seconds, pending_expires_at <= now() from requests where record_id=$1 for update`, recordID).
+		Scan(&requestID, &state, &lifetime, &expired); err != nil {
 		return Decision{}, err
 	}
 	parsed, err := verifyRecordBody(recordID, body)
@@ -455,7 +457,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
-	if state != "pending" {
+	if state != "pending" || expired {
 		return Decision{}, ErrTerminal
 	}
 	// now is reset to the record's own creation time: the request object's own iat/exp bound only

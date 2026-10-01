@@ -36,9 +36,9 @@ var (
 	// record's own: the human is deciding a different login than the one their terminal or
 	// dashboard actually shows, refused before the approver is even checked.
 	ErrCodeMismatch = errors.New("confirmation code does not match")
-	// ErrAlreadyDecided is ApplyDecision's refusal for a record that already carries its one
-	// terminal event: a second approve or deny, one that lost the race to a concurrent one, or one
-	// after the sweeper recorded the login expired.
+	// ErrAlreadyDecided is ApplyDecision's refusal for a record that is no longer pending: it
+	// already carries its one terminal event (a second approve or deny, one that lost the race to a
+	// concurrent one, or the sweeper's 'expired'), or its expires_at has passed.
 	ErrAlreadyDecided = errors.New("this machine login has already been decided")
 	// ErrKeyHoldsLiveCredential is ApplyDecision's refusal to approve a pending login whose key
 	// already holds a live launcher credential under another record: a machine signed two logins
@@ -191,9 +191,10 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // means the human is looking at a different login than the one they're deciding, refused before
 // anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be
 // the record's own approver (record.ErrNotApprover), checked next, so another login is refused the
-// same way whatever the record's state. A record that already carries a terminal event is
-// ErrAlreadyDecided, checked under the record's row lock before anything is minted, so a second
-// decision and one racing the first both answer the same way. Approval mints the
+// same way whatever the record's state. A record that already carries a terminal event, or whose
+// expires_at has passed though the sweeper has not yet recorded it expired, is ErrAlreadyDecided,
+// checked under the record's row lock before anything is minted, so a second decision, one racing
+// the first and one after expiry all answer the same way. Approval mints the
 // credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
 // CredentialLifetime counted from the decision — in the same transaction that records the
 // decision, so a crash between the two never orphans a credential no decision names. A key that
@@ -214,8 +215,9 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	// this decision's own insert then answers ErrAlreadyDecided.
 	var canonical, storedCode string
 	var createdAt time.Time
-	err = tx.QueryRow(ctx, `select body, code, created_at from credential_requests where id=$1 and kind='launcher_credential' for no key update`, recordID).
-		Scan(&canonical, &storedCode, &createdAt)
+	var expired bool
+	err = tx.QueryRow(ctx, `select body, code, created_at, expires_at <= now() from credential_requests where id=$1 and kind='launcher_credential' for no key update`, recordID).
+		Scan(&canonical, &storedCode, &createdAt, &expired)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
@@ -243,7 +245,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		Scan(&decided); err != nil {
 		return "", "", err
 	}
-	if decided {
+	if decided || expired {
 		return "", "", ErrAlreadyDecided
 	}
 	event := "denied"

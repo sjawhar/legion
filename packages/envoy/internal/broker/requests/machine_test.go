@@ -423,6 +423,29 @@ func TestExpirePendingWritesTheExpiredEventAndFlipsTheRequest(t *testing.T) {
 	}
 }
 
+// TestApplyDecisionRefusesARecordPastItsExpiry pins that a record past its expiry is decided no
+// more, before the sweeper has expired it as well as after: approve and deny both answer
+// ErrTerminal, the answer an expired request gives, and neither writes a decision or a grant.
+func TestApplyDecisionRefusesARecordPastItsExpiry(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	ctx := context.Background()
+	m.PendingTTL = -time.Minute
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), "")
+	if err != nil || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v", req, err)
+	}
+	for _, approve := range []bool{true, false} {
+		if dec, err := m.ApplyDecision(ctx, *req.RecordID, approve, approver); !errors.Is(err, ErrTerminal) {
+			t.Fatalf("ApplyDecision(approve=%v) past the record's expiry = %+v, %v, want ErrTerminal", approve, dec, err)
+		}
+	}
+	var events, grants int
+	if err := m.Store.Pool.QueryRow(ctx, `select (select count(*) from credential_request_events where record_id=$1),
+		(select count(*) from grants where request_id=$2)`, *req.RecordID, req.ID).Scan(&events, &grants); err != nil || events != 0 || grants != 0 {
+		t.Fatalf("after the refused decisions: %d events, %d grants, %v; want none", events, grants, err)
+	}
+}
+
 func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
 	m, enrA, keyA, _ := newFixture(t)
 	ctx := context.Background()

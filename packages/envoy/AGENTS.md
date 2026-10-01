@@ -1565,8 +1565,9 @@ mints the grant while the requesting enrollment is still live, deny denies it �
 record's id, refusing any login but the record's approver whatever the record's state
 (`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
 writing the decision event (which records the deciding login), the request transition and the
-audit row in one transaction; a non-pending record is `409 RECORD_TERMINAL` for its approver (a
-duplicate or late decision changes nothing). `Values` releases a
+audit row in one transaction; a non-pending record, and one past its expiry that the sweeper has
+not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
+nothing). `Values` releases a
 live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
@@ -1595,9 +1596,10 @@ it), so `code` is required and checked again on the decision itself, before the 
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
 update`, which an event insert's foreign-key check does not wait on), refuses any login but the
 record's own approver (`403 NOT_APPROVER`) whatever the record's state, answers a record that
-already carries a terminal event `409 RECORD_TERMINAL` before minting anything, as a decided
-`agent_secret` record answers, so a second click and a concurrent one both get it, and, on
-approval, mints the launcher
+already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
+expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
+answers, so a second click, a concurrent one and a late one all get it, and, on approval, mints
+the launcher
 credential in the same transaction: bound to the request object's own key (its thumbprint and
 embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
 from the decision, so a crash between minting and recording the decision never orphans a

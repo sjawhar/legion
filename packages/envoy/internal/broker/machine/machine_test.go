@@ -370,6 +370,34 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 	}
 }
 
+// TestApplyDecisionRefusesALoginPastItsExpiry pins that a machine login past its own expires_at is
+// decided no more, before the sweeper has written its 'expired' event as well as after: approve and
+// deny both answer ErrAlreadyDecided, the answer an expired login gives, and neither mints a
+// credential or records a decision.
+func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	svc.PendingTTL = -time.Minute
+	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "example-host-devbox", ""))
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	view, err := svc.LookupByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("LookupByCode: %v", err)
+	}
+	for _, approve := range []bool{true, false} {
+		if _, _, err := svc.ApplyDecision(ctx, view.RecordID, approve, testApprover, code); !errors.Is(err, ErrAlreadyDecided) {
+			t.Fatalf("ApplyDecision(approve=%v) past the login's expiry = %v, want ErrAlreadyDecided", approve, err)
+		}
+	}
+	var events, credentials int
+	if err := svc.Store.Pool.QueryRow(ctx, `select (select count(*) from credential_request_events where record_id=$1),
+		(select count(*) from launcher_credentials where record_id=$1)`, view.RecordID).Scan(&events, &credentials); err != nil || events != 0 || credentials != 0 {
+		t.Fatalf("after the refused decisions: %d events, %d credentials, %v; want none", events, credentials, err)
+	}
+}
+
 // TestChainVerificationRefusesADecisionTheBrokerDidNotWrite pins what AuthenticateLauncher's
 // chain re-check proves on every call: a credential authenticates only while its record embeds a
 // request object the machine really signed and carries exactly one terminal decision, an approval
