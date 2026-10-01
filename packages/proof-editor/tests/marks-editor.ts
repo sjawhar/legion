@@ -1,10 +1,10 @@
 import { undoDepth } from "@milkdown/kit/prose/history";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { Window } from "happy-dom";
 import { prosemirrorToYXmlFragment, yUndoPluginKey } from "y-prosemirror";
 import * as Y from "yjs";
 import { createProofEditor, type ProofEditorHandle } from "../src/lib";
 import { createHeadlessProof } from "../src/lib-headless.js";
+import { withDomWindow } from "./dom-window";
 
 export interface MarksEditor {
   readonly handle: ProofEditorHandle;
@@ -30,14 +30,7 @@ export async function withMarksEditor(
   const { parseMarkdown } = await createHeadlessProof();
   const ydoc = new Y.Doc();
   prosemirrorToYXmlFragment(parseMarkdown(markdown), ydoc.getXmlFragment("prosemirror"));
-  const window = new Window({ url: "http://localhost/" });
-  // Put back exactly what was there: a key Bun never defined is deleted, not left as undefined,
-  // because src/tests/headless-no-dom.test.ts asserts `!("document" in globalThis)`.
-  const previous = (["document", "window"] as const).map(
-    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const
-  );
-  Object.assign(globalThis, { document: window.document, window });
-  try {
+  await withDomWindow(async (window) => {
     const root = window.document.body.appendChild(window.document.createElement("div"));
     const handle = await createProofEditor(root as unknown as HTMLElement, {
       heatMapMode: "hidden",
@@ -78,11 +71,5 @@ export async function withMarksEditor(
       // The editor tears its view down asynchronously; its plugins' teardown needs the DOM.
       while (!view.isDestroyed) await Promise.resolve();
     }
-  } finally {
-    for (const [key, descriptor] of previous) {
-      if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
-      else Object.defineProperty(globalThis, key, descriptor);
-    }
-    await window.happyDOM.close();
-  }
+  });
 }

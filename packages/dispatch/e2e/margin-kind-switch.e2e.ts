@@ -75,6 +75,16 @@ function kindButton(page: Page, name: "Comment" | "Suggest" | "Ask") {
   });
 }
 
+/** A bar Comment on `quote`, then the composer's Kind switched to Ask: the bar's comment mark is
+ *  retyped into an ask mark over the same text. */
+async function commentThenAsk(page: Page, quote: string): Promise<void> {
+  await selectEditorText(page, quote);
+  await barAction(page, "Comment");
+  await expect(composer(page)).toContainText(quote);
+  await kindButton(page, "Ask").click();
+  await expect(askMarks(page)).toHaveText([quote]);
+}
+
 /** Mod+Z, Mod+Z, Mod+Shift+Z in the editor, with the caret after "fox": the chords reach the
  *  editor's history keymap, and the collab keymap when that one declines. */
 async function undoUndoRedo(page: Page): Promise<void> {
@@ -130,30 +140,35 @@ test("switching an anchored composer from Comment to Ask retypes its mark and as
   );
 });
 
-test("undo and redo write back no mark the composer wrote, retyped, cancelled or replaced", async ({
+test("undo and redo after a switch write back no comment mark and take no ask mark", async ({
   browser,
 }) => {
   await withReaders(browser, "Undo after a switch", async ({ alicePage, bobPage }) => {
-    // After a switch: the comment mark does not come back and the ask mark does not go.
-    await selectEditorText(alicePage, "brown");
-    await barAction(alicePage, "Comment");
-    await expect(composer(alicePage)).toContainText("brown");
-    await kindButton(alicePage, "Ask").click();
-    await expect(askMarks(alicePage)).toHaveText(["brown"]);
+    await commentThenAsk(alicePage, "brown");
     await undoUndoRedo(alicePage);
     await expect(askMarks(alicePage)).toHaveText(["brown"]);
     await expect(askMarks(bobPage)).toHaveText(["brown"]);
     await expect(commentMarks(alicePage)).toHaveCount(0);
     await expect(commentMarks(bobPage)).toHaveCount(0);
+  });
+});
 
-    // Cancelling after the switch leaves no mark. Escape is handled on the composer's form, so
-    // focus goes back there after the editor took it for the chords.
-    await composer(alicePage).getByLabel("Question").focus();
+test("a composer cancelled after a switch leaves no mark, through undo and redo", async ({
+  browser,
+}) => {
+  await withReaders(browser, "Cancel after a switch", async ({ alicePage, bobPage }) => {
+    await commentThenAsk(alicePage, "brown");
     await alicePage.keyboard.press("Escape");
     await expect(anyMarks(alicePage)).toHaveCount(0);
     await expect(anyMarks(bobPage)).toHaveCount(0);
+    await undoUndoRedo(alicePage);
+    await expect(anyMarks(alicePage)).toHaveCount(0);
+    await expect(anyMarks(bobPage)).toHaveCount(0);
+  });
+});
 
-    // A bar Comment that is cancelled stays cancelled through undo and redo.
+test("a cancelled bar Comment stays cancelled through undo and redo", async ({ browser }) => {
+  await withReaders(browser, "Cancelled comment", async ({ alicePage, bobPage }) => {
     await selectEditorText(alicePage, "brown");
     await barAction(alicePage, "Comment");
     await expect(composer(alicePage)).toContainText("brown");
@@ -162,15 +177,22 @@ test("undo and redo write back no mark the composer wrote, retyped, cancelled or
     await undoUndoRedo(alicePage);
     await expect(anyMarks(alicePage)).toHaveCount(0);
     await expect(anyMarks(bobPage)).toHaveCount(0);
+  });
+});
 
-    // Refining the selection while a composer is open: the second bar Comment cuts into the
-    // first composer's mark, and the margin removes the rest of it. Nothing of it comes back.
+test("refining the selection under an open composer leaves nothing of the first mark for undo to bring back", async ({
+  browser,
+}) => {
+  await withReaders(browser, "Refined selection", async ({ alicePage, bobPage }) => {
+    // The second bar Comment cuts into the first composer's mark, and the margin removes the rest
+    // of it.
     await selectEditorText(alicePage, "quick brown");
     await barAction(alicePage, "Comment");
     await expect(composer(alicePage)).toContainText("quick brown");
     await selectEditorText(alicePage, "brown");
     await barAction(alicePage, "Comment");
     await expect(commentMarks(alicePage)).toHaveText(["brown"]);
+    // Escape is handled on the composer's form, so focus goes back there from the editor.
     await composer(alicePage).getByLabel("Comment").focus();
     await alicePage.keyboard.press("Escape");
     await expect(anyMarks(alicePage)).toHaveCount(0);
@@ -208,11 +230,7 @@ test("undo and redo after a switch write back no comment mark when a sent sugges
         )
       ).toHaveText("red");
 
-      await selectEditorText(alicePage, "brown");
-      await barAction(alicePage, "Comment");
-      await expect(composer(alicePage)).toContainText("brown");
-      await kindButton(alicePage, "Ask").click();
-      await expect(askMarks(alicePage)).toHaveText(["brown"]);
+      await commentThenAsk(alicePage, "brown");
       await undoUndoRedo(alicePage);
       await expect(askMarks(alicePage)).toHaveText(["brown"]);
       await expect(askMarks(bobPage)).toHaveText(["brown"]);
@@ -226,26 +244,30 @@ test("undo and redo after a switch write back no comment mark when a sent sugges
   );
 });
 
-test("a kind switch the editor refuses says why and changes nothing", async ({ browser }) => {
+test("Suggest on a mid-word selection is refused, and the comment stays", async ({ browser }) => {
+  await withReaders(browser, "Mid-word suggestion", async ({ alicePage }) => {
+    // The bar's Comment accepts a mid-word selection; a suggestion over it is one upstream will
+    // not write.
+    await selectEditorText(alicePage, "ick");
+    await barAction(alicePage, "Comment");
+    await expect(composer(alicePage)).toContainText("ick");
+    await kindButton(alicePage, "Suggest").click();
+    await expect(composer(alicePage).getByRole("status")).toHaveText(
+      "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again."
+    );
+    await expect(kindButton(alicePage, "Comment")).toHaveAttribute("aria-pressed", "true");
+    await expect(kindButton(alicePage, "Suggest")).toHaveAttribute("aria-pressed", "false");
+    await expect(commentMarks(alicePage)).toHaveText(["ick"]);
+  });
+});
+
+test("Comment over text another reader's comment covers is refused, and that comment stays whole", async ({
+  browser,
+}) => {
   await withReaders(
     browser,
-    "Refused switches",
+    "Overlapping comment",
     async ({ alicePage, bobPage, issueKey, artifactId }) => {
-      // The bar's Comment accepts a mid-word selection; a suggestion over it is one upstream will
-      // not write.
-      await selectEditorText(alicePage, "ick");
-      await barAction(alicePage, "Comment");
-      await expect(composer(alicePage)).toContainText("ick");
-      await kindButton(alicePage, "Suggest").click();
-      await expect(composer(alicePage).getByRole("status")).toHaveText(
-        "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again."
-      );
-      await expect(kindButton(alicePage, "Comment")).toHaveAttribute("aria-pressed", "true");
-      await expect(kindButton(alicePage, "Suggest")).toHaveAttribute("aria-pressed", "false");
-      await expect(commentMarks(alicePage)).toHaveText(["ick"]);
-      await alicePage.keyboard.press("Escape");
-      await expect(anyMarks(alicePage)).toHaveCount(0);
-
       // Bob's recorded comment covers "quick brown"; a comment of Alice's over "brown" would cut
       // "brown" out of it.
       const bobsComment = await createComment(
@@ -273,18 +295,24 @@ test("a kind switch the editor refuses says why and changes nothing", async ({ b
       await expect
         .poll(() => listComments(issueKey, artifactId).then((items) => items[0]?.anchor?.quote))
         .toBe("quick brown");
-
-      // Bob deletes the text Alice's composer is about; her switch has no mark left to retype.
-      await selectEditorText(alicePage, "fox");
-      await barAction(alicePage, "Comment");
-      await expect(composer(alicePage)).toContainText("fox");
-      await deleteEditorText(bobPage, "fox");
-      await expect(documentEditor(alicePage)).not.toContainText("fox");
-      await kindButton(alicePage, "Ask").click();
-      await expect(composer(alicePage).getByRole("status")).toHaveText(
-        "That highlight is gone from the document. Close this composer and select the text again."
-      );
-      await expect(kindButton(alicePage, "Comment")).toHaveAttribute("aria-pressed", "true");
     }
   );
+});
+
+test("a switch after another reader deleted the text says the highlight is gone", async ({
+  browser,
+}) => {
+  await withReaders(browser, "Deleted text", async ({ alicePage, bobPage }) => {
+    // Bob deletes the text Alice's composer is about; her switch has no mark left to retype.
+    await selectEditorText(alicePage, "fox");
+    await barAction(alicePage, "Comment");
+    await expect(composer(alicePage)).toContainText("fox");
+    await deleteEditorText(bobPage, "fox");
+    await expect(documentEditor(alicePage)).not.toContainText("fox");
+    await kindButton(alicePage, "Ask").click();
+    await expect(composer(alicePage).getByRole("status")).toHaveText(
+      "That highlight is gone from the document. Close this composer and select the text again."
+    );
+    await expect(kindButton(alicePage, "Comment")).toHaveAttribute("aria-pressed", "true");
+  });
 });

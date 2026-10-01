@@ -241,6 +241,10 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
     bridgeRef.current = bridge;
     setDocumentBridge(bridge);
+    // A document registers fresh whenever `ProofDocument` remounts its editor - a new artifact or
+    // block schema - and the margin's open composer outlives that: the new editor has to learn
+    // which mark the composer holds, as `publishCompose` tells the one it replaces.
+    bridge?.setComposerMark(openCompose.current?.request.anchor.mark_id ?? null);
     if (bridge === undefined) {
       setBlockPlacements(new Map());
       setMarkPlacements(new Map());

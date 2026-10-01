@@ -94,6 +94,13 @@ function takesNothing(
  * suggestion accept that replaces text and drops its mark - is the reader's edit and stays
  * undoable too.
  *
+ * Two channels mark a removal as the composer's own, and each covers callers the other does not.
+ * The composer-mark rule covers the margin: every removal it makes - a replaced composer's mark,
+ * a cancelled one, and the old mark inside a retype - runs while `setComposerMark` still names
+ * that mark. The label covers `removeRecordMark`'s callers that name no composer mark: it keeps
+ * `retypeMark` and the handle's `removeMark` self-sufficient for any host, and the cancel and
+ * switch cases in tests/record-mark-history.test.ts rely on it. Neither is redundant.
+ *
  * Both undo managers honour the stamp. prosemirror-history skips the transaction, and the
  * transactions other plugins append to it. y-prosemirror's sync plugin copies the flag of the
  * batch's last transaction onto the Yjs transaction its UndoManager reads, and plugins append
