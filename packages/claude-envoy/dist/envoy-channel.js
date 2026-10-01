@@ -38916,6 +38916,7 @@ class DispatchServiceError extends Error {
   current;
   mismatches;
   name = "DispatchServiceError";
+  fromDispatch = true;
   constructor(code, status, message, candidates, current, mismatches) {
     super(message);
     this.code = code;
@@ -38928,13 +38929,16 @@ class DispatchServiceError extends Error {
 
 class DispatchGatewayError extends DispatchServiceError {
   answer;
-  transient;
   advice;
-  constructor(status, answer, transient, advice, message = `${answer}, so ${advice}.`) {
+  fromDispatch = false;
+  transient;
+  mayHaveReachedDispatch;
+  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
     super(`HTTP_${status}`, status, message);
     this.answer = answer;
-    this.transient = transient;
     this.advice = advice;
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
   }
 }
 function asErrorShape(value) {
@@ -38950,7 +38954,7 @@ function requestSignal(signal) {
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
-    return `text that is not a JSON page, ${GATEWAY_PAGE}, so ${gatewayAdvice("GET", true)}.`;
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
   }
   let what;
   if (Array.isArray(answer)) {
@@ -38970,20 +38974,26 @@ function whyNotAPage(answer) {
   return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
 }
 var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
-function gatewayAdvice(method, transient) {
-  if (!transient) {
+function gatewayAdvice(method, status) {
+  if (!transientStatus(status)) {
     return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
   }
-  return method === "GET" ? "a retry may succeed" : "the write may or may not have reached Dispatch: check whether it took effect before retrying it";
+  if (method === "GET")
+    return "a retry may succeed";
+  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
 }
 function transientStatus(status) {
   return status >= 500 || status === 408 || status === 429;
+}
+function reachesDispatch(status) {
+  return status >= 500;
 }
 var REDACTED = "[redacted]";
 var EXCERPT_SCAN_LIMIT = 64 * 1024;
 function excerpt(text, token) {
   const bearer = token.trim();
-  const plain = (bearer === "" ? text : text.replaceAll(bearer, REDACTED)).slice(0, EXCERPT_SCAN_LIMIT).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  const scanned = bearer === "" ? text.slice(0, EXCERPT_SCAN_LIMIT) : text.slice(0, Math.max(EXCERPT_SCAN_LIMIT, text.lastIndexOf(bearer, EXCERPT_SCAN_LIMIT - 1) + bearer.length)).replaceAll(bearer, REDACTED).slice(0, EXCERPT_SCAN_LIMIT);
+  const plain = scanned.replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
   return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
 }
 
@@ -39292,11 +39302,19 @@ class DispatchClient {
         throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
       }
       const quoted = excerpt(text, this.token);
-      const body = quoted === "" ? "an empty body" : `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      let body;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
       const reasonPhrase = excerpt(response.statusText, this.token);
       const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
-      const transient = transientStatus(response.status);
-      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, transient, gatewayAdvice(method, transient));
+      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
     }
     return payload;
   }
@@ -40016,7 +40034,7 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
       throw new Error("artifact is required for a project document");
     }
     const routed = await client.getProjectArtifact(owner.project, artifactReference).catch((error48) => {
-      if (!(error48 instanceof DispatchServiceError) || error48.status !== 404)
+      if (!dispatchAnswered(error48, 404))
         throw error48;
       return;
     });
@@ -40189,7 +40207,7 @@ function referenceLines(edges) {
   });
 }
 function unavailableReason(error48) {
-  return error48 instanceof DispatchServiceError && error48.status === 404 ? "unavailable" : `unavailable: ${messageFor(error48)}`;
+  return dispatchAnswered(error48, 404) ? "unavailable" : `unavailable: ${messageFor(error48)}`;
 }
 async function graphEdges(client, query) {
   try {
@@ -40379,9 +40397,8 @@ async function openArtifactMarks(client, resolved) {
   const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
   const commentsResult = await commentsResultPromise;
   if (commentsResult.status === "rejected") {
-    if (commentsResult.reason instanceof DispatchServiceError && commentsResult.reason.status === 404) {
+    if (dispatchAnswered(commentsResult.reason, 404))
       return marks;
-    }
     throw commentsResult.reason;
   }
   return [
@@ -40471,13 +40488,21 @@ function refusalWithCode(error48, suffix = "") {
   if (error48 instanceof DispatchGatewayError) {
     let told = error48.message;
     if (suffix !== "") {
-      told = error48.transient ? `${error48.answer}${suffix}` : `${error48.answer}, so ${error48.advice}${suffix}`;
+      told = error48.mayHaveReachedDispatch ? `${error48.answer}${suffix}` : `${error48.answer}, so ${error48.advice}${suffix}`;
     }
-    return new DispatchGatewayError(error48.status, error48.answer, error48.transient, error48.advice, `${error48.code}: ${told}`);
+    return new DispatchGatewayError(error48.status, error48.answer, error48.advice, `${error48.code}: ${told}`);
   }
   if (!(error48 instanceof DispatchServiceError))
     return error48;
   return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${suffix}`, error48.candidates, error48.current, error48.mismatches);
+}
+function dispatchAnswered(error48, status) {
+  return error48 instanceof DispatchServiceError && error48.fromDispatch && error48.status === status;
+}
+function writeMayHaveLanded(error48) {
+  if (error48 instanceof DispatchGatewayError)
+    return error48.mayHaveReachedDispatch;
+  return !(error48 instanceof DispatchServiceError) || error48.status >= 500;
 }
 async function executeDispatchTool(input) {
   const configUrl = input.config.url;
@@ -40648,7 +40673,12 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error48) {
-          throw refusalWithCode(error48, error48 instanceof DispatchGatewayError && error48.transient ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "; the reason was not posted, so the close was not sent");
+          const told = writeMayHaveLanded(error48) ? "; the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "; the reason was not posted, so the close was not sent";
+          if (error48 instanceof DispatchServiceError)
+            throw refusalWithCode(error48, told);
+          throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${told}`, {
+            cause: error48
+          });
         }
       }
       const linked = before.external_links.map((link) => link.url);
@@ -40667,12 +40697,12 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
-        const taken = error48 instanceof DispatchServiceError && !(error48 instanceof DispatchGatewayError) && error48.status === 500 && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
+        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
-        const refused = error48 instanceof DispatchServiceError && error48.status < 500;
         const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
-        const landed = refused ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}` : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
+        const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
+        const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
           throw refusalWithCode(error48, taken + landed);
         throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${landed}`, {
@@ -41281,7 +41311,7 @@ async function resolveExistingIssue(client, issueReference) {
   try {
     return await client.resolveIssue(issueReference);
   } catch (error48) {
-    if (error48 instanceof DispatchServiceError && error48.status === 404) {
+    if (dispatchAnswered(error48, 404)) {
       throw new Error(`no Dispatch issue is linked to ${issueReference}; create it first with ` + `dispatch_issue({ external: "${issueReference}", ... })`);
     }
     throw error48;

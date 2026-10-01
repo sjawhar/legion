@@ -538,36 +538,60 @@ describe("DispatchClient", () => {
     expect(notFound).toEqual(expect.objectContaining({ code: "HTTP_404", transient: false }));
   });
 
-  // A gateway that answers a write with a status that can clear may have forwarded it first: a
-  // 502 or 504 can come back after Dispatch applied the write. Advising a retry there can post a
-  // message twice, so a write is told to check what took effect; a status that cannot clear still
-  // gets the same advice as a read, since the request never got past the gateway.
-  test("tells a write a gateway answered to check whether it took effect, never that a retry may succeed", async () => {
+  // A gateway's 5xx can come back after it forwarded a write and Dispatch applied it, so advising
+  // a retry there can post a message twice: the write is told to check what took effect. A 408 or
+  // 429 is the gateway's own timeout or rate limit, sent before it forwards the request, so the
+  // write never reached Dispatch and a retry may succeed. Any other status still gets the same
+  // advice as a read, since the request never got past the gateway either.
+  test("tells a write a gateway answered whether it may have reached Dispatch", async () => {
     const page = (status: number, statusText: string) =>
       new Response(`<html><body><h1>${status} ${statusText}</h1></body></html>`, {
         status,
         statusText,
         headers: { "Content-Type": "text/html" },
       });
-    const { fetchImpl } = fakeFetch([page(502, "Bad Gateway"), page(404, "Not Found")]);
+    const { fetchImpl } = fakeFetch([
+      page(502, "Bad Gateway"),
+      page(408, "Request Timeout"),
+      page(429, "Too Many Requests"),
+      page(404, "Not Found"),
+    ]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
     const refusal = () =>
       client.message("DSP-1", { body: "Shipped.", actor }).then(
-        () => "",
-        (error: Error) => error.message
+        () => {
+          throw new Error("expected a refusal");
+        },
+        (error: Error) => error
       );
     const request = "POST http://dispatch.test/api/v1/issues/DSP-1/messages answered ";
     const gateway = ", which looks like a proxy or gateway page rather than Dispatch's own answer";
+    const page404 = `${request}404 Not Found with a body that is not Dispatch's error JSON ("404 Not Found")`;
 
-    expect(await refusal()).toBe(
+    const badGateway = await refusal();
+    expect(badGateway.message).toBe(
       `${request}502 Bad Gateway with a body that is not Dispatch's error JSON ("502 Bad Gateway")` +
         `${gateway}, so the write may or may not have reached Dispatch: check whether it took ` +
         "effect before retrying it."
     );
-    expect(await refusal()).toBe(
-      `${request}404 Not Found with a body that is not Dispatch's error JSON ("404 Not Found")` +
-        `${gateway}, so a retry gets the same answer until the Dispatch URL, or whatever answers ` +
-        "in its place, is fixed."
+    expect(badGateway).toEqual(expect.objectContaining({ mayHaveReachedDispatch: true }));
+    for (const [status, statusText] of [
+      [408, "Request Timeout"],
+      [429, "Too Many Requests"],
+    ] as const) {
+      const refused = await refusal();
+      expect(refused.message).toBe(
+        `${request}${status} ${statusText} with a body that is not Dispatch's error JSON ` +
+          `("${status} ${statusText}")${gateway}, so the write did not reach Dispatch, and a ` +
+          "retry may succeed."
+      );
+      expect(refused).toEqual(
+        expect.objectContaining({ transient: true, mayHaveReachedDispatch: false })
+      );
+    }
+    expect((await refusal()).message).toBe(
+      `${page404}${gateway}, so a retry gets the same answer until the Dispatch URL, or whatever ` +
+        "answers in its place, is fixed."
     );
   });
 
@@ -635,7 +659,18 @@ describe("DispatchClient", () => {
   // bound is generous so a loaded machine passes and a quadratic pass does not.
   test("builds the excerpt of a megabyte of unclosed tags in bounded time", async () => {
     const megabyte = 1 << 20;
-    for (const unit of ["<", "<script", "<script x", "<a <b", "</script>", "<script></script "]) {
+    // The last three hold the client's bearer, "secret", everywhere, or almost everywhere.
+    for (const unit of [
+      "<",
+      "<script",
+      "<script x",
+      "<a <b",
+      "</script>",
+      "<script></script ",
+      "secret",
+      "<script>secret",
+      "secre",
+    ]) {
       const hostile = unit.repeat(Math.ceil(megabyte / unit.length));
       const { fetchImpl } = fakeFetch([
         new Response(hostile, { status: 502, headers: { "Content-Type": "text/html" } }),
@@ -652,6 +687,70 @@ describe("DispatchClient", () => {
         "GET http://dispatch.test/api/v1/issues/DSP-1 answered 502 with "
       );
     }
+  });
+
+  // The excerpt reads at most the first 64 KiB of the body, so what it costs has a bound however
+  // large the body is. Redacting the bearer shortens the text, so it runs on that slice: redacting
+  // the whole body first pulls text from past the limit into the excerpt, and a slice cut through
+  // a bearer would leave its first characters to be pulled in the same way. A bearer that starts
+  // inside the limit and runs past it is redacted whole.
+  test("scans at most the first 64 KiB of a body, however often it holds the bearer", async () => {
+    const limit = 64 * 1024;
+    const bearer = `dsp_${"Zq9x".repeat(10)}`;
+    const styled = `<style>${bearer.repeat(Math.floor((limit - 80) / bearer.length))}</style>`;
+    const shortOfLimit = limit - styled.length;
+    // Visible words end at the limit, and a bearer starts one character past it.
+    const pastLimit = `${styled}${"p".repeat(shortOfLimit)} ${bearer} after the limit`;
+    // A bearer starts five characters short of the limit and ends past it.
+    const acrossLimit = `${styled}${"q".repeat(shortOfLimit - 5)}${bearer} after the limit`;
+    const { fetchImpl } = fakeFetch(
+      [pastLimit, acrossLimit].map(
+        (body) => new Response(body, { status: 502, headers: { "Content-Type": "text/html" } })
+      )
+    );
+    const client = new DispatchClient("http://dispatch.test", bearer, fetchImpl);
+    const refusal = () =>
+      client.getIssue("DSP-1").then(
+        () => "",
+        (error: Error) => error.message
+      );
+
+    const past = await refusal();
+    expect(past).toContain(`("${"p".repeat(shortOfLimit)}")`);
+    const across = await refusal();
+    expect(across).toContain(`("${"q".repeat(shortOfLimit - 5)}[redacted]")`);
+    for (const message of [past, across]) {
+      expect(message).not.toContain("after the limit");
+      expect(message).not.toContain(bearer.slice(0, 8));
+    }
+  });
+
+  // A body of nothing but markup is not empty, and an agent told it was would look for a gateway
+  // that sent nothing. The answer gives the body's size in bytes and says none of it reads as
+  // text, or none of what the excerpt reads when the body runs past that.
+  test("says a body of markup alone has no readable text, with its size, rather than that it is empty", async () => {
+    const { fetchImpl } = fakeFetch([
+      new Response("<p>\u00a0</p>", { status: 502, headers: { "Content-Type": "text/html" } }),
+      new Response("<script>".repeat(1 << 17), {
+        status: 502,
+        headers: { "Content-Type": "text/html" },
+      }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const refusal = () =>
+      client.getIssue("DSP-1").then(
+        () => "",
+        (error: Error) => error.message
+      );
+    const request = "GET http://dispatch.test/api/v1/issues/DSP-1 answered 502 with ";
+    const gateway =
+      ", which looks like a proxy or gateway page rather than Dispatch's own answer, so a retry " +
+      "may succeed.";
+
+    expect(await refusal()).toBe(`${request}a body of 9 bytes and no readable text${gateway}`);
+    expect(await refusal()).toBe(
+      `${request}a body of 1,048,576 bytes and no readable text in its first 64 KiB${gateway}`
+    );
   });
 
   // Dispatch's own refusal is JSON with a string `error`; `code` names the check when the server

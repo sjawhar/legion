@@ -53,6 +53,11 @@ export type { DispatchServiceErrorShape } from "@legion/contracts";
 
 export class DispatchServiceError extends Error {
   override readonly name = "DispatchServiceError";
+  /**
+   * Whether Dispatch itself wrote this refusal, so its status and code say what Dispatch decided;
+   * false for an answer something in Dispatch's place wrote (`DispatchGatewayError`).
+   */
+  readonly fromDispatch: boolean = true;
 
   constructor(
     readonly code: string,
@@ -74,6 +79,15 @@ export class DispatchServiceError extends Error {
  * `HTTP_<status>`, as for any refusal that names no code.
  */
 export class DispatchGatewayError extends DispatchServiceError {
+  override readonly fromDispatch = false;
+  /** Whether the status can clear on its own: a 5xx, a timeout (408) or a rate limit (429). */
+  readonly transient: boolean;
+  /**
+   * Whether the request may have reached Dispatch before the gateway answered, so a write may
+   * have taken effect (`reachesDispatch`).
+   */
+  readonly mayHaveReachedDispatch: boolean;
+
   constructor(
     status: number,
     /**
@@ -81,16 +95,13 @@ export class DispatchGatewayError extends DispatchServiceError {
      * gateway page rather than Dispatch's own answer`.
      */
     readonly answer: string,
-    /**
-     * Whether the status can clear on its own (a 5xx, 408 or 429), which also leaves open whether
-     * the request got past the gateway to Dispatch.
-     */
-    readonly transient: boolean,
     /** What asking again can do, as a clause that follows "so", without a final stop. */
     readonly advice: string,
     message = `${answer}, so ${advice}.`
   ) {
     super(`HTTP_${status}`, status, message);
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
   }
 }
 
@@ -147,7 +158,7 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
  */
 function whyNotAPage(answer: unknown): string | undefined {
   if (typeof answer === "string") {
-    return `text that is not a JSON page, ${GATEWAY_PAGE}, so ${gatewayAdvice("GET", true)}.`;
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
   }
   let what: string;
   if (Array.isArray(answer)) {
@@ -180,18 +191,20 @@ function whyNotAPage(answer: unknown): string | undefined {
 const GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
 
 /**
- * What asking again can do once a gateway answered `method` with a status. A status that cannot
+ * What asking again can do once a gateway answered `method` with `status`. A status that cannot
  * clear answers the same request the same way. One that can (`transientStatus`) may clear for a
- * read, but a gateway can answer a write that way after Dispatch applied it (a 502 or 504 after the
- * upstream took the request), so a blind retry could apply the write twice.
+ * read. A write answered so may already have taken effect only when the request reached Dispatch
+ * (`reachesDispatch`), where a blind retry could apply it twice; otherwise it did not, and a retry
+ * may succeed as for a read.
  */
-function gatewayAdvice(method: string, transient: boolean): string {
-  if (!transient) {
+function gatewayAdvice(method: string, status: number): string {
+  if (!transientStatus(status)) {
     return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
   }
-  return method === "GET"
-    ? "a retry may succeed"
-    : "the write may or may not have reached Dispatch: check whether it took effect before retrying it";
+  if (method === "GET") return "a retry may succeed";
+  return reachesDispatch(status)
+    ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it"
+    : "the write did not reach Dispatch, and a retry may succeed";
 }
 
 /**
@@ -200,6 +213,17 @@ function gatewayAdvice(method: string, transient: boolean): string {
  */
 function transientStatus(status: number): boolean {
   return status >= 500 || status === 408 || status === 429;
+}
+
+/**
+ * Whether a gateway that answered with `status` may have forwarded the request to Dispatch first:
+ * only after a 5xx, which a gateway sends when the upstream failed, timed out or dropped the
+ * connection, possibly once Dispatch had the request. A 408 or 429 is the gateway's own timeout on
+ * the client's request or its own rate limit, and any other status its own refusal, each sent
+ * before it forwards anything.
+ */
+function reachesDispatch(status: number): boolean {
+  return status >= 500;
 }
 
 const REDACTED = "[redacted]";
@@ -214,17 +238,32 @@ const EXCERPT_SCAN_LIMIT = 64 * 1024;
 /**
  * Text a gateway chose (a body, or the reason phrase) as one line of plain text safe to quote. A
  * misconfigured gateway echoes the request back, so two kinds of credential are redacted: first
- * the client's own bearer, trimmed as fetch sends it, over the whole text so the scan limit
- * cannot cut it in two; then, within the limit and after scripts, styles and tags are dropped, the
- * value after `Authorization:` (its scheme kept) or `Bearer`. All of it runs before the cut to one
- * line, so a cut never leaves a credential's first characters behind. The text is the answerer's,
- * and the excerpt is built on the host's event loop, so every pattern runs in linear time: a tag
- * holds no `<`, and a script or style block left open runs to the end.
+ * the client's own bearer, trimmed as fetch sends it; then, after scripts, styles and tags are
+ * dropped, the value after `Authorization:` (its scheme kept) or `Bearer`. All of it runs before
+ * the cut to one line, so a cut never leaves a credential's first characters behind. The text is
+ * the answerer's, and the excerpt is built on the host's event loop, so only the first
+ * `EXCERPT_SCAN_LIMIT` characters are read and every pattern runs in linear time: a tag holds no
+ * `<`, and a script or style block left open runs to the end. The bearer is redacted within that
+ * slice, taking whole one that starts inside the limit and runs past it, so the scan limit cannot
+ * cut it in two; redaction changes the slice's length, so it is cut to the limit only afterwards,
+ * and nothing from past the limit moves into it.
  */
 function excerpt(text: string, token: string): string {
   const bearer = token.trim();
-  const plain = (bearer === "" ? text : text.replaceAll(bearer, REDACTED))
-    .slice(0, EXCERPT_SCAN_LIMIT)
+  const scanned =
+    bearer === ""
+      ? text.slice(0, EXCERPT_SCAN_LIMIT)
+      : text
+          .slice(
+            0,
+            Math.max(
+              EXCERPT_SCAN_LIMIT,
+              text.lastIndexOf(bearer, EXCERPT_SCAN_LIMIT - 1) + bearer.length
+            )
+          )
+          .replaceAll(bearer, REDACTED)
+          .slice(0, EXCERPT_SCAN_LIMIT);
+  const plain = scanned
     .replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ")
     .replace(/<[^<>]*>/g, " ");
   return textHead(
@@ -751,7 +790,8 @@ export class DispatchClient {
    * non-2xx body — a gateway's HTML page, an empty body, JSON of another shape — did not come
    * from Dispatch, so it is a `DispatchGatewayError` naming the request (method, URL and query;
    * the token travels in a header, never the URL), the status and reason phrase, a one-line
-   * plain-text excerpt of the body, and what asking again can do for that method and status.
+   * plain-text excerpt of the body (or, when none of what the excerpt reads is text, the body's
+   * size), and what asking again can do for that method and status.
    */
   async #response<T>(method: string, url: string, response: Response): Promise<T> {
     const text = await response.text();
@@ -776,18 +816,23 @@ export class DispatchClient {
         );
       }
       const quoted = excerpt(text, this.token);
-      const body =
-        quoted === ""
-          ? "an empty body"
-          : `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      let body: string;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within =
+          text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
       const reasonPhrase = excerpt(response.statusText, this.token);
       const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
-      const transient = transientStatus(response.status);
       throw new DispatchGatewayError(
         response.status,
         `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`,
-        transient,
-        gatewayAdvice(method, transient)
+        gatewayAdvice(method, response.status)
       );
     }
     return payload as T;
