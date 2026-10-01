@@ -124,14 +124,13 @@ The composer a selection-bar action opens is anchored to the provisional mark th
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch
 retypes the mark through `ProofEditorHandle.retypeMark` so the server verifies a mark of the kind
 being sent, and the mark is removed when the composer ends unsaved — cancelled, or replaced by a
-newer composer. The margin also names the mark the open composer holds to the editor
-(`ProofEditorHandle.setComposerMark`). The composer's own mark writes are never undo steps
-(`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or y-prosemirror's
-UndoManager: neither undo nor redo writes one back, beside a recorded suggestion or after the
-reader refines the selection under an open composer. A bar Comment that cut into someone else's
-comment (LEGION-458) stays undoable. A switch the editor refuses (the mark is gone,
-a suggestion over text upstream will not mark, or another reader's mark of that kind already
-covers part of the text) is said under the switch in the reader's words, and the kind stays.
+newer composer. A switch over text another reader's mark of the new kind covers goes through and
+leaves that mark whole, as any record mark over another does. The composer's own mark writes are
+never undo steps (`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or
+y-prosemirror's UndoManager: neither undo nor redo writes one back, beside a recorded suggestion,
+after the reader refines the selection under an open composer, or over someone else's comment. A
+switch the editor refuses (the mark is gone, or a suggestion over text upstream will not mark) is
+said under the switch in the reader's words, and the kind stays.
 
 Issue Conversation stays the chronological record of the same comments: collapsed comment turns
 provide a reply summary, a comment deep link focuses its turn there, and on phones opening one uses

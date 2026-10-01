@@ -90,7 +90,7 @@ import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
-import { recordMarkHistoryPlugin, setComposerMark as setComposerRecordMark } from './record-mark-history';
+import { recordMarkHistoryPlugin } from './record-mark-history';
 import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RetypeOutcome } from './record-mark-retype';
 
@@ -174,9 +174,6 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
    *  margin composer's kind switch needs; a refusal names why nothing changed. */
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
-  /** Names the record mark the open margin composer holds, or null when none is open; a write
-   *  that cuts into it is the composer's own (./record-mark-history.ts). */
-  setComposerMark(markId: string | null): void;
   /** Scrolls a mark's anchor into view and pulses it. Works for both the
    *  unified marks system and dispatchAsk marks: both render `data-id`. */
   focusMark(markId: string): void;
@@ -416,9 +413,6 @@ export async function createProofEditor(
     },
     retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
       return retypeRecordMark(view, markId, kind, opts.user.name);
-    },
-    setComposerMark(markId: string | null): void {
-      setComposerRecordMark(view, markId);
     },
     focusMark(markId: string): void {
       const escaped = cssEscapeAttrValue(markId);

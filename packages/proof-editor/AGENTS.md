@@ -38,7 +38,7 @@ not reach them:
 | `src/collab-cursor-plugin.ts` | The peer-cursor plugin: y-prosemirror's, except that a peer's caret is not drawn while it sits on the focused local caret, where Chromium and WebKit otherwise drop or misplace typing (LEGION-289); it is also biome-checked |
 | `src/editor/schema/dom-attributes.ts` | `withDomAttributes`, the DOM-output-spec helper lifted out of `block-ids.ts` so the typed-block schema can use it too |
 | `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
-| `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (its removals are of the open composer's own mark, `setComposerMark`, or put straight back, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; a write that cuts into another record's mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
+| `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
@@ -61,12 +61,11 @@ cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of ca
 `yCursorPlugin` itself; `src/lib.ts` installing `trailingNewlineInputPlugin` from
 `./trailing-newline-input`; `src/lib.ts` installing `recordMarkHistoryPlugin` from
 `./record-mark-history`; `src/lib.ts` routing `removeMark` and the new `retypeMark` through
-`./record-mark-retype`, and the new `setComposerMark` through `./record-mark-history`;
-`src/dispatch-marks.ts`'s `dispatchAsk` schema declaring `excludes: ''`, so two readers' asks
-may cover the same text, with `removeAskMark` removing that mark's instance by id rather than
-every `dispatchAsk` over its range and the parse runner closing its own span of nested asks
-rather than every open ask (LEGION-458); and annotations, casts and assertions that make a file
-type-check, each of which erases before runtime (below).
+`./record-mark-retype`; `src/dispatch-marks.ts`'s `dispatchAsk` schema declaring `excludes: ''`,
+so two readers' asks may cover the same text, with `removeAskMark` removing that mark's instance
+by id rather than every `dispatchAsk` over its range and the parse runner closing its own span of
+nested asks rather than every open ask (LEGION-458); and annotations, casts and assertions that
+make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the

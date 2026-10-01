@@ -19,9 +19,6 @@ export interface DocumentBridge {
   removeMark(markId: string): void;
   /** Replaces the provisional mark `markId` with one of `kind` over the same text. */
   retypeMark(markId: string, kind: ComposerKind): RetypeOutcome;
-  /** Names the mark the open composer holds, or null when none is open, so the document treats a
-   *  selection-bar action that cuts into it as the composer's own write. */
-  setComposerMark(markId: string | null): void;
   setActiveBlocks(blockIds: readonly string[]): void;
   setActiveMarks(markIds: readonly string[]): void;
 }
@@ -30,8 +27,6 @@ export interface DocumentBridge {
 const KIND_SWITCH_REFUSALS: Record<RetypeRefusal["refused"], string> = {
   missing:
     "That highlight is gone from the document. Close this composer and select the text again.",
-  overlaps:
-    "Someone else's comment already covers part of this text. Close this composer and select text outside it.",
   unmarkable:
     "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again.",
 };
@@ -140,12 +135,11 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // (the editor holds `composeForMark` for the document's lifetime).
   const openCompose = useRef<OpenCompose | undefined>(undefined);
   const bridgeRef = useRef<DocumentBridge | undefined>(undefined);
-  // Every change to the open compose goes through here: the ref the callbacks read, the state the
-  // sheet renders, and the mark the document treats as the composer's own.
+  // Every change to the open compose goes through here: the ref the callbacks read, and the state
+  // the sheet renders.
   const publishCompose = useCallback((next: OpenCompose | undefined) => {
     openCompose.current = next;
     setPendingCompose(next?.request);
-    bridgeRef.current?.setComposerMark(next?.request.anchor.mark_id ?? null);
   }, []);
 
   // The margin owns the provisional mark a compose request names: it leaves the document when the
@@ -241,10 +235,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
     bridgeRef.current = bridge;
     setDocumentBridge(bridge);
-    // A document registers fresh whenever `ProofDocument` remounts its editor - a new artifact or
-    // block schema - and the margin's open composer outlives that: the new editor has to learn
-    // which mark the composer holds, as `publishCompose` tells the one it replaces.
-    bridge?.setComposerMark(openCompose.current?.request.anchor.mark_id ?? null);
     if (bridge === undefined) {
       setBlockPlacements(new Map());
       setMarkPlacements(new Map());

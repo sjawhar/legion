@@ -390,7 +390,6 @@ export function ProofDocument({
                   removeMark: (markId) => handle.removeMark(markId),
                   retypeMark: (markId, kind) =>
                     handle.retypeMark(markId, selectionBarKindFor(kind)),
-                  setComposerMark: (markId) => handle.setComposerMark(markId),
                   setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
                   setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
                 });

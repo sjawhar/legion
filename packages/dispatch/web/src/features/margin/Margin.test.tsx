@@ -724,11 +724,9 @@ test("composeForMark rejects when the composer is dismissed unsaved", async () =
 
 function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
   bridge: DocumentBridge;
-  held: (string | null)[];
   removed: string[];
   retyped: [string, string][];
 } {
-  const held: (string | null)[] = [];
   const removed: string[] = [];
   const retyped: [string, string][] = [];
   return {
@@ -744,11 +742,7 @@ function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
       },
       setActiveBlocks() {},
       setActiveMarks() {},
-      setComposerMark(markId) {
-        held.push(markId);
-      },
     },
-    held,
     removed,
     retyped,
   };
@@ -855,7 +849,7 @@ test("the composer's kind switch retypes its mark through the document and sends
   }
 });
 
-test("the margin removes the composer's mark when the composer is cancelled or replaced, and tells the document which mark the composer holds", async () => {
+test("the margin removes the composer's mark when the composer is cancelled or replaced, in the document open then", async () => {
   const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
   const reopened = fakeBridge((markId, kind) => ({
     markId: `${markId}-${kind}`,
@@ -876,12 +870,9 @@ test("the margin removes the composer's mark when the composer is cancelled or r
     // A newer composer takes the margin: the retyped mark, not the original, is removed.
     fireEvent.click(screen.getByRole("button", { name: "Compose second" }));
     await waitFor(() => expect(fake.removed).toEqual(["m-1-ask"]));
-    // Registering told the document no composer was open; each compose since named its mark.
-    expect(fake.held).toEqual([null, "m-1", "m-1-ask", "m-2"]);
 
-    // A fresh editor registered under the open composer learns which mark the composer holds.
+    // A fresh editor registers under the open composer.
     fireEvent.click(screen.getByRole("button", { name: "Reopen the document" }));
-    expect(reopened.held).toEqual(["m-2"]);
 
     // Cancelling removes the mark the composer holds, in the document now open.
     fireEvent.keyDown(
@@ -890,12 +881,8 @@ test("the margin removes the composer's mark when the composer is cancelled or r
     );
     await waitFor(() => expect(reopened.removed).toEqual(["m-2"]));
     expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
-    // The document always knew which mark was the composer's, so a selection-bar action that cut
-    // into it counted as the composer's own write.
-    expect(reopened.held).toEqual(["m-2", null]);
-    // The replaced document's log stays frozen: once the document reopened onto `reopened`, the
-    // margin told `fake` nothing more.
-    expect(fake.held).toEqual([null, "m-1", "m-1-ask", "m-2"]);
+    // The replaced document is told nothing more once the document reopened onto `reopened`.
+    expect(fake.removed).toEqual(["m-1-ask"]);
   } finally {
     view.unmount();
   }
