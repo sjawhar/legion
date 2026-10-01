@@ -99,3 +99,74 @@ start when the name is taken and removes it on exit. Unlike
 validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/envoy-and-contracts.yaml` on every change to
 `packages/envoy`, `packages/envoy-client` or `packages/contracts`.
+
+## listener-deploy-probe.sh
+
+Watches an Envoy listener from a client's seat while its deployment rolls, and
+judges whether any task refused `/v1` while it was in service. A rolling deploy
+runs the old and the new task side by side, and a caller that resolves the
+listener's name (Dispatch, the Legion daemon, every plugin) can reach either.
+Every tick the probe resolves the name with `getent ahostsv4` (or takes the
+tasks' addresses from `--targets`) and asks each address, and the name itself,
+for `/healthz` and `GET /v1/sessions`. It needs bash, curl, getent and sed only
+(no jq), so it also runs inside a listener task over `aws ecs execute-command`.
+
+```bash
+ENVOY_TOKEN_FILE=<path to the listener bearer> \
+  packages/envoy/scripts/listener-deploy-probe.sh \
+  --url http://envoy-listener.internal.example:9020 --duration 300
+```
+
+Start it, then start the deploy (for example an ECS `--force-new-deployment`),
+and let it run past the old task's exit. Options:
+
+- `--targets <ip,ip>` — probe these addresses instead of resolving the name,
+  e.g. both tasks' addresses from `aws ecs describe-tasks`.
+- `--token-file <path>` — the listener's `/v1` bearer (default
+  `$ENVOY_TOKEN_FILE`, then `$ENVOY_TOKEN`). The bearer reaches curl in a header
+  file, never on its command line.
+- `--interval <s>` (default 1) and `--duration <s>` (default 300; `0` runs
+  until Ctrl-C, which still prints the summary).
+- `--send-to <session>` — also `POST /v1/messages/send` to that session at every
+  target each tick, under one idempotency key per tick.
+- `--dispatch-url`, `--dispatch-token-file`, `--dispatch-issue <KEY>`,
+  `--dispatch-session <session>` (all four together), `--dispatch-mode btw|steer`
+  (default `btw`), `--dispatch-every <n>` (default 10) — post a Dispatch issue
+  message targeting the session every `n` ticks and record its delivery
+  attempt's `state` (and `error`), which is how a Dispatch delivery during the
+  overlap is observed.
+
+Each tick prints one tab-separated line per target:
+`ts target healthz_code healthz_status v1_code v1_error send_code dispatch_state`
+(`000` when nothing answered, `-` for a column that does not apply; the Dispatch
+attempt rides the name's line). On exit it prints, per target, when it was
+seen, how many ticks `/healthz` answered, and the `/v1` non-200 answers at the
+ticks `/healthz` answered 200, counted by `code:error` with the first and last
+time, then the sends and Dispatch attempts by outcome, then the verdict.
+
+### Verdict and exit codes
+
+A target **fails** when `/v1/sessions` answers anything but 200 at any tick
+where its `/healthz` answered 200 (whatever its `status`, `starting` included),
+or when it never answers `/v1/sessions` 200 at all. A `/v1` request that draws no
+HTTP answer at such a tick (the connection is refused or dropped because the task
+stopped, or started, between the tick's two requests) is counted in the summary,
+not judged a refusal; a task that is gone or wedged for good still fails the
+second rule. A target that never answers `/healthz` is **unreached**: named in
+the summary, not failed (a stale A record during the handover is one).
+
+| Code | Meaning |
+|------|---------|
+| 0 | At least one target answered `/healthz`, and every target that did passed. |
+| 1 | A target failed, or no target ever answered `/healthz`. |
+| 2 | Usage error, or every `/v1` answer of the run was 401 or 403: the bearer is wrong, not the listener. |
+| 4 | A required tool is missing (`curl`, `sed`, or `getent` without `--targets`). |
+
+A listener from before LEGION-456 keeps `/v1` closed until its durable binds,
+so during a rolling deploy the replacement answers `/healthz` 200 `starting`
+and `/v1` 503 `service starting` for most of a minute and the run exits 1. A
+listener that opens `/v1` once its caches are warm passes.
+
+`listener-deploy-probe.test.sh` proves the verdict over two fake tasks, Python
+`http.server`s on `127.0.0.1` and `127.0.0.2` behind a fake `getent`; CI runs it
+in the `envoy-go` job of `.github/workflows/envoy-and-contracts.yaml`.
