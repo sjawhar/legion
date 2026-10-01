@@ -56,9 +56,10 @@ func TestSendDistinguishesAReceiptTimeoutFromARefusal(t *testing.T) {
 	}
 }
 
-// LEGION-271. The listener answers a send JetStream already held with duplicate: true, and that
-// is the only thing telling Dispatch its retry changed nothing on the agent's subject. An older
-// listener omits the field, which reads as false.
+// LEGION-271. The listener answers a send JetStream already held with duplicate: true: the stream
+// stored nothing new, and the publish still reached the agent's subject. That flag is the only
+// thing telling Dispatch its retry was a repeat. An older listener omits the field, which reads as
+// false.
 func TestSendCarriesTheListenersDuplicateVerdict(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
