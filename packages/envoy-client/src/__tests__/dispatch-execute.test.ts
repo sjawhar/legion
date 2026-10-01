@@ -3487,6 +3487,23 @@ describe("executeDispatchTool", () => {
       expect(posts).toEqual([]);
     });
 
+    test("a waived block not yet in a version is named with the decision to write in", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [opening("b-1", "open")],
+        [blockAsk("b-1", "resolved")]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        '- "Question of b-1?" (block b-1, ask ask-b-1), resolved but still open in version 4: write the decision into the text with dispatch_doc_edit, which writes a version that carries it'
+      );
+      expect(posts).toEqual([]);
+    });
+
     test("a line quoting a block's opener cannot hide the open block below it", async () => {
       const quoted =
         'A settled block opens like `:::ask{#b-1 urgency="med" multiple="false" state="resolved"}`.';

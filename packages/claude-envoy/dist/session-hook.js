@@ -16537,8 +16537,9 @@ async function openArtifactMarks(client, resolved) {
     ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
   ];
 }
-function ownedAsks(client, resolved) {
-  return resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id) : client.listIssueAsks(resolved.issue.key);
+async function blockAsks(client, resolved) {
+  const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id) : client.listIssueAsks(resolved.issue.key));
+  return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
@@ -16549,10 +16550,10 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   if (blocks.length === 0)
     return;
   const [owned, version2] = await Promise.all([
-    ownedAsks(client, resolved),
+    blockAsks(client, resolved),
     client.docRead(artifact.id, latest)
   ]);
-  const asks = new Map(owned.filter((ask) => ask.block_id != null && ask.block_artifact?.id === artifact.id).map((ask) => [ask.block_id, ask]));
+  const asks = new Map(owned.map((ask) => [ask.block_id, ask]));
   const lines = version2.markdown.split(`
 `);
   const open = blocks.flatMap((block) => {
@@ -16567,8 +16568,9 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
       return [`${named}, whose ask Dispatch has not opened yet`];
     if (ask.state === "open")
       return [named];
+    const next = ask.state === "answered" ? "fold the answer into the text" : "write the decision into the text";
     return [
-      `${named}, ${ask.state} but still open in version ${latest}: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it`
+      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`
     ];
   });
   if (open.length === 0)
@@ -16601,8 +16603,8 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   }
   if (removed.size === 0)
     return;
-  const owned = await ownedAsks(client, resolved);
-  const open = owned.filter((ask) => ask.state === "open" && ask.block_id != null && ask.block_artifact?.id === artifact.id && removed.has(ask.block_id));
+  const owned = await blockAsks(client, resolved);
+  const open = owned.filter((ask) => ask.state === "open" && removed.has(ask.block_id));
   if (open.length === 0)
     return;
   const [what, question] = open.length === 1 ? ["a decision block whose ask is", "question"] : [`${open.length} decision blocks whose asks are`, "questions"];

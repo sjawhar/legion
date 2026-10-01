@@ -1595,12 +1595,19 @@ async function openArtifactMarks(
   ];
 }
 
-/** Every ask the document's owner holds: an issue lists its document's asks under the issue, since
- * the artifact route refuses an issue document. */
-function ownedAsks(client: DispatchClient, resolved: ResolvedArtifact): Promise<Ask[]> {
-  return resolved.issue === undefined
+/** The asks of the document's `ask` blocks. An issue lists them under the issue, since the artifact
+ * route refuses an issue document; an unlinked document lists its own. */
+async function blockAsks(
+  client: DispatchClient,
+  resolved: ResolvedArtifact
+): Promise<Array<Ask & { readonly block_id: string }>> {
+  const asks = await (resolved.issue === undefined
     ? client.getArtifactAsks(resolved.artifact.id)
-    : client.listIssueAsks(resolved.issue.key);
+    : client.listIssueAsks(resolved.issue.key));
+  return asks.filter(
+    (ask): ask is Ask & { readonly block_id: string } =>
+      typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id
+  );
 }
 
 /**
@@ -1627,14 +1634,10 @@ async function refuseOpenDecisionBlocks(
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0) return;
   const [owned, version] = await Promise.all([
-    ownedAsks(client, resolved),
+    blockAsks(client, resolved),
     client.docRead(artifact.id, latest),
   ]);
-  const asks = new Map(
-    owned
-      .filter((ask) => ask.block_id != null && ask.block_artifact?.id === artifact.id)
-      .map((ask) => [ask.block_id, ask])
-  );
+  const asks = new Map(owned.map((ask) => [ask.block_id, ask]));
   const lines = version.markdown.split("\n");
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
@@ -1652,8 +1655,13 @@ async function refuseOpenDecisionBlocks(
     if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
     if (ask === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
     if (ask.state === "open") return [named];
+    // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
+    const next =
+      ask.state === "answered"
+        ? "fold the answer into the text"
+        : "write the decision into the text";
     return [
-      `${named}, ${ask.state} but still open in version ${latest}: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it`,
+      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`,
     ];
   });
   if (open.length === 0) return;
@@ -1710,14 +1718,8 @@ async function refuseRemovingOpenDecisionBlocks(
     }
   }
   if (removed.size === 0) return;
-  const owned = await ownedAsks(client, resolved);
-  const open = owned.filter(
-    (ask) =>
-      ask.state === "open" &&
-      ask.block_id != null &&
-      ask.block_artifact?.id === artifact.id &&
-      removed.has(ask.block_id)
-  );
+  const owned = await blockAsks(client, resolved);
+  const open = owned.filter((ask) => ask.state === "open" && removed.has(ask.block_id));
   if (open.length === 0) return;
   const [what, question] =
     open.length === 1

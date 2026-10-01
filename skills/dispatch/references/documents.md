@@ -23,7 +23,9 @@ names one block, so an insert, upload or suggestion whose markdown names an id t
 outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
 `INVALID_MARKDOWN` for any other write. To rewrite such a block whole, `delete` it and then
 `insert` the new one carrying its id, anchored on the block before or after it, in that order and
-in one batch: an insert carrying an id the document still holds is refused.
+in one batch: an insert carrying an id the document still holds is refused. An `ask` block whose ask
+is still open cannot be rewritten that way: the tools refuse the `delete`, so reword it with
+`replace` or relocate it with `move` ([Editing a document](skill://dispatch/references/document-edits.md)).
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf
