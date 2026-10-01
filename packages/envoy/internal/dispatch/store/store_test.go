@@ -348,15 +348,16 @@ func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
 
 // The lock audit fails both ways: on a table a migration locks that the reading misses (reindex
 // is a form the patterns do not know), and on a table the reading names that the migration never
-// locks (an update in a branch its DO block never takes).
+// locks (a quoted identifier holding a statement's text, which the patterns read as that
+// statement).
 func TestTheLockAuditRefusesAMissedTableAndAMisreadOne(t *testing.T) {
 	for name, tc := range map[string]struct{ second, want string }{
 		"a form the patterns do not know": {
 			second: "reindex table things",
 			want:   "migration 0002_second.up.sql locks things above ACCESS SHARE, which pgmigrate.CensusTables does not read from it",
 		},
-		"a statement its DO block never runs": {
-			second: "do $$ begin if false then update things set kind = null; end if; end $$",
+		"a name the patterns misread": {
+			second: `select 1 as "delete from things"`,
 			want:   "migration 0002_second.up.sql names things, which pgmigrate.CensusTables reads from it, but takes no lock on it",
 		},
 	} {
@@ -372,8 +373,10 @@ func TestTheLockAuditRefusesAMissedTableAndAMisreadOne(t *testing.T) {
 // The lock audit holds pgmigrate.CensusTables, the one reading Census takes too, to what each
 // migration locks: the table behind an index the migration drops, which no statement of it names;
 // the tables a foreign key reaches from rows it writes, which an earlier migration of the set
-// seeds, since on an empty table a foreign key locks nothing; and a function's body, which the
-// migration defines and does not run, so the table it writes is not the migration's.
+// seeds, since on an empty table a foreign key locks nothing; a function's body, which the
+// migration defines and does not run, so the table it writes is not the migration's; and a write a
+// DO block makes only when a table holds rows, which on the audit's database it does not, so the
+// table it would write is left unlocked there and is no misread.
 func TestTheLockAuditAcceptsWhatTheCensusReads(t *testing.T) {
 	const parents = `create table parent (id integer primary key);
 		create table child (id integer primary key, parent_id integer references parent on delete cascade);
@@ -409,6 +412,10 @@ func TestTheLockAuditAcceptsWhatTheCensusReads(t *testing.T) {
 		"a function whose body writes a table": {
 			first:  "create table things (id integer, kind text)",
 			second: "create function note_thing() returns trigger language plpgsql as $$ begin insert into things (id) values (1); return new; end $$",
+		},
+		"a write a DO block makes only when a table holds rows": {
+			first:  "create table things (id integer, kind text); create table others (id integer)",
+			second: "do $$ begin if exists (select 1 from things) then update others set id = 2; end if; end $$",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

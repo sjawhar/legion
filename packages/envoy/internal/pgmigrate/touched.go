@@ -68,8 +68,13 @@ var touchedIndexPatterns = []*regexp.Regexp{
 // (pgmigratetest.CheckTouchedTablesAgainstLocks), so a migration written in a form this does not
 // know (reindex, cluster, create policy … on, merge into) fails there and needs a pattern here.
 func TouchedTables(sql string) []string {
+	return touchedNames(readMigration(sql).code)
+}
+
+// touchedNames names, sorted and once each, the tables a migration's code names (touches).
+func touchedNames(code string) []string {
 	var names []string
-	for _, touch := range touches(migrationCode(sql)) {
+	for _, touch := range touches(code) {
 		names = append(names, touch.name)
 	}
 	slices.Sort(names)
@@ -123,12 +128,16 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// CensusTable is one table the census reads for a migration.
-type CensusTable struct {
+// TouchedTable is one table of the census's reading of a migration (CensusTables).
+type TouchedTable struct {
 	Name string
 	// Through is the table a foreign key reaches this one from, when no statement of the migration
 	// names it; empty for a table one names.
 	Through string
+	// Conditional says only statements inside a DO block's body name the table, directly or
+	// through an index: the block can branch on what the database holds, so whether the migration
+	// locks the table can depend on its rows. The census reads it all the same.
+	Conditional bool
 }
 
 // CensusTables is the census's one reading of the tables a migration locks above ACCESS SHARE,
@@ -149,18 +158,27 @@ type CensusTable struct {
 // The foreign keys followed are the ones the catalog holds, read when the census is taken; Census
 // adds the ones earlier pending migrations add (addedForeignKeys), which the lock audit, applying
 // each migration before it reads the next, finds in the catalog.
-func CensusTables(ctx context.Context, q Querier, sql string) ([]CensusTable, error) {
-	return censusTables(ctx, q, migrationCode(sql), nil)
+func CensusTables(ctx context.Context, q Querier, sql string) ([]TouchedTable, error) {
+	keys, err := foreignKeys(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return censusTables(ctx, q, readMigration(sql), keys)
 }
 
-// censusTables is CensusTables over a migration's code, following the foreign keys pending
-// earlier migrations add as well as the catalog's.
-func censusTables(ctx context.Context, q Querier, code string, pending []foreignKey) ([]CensusTable, error) {
+// censusTables is CensusTables over a migration as the census reads it, following keys, the
+// foreign keys the database holds by the time the migration applies.
+func censusTables(ctx context.Context, q Querier, text migrationText, keys []foreignKey) ([]TouchedTable, error) {
 	writes := map[string]rowWrite{}
-	for _, touch := range touches(code) {
+	for _, touch := range touches(text.code) {
 		writes[touch.name] |= touch.writes
 	}
-	for _, index := range touchedIndexes(code) {
+	unconditional := map[string]bool{}
+	for _, name := range touchedNames(text.outsideBlocks) {
+		unconditional[name] = true
+	}
+	indexesOutsideBlocks := touchedIndexes(text.outsideBlocks)
+	for _, index := range touchedIndexes(text.code) {
 		var table string
 		err := q.QueryRow(ctx, "select indrelid::regclass::text from pg_index where indexrelid = to_regclass($1)", index).Scan(&table)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -173,26 +191,20 @@ func censusTables(ctx context.Context, q Querier, code string, pending []foreign
 		if _, named := writes[table]; !named {
 			writes[table] = 0
 		}
-	}
-	tables := make([]CensusTable, 0, len(writes))
-	writesRows := false
-	for name, w := range writes {
-		tables = append(tables, CensusTable{Name: name})
-		writesRows = writesRows || w != 0
-	}
-	if writesRows {
-		keys, err := foreignKeys(ctx, q)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, pending...)
-		for name, through := range reachedByForeignKeys(writes, keys) {
-			if _, named := writes[name]; !named {
-				tables = append(tables, CensusTable{Name: name, Through: through})
-			}
+		if slices.Contains(indexesOutsideBlocks, index) {
+			unconditional[table] = true
 		}
 	}
-	slices.SortFunc(tables, func(a, b CensusTable) int { return strings.Compare(a.Name, b.Name) })
+	tables := make([]TouchedTable, 0, len(writes))
+	for name := range writes {
+		tables = append(tables, TouchedTable{Name: name, Conditional: !unconditional[name]})
+	}
+	for name, through := range reachedByForeignKeys(writes, keys) {
+		if _, named := writes[name]; !named {
+			tables = append(tables, TouchedTable{Name: name, Through: through})
+		}
+	}
+	slices.SortFunc(tables, func(a, b TouchedTable) int { return strings.Compare(a.Name, b.Name) })
 	return tables, nil
 }
 
@@ -223,17 +235,24 @@ func foreignKeys(ctx context.Context, q Querier) ([]foreignKey, error) {
 }
 
 // statementTable is the table a create table or alter table statement is about.
-var statementTable = regexp.MustCompile(`(?is)^\s*(?:create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?|alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?)([\w."]+)`)
+var statementTable = regexp.MustCompile(`(?is)\b(?:create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?|alter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?)([\w."]+)`)
 
 var onDeleteCascade = regexp.MustCompile(`(?is)\bon\s+delete\s+cascade\b`)
 
 // addedForeignKeys reads, from a migration's code, the foreign keys it adds: each references in a
-// create table or alter table statement, from that statement's table. A statement adding one with
-// on delete cascade has every key it adds read as cascading, which reaches more tables, never
+// create table or alter table statement, from that statement's table. The statement is found
+// anywhere in the text between two semicolons, as the lock patterns find theirs, so one inside a DO
+// block's body counts, behind an if not exists over pg_constraint or not. A statement adding one
+// with on delete cascade has every key it adds read as cascading, which reaches more tables, never
 // fewer.
 func addedForeignKeys(code string) []foreignKey {
 	var keys []foreignKey
-	for _, statement := range strings.Split(code, ";") {
+	for _, segment := range strings.Split(code, ";") {
+		start := statementTable.FindStringIndex(segment)
+		if start == nil {
+			continue
+		}
+		statement := segment[start[0]:]
 		from := namesMatching(statement, statementTable)
 		if len(from) == 0 {
 			continue
@@ -301,79 +320,53 @@ func reachedByForeignKeys(writes map[string]rowWrite, keys []foreignKey) map[str
 	return reached
 }
 
-// migrationCode is the text of the statements a migration runs, for the patterns to read: each
-// comment is a space and each string literal is ”, and a dollar-quoted literal is read as
-// statements only as a DO statement's body, which the migration runs. Anywhere else it is ”: a
-// function's body among them, which the migration defines and does not run. It finds each with
-// scan.l's rules (scan.go), so a -- or /* inside a literal is the literal's.
-func migrationCode(sql string) string {
+// migrationText is a migration's SQL as the census reads it.
+type migrationText struct {
+	// code is the text of the statements the migration runs (migrationCode), a DO block's body
+	// among them.
+	code string
+	// outsideBlocks is code with each DO block's body read as a literal, as a function's is: the
+	// statements the migration runs whatever rows its database holds.
+	outsideBlocks string
+}
+
+func readMigration(sql string) migrationText {
+	return migrationText{code: migrationCode(sql, true), outsideBlocks: migrationCode(sql, false)}
+}
+
+// migrationCode is the text of the statements a migration runs, for the patterns to read, found
+// with scan.l's rules (scanSQL), so a -- or /* inside a literal is the literal's. Each comment is a
+// space and each string literal is an empty one. A dollar-quoted literal is read as statements only
+// as a DO statement's body, which the migration runs, and only when blocks says so; anywhere else
+// it is an empty literal, a function's body among them, which the migration defines and does not
+// run.
+func migrationCode(sql string, blocks bool) string {
 	var code strings.Builder
 	statement := "" // the first word of the statement being read
-	for i := 0; i < len(sql); {
-		c := sql[i]
-		var next byte
-		if i+1 < len(sql) {
-			next = sql[i+1]
-		}
+	scanSQL(sql, func(kind sqlTokenKind, start, end int) error {
+		text := sql[start:end]
 		switch {
-		case c == '-' && next == '-':
-			i = endOfLineComment(sql, i)
+		case kind == sqlComment:
 			code.WriteByte(' ')
-		case c == '/' && next == '*':
-			i = endOfBlockComment(sql, i)
-			code.WriteByte(' ')
-		case c == '\'':
-			i = endOfStringLiteral(sql, i, false)
+		case kind == sqlString, kind == sqlUnicodeEscape && text[2] == '\'':
 			code.WriteString("''")
-		case c == '"':
-			_, end := quotedIdentifier(sql, i)
-			code.WriteString(sql[i:end])
-			i = end
-		case c == '$':
-			end, ok := endOfDollarQuote(sql, i)
-			switch {
-			case !ok:
-				code.WriteByte(c)
-				end = i + 1
-			case statement == "do":
-				open := strings.IndexByte(sql[i+1:end], '$') + 2
-				code.WriteByte(' ')
-				code.WriteString(migrationCode(strings.TrimSuffix(sql[i+open:end], sql[i:i+open])))
-				code.WriteByte(' ')
-			default:
-				code.WriteString("''")
-			}
-			i = end
-		case isIdentStart(c):
-			switch {
-			case (c == 'e' || c == 'E') && next == '\'':
-				i = endOfStringLiteral(sql, i+1, true)
-				code.WriteString("''")
-			case strings.IndexByte("bBxXnN", c) >= 0 && next == '\'':
-				i = endOfStringLiteral(sql, i+1, false)
-				code.WriteString("''")
-			case (c == 'u' || c == 'U') && next == '&' && i+2 < len(sql) && sql[i+2] == '\'':
-				i = endOfStringLiteral(sql, i+2, false)
-				code.WriteString("''")
-			default:
-				end := i + 1
-				for end < len(sql) && (isIdentStart(sql[end]) || isDigit(sql[end]) || sql[end] == '$') {
-					end++
-				}
-				if statement == "" {
-					statement = strings.ToLower(sql[i:end])
-				}
-				code.WriteString(sql[i:end])
-				i = end
-			}
-		case c == ';':
-			statement = ""
-			code.WriteByte(c)
-			i++
+		case kind == sqlDollarString && blocks && statement == "do":
+			open := strings.IndexByte(text[1:], '$') + 2
+			code.WriteByte(' ')
+			code.WriteString(migrationCode(strings.TrimSuffix(text[open:], text[:open]), blocks))
+			code.WriteByte(' ')
+		case kind == sqlDollarString:
+			code.WriteString("''")
 		default:
-			code.WriteByte(c)
-			i++
+			switch {
+			case kind == sqlWord && statement == "":
+				statement = strings.ToLower(text)
+			case text == ";":
+				statement = ""
+			}
+			code.WriteString(text)
 		}
-	}
+		return nil
+	})
 	return code.String()
 }

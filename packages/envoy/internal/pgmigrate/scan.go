@@ -2,10 +2,102 @@ package pgmigrate
 
 import "strings"
 
-// The helpers here read SQL text as Postgres 16's lexer does (src/backend/parser/scan.l) with
-// standard_conforming_strings on: where a comment, a string literal, a quoted identifier or a
-// dollar-quoted literal ends. Two readers share them: checkCensus's reading of a census file
-// (censusTokens) and the census's reading of a migration (migrationCode).
+// The scanner here reads SQL text as Postgres 16's lexer does (src/backend/parser/scan.l) with
+// standard_conforming_strings on: which kind of token starts at each byte, and where a comment, a
+// string literal, a quoted identifier or a dollar-quoted literal ends. Two readers share it:
+// checkCensus's reading of a census file (censusTokens) and the census's reading of a migration
+// (migrationCode).
+
+// sqlTokenKind is the kind of one token scanSQL reads.
+type sqlTokenKind int
+
+const (
+	sqlSpace            sqlTokenKind = iota // one byte of scan.l's space
+	sqlComment                              // -- to its line's end, or /* */, which nests
+	sqlString                               // '…', or E'…' (backslash escapes), B'…', X'…', N'…'
+	sqlDollarString                         // $$…$$ or $tag$…$tag$
+	sqlUnicodeEscape                        // U&'…' or U&"…", in either case
+	sqlQuotedIdentifier                     // "…"
+	sqlWord                                 // a keyword or an identifier
+	sqlNumber                               // decinteger, {decdigit}(_?{decdigit})*
+	sqlOther                                // any other one byte
+)
+
+// scanSQL reads text token by token, calling visit with each token's kind and its span, and stops
+// at the first error visit returns, which it returns. A string literal is continued by whitespace
+// holding a newline and another quote; what follows a number is read on its own, as scan.l reads it
+// or refuses it as trailing junk. An unterminated literal, comment or quoted identifier takes the
+// rest of the text, which Postgres refuses before it runs anything.
+func scanSQL(text string, visit func(kind sqlTokenKind, start, end int) error) error {
+	for i := 0; i < len(text); {
+		kind, end := sqlToken(text, i)
+		if err := visit(kind, i, end); err != nil {
+			return err
+		}
+		i = end
+	}
+	return nil
+}
+
+// sqlToken returns the kind of the token that starts at i and the index after it.
+func sqlToken(text string, i int) (sqlTokenKind, int) {
+	c := text[i]
+	var next byte
+	if i+1 < len(text) {
+		next = text[i+1]
+	}
+	switch {
+	case isSQLSpace(c):
+		return sqlSpace, i + 1
+	case c == '-' && next == '-':
+		return sqlComment, endOfLineComment(text, i)
+	case c == '/' && next == '*':
+		return sqlComment, endOfBlockComment(text, i)
+	case c == '\'':
+		return sqlString, endOfStringLiteral(text, i, false)
+	case c == '"':
+		_, end := quotedIdentifier(text, i)
+		return sqlQuotedIdentifier, end
+	case c == '$':
+		if end, ok := endOfDollarQuote(text, i); ok {
+			return sqlDollarString, end
+		}
+	case isDigit(c):
+		end := i + 1
+		for end < len(text) {
+			if isDigit(text[end]) {
+				end++
+			} else if text[end] == '_' && end+1 < len(text) && isDigit(text[end+1]) {
+				end += 2
+			} else {
+				break
+			}
+		}
+		return sqlNumber, end
+	case isIdentStart(c):
+		var after byte
+		if i+2 < len(text) {
+			after = text[i+2]
+		}
+		switch {
+		case (c == 'e' || c == 'E') && next == '\'':
+			return sqlString, endOfStringLiteral(text, i+1, true)
+		case strings.IndexByte("bBxXnN", c) >= 0 && next == '\'':
+			return sqlString, endOfStringLiteral(text, i+1, false)
+		case (c == 'u' || c == 'U') && next == '&' && after == '\'':
+			return sqlUnicodeEscape, endOfStringLiteral(text, i+2, false)
+		case (c == 'u' || c == 'U') && next == '&' && after == '"':
+			_, end := quotedIdentifier(text, i+2)
+			return sqlUnicodeEscape, end
+		}
+		end := i + 1
+		for end < len(text) && (isIdentStart(text[end]) || isDigit(text[end]) || text[end] == '$') {
+			end++
+		}
+		return sqlWord, end
+	}
+	return sqlOther, i + 1
+}
 
 // isSQLSpace is scan.l's space: [ \t\n\r\f].
 func isSQLSpace(c byte) bool {

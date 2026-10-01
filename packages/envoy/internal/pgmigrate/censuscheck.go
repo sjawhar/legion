@@ -53,77 +53,29 @@ type censusToken struct {
 	quoted bool
 }
 
-// censusTokens reads a census as Postgres 16's lexer (src/backend/parser/scan.l) reads it with
-// standard_conforming_strings on, which Census sets, and returns its code: everything outside its
-// comments and string literals. A -- comment runs to the end of its line and /* */ comments nest.
-// A string literal is '…', E'…' (backslash escapes), B'…', X'…' or N'…', continued by whitespace
-// holding a newline and another quote, or dollar-quoted. A Unicode escape, U&'…' or U&"…", is
-// refused outright: its escapes can spell any name, and no census needs one. An unterminated
-// literal, comment or quoted identifier takes the rest of the text, which Postgres refuses before
-// it runs anything.
+// censusTokens reads a census as Postgres 16's lexer reads it with standard_conforming_strings on,
+// which Census sets (scanSQL), and returns its code: everything outside its comments and string
+// literals, dollar-quoted ones included. A Unicode escape, U&'…' or U&"…", is refused outright: its
+// escapes can spell any name, and no census needs one.
 func censusTokens(text string) ([]censusToken, error) {
 	var tokens []censusToken
-	for i := 0; i < len(text); {
-		c := text[i]
-		var next byte
-		if i+1 < len(text) {
-			next = text[i+1]
-		}
-		switch {
-		case isSQLSpace(c):
-			i++
-		case c == '-' && next == '-':
-			i = endOfLineComment(text, i)
-		case c == '/' && next == '*':
-			i = endOfBlockComment(text, i)
-		case c == '\'':
-			i = endOfStringLiteral(text, i, false)
-		case c == '"':
-			name, end := quotedIdentifier(text, i)
+	err := scanSQL(text, func(kind sqlTokenKind, start, end int) error {
+		switch kind {
+		case sqlSpace, sqlComment, sqlString, sqlDollarString:
+		case sqlUnicodeEscape:
+			return errors.New("a census may not hold a Unicode escape (U&): its escapes can spell any name, and a census needs none")
+		case sqlQuotedIdentifier:
+			name, _ := quotedIdentifier(text, start)
 			tokens = append(tokens, censusToken{text: strings.ToLower(name), quoted: true})
-			i = end
-		case c == '$':
-			end, ok := endOfDollarQuote(text, i)
-			if !ok {
-				tokens = append(tokens, censusToken{text: "$"})
-				end = i + 1
-			}
-			i = end
-		case isDigit(c):
-			// decinteger, {decdigit}(_?{decdigit})*; what follows is read on its own, as scan.l
-			// reads it or refuses it as trailing junk.
-			end := i + 1
-			for end < len(text) {
-				if isDigit(text[end]) {
-					end++
-				} else if text[end] == '_' && end+1 < len(text) && isDigit(text[end+1]) {
-					end += 2
-				} else {
-					break
-				}
-			}
-			tokens = append(tokens, censusToken{text: text[i:end]})
-			i = end
-		case isIdentStart(c):
-			switch {
-			case (c == 'u' || c == 'U') && next == '&':
-				return nil, errors.New("a census may not hold a Unicode escape (U&): its escapes can spell any name, and a census needs none")
-			case (c == 'e' || c == 'E') && next == '\'':
-				i = endOfStringLiteral(text, i+1, true)
-			case strings.IndexByte("bBxXnN", c) >= 0 && next == '\'':
-				i = endOfStringLiteral(text, i+1, false)
-			default:
-				end := i + 1
-				for end < len(text) && (isIdentStart(text[end]) || isDigit(text[end]) || text[end] == '$') {
-					end++
-				}
-				tokens = append(tokens, censusToken{text: strings.ToLower(text[i:end])})
-				i = end
-			}
+		case sqlWord:
+			tokens = append(tokens, censusToken{text: strings.ToLower(text[start:end])})
 		default:
-			tokens = append(tokens, censusToken{text: text[i : i+1]})
-			i++
+			tokens = append(tokens, censusToken{text: text[start:end]})
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return tokens, nil
 }

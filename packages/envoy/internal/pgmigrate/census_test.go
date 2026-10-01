@@ -54,7 +54,8 @@ func TestTouchedIndexesFindsDropAndAlterIndex(t *testing.T) {
 }
 
 // The foreign keys a pending migration adds are read from its create table and alter table
-// statements, from the statement's table, cascading when the statement says on delete cascade; a
+// statements, from the statement's table, cascading when the statement says on delete cascade,
+// wherever the statement stands: inside a DO block too, behind the usual guard on pg_constraint. A
 // references inside a literal or another statement adds none.
 func TestAddedForeignKeysReadsTheKeysAMigrationAdds(t *testing.T) {
 	for sql, want := range map[string][]foreignKey{
@@ -62,8 +63,13 @@ func TestAddedForeignKeysReadsTheKeysAMigrationAdds(t *testing.T) {
 		"ALTER TABLE public.comments ADD CONSTRAINT c FOREIGN KEY (ask_id) REFERENCES public.asks (id);":                         {{from: "comments", to: "asks", onDelete: "a"}},
 		"alter table things add column note text; create table notes (body text default 'references things');":                   nil,
 		"create table a (id int primary key);\ncreate table b (a_id int references a, c_id int references c on delete cascade);": {{from: "b", to: "a", onDelete: "c"}, {from: "b", to: "c", onDelete: "c"}},
+
+		// Inside a DO block, and behind the usual guard on pg_constraint.
+		"do $$ begin alter table things add column parent_id integer references parent on delete cascade; end $$;": {{from: "things", to: "parent", onDelete: "c"}},
+		"do $$ begin if not exists (select from pg_constraint where conname = 'k') then " +
+			"alter table things add constraint k foreign key (parent_id) references parent; end if; end $$;": {{from: "things", to: "parent", onDelete: "a"}},
 	} {
-		if got := addedForeignKeys(migrationCode(sql)); !slices.Equal(got, want) {
+		if got := addedForeignKeys(readMigration(sql).code); !slices.Equal(got, want) {
 			t.Errorf("addedForeignKeys(%q) = %v, want %v", sql, got, want)
 		}
 	}
@@ -74,11 +80,11 @@ func TestAddedForeignKeysReadsTheKeysAMigrationAdds(t *testing.T) {
 // key reaches says from where, and a size above the limit never prints as the limit itself.
 func TestReportWritesCountsAndEndsWithTheVerdict(t *testing.T) {
 	count := int64(3)
-	age := int64(8040)
+	age := 2*time.Hour + 14*time.Minute
 	report := &Report{VersionTable: "schema_migrations", SchemaVersion: 52, TableLimit: CensusTableLimit, LongTransaction: CensusLongTransaction, Pending: []MigrationCensus{{
 		Migration: Migration{Version: 53, Name: "0053_x.up.sql", CensusName: "0053_x.census.sql", Census: "select 1"},
 		Tables: []TableCensus{
-			{Name: "asks", Exists: true, Rows: 2113, Bytes: 8626176, Holders: []Session{{PID: 4242, User: "dispatch", Application: "psql", State: "idle in transaction", XactSeconds: &age}}},
+			{Name: "asks", Exists: true, Rows: 2113, Bytes: 8626176, Holders: []Session{{PID: 4242, User: "dispatch", Application: "psql", State: "idle in transaction", XactAge: &age}}},
 			{Name: "later", Exists: false},
 			{Name: "single", Exists: true, Rows: 1, Bytes: 8192},
 			{Name: "followers", Exists: true, Bytes: 16384, Through: "asks"},
@@ -98,7 +104,7 @@ func TestReportWritesCountsAndEndsWithTheVerdict(t *testing.T) {
 		"census: 0053_x.up.sql touches followers through a foreign key with asks: 16.0 KiB; locks held by other sessions: none",
 		"census: 0053_x.up.sql touches broadcasts: 1,115,660,288 bytes, above the 1,073,741,824 bytes limit, so its rows were not counted; locks held by other sessions: none",
 		"census: REFUSED 0053_x.up.sql: its census counts 3 (0053_x.census.sql); the migration would refuse or rewrite what those rows hold",
-		"census: transactions open longer than 1m0s: none",
+		"census: transactions open longer than 1m0s, or of an age the census cannot see: none",
 	} {
 		if !slices.Contains(lines, want) {
 			t.Errorf("report lacks %q; got:\n%s", want, out.String())
@@ -134,12 +140,15 @@ func TestReportOfAFreshDatabaseIsOneLine(t *testing.T) {
 
 // A session of another role shows its pid, role and application, and Postgres hides its state
 // and transaction age from a role without pg_read_all_stats; the report says each is hidden
-// rather than printing an empty field. An autovacuum worker shows no role, and says what it is.
+// rather than printing an empty field. An autovacuum worker shows no role, and says what it is. A
+// transaction's age is printed as Postgres measured it, to the microsecond, never rounded.
 func TestSessionStringSaysWhatPostgresHides(t *testing.T) {
+	age := 59*time.Second + 500123*time.Microsecond
 	for session, want := range map[Session]string{
 		{PID: 79, User: "other"}:     `pid 79 (user other, application "", state not visible, transaction age not visible)`,
 		{PID: 464}:                   `pid 464 (user not visible, application "", state not visible, transaction age not visible)`,
 		{PID: 798, Autovacuum: true}: `pid 798 (autovacuum worker, application "", state not visible, transaction age not visible)`,
+		{PID: 80, User: "dispatch", State: "idle in transaction", XactAge: &age}: `pid 80 (user dispatch, application "", idle in transaction, transaction open 59.500123s)`,
 	} {
 		if got := session.String(); got != want {
 			t.Errorf("Session.String() = %q, want %q", got, want)
@@ -148,19 +157,22 @@ func TestSessionStringSaysWhatPostgresHides(t *testing.T) {
 }
 
 // A lock holder refuses the migration when it would hold up the migration's lock past
-// LockTimeout: an old transaction, or one whose age the census cannot see. An autovacuum worker
-// does not, however long it has run, because Postgres cancels it once the migration has waited
-// deadlock_timeout for its lock - unless it is an anti-wraparound vacuum, which Postgres does not
-// cancel, or deadlock_timeout is not shorter than LockTimeout, so the migration gives up first.
-// Whether a vacuum is anti-wraparound is its activity's to say: Postgres marks it so when it
-// launches it, so a vacuum launched before its table passed its freeze age is not, and only
-// where the activity is hidden does the census take the table's age for it.
+// LockTimeout: a transaction open at least the bound, measured unrounded, or one whose age the
+// census cannot see. An autovacuum worker does not, however long it has run, because Postgres
+// cancels it once the migration has waited deadlock_timeout for its lock - unless it is an
+// anti-wraparound vacuum, which Postgres does not cancel, or deadlock_timeout is not shorter than
+// LockTimeout, so the migration gives up first. Whether a vacuum is anti-wraparound is its
+// activity's to say: Postgres marks it so when it launches it, so a vacuum launched before its
+// table passed its freeze age is not, and only where the activity says nothing - hidden from the
+// census's role, or not tracked - does the census take the table's age for it.
 func TestAHolderRefusesOnlyWhatWouldHoldTheMigrationPastItsLockTimeout(t *testing.T) {
-	young, old := int64(5), int64(7200)
+	young, old := 5*time.Second, 2*time.Hour
+	short, past := 59500*time.Millisecond, 60500*time.Millisecond
 	yes, no := true, false
 	hidden := lockHolder{Session: Session{PID: 798, Autovacuum: true}}
-	regular := lockHolder{Session: Session{PID: 799, Autovacuum: true, XactSeconds: &old}, antiWraparound: &no}
-	wraparound := lockHolder{Session: Session{PID: 800, Autovacuum: true, XactSeconds: &young}, antiWraparound: &yes}
+	regular := lockHolder{Session: Session{PID: 799, Autovacuum: true, XactAge: &old}, antiWraparound: &no}
+	wraparound := lockHolder{Session: Session{PID: 800, Autovacuum: true, XactAge: &young}, antiWraparound: &yes}
+	untracked := lockHolder{Session: Session{PID: 801, Autovacuum: true, State: "disabled"}, antiWraparound: &no}
 	for name, tc := range map[string]struct {
 		holder                      lockHolder
 		pastFreezeAge, cancellation bool
@@ -170,11 +182,18 @@ func TestAHolderRefusesOnlyWhatWouldHoldTheMigrationPastItsLockTimeout(t *testin
 		"an old autovacuum Postgres cancels":              {holder: regular, cancellation: true},
 		"a regular vacuum of a table past its freeze age": {holder: regular, pastFreezeAge: true, cancellation: true},
 		"an anti-wraparound vacuum":                       {holder: wraparound, cancellation: true, want: "pid 800 (autovacuum worker, application \"\", state not visible, transaction open 5s) holds a lock on things, and it is an anti-wraparound autovacuum"},
-		"a hidden vacuum of a table past its freeze age":  {holder: hidden, pastFreezeAge: true, cancellation: true, want: "holds a lock on things, which is past its freeze age, so it may be an anti-wraparound autovacuum"},
-		"an autovacuum outlasting the lock timeout":       {holder: hidden, want: "deadlock_timeout is not shorter than"},
-		"a session whose age Postgres hides":              {holder: lockHolder{Session: Session{PID: 79, User: "other"}}, cancellation: true, want: "pg_read_all_stats"},
-		"an old transaction":                              {holder: lockHolder{Session: Session{PID: 80, User: "dispatch", XactSeconds: &old}}, cancellation: true, want: "has held a lock on things for 2h0m0s, longer than 1m0s"},
-		"a young transaction":                             {holder: lockHolder{Session: Session{PID: 81, User: "dispatch", XactSeconds: &young}}, cancellation: true},
+		"a hidden vacuum of a table past its freeze age":  {holder: hidden, pastFreezeAge: true, cancellation: true, want: "holds a lock on things, which is past its freeze age, so it may be an anti-wraparound autovacuum, which Postgres does not cancel for the migration's lock; granting the census's role pg_read_all_stats lets the census read which"},
+		// With track_activities off Postgres shows the worker as disabled with an empty activity,
+		// which says nothing about why it was launched, even to a role that may read it.
+		"an untracked vacuum of a table past its freeze age": {holder: untracked, pastFreezeAge: true, cancellation: true, want: "holds a lock on things, which is past its freeze age, so it may be an anti-wraparound autovacuum, which Postgres does not cancel for the migration's lock; Postgres records no activity for it with track_activities off, so the census cannot read which"},
+		"an untracked vacuum of a table short of it":         {holder: untracked, cancellation: true},
+		"an autovacuum outlasting the lock timeout":          {holder: hidden, want: "deadlock_timeout is not shorter than"},
+		"a session whose age Postgres hides":                 {holder: lockHolder{Session: Session{PID: 79, User: "other"}}, cancellation: true, want: "Postgres hides its transaction's age from the census's role, so the census cannot rule out a transaction older than 1m0s; granting that role pg_read_all_stats lets the census read the age"},
+		"a session Postgres does not track":                  {holder: lockHolder{Session: Session{PID: 82, User: "dispatch", State: "disabled"}}, cancellation: true, want: "Postgres records no transaction start for it with track_activities off, so the census cannot rule out a transaction older than 1m0s"},
+		"an old transaction":                                 {holder: lockHolder{Session: Session{PID: 80, User: "dispatch", XactAge: &old}}, cancellation: true, want: "has held a lock on things for 2h0m0s, longer than 1m0s"},
+		"a young transaction":                                {holder: lockHolder{Session: Session{PID: 81, User: "dispatch", XactAge: &young}}, cancellation: true},
+		"a transaction half a second short of the bound":     {holder: lockHolder{Session: Session{PID: 83, User: "dispatch", XactAge: &short}}, cancellation: true},
+		"a transaction half a second past the bound":         {holder: lockHolder{Session: Session{PID: 84, User: "dispatch", XactAge: &past}}, cancellation: true, want: "transaction open 1m0.5s) has held a lock on things for 1m0.5s, longer than 1m0s"},
 	} {
 		got := holderRefusal(tc.holder, "things", tc.pastFreezeAge, tc.cancellation, time.Minute)
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {

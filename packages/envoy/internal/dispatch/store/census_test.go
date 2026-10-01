@@ -320,6 +320,25 @@ func TestCensusRefusesADatabaseHoldingTablesButRecordingNoVersion(t *testing.T) 
 	}
 }
 
+// A connection whose search_path names no schema that exists has a null current_schema(): it finds
+// neither schema_migrations nor any table, so a database at 1 holding a row 0002's check refuses
+// would read as fresh, and the runner cannot create anything on it either. The census cannot be
+// taken there, and says why.
+func TestCensusCannotBeTakenWhereTheSearchPathNamesNoSchema(t *testing.T) {
+	ctx := context.Background()
+	store, url := migratedToOne(t)
+	if _, err := store.Pool.Exec(ctx, "insert into things (id, kind) values (1, 'bad')"); err != nil {
+		t.Fatal(err)
+	}
+	report, err := census(ctx, url+"&search_path=nosuch", withCheck("select count(*) from things where kind = 'bad'"), pgmigrate.CensusOptions{})
+	if err == nil {
+		t.Fatalf("census took a database whose search_path names no schema:\n%s", reportText(report))
+	}
+	if !strings.Contains(err.Error(), "search_path names no schema that exists") {
+		t.Errorf("census error = %v, want it to say the search_path names no schema", err)
+	}
+}
+
 // The same holds for a typo behind an earlier pending migration: 0002 adds a column, and 0003's
 // census misspells the one it means. A census that let it pass would let 0003 fail at boot on the
 // very row it exists to count.
@@ -408,7 +427,9 @@ func TestCensusNeverPrintsARowValueAnInputFunctionQuotes(t *testing.T) {
 
 // A lock holder of another role whose transaction's age Postgres hides from the census's role
 // (no pg_read_all_stats) refuses: the census cannot rule out the long transaction it exists to
-// catch. Granting that role pg_read_all_stats lets it read the age, and a young holder passes.
+// catch, and it lists the holder with the long transactions, which it cannot rule it out of either.
+// Granting that role pg_read_all_stats lets it read the age, and a young holder passes and is not
+// listed.
 func TestCensusRefusesALockHolderWhoseAgeItCannotSee(t *testing.T) {
 	ctx := context.Background()
 	store, base := migratedToOne(t)
@@ -450,13 +471,18 @@ func TestCensusRefusesALockHolderWhoseAgeItCannotSee(t *testing.T) {
 		t.Fatal(err)
 	}
 	asCensus.User = neturl.UserPassword(censusRole, "census-test")
-	pid := "pid " + strconv.FormatUint(uint64(holder.PgConn().PID()), 10)
+	holderPID := holder.PgConn().PID()
+	pid := "pid " + strconv.FormatUint(uint64(holderPID), 10)
+	isHolder := func(s pgmigrate.Session) bool { return s.PID == holderPID }
 	report, err := census(ctx, asCensus.String(), withCheck("select 0"), pgmigrate.CensusOptions{})
 	if err != nil {
 		t.Fatalf("census: %v", err)
 	}
 	if got := refusals(report); len(got) != 1 || !strings.Contains(got[0], pid) || !strings.Contains(got[0], "pg_read_all_stats") {
 		t.Errorf("refusals = %v, want one naming %s and pg_read_all_stats", got, pid)
+	}
+	if !slices.ContainsFunc(report.LongTransactions, isHolder) {
+		t.Errorf("long transactions = %v, want the holder whose age the census cannot see:\n%s", report.LongTransactions, reportText(report))
 	}
 	if _, err := store.Pool.Exec(ctx, "grant pg_read_all_stats to "+censusRole); err != nil {
 		t.Fatal(err)
@@ -467,6 +493,9 @@ func TestCensusRefusesALockHolderWhoseAgeItCannotSee(t *testing.T) {
 	}
 	if report.Refused() {
 		t.Errorf("a young holder refused once the census could read its age: %v", refusals(report))
+	}
+	if slices.ContainsFunc(report.LongTransactions, isHolder) {
+		t.Errorf("a young holder listed with the long transactions once the census could read its age: %v", report.LongTransactions)
 	}
 }
 
@@ -588,6 +617,61 @@ func TestTheCensusPairCheckNamesACensusReadingWhatANewMigrationCreates(t *testin
 	}
 }
 
+// A migration that renames a table or a column, or gives a column a new type, keeps the catalog
+// row it changes, but a census reading the new name or type reads what the database does not have
+// before it, as surely as one reading what a migration creates: a release carrying both refuses
+// every deploy. The check names the census, what it reads and the migration until the census
+// names that migration.
+func TestTheCensusPairCheckNamesACensusReadingWhatANewMigrationRenamesOrRetypes(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct{ change, check, census, want string }{
+		"a renamed column": {
+			change: "alter table things rename column kind to category",
+			check:  "alter table things add constraint category_check check (category <> 'bad')",
+			census: "select count(*) from things where category = 'bad'",
+			want:   "census 0003_check.census.sql reads things.category, which 0002_change.up.sql renames from things.kind",
+		},
+		"a renamed table": {
+			change: "alter table things rename to items",
+			check:  "alter table items add constraint kind_check check (kind <> 'bad')",
+			census: "select count(*) from items where kind = 'bad'",
+			want:   "census 0003_check.census.sql reads items.kind, which 0002_change.up.sql renames from things.kind",
+		},
+		"a column given a new type": {
+			change: "alter table things alter column id type text",
+			check:  "alter table things add constraint id_check check (id <> 'x')",
+			census: "select count(*) from things where id = 'x'",
+			want:   "census 0003_check.census.sql reads things.id, which 0002_change.up.sql gives a new type",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			set := fstest.MapFS{
+				"migrations/0001_things.up.sql":     censusBase["migrations/0001_things.up.sql"],
+				"migrations/0002_change.up.sql":     {Data: []byte(tc.change)},
+				"migrations/0002_change.census.sql": {Data: []byte("-- renames and retypes no row\nselect 0")},
+				"migrations/0003_check.up.sql":      {Data: []byte(tc.check)},
+				"migrations/0003_check.census.sql":  {Data: []byte(tc.census)},
+			}
+			check := func() error {
+				store := openEmptyTestStore(t)
+				conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { conn.Close(context.Background()) })
+				return pgmigratetest.CheckCensusNamesTheMigrationsItReads(ctx, conn, set, "migrations", 2)
+			}
+			if err := check(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckCensusNamesTheMigrationsItReads = %v, want it to say %q", err, tc.want)
+			}
+			set["migrations/0003_check.census.sql"] = &fstest.MapFile{Data: []byte("-- reads what 0002_change leaves, which ships in an earlier release\n" + tc.census)}
+			if err := check(); err != nil {
+				t.Errorf("with 0002 named: %v", err)
+			}
+		})
+	}
+}
+
 // migrationsThrough is the embedded set's files numbered up to version: what a binary built when
 // version was the newest migration would carry.
 func migrationsThrough(t *testing.T, version int) fstest.MapFS {
@@ -671,31 +755,45 @@ func TestCensusRefusesALockHeldOnATouchedTableByAnOldTransaction(t *testing.T) {
 // A foreign key an earlier pending migration adds is not in the catalog yet, but the migrations
 // apply in order at boot, so a later one's rows reach through it. Here 0002 gives things a key to
 // parent that cascades, and 0003 deletes from parent: an old transaction holding things refuses
-// 0003 as well as 0002, which names things itself.
+// 0003 as well as 0002, which names things itself. 0002 adds the key in each form a migration
+// writes it: in an alter table, inside a DO block, and behind the usual guard on pg_constraint.
 func TestCensusFollowsAForeignKeyAnEarlierPendingMigrationAdds(t *testing.T) {
-	ctx := context.Background()
-	store, url := migratedToOne(t)
-	if _, err := store.Pool.Exec(ctx, "create table parent (id integer primary key)"); err != nil {
-		t.Fatal(err)
-	}
-	set := fstest.MapFS{
-		"migrations/0001_things.up.sql":        censusBase["migrations/0001_things.up.sql"],
-		"migrations/0002_things_parent.up.sql": {Data: []byte("alter table things add column parent_id integer references parent on delete cascade")},
-		"migrations/0003_parent_purge.up.sql":  {Data: []byte("delete from parent where id < 0")},
-	}
-	pid := "pid " + strconv.FormatUint(uint64(holdLock(t, store, "things", "access share")), 10)
-	time.Sleep(1100 * time.Millisecond)
-	report, err := census(ctx, url, set, pgmigrate.CensusOptions{LongTransaction: time.Second})
-	if err != nil {
-		t.Fatalf("census: %v", err)
-	}
-	if got := refusals(report); !slices.ContainsFunc(got, func(r string) bool {
-		return strings.HasPrefix(r, "0003_parent_purge.up.sql: "+pid) && strings.Contains(r, "has held a lock on things")
-	}) {
-		t.Errorf("refusals = %v, want one for 0003 naming %s on things", got, pid)
-	}
-	if out := reportText(report); !strings.Contains(out, "census: 0003_parent_purge.up.sql touches things through a foreign key with parent: ") {
-		t.Errorf("report:\n%s", out)
+	for name, adds := range map[string]string{
+		"in an alter table": "alter table things add column parent_id integer references parent on delete cascade",
+		"inside a DO block": "do $$ begin alter table things add column parent_id integer references parent on delete cascade; end $$",
+		"behind a guard in a DO block": `alter table things add column parent_id integer;
+			do $$ begin
+				if not exists (select 1 from pg_constraint where conname = 'things_parent') then
+					alter table things add constraint things_parent foreign key (parent_id) references parent on delete cascade;
+				end if;
+			end $$`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store, url := migratedToOne(t)
+			if _, err := store.Pool.Exec(ctx, "create table parent (id integer primary key)"); err != nil {
+				t.Fatal(err)
+			}
+			set := fstest.MapFS{
+				"migrations/0001_things.up.sql":        censusBase["migrations/0001_things.up.sql"],
+				"migrations/0002_things_parent.up.sql": {Data: []byte(adds)},
+				"migrations/0003_parent_purge.up.sql":  {Data: []byte("delete from parent where id < 0")},
+			}
+			pid := "pid " + strconv.FormatUint(uint64(holdLock(t, store, "things", "access share")), 10)
+			time.Sleep(1100 * time.Millisecond)
+			report, err := census(ctx, url, set, pgmigrate.CensusOptions{LongTransaction: time.Second})
+			if err != nil {
+				t.Fatalf("census: %v", err)
+			}
+			if got := refusals(report); !slices.ContainsFunc(got, func(r string) bool {
+				return strings.HasPrefix(r, "0003_parent_purge.up.sql: "+pid) && strings.Contains(r, "has held a lock on things")
+			}) {
+				t.Errorf("refusals = %v, want one for 0003 naming %s on things", got, pid)
+			}
+			if out := reportText(report); !strings.Contains(out, "census: 0003_parent_purge.up.sql touches things through a foreign key with parent: ") {
+				t.Errorf("report:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -716,7 +814,7 @@ func TestCensusRefusesATouchedTableItCannotReadWithinTheLockTimeout(t *testing.T
 		t.Errorf("refusals = %v, want one naming the table, 55P03 and pid %d", got, pid)
 	}
 	out := reportText(report)
-	if !strings.Contains(out, "touches things: not read, its lock was not granted within 5s") || !strings.Contains(out, "census: transactions open longer than 1m0s: none") {
+	if !strings.Contains(out, "touches things: not read, its lock was not granted within 5s") || !strings.Contains(out, "census: transactions open longer than 1m0s, or of an age the census cannot see: none") {
 		t.Errorf("report:\n%s", out)
 	}
 }

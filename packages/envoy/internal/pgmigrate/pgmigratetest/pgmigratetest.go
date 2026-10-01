@@ -143,7 +143,9 @@ func CheckTouchedTablesAreKnown(fsys fs.FS, dir string) error {
 //   - a table a statement of the migration is read to name that the migration never locks: a
 //     misread statement, which would refuse a deploy over a table the migration leaves alone. A
 //     table a foreign key reaches is not held to this, since it is locked only when the migration
-//     writes a row there or in the table it is reached from.
+//     writes a row there or in the table it is reached from; nor is one only a DO block's body
+//     names (TouchedTable.Conditional), since the block can branch on rows the audit's database
+//     does not hold.
 //
 // The locks a foreign key takes are taken on rows: a row the migration writes is checked against,
 // or cascades into, the tables its keys connect. The audit sees them only where the set's earlier
@@ -183,7 +185,7 @@ func auditMigrationLocks(ctx context.Context, conn *pgx.Conn, migration pgmigrat
 	read, named := map[string]bool{}, map[string]bool{}
 	for _, table := range reading {
 		read[table.Name] = true
-		if table.Through == "" {
+		if table.Through == "" && !table.Conditional {
 			named[table.Name] = true
 		}
 	}
@@ -260,17 +262,19 @@ func schemaTables(ctx context.Context, conn *pgx.Conn) (map[uint32]string, error
 
 // CheckCensusNamesTheMigrationsItReads applies every migration of the set in fsys, in version
 // order and each in a transaction of its own, on the empty database conn is connected to, recording
-// which migration created each table, column, function and type, and reports an error unless
-// every census names, in its text, each migration numbered from `from` on whose objects it reads.
-// What a census reads is what Postgres records it depends on as a view, created just before its
-// migration applies and rolled back.
+// which migration created each table, column, function and type, and which last renamed one or
+// gave a column a new type, and reports an error unless every census names, in its text, each
+// migration numbered from `from` on that created or changed what it reads. What a census reads is
+// what Postgres records it depends on as a view, created just before its migration applies and
+// rolled back.
 //
 // A deployment takes every census before any migration of its release applies, so a census that
-// reads what an earlier migration of the same release creates names something the database does
-// not have yet, and refuses every deploy of that release. Where releases split is not in the set,
-// so the test cannot tell; naming the migration in the census, in a comment saying it ships in an
-// earlier release, is the author's word that it does. A table or column an earlier migration of
-// the same release creates holds no row the census could count, so such a census does not read it.
+// reads what an earlier migration of the same release creates, renames or retypes names something
+// the database does not have yet, and refuses every deploy of that release. Where releases split
+// is not in the set, so the test cannot tell; naming the migration in the census, in a comment
+// saying it ships in an earlier release, is the author's word that it does. A table or column an
+// earlier migration of the same release creates holds no row the census could count, so such a
+// census does not read it.
 func CheckCensusNamesTheMigrationsItReads(ctx context.Context, conn *pgx.Conn, fsys fs.FS, dir string, from int) error {
 	migrations, err := pgmigrate.Load(fsys, dir)
 	if err != nil {
@@ -288,8 +292,12 @@ func CheckCensusNamesTheMigrationsItReads(ctx context.Context, conn *pgx.Conn, f
 				if !ok || creator.migration.Version < from || strings.Contains(migration.Census, strings.TrimSuffix(creator.migration.Name, ".up.sql")) {
 					continue
 				}
-				return fmt.Errorf("census %s reads %s, which %s creates: a deployment takes the census before any migration of its release applies, so a release carrying both refuses every deploy; ship %s in an earlier release and name it in a comment in the census, or write the census without it (a table or column the same release creates holds no row to count)",
-					migration.CensusName, creator.name, creator.migration.Name, creator.migration.Name)
+				advice := "write the census without it"
+				if creator.verb == "creates" {
+					advice += " (a table or column the same release creates holds no row to count)"
+				}
+				return fmt.Errorf("census %s reads %s, which %s %s: a deployment takes the census before any migration of its release applies, so a release carrying both refuses every deploy; ship %s in an earlier release and name it in a comment in the census, or %s",
+					migration.CensusName, creator.name, creator.migration.Name, creator.verb, creator.migration.Name, advice)
 			}
 		}
 		tx, err := conn.Begin(ctx)
@@ -303,7 +311,7 @@ func CheckCensusNamesTheMigrationsItReads(ctx context.Context, conn *pgx.Conn, f
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("migration %s: commit: %w", migration.Name, err)
 		}
-		if err := recordCreated(ctx, conn, migration, created); err != nil {
+		if err := recordChanges(ctx, conn, migration, created); err != nil {
 			return fmt.Errorf("migration %s: %w", migration.Name, err)
 		}
 	}
@@ -317,24 +325,31 @@ type catalogObject struct {
 	sub        int32
 }
 
+// createdBy is the migration that last made a catalog object what a census reads: what it did to
+// it (verb), and the name and, for a column, the type it left.
 type createdBy struct {
 	migration pgmigrate.Migration
+	verb      string
 	name      string
+	typ       uint32
 }
 
-// recordCreated records migration as the creator of every table, column, function and type of
-// the schema the connection creates in that no earlier migration created.
-func recordCreated(ctx context.Context, conn *pgx.Conn, migration pgmigrate.Migration, created map[catalogObject]createdBy) error {
+// recordChanges records migration as the creator of every table, column, function and type of the
+// schema the connection creates in that no earlier migration created, and as the last changer of
+// one an earlier migration made whose name it changes, or a column's type: a rename or a new type
+// keeps the catalog row's oid, but a census that reads the object under its new name or type reads
+// what the database does not have before migration applies.
+func recordChanges(ctx context.Context, conn *pgx.Conn, migration pgmigrate.Migration, created map[catalogObject]createdBy) error {
 	rows, err := conn.Query(ctx, `
-		select 'pg_class'::regclass::oid, c.oid, 0, c.relname::text from pg_class c where c.relnamespace = current_schema()::regnamespace
+		select 'pg_class'::regclass::oid, c.oid, 0, c.relname::text, 0::oid from pg_class c where c.relnamespace = current_schema()::regnamespace
 		union all
-		select 'pg_class'::regclass::oid, c.oid, a.attnum::int, c.relname || '.' || a.attname
+		select 'pg_class'::regclass::oid, c.oid, a.attnum::int, c.relname || '.' || a.attname, a.atttypid
 		from pg_attribute a join pg_class c on c.oid = a.attrelid
 		where c.relnamespace = current_schema()::regnamespace and a.attnum > 0 and not a.attisdropped
 		union all
-		select 'pg_proc'::regclass::oid, p.oid, 0, p.proname::text from pg_proc p where p.pronamespace = current_schema()::regnamespace
+		select 'pg_proc'::regclass::oid, p.oid, 0, p.proname::text, 0::oid from pg_proc p where p.pronamespace = current_schema()::regnamespace
 		union all
-		select 'pg_type'::regclass::oid, t.oid, 0, t.typname::text from pg_type t where t.typnamespace = current_schema()::regnamespace`)
+		select 'pg_type'::regclass::oid, t.oid, 0, t.typname::text, 0::oid from pg_type t where t.typnamespace = current_schema()::regnamespace`)
 	if err != nil {
 		return fmt.Errorf("list what it created: %w", err)
 	}
@@ -342,11 +357,18 @@ func recordCreated(ctx context.Context, conn *pgx.Conn, migration pgmigrate.Migr
 	for rows.Next() {
 		var object catalogObject
 		var name string
-		if err := rows.Scan(&object.class, &object.oid, &object.sub, &name); err != nil {
+		var typ uint32
+		if err := rows.Scan(&object.class, &object.oid, &object.sub, &name, &typ); err != nil {
 			return fmt.Errorf("list what it created: %w", err)
 		}
-		if _, ok := created[object]; !ok {
-			created[object] = createdBy{migration: migration, name: name}
+		prior, ok := created[object]
+		switch {
+		case !ok:
+			created[object] = createdBy{migration: migration, verb: "creates", name: name, typ: typ}
+		case prior.name != name:
+			created[object] = createdBy{migration: migration, verb: "renames from " + prior.name, name: name, typ: typ}
+		case prior.typ != typ:
+			created[object] = createdBy{migration: migration, verb: "gives a new type", name: name, typ: typ}
 		}
 	}
 	return rows.Err()
@@ -363,11 +385,14 @@ func censusReads(ctx context.Context, conn *pgx.Conn, census string) ([]catalogO
 	if _, err := tx.Exec(ctx, "create temporary view pgmigratetest_census as "+strings.TrimSuffix(strings.TrimSpace(census), ";")); err != nil {
 		return nil, fmt.Errorf("read it as a view: %w", err)
 	}
+	// Ordered so that a table comes before its columns, and one failure names the same object on
+	// every run.
 	rows, err := tx.Query(ctx, `
 		select d.refclassid, d.refobjid, d.refobjsubid
 		from pg_depend d join pg_rewrite r on r.oid = d.objid
 		where d.classid = 'pg_rewrite'::regclass and r.ev_class = 'pgmigratetest_census'::regclass
-			and d.refobjid <> 'pgmigratetest_census'::regclass`)
+			and d.refobjid <> 'pgmigratetest_census'::regclass
+		order by 1, 2, 3`)
 	if err != nil {
 		return nil, fmt.Errorf("read what it depends on: %w", err)
 	}
