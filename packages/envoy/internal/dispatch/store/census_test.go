@@ -183,6 +183,21 @@ func TestCensusRefusesACensusThatWrites(t *testing.T) {
 	}
 }
 
+// The census runs with standard_conforming_strings on whatever the connection sets, because
+// pgmigrate.Load finds a census's string literals by that syntax: with it off a backslash escapes
+// the quote after it, so a literal could run on where Load read code. Under off, '\\' is one
+// backslash and this census answers -1.
+func TestCensusReadsItsStringLiteralsWithStandardConformingStrings(t *testing.T) {
+	_, url := migratedToOne(t)
+	report, err := census(context.Background(), url+"&standard_conforming_strings=off", withCheck(`select length('\\') - 2`), pgmigrate.CensusOptions{})
+	if err != nil {
+		t.Fatalf("census: %v", err)
+	}
+	if got := refusals(report); len(got) != 0 {
+		t.Errorf("refusals = %v, want none: the census read '\\\\' as one backslash", got)
+	}
+}
+
 // A failed census never prints a row's value. A data exception's message quotes the value that
 // failed to cast (`invalid input syntax for type integer: "<value>"`), and Dispatch's tables hold
 // plain-text secrets, so the report names the census file and the SQLSTATE and nothing of the

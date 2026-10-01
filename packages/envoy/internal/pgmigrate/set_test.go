@@ -198,9 +198,12 @@ func TestLoadReadsACensusBesideItsMigration(t *testing.T) {
 
 // A census with no migration of its stem, one that is not one select, and one calling a function
 // a read-only transaction does not stop are each refused, naming the census file and the reason.
-// The four functions are a tripwire, matched in any case: the census runs as the service's own
-// role, so terminating or cancelling a backend ends the live service's sessions, and a sleep or an
-// advisory lock holds the deploy and the database for nothing a count needs.
+// The functions are a tripwire, matched bare or quoted and in any case: the census runs as the
+// service's own role, so terminating or cancelling a backend ends the live service's sessions, a
+// sleep or an advisory lock holds the deploy and the database for nothing a count needs, and a
+// function that runs a query given as text runs whatever its literal holds. A Unicode escape,
+// which can spell any of them, is refused outright, and neither a string literal nor a comment
+// hides a call that Postgres would run.
 func TestLoadRefusesACensusWithNoMigrationOneThatIsNotASelectAndOneThatCallsAForbiddenFunction(t *testing.T) {
 	const first = "create table a (id integer)"
 	for name, tc := range map[string]struct {
@@ -256,6 +259,59 @@ func TestLoadRefusesACensusWithNoMigrationOneThatIsNotASelectAndOneThatCallsAFor
 			},
 			want: "census 0001_first.census.sql: a census may not call pg_advisory_",
 		},
+		"advisory lock taken without waiting": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte("select count(*) from (select pg_try_advisory_lock(1)) t")},
+			},
+			want: "census 0001_first.census.sql: a census may not call pg_try_advisory_lock",
+		},
+		"quoted name": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte(`select count(*) from (select "pg_sleep"(1)) t`)},
+			},
+			want: "census 0001_first.census.sql: a census may not call pg_sleep",
+		},
+		"Unicode-escaped identifier": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte(`select count(*) from (select U&"pg\005fadvisory_lock"(1)) t`)},
+			},
+			want: "census 0001_first.census.sql: a census may not hold a Unicode escape (U&)",
+		},
+		"Unicode-escaped string in lower case": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte(`select count(*) from a where id::text = u&'\0031'`)},
+			},
+			want: "census 0001_first.census.sql: a census may not hold a Unicode escape (U&)",
+		},
+		"a query given as text": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte("select count(*) from (select query_to_xml('select pg_sleep(1)', true, false, '')) t")},
+			},
+			want: "census 0001_first.census.sql: a census may not call query_to_xml",
+		},
+		// A -- inside a string literal starts no comment, so the call after it on the line runs.
+		"a call after a literal holding --": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte("select count(*) from (select '--' as dashes, pg_sleep(1) as nap) t")},
+			},
+			want: "census 0001_first.census.sql: a census may not call pg_sleep",
+		},
+		// A literal followed by whitespace holding a newline and another quote continues, in the
+		// first literal's escape syntax, so E'a' then '\'' is one literal ending after the
+		// escaped quote, and the call after it runs.
+		"a call after a continued E literal": {
+			set: fstest.MapFS{
+				"migrations/0001_first.up.sql":     {Data: []byte(first)},
+				"migrations/0001_first.census.sql": {Data: []byte("select count(*) from (select E'a'\n'\\'' as a, pg_sleep(1) as nap, '' as c) t")},
+			},
+			want: "census 0001_first.census.sql: a census may not call pg_sleep",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			migrations, err := Load(tc.set, "migrations")
@@ -272,11 +328,15 @@ func TestLoadRefusesACensusWithNoMigrationOneThatIsNotASelectAndOneThatCallsAFor
 	}
 }
 
-// A forbidden name inside a comment is not a call, and the census is read without its comments.
-func TestLoadAcceptsACensusWhoseCommentNamesAForbiddenFunction(t *testing.T) {
+// A forbidden name or a U& inside a comment or a string literal is not a call: comments, nested
+// ones included, and literals in each quoting Postgres reads are passed over.
+func TestLoadAcceptsACensusWhoseCommentOrStringLiteralNamesAForbiddenFunction(t *testing.T) {
 	set := fstest.MapFS{
-		"migrations/0001_first.up.sql":     {Data: []byte("create table a (id integer)")},
-		"migrations/0001_first.census.sql": {Data: []byte("-- no pg_sleep here\n/* nor pg_terminate_backend */\nselect 0")},
+		"migrations/0001_first.up.sql": {Data: []byte("create table a (id integer, note text)")},
+		"migrations/0001_first.census.sql": {Data: []byte("-- no pg_sleep here, nor U&\"pg_sleep\"\n" +
+			"/* nor pg_terminate_backend /* nested: pg_advisory_lock */ still a comment: U&'x' */\n" +
+			"select count(*) from a where note in ('pg_sleep', 'it''s pg_cancel_backend', E'U&\\'pg_sleep\\'',\n" +
+			"  $$pg_advisory_lock(1)$$, $q$query_to_xml('select 1')$q$, N'pg_sleep', 'a'\n  'continued pg_sleep')")},
 	}
 	if _, err := Load(set, "migrations"); err != nil {
 		t.Fatalf("Load: %v", err)

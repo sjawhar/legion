@@ -314,8 +314,14 @@ service's own database role. The read-only transaction stops every write, and th
 statement is sent through the extended protocol whatever the connection string asks for, so it
 cannot carry a second statement (a `commit` of its own, then a write). Read-only does not stop
 `pg_terminate_backend` (which, as that role, ends the service's own sessions), `pg_cancel_backend`,
-advisory locks or `pg_sleep`: `pgmigrate.Load` refuses a census naming any of them, and review is
-the control past that, since any non-zero integer a census answers is printed.
+advisory locks (`pg_try_advisory_*` included) or `pg_sleep`, nor a function that runs a query
+given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`): `pgmigrate.Load` refuses a
+census naming any of them, bare or quoted and in any case, anywhere outside its comments and
+string literals, and refuses a Unicode escape (`U&"…"`, `U&'…'`) outright, since one can spell any
+name and no census needs it. `Load` finds the comments and literals as Postgres 16's lexer does
+(nested comments, `E'…'` escapes, continued and dollar-quoted literals), and the census runs with
+`standard_conforming_strings` on, so Postgres reads its literals the same way. Review is the
+control past that, since any non-zero integer a census answers is printed.
 
 **What the report prints:** counts, sizes (in KiB, MiB and GiB), versions, file names and session
 metadata (pid, role, application name, state, transaction age; never query text, and "not

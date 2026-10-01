@@ -144,9 +144,12 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 		return nil, fmt.Errorf("census: begin read-only transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "select set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
+	// standard_conforming_strings on, whatever the server or the connection sets, makes Postgres
+	// find the census's string literals where Load's check found them (censusTokens): off, a
+	// backslash in '…' escapes the quote after it, and a literal can run on over a call.
+	if _, err := tx.Exec(ctx, "select set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true), set_config('standard_conforming_strings', 'on', true)",
 		strconv.FormatInt(options.StatementTimeout.Milliseconds(), 10)+"ms", lockTimeoutSetting); err != nil {
-		return nil, fmt.Errorf("census: set timeouts: %w", err)
+		return nil, fmt.Errorf("census: set timeouts and string syntax: %w", err)
 	}
 	report := &Report{VersionTable: versionTable, TableLimit: options.TableLimit, LongTransaction: options.LongTransaction}
 	recorded, err := recordedVersions(ctx, tx, versionTable)
