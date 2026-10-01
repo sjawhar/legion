@@ -89,6 +89,9 @@ const (
 	TimerTurn TimerKind = "turn"
 	// TimerProbe is the re-probe of an uncertain process.
 	TimerProbe TimerKind = "probe"
+	// TimerSuspend is the held suspension's timer (holdSuspension): the stop timeout of its wait for
+	// the agent's turn, and the retry of a stop that failed.
+	TimerSuspend TimerKind = "suspend"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -210,7 +213,7 @@ func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
-// by its kind, because the four waits mean four different things.
+// by its kind, because the five waits mean five different things.
 type eventKind string
 
 const (
@@ -226,6 +229,7 @@ const (
 	onDeadline      eventKind = timerPrefix + eventKind(TimerRegistration)
 	onTurnTimer     eventKind = timerPrefix + eventKind(TimerTurn)
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
+	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -431,6 +435,10 @@ func fillTable(t *builder) {
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
 
+	t.row(onSuspendTimer, "the held suspension's timer: its turn has not ended, or its stop failed; stop the process", suspendAtTimeout,
+		[]ClaimState{StateSuspended}, StateWorking, StateIdle)
+	t.ignore(onSuspendTimer, "no suspension is held", slices.Concat(unready, []ClaimState{StateReady}, gone)...)
+
 	// The tree's volume, found lost by another claim of the tree.
 	t.row(onVolumeLost, "the tree volume was lost: drop the session it held", sessionLost, nil,
 		slices.Concat(processless, booting)...)
@@ -464,7 +472,9 @@ func fillTable(t *builder) {
 	t.ignore(onReady, retiredClaim, StateRetired)
 
 	t.row(onSuspend, "suspend: stop the process, keep the session", suspend, []ClaimState{StateSuspended},
-		StateRegistered, StateReady, StateWorking, StateIdle)
+		StateRegistered, StateReady, StateIdle)
+	t.row(onSuspend, "hold the suspension for the turn's end: stopping the agent now would cut its turn off", holdSuspension,
+		nil, StateWorking)
 	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
 	t.ignore(onSuspend, notRegistered,
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
@@ -768,10 +778,24 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	return m.persist(ctx)
 }
 
-// turnEnded is the turn over: the delivery it confirmed retires, and one queued meanwhile goes. The
-// agent just said where it is, so nothing is left to ask it after a restart.
+// turnEnded is the turn over: the delivery it confirmed retires, and one queued meanwhile goes —
+// unless a suspension is held for this turn (holdSuspension), which runs instead; a stop the
+// runtime refuses leaves the claim idle, still holding it. The agent just said where it is, so
+// nothing is left to ask it after a restart.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
+	if m.held != nil {
+		if err := m.suspendHeld(ctx); err != nil {
+			if m.held == nil {
+				// The stop landed and let the process go; only its write failed, and the claim is
+				// suspended in memory (suspended).
+				return err
+			}
+			m.claim.State = StateIdle
+			return errors.Join(err, m.persist(ctx))
+		}
+		return nil
+	}
 	m.claim.State = StateIdle
 	if err := m.persist(ctx); err != nil {
 		return err
@@ -860,40 +884,6 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 }
 
 func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
-
-// suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
-// queued for a phase and still pending unconfirmed (acknowledged and then refused, or lost to the
-// transport) is retired with it (settle): the next resume is started with its new phase's task,
-// never handed the finished one's. A task of no phase — an operator's own, an architect's — is
-// not the workflow's to end, and goes on that resume.
-func suspend(m *Machine, ctx context.Context, ev Event) error {
-	// The table routes only RequestSuspend here (eventKindOf's onSuspend). Another event is a wiring
-	// error, refused before anything is stopped, rather than a panic or a journal line with no
-	// reason.
-	request, ok := ev.(RequestSuspend)
-	if !ok {
-		return fmt.Errorf("suspend %s: the suspend action was handed %T, not a RequestSuspend", m.claim.Token, ev)
-	}
-	if err := m.suspendProcess(ctx); err != nil {
-		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
-	}
-	if err := m.suspended(ctx); err != nil {
-		return err
-	}
-	m.log.Info("supervise: suspended", "reason", request.Reason)
-	return nil
-}
-
-// suspended moves the claim to suspended: its session kept, and the process it stopped let go for
-// the resume to wait out. It only persists — revoking the stopped agent's capability, in memory
-// even when the write fails. The finished phase's unconfirmed task is retired after it by settle,
-// which Handle runs after every row; a retirement that fails is reported, and the claim's next
-// decision retires it before anything else.
-func (m *Machine) suspended(ctx context.Context) error {
-	m.letGo()
-	m.claim.State = StateSuspended
-	return m.persist(ctx)
-}
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
 
