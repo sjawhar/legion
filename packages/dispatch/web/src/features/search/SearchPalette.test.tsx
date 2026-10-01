@@ -6,7 +6,7 @@ import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { SearchResult } from "../../api/types";
+import type { SearchResponse, SearchResult } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { SearchButton } from "./SearchButton";
@@ -357,7 +357,7 @@ test("while the search is in flight no action found inside its label is highligh
   const ran: string[] = [];
   const unregister = registerClose(ran);
   const hit = issueHit("LEGION-3");
-  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const answer = Promise.withResolvers<SearchResponse>();
   const search = spyOn(api, "search").mockReturnValue(answer.promise);
   const view = renderPaletteHost();
 
@@ -410,7 +410,7 @@ test("an arrow pressed before the search answers reaches no action found inside 
   const ran: string[] = [];
   const unregister = registerClose(ran);
   const hit = issueHit("LEGION-3");
-  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const answer = Promise.withResolvers<SearchResponse>();
   const search = spyOn(api, "search").mockReturnValue(answer.promise);
   const view = renderPaletteHost();
 
@@ -473,7 +473,7 @@ test("while the search is out the arrows walk only the actions the query starts,
     { id: "triage", keys: [], label: "Issue triage", run: () => ran.push("triage") },
   ]);
   const hit = issueHit("LEGION-3");
-  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const answer = Promise.withResolvers<SearchResponse>();
   const search = spyOn(api, "search").mockReturnValue(answer.promise);
   const view = renderPaletteHost();
   const [report, triage] = [
@@ -511,7 +511,7 @@ test("a refetch behind a stale cached answer is still out, so Down and Enter rea
   const ran: string[] = [];
   const unregister = registerClose(ran);
   const hit = issueHit("LEGION-3");
-  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const answer = Promise.withResolvers<SearchResponse>();
   const search = spyOn(api, "search").mockReturnValue(answer.promise);
   const view = renderPaletteHost();
   // The reader searched `issue` earlier and found nothing; that answer is stale now.
@@ -574,7 +574,7 @@ test("a background refetch keeps the actions the query starts and the hits walka
   const view = renderPaletteHost();
   const report = "search-option-action-global-report";
   const refetchHeld = async (calls: number) => {
-    const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+    const answer = Promise.withResolvers<SearchResponse>();
     search.mockReturnValue(answer.promise);
     act(() => {
       void view.queryClient.refetchQueries();
