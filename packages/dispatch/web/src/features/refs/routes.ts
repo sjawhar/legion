@@ -286,6 +286,13 @@ export function parseProjectPath(pathname: string, search = ""): ProjectRoute | 
   );
 }
 
+/** The project a route is about: a project path's own key, or an issue path's key without its
+ *  number (an issue key is `<PROJECT>-<n>`, `issueKeyPattern` above); `undefined` elsewhere. */
+export function routeProjectOf(pathname: string): string | undefined {
+  const issueKey = parseIssuePath(pathname)?.key;
+  return parseProjectPath(pathname)?.project ?? issueKey?.slice(0, issueKey.lastIndexOf("-"));
+}
+
 export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if ("project" in route) {
     return `dispatch://${route.project}/artifact/${encodeURIComponent(route.slug)}${
