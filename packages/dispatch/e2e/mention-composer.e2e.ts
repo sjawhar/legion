@@ -47,7 +47,8 @@ async function issueCommentPayload(page: Page, issueKey: string): Promise<Record
 }
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
+  await setLiveSessions([]);
 });
 
 test("E1 and E2: explicit role mentions deliver once while /btw without a mention stays a plain comment", async ({

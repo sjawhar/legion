@@ -53,7 +53,9 @@ services:
   # signs in through the server's dev sign-in route (DISPATCH_DEV_SIGNIN), so the image must be
   # built from a tree that has it. The flag's fence holds here: cookie identity, a loopback
   # listener, origin and database, and no signing key passed or mounted, so the server generates
-  # one for its process alone.
+  # one for its process alone. Under host networking Dispatch's default Envoy address is this
+  # host's own listener, so ENVOY_URL names port 1, where nothing listens, and no Envoy token is
+  # passed: a signed-in acceptance server reaches no real session.
   postgres-acceptance:
     profiles: ["acceptance"]
     image: postgres:16
@@ -93,7 +95,7 @@ services:
       DISPATCH_NATS_DISABLED: "1"
       DISPATCH_SERVER_URL: http://127.0.0.1:8767
       DISPATCH_TEST_HOOKS: "1"
-      ENVOY_TOKEN: ${ENVOY_TOKEN:-}
+      ENVOY_URL: http://127.0.0.1:1
 volumes:
   dispatch-data:
   dispatch-acceptance-pg:

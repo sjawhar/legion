@@ -22,12 +22,6 @@ e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
 
-# Resolve the concrete Go executable before hiding HOME. A mise shim can use
-# the caller's configuration here; the server is built with that toolchain in
-# the caller's environment, before the hermetic environment below exists, and
-# the server process itself never asks mise or Go to choose anything.
-go_binary="$(go env GOROOT)/bin/go"
-
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -50,14 +44,14 @@ done
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
 
 cd "$(dirname "$0")/../../envoy"
-# Build first and exec the binary itself. A server started as `go run` is the go command's
-# child; the go command ignores only SIGINT and SIGQUIT, so a SIGTERM to it ends the go command
-# and leaves the server listening. Playwright kills the whole process group and the
-# skill-scenarios rig the whole process tree, but a caller that signals the one pid it started
-# (`kill $!`) needs that pid to be the server. One binary per checkout, built under a lock so two
-# harnesses starting at once serialise: Go rewrites it only when the source changed, and a
-# running server keeps the inode it started from.
-flock ./.dispatch-e2e.lock "$go_binary" build -o ./dispatch-e2e ./cmd/dispatch
+# Build first, in the caller's toolchain environment, and exec the binary itself. A server
+# started as `go run` is the go command's child; the go command ignores only SIGINT and SIGQUIT,
+# so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
+# whole process group and the skill-scenarios rig the whole process tree, but a caller that
+# signals the one pid it started (`kill $!`) needs that pid to be the server. One binary per
+# checkout, built under a lock so two harnesses starting at once serialise: Go rewrites it only
+# when the source changed, and a running server keeps the inode it started from.
+flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \

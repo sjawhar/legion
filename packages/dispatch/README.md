@@ -41,11 +41,10 @@ runs the Vite development server for interface work.
 
 `bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
 server and Postgres. The harness starts `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects a deployed server. The script resolves the
-concrete Go binary in the caller's toolchain environment, builds the server
-into `packages/envoy/dispatch-e2e` and execs it, so a SIGTERM to the pid it
-hands its caller stops the server. It pins every server setting: cookie
-identity, the production mode, with `alice` and `bob` signed in through the
+`PLAYWRIGHT_BASE_URL` selects a deployed server. The script builds the server
+with the caller's `go` into `packages/envoy/dispatch-e2e` and execs it, so a
+SIGTERM to the pid it hands its caller stops the server. It pins every server
+setting: cookie identity, the production mode, with `alice` and `bob` signed in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
 origin, listener and database, with a signing key the server generates for its
 process), `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
@@ -86,10 +85,12 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
 The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with its
 own Postgres volume and database. It signs `alice` and `bob` in through the dev sign-in route, as
 the local harness does, so the image must be built from a tree that has the route; it also uses
-an acceptance-only agent token, disabled NATS, and port 8767, and it starts only the named
-acceptance service and its database dependency. Compose still interpolates every service in the
-file, and the production `dispatch` service requires five variables the acceptance run never
-uses, so the recipe passes placeholders for them.
+an acceptance-only agent token, disabled NATS, an Envoy address nothing serves (port 1, so the
+host's own listener is out of reach under host networking), and port 8767, and it starts only
+the named acceptance service and its database dependency. The specs that drive the harness's
+fake Envoy or fake GitHub, and those that need an Envoy listener that answers, skip against it.
+Compose still interpolates every service in the file, and the production `dispatch` service
+requires five variables the acceptance run never uses, so the recipe passes placeholders for them.
 
 ```bash
 cd packages/envoy/deploy/compose
@@ -108,12 +109,15 @@ docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
 
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has `chromium` and `iphone` projects; the iPhone project uses Chromium
-with iPhone 13 viewport, touch, and user-agent emulation. A `webkit` project runs
-`e2e/collab-cursor.e2e.ts` alone, since where a caret lands beside a
-collaborator's cursor differs by engine, and a `firefox` project runs
-`e2e/code-line-replace.e2e.ts` alone, since Firefox's own editing mishandles text
-typed over what follows a block's last line break; `bun run e2e:install` installs all three browsers.
+The suite has five projects. `chromium` and `iphone` run every spec; the iPhone project uses
+Chromium with iPhone 13 viewport, touch, and user-agent emulation. `webkit` runs
+`e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor differs by
+engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
+mishandles text typed over what follows a block's last line break; both also run
+`e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch.
+`webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts` in WebKit
+with the iPhone 13 profile, since iOS Safari is the engine its keyboard cap exists for.
+`bun run e2e:install` installs all three browsers.
 
 ## Phone check
 

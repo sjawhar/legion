@@ -59,8 +59,8 @@ production Envoy, not the fake.
 
 Closed in the harness, not in the operator's habits (LEGION-154):
 `run-server.sh` requires the one destructive-write input (`DATABASE_URL`) and
-resolves the concrete Go binary with the caller's toolchain before it isolates
-the server process. It then reads the harness ports, unsets every
+builds the server with the caller's `go`, in the caller's environment, before it
+isolates the server process. It then reads the harness ports, unsets every
 inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, and supplies the
 server's configuration in full: `ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake
 GitHub and dashboard origins, and a fresh App key, with no cookie signing key: the server

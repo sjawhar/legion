@@ -38,7 +38,8 @@ async function selectMention(page: Page, text: string, option = "planner"): Prom
 }
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
+  await setLiveSessions([]);
 });
 
 test("/btw with a surviving mention strips its token and sends one comment-level mode", async ({

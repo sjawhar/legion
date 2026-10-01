@@ -444,8 +444,8 @@ a login's casing - make that selector an assertion too, then lapse the property 
 fires, since a selector check that cannot fire only looks like a guard. The one exception is a Playwright
 project's title `grep`; its fallback is the one-time manual check beside the `webkit-iphone` project below.
 
-`run-server.sh` resolves the concrete Go binary in the caller's toolchain
-environment, builds the server with it, and execs the binary with every server
+`run-server.sh` builds the server with the caller's `go`, in the caller's
+environment, and execs the binary with every server
 setting pinned. It execs the binary rather than `go run`: the go command ignores
 only SIGINT and SIGQUIT, so a SIGTERM to `go run` ends the go command and leaves
 its server listening. Playwright kills the whole process group and the
@@ -487,7 +487,15 @@ paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 `run-server.sh` builds `ENVOY_URL` from that port alone. Tests seed
 live sessions and their capabilities with `setLiveSessions`, change their scripted 200/404 send
 response with `setSessionSendStatus`, and inspect targeted sends with `getSentMessages`;
-persisted subscriptions use `setInterests`, all from `e2e/agents.ts`. It also holds the Agents
+persisted subscriptions use `setInterests`, all from `e2e/agents.ts`. A deployed server
+(`PLAYWRIGHT_BASE_URL`) talks to no fake, so there each of those fixture helpers, and the fake
+GitHub's `seedFakeGithub`, skips the test that calls it rather than failing it; a test that also
+runs deployed guards its fixture calls with `if (!process.env.PLAYWRIGHT_BASE_URL)`. The skip
+ends the test where it stands, so a fixture call follows `resetDatabase()` rather than running
+beside it in a `Promise.all`: a reset left running would overlap the next test's, and each waits
+out the other's open transaction. The compose `acceptance` profile's Envoy is a closed port, so a
+deployed run's Agents page, subscriber reads and request counts see a failing listener; a test
+that measures one of those skips under `PLAYWRIGHT_BASE_URL` and says why. It also holds the Agents
 page the keyboard specs share: `seedAgents` (the Planner and Reviewer sessions, both listed, and two
 open issues for the picker) and `openAgents`, which waits for the page's heading before a key is
 pressed, since the keymap binds only once sign-in resolves. A session a shared helper seeds, as
@@ -521,12 +529,16 @@ in its own order, and the two crossing is a PostgreSQL deadlock that kills eithe
 the settlement. With no live room and no armed settlement timer the two cannot overlap, so the
 reset does not retry. It still waits for any open server transaction before truncating. For a
 deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
-bearer-seeded API calls. Every psql the harness runs, `seed.ts`'s and `failed-room.e2e.ts`'s,
-goes through `e2e/psql.ts`, which drops `PGHOSTADDR` from psql's environment: libpq reads it and
-connects there in place of the URL's host, and the server's pgx does not read it, so with it set
-in a shell psql would truncate a database the server's own loopback check never saw. `PGHOST`
-and `PGSERVICE` stay, since pgx and libpq read both. `e2e/psql.ts` imports nothing from `e2e/`,
-so a module can import it statically before the harness is up, without evaluating `e2e/api.ts`.
+bearer-seeded API calls. Every SQL statement the harness runs, `seed.ts`'s and
+`failed-room.e2e.ts`'s, goes through `sql()` in `e2e/psql.ts`, which resolves that database
+(`PLAYWRIGHT_DATABASE_URL` for a deployed server, else `DATABASE_URL`, never a default) and runs
+psql without `~/.psqlrc` and without `PGHOSTADDR`: libpq reads it and connects there in place of
+the URL's host, and the server's pgx does not read it, so with it set in a shell psql would
+truncate a database the server's own loopback check never saw. `PGHOST` and `PGSERVICE` stay,
+since pgx and libpq read both; a service entry's `hostaddr`, the one key they part on, pgx sends
+to Postgres as a setting, which refuses the connection, so the harness server never boots on one.
+`e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
+is up, without evaluating `e2e/api.ts`.
 
 That reset is also the one rig failure that presents as a code failure. Any other process holding
 a non-idle connection to the test database — most often a Dispatch server from an earlier run

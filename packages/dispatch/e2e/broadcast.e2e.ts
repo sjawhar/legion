@@ -54,7 +54,8 @@ const observer: FakeSession = {
 };
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
+  await setLiveSessions([]);
 });
 
 test("a broadcast lists recipient cards in the non-alphabetical order the sender ticked them", async ({

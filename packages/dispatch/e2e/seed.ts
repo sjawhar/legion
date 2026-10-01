@@ -1,5 +1,5 @@
 import { forgetSessions, quiesceDocuments } from "./api";
-import { psql } from "./psql";
+import { sql } from "./psql";
 
 const tables = [
   "agent_tokens",
@@ -25,68 +25,34 @@ const tables = [
   "user_sessions",
 ];
 
-// A deployed server can name its database independently, but a leftover deployed URL must not
-// override a local harness's DATABASE_URL. Every SQL mutation, especially resetDatabase's
-// TRUNCATE, requires a URL the caller explicitly supplied for this run: no shared default exists.
-function databaseUrl(): string {
-  const deployedDatabaseUrl = globalThis.process.env.PLAYWRIGHT_BASE_URL
-    ? globalThis.process.env.PLAYWRIGHT_DATABASE_URL
-    : undefined;
-  const url = deployedDatabaseUrl ?? globalThis.process.env.DATABASE_URL;
-  if (url === undefined || url.trim() === "") {
-    throw new Error(
-      "PLAYWRIGHT_DATABASE_URL or DATABASE_URL must name the database for this e2e run"
-    );
-  }
-  return url;
-}
-
 function sqlLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
 export async function insertExternalLink(issueKey: string, url: string): Promise<void> {
-  await psql([
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-c",
-    `INSERT INTO issue_external_links (issue_key, url, kind) VALUES (${sqlLiteral(issueKey)}, ${sqlLiteral(url)}, 'url')`,
-  ]);
+  await sql(
+    `INSERT INTO issue_external_links (issue_key, url, kind) VALUES (${sqlLiteral(issueKey)}, ${sqlLiteral(url)}, 'url')`
+  );
 }
 
 export async function setEventCreatedAt(eventId: number, iso: string): Promise<void> {
-  await psql([
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-c",
-    `UPDATE events SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${Number(eventId)}`,
-  ]);
+  await sql(
+    `UPDATE events SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${Number(eventId)}`
+  );
 }
 
 /** Stamps a verified service token's subject on a seeded comment's author. The API seeder posts
  *  its actor under the shared token and the server drops a body-supplied `service`, so the only
  *  way to fixture a service-authored write is the `comments.author` jsonb itself. */
 export async function setCommentAuthorService(commentId: string, service: string): Promise<void> {
-  await psql([
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-c",
-    `UPDATE comments SET author = author || jsonb_build_object('service', ${sqlLiteral(service)}) WHERE id = ${sqlLiteral(commentId)}::uuid`,
-  ]);
+  await sql(
+    `UPDATE comments SET author = author || jsonb_build_object('service', ${sqlLiteral(service)}) WHERE id = ${sqlLiteral(commentId)}::uuid`
+  );
 }
 
 /** Marks a newly created fixture issue as pre-creator metadata. */
 export async function clearIssueCreator(issueKey: string): Promise<void> {
-  await psql([
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-c",
-    `UPDATE issues SET created_by = 'null'::jsonb WHERE key = ${sqlLiteral(issueKey)}`,
-  ]);
+  await sql(`UPDATE issues SET created_by = 'null'::jsonb WHERE key = ${sqlLiteral(issueKey)}`);
 }
 
 // The DO block waits for every other session to leave its transaction. That is a barrier, not a
@@ -95,13 +61,7 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
 // the document service first.
 
 async function resetDatabaseOnce(): Promise<void> {
-  await psql([
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-v",
-    "VERBOSITY=verbose",
-    "-c",
+  await sql(
     `DO $$
       DECLARE open_transactions text;
       BEGIN
@@ -124,9 +84,8 @@ async function resetDatabaseOnce(): Promise<void> {
         END IF;
       END
     $$`,
-    "-c",
-    `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
-  ]);
+    `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`
+  );
 }
 
 /**
@@ -136,8 +95,9 @@ async function resetDatabaseOnce(): Promise<void> {
  * with both running PostgreSQL breaks the cycle by aborting one of them (LEGION-168), which is
  * either a failed reset or a settlement that dies mid-scenario. Quiescing first leaves the
  * server with nothing to run, so the two never overlap. The truncate takes `user_sessions` with
- * it, so every session cookie minted before it is refused afterwards: e2e/api.ts forgets its
- * cached ones here, and a browser context signs in after the reset (e2e/users.ts).
+ * it, so a session cookie minted before it is refused until its login signs in again:
+ * e2e/api.ts forgets its cached ones here, and a browser context signs in after the reset
+ * (e2e/users.ts).
  */
 export async function resetDatabase(): Promise<void> {
   await quiesceDocuments();

@@ -14,33 +14,18 @@
 // read the two lines it prints for the queued writer.
 import { expect, test } from "@playwright/test";
 
-import { baseUrl, createComment, createIssue, createProject, userHeaders } from "./api";
+import {
+  baseUrl,
+  createComment,
+  createIssue,
+  createProject,
+  getArtifactText,
+  userHeaders,
+} from "./api";
 import { documentEditor } from "./editor";
-import { psql } from "./psql";
+import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-
-/** The database this probe may write to, resolved as `seed.ts` resolves it: a deployed server's
- * own `PLAYWRIGHT_DATABASE_URL`, else the `DATABASE_URL` this run supplied. It never falls back
- * to libpq's default, because this probe installs a `doc_updates` trigger and cancels a
- * backend. */
-function databaseUrl(): string {
-  const deployed = process.env.PLAYWRIGHT_BASE_URL
-    ? process.env.PLAYWRIGHT_DATABASE_URL
-    : undefined;
-  const url = deployed ?? process.env.DATABASE_URL;
-  if (url === undefined || url.trim() === "") {
-    throw new Error(
-      "PLAYWRIGHT_DATABASE_URL or DATABASE_URL must name the database for the failed-room probe"
-    );
-  }
-  return url;
-}
-
-async function sql(statement: string): Promise<string> {
-  const { stdout } = await psql([databaseUrl(), "-v", "ON_ERROR_STOP=1", "-tAc", statement]);
-  return stdout.trim();
-}
 
 /** Holds the room's next durable append inside its `doc_updates` insert for this long, which is
  * how the probe gets a writer it can cancel while it owns the room. Every `doc_updates` insert
@@ -206,12 +191,7 @@ test("a writer inside the docs layer when its room fails is told, and the room r
   );
   expect(recovered.status).toBe(201);
 
-  const artifacts = await fetch(`${baseUrl}/api/v1/issues/${issue.key}`, {
-    headers: await userHeaders("alice"),
-  }).then((response) => response.json() as Promise<{ artifacts: { id: string }[] }>);
-  const text = await fetch(`${baseUrl}/api/v1/artifacts/${artifacts.artifacts[0].id}/text`, {
-    headers: await userHeaders("alice"),
-  }).then((response) => response.json() as Promise<{ markdown: string }>);
+  const text = await getArtifactText(issue.primary_artifact_id);
   console.log(`FAILED-ROOM document text=${JSON.stringify(text.markdown)}`);
   // The room reloaded from its durable copy with the browser's own paragraph in it, which is the
   // half of the recovery no status code shows.

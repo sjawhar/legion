@@ -292,11 +292,24 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
     { body: "Can this ship?" },
     { actor: { id: "s1", kind: "session" }, as: "agent" }
   );
+  // The reply's mention reads the session's live title from the agents list, which lands after
+  // the turns render, and a collapsed comment card shows no author. A later message from the same
+  // session heads its turn with that title once the list is in, from the same render the Reply
+  // button reads, so the click waits for it.
+  await createMessage(
+    issue.key,
+    { body: "Build is green." },
+    {
+      actor: { id: "s1", kind: "session" },
+      as: "agent",
+    }
+  );
   const alice = await asUser(browser, "alice");
 
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(turn(page, "Build is green.")).toContainText("planner");
     const card = turn(page, "Can this ship?");
     await card.getByRole("button", { name: "Reply" }).click();
     const composer = page.getByRole("form", { name: "Comment composer" });
@@ -671,9 +684,7 @@ test("a long session title never widens the Conversation past its column", async
     { content: "# Sketch\n", name: "Transcript sketch" },
     { actor: { id: sessionId, kind: "session" }, as: "agent" }
   );
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: sessionId, title: longTitle }]);
-  }
+  await setLiveSessions([{ session_id: sessionId, title: longTitle }]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();

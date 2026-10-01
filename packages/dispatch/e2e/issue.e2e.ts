@@ -586,18 +586,16 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Subscriber removal" });
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-unsub-session", title: "Worker (e2e)" }]);
-    await setInterests([
-      {
-        session_id: "e2e-unsub-session",
-        topics: [
-          `notifications.dispatch.issue.${issue.key}`,
-          `notifications.dispatch.issue.${issue.key}.>`,
-        ],
-      },
-    ]);
-  }
+  await setLiveSessions([{ session_id: "e2e-unsub-session", title: "Worker (e2e)" }]);
+  await setInterests([
+    {
+      session_id: "e2e-unsub-session",
+      topics: [
+        `notifications.dispatch.issue.${issue.key}`,
+        `notifications.dispatch.issue.${issue.key}.>`,
+      ],
+    },
+  ]);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
@@ -607,9 +605,7 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
     await page.getByRole("button", { name: "Subscribers: 1" }).click();
     const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribedAgents.getByText("Worker (e2e)", { exact: true })).toBeVisible();
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
-    }
+    await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
 
     await subscribedAgents.getByRole("button", { name: "Unsubscribe" }).click();
     const dialog = page.getByRole("dialog", { name: "Unsubscribe" });
@@ -620,13 +616,11 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 
     await expect(page.getByRole("region", { name: "Subscribed agents" })).toHaveCount(0);
 
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect
-        .poll(async () =>
-          (await getUnsubscribeCalls()).some((call) => call.session_id === "e2e-unsub-session")
-        )
-        .toBe(true);
-    }
+    await expect
+      .poll(async () =>
+        (await getUnsubscribeCalls()).some((call) => call.session_id === "e2e-unsub-session")
+      )
+      .toBe(true);
 
     await expect
       .poll(async () =>
@@ -644,7 +638,6 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 });
 
 async function subscribeSession(issueKey: string): Promise<void> {
-  if (process.env.PLAYWRIGHT_BASE_URL) return;
   await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
   await setInterests([
     {

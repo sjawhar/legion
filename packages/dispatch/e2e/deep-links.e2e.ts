@@ -574,6 +574,10 @@ test("an iPhone document item link brings its far-away mark above the closed rev
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the closed sheet is phone-only");
+  test.skip(
+    process.env.PLAYWRIGHT_BASE_URL !== undefined,
+    "an unreachable Envoy puts an alert in the issue header, which moves the document on a phone"
+  );
   const { comment, issue, markId } = await seedLongDocument();
   const context = await asUser(browser, "alice");
 

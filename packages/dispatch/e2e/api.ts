@@ -61,30 +61,44 @@ interface ApiOptions {
   token?: string;
 }
 
+/** The server's dev sign-in route for `login`, relative to the dashboard origin; it answers a
+ *  sign-in with a 302 that sets the `dsession` cookie. */
+export function devSignInPath(login: string): string {
+  return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
+}
+
 const sessionCookies = new Map<string, Promise<string>>();
 
-/** The `dsession` cookie the server issues `login` at /auth/_dev/signin, minted once per spelling
- *  of a login. `forgetSessions` drops them when the database is reset: the generation a cookie
- *  encodes lives in `user_sessions`, which the reset truncates. */
+/** The `dsession` cookie the server issues `login` at its dev sign-in route, minted once per
+ *  spelling of a login and kept until something revokes it: the generation the cookie names lives
+ *  in `user_sessions`, which `resetDatabase` truncates (it calls `forgetSessions`), and a browser
+ *  context's Sign out as the same login advances it. A sign-in that fails, by its answer or by
+ *  the request itself, is not kept, so the next call asks again. */
 function sessionCookie(login: string): Promise<string> {
-  let cookie = sessionCookies.get(login);
-  if (cookie === undefined) {
-    cookie = fetch(new URL(`/auth/_dev/signin?login=${encodeURIComponent(login)}`, baseUrl), {
-      redirect: "manual",
-    }).then(async (response) => {
-      const value = /(?:^|,\s*)dsession=([^;]+)/.exec(
-        response.headers.get("set-cookie") ?? ""
-      )?.[1];
+  const cached = sessionCookies.get(login);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
+    async (response) => {
+      const value = response.headers
+        .getSetCookie()
+        .find((header) => header.startsWith("dsession="))
+        ?.split(";")[0];
       if (response.status !== 302 || value === undefined) {
-        sessionCookies.delete(login);
         throw new Error(
           `dev sign-in as ${login} failed: ${response.status} ${await response.text()}`
         );
       }
-      return `dsession=${value}`;
-    });
-    sessionCookies.set(login, cookie);
-  }
+      return value;
+    }
+  );
+  sessionCookies.set(login, cookie);
+  cookie.catch(() => {
+    if (sessionCookies.get(login) === cookie) {
+      sessionCookies.delete(login);
+    }
+  });
   return cookie;
 }
 
@@ -94,15 +108,10 @@ export function forgetSessions(): void {
 }
 
 /** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
- *  the server requires on every cookie-authenticated write (either the Origin match or the
- *  same-origin fetch metadata satisfies enforceCookieOrigin; both are sent so the runtime's
- *  header policy cannot turn a seeding write into `invalid request origin`). */
+ *  the server requires on every cookie-authenticated write (enforceCookieOrigin admits a write
+ *  whose `Origin` is the dashboard's). */
 export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
-  return {
-    Cookie: await sessionCookie(login),
-    Origin: dashboardOrigin,
-    "Sec-Fetch-Site": "same-origin",
-  };
+  return { Cookie: await sessionCookie(login), Origin: dashboardOrigin };
 }
 
 async function request<T>(
@@ -123,7 +132,7 @@ async function request<T>(
   if (as === "agent") {
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
-    Object.assign(headers, await userHeaders(options.login ?? "alice"));
+    Object.assign(headers, await userHeaders(options.login));
   }
 
   const response = await fetch(new URL(path, baseUrl), {

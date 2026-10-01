@@ -92,16 +92,16 @@ test("project filters stay collapsed until needed and margin asks use the compac
       path: testInfo.outputPath(`polish-margin-${viewport}.png`),
       fullPage: true,
     });
+    // The Agents page renders its list, empty or not, only once an Envoy listener answers.
     if (!process.env.PLAYWRIGHT_BASE_URL) {
       await setLiveSessions([]);
+      await page.goto("/agents");
+      await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
+      await page.screenshot({
+        path: testInfo.outputPath(`polish-agents-${viewport}.png`),
+        fullPage: true,
+      });
     }
-
-    await page.goto("/agents");
-    await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
-    await page.screenshot({
-      path: testInfo.outputPath(`polish-agents-${viewport}.png`),
-      fullPage: true,
-    });
   } finally {
     await context.close();
   }
@@ -119,9 +119,7 @@ test("an untitled session reads the same on the Agents page, the ask card, its f
     { options: [{ label: "Ship" }], question: "Same name everywhere?" },
     { actor: { id: sessionId, kind: "session" }, as: "agent" }
   );
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: sessionId, title: "" }]);
-  }
+  await setLiveSessions([{ session_id: sessionId, title: "" }]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();

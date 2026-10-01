@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
@@ -16,14 +16,18 @@ export interface FakeSession {
   topics?: string[];
 }
 
+/** A request to the harness's fake Envoy. A deployed server (`PLAYWRIGHT_BASE_URL`) talks to no
+ *  fake, so the test that reaches this there is skipped at that point rather than failed: the
+ *  state it seeds or reads exists only on the fake. */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
   body?: object
 ): Promise<Response> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
+  test.skip(
+    Boolean(process.env.PLAYWRIGHT_BASE_URL),
+    "live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL"
+  );
   const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -96,32 +100,13 @@ export interface FakeInterest {
 }
 
 export async function setInterests(rows: FakeInterest[]): Promise<void> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}/__fixture/interests`, {
-    body: JSON.stringify(rows),
-    headers: { "Content-Type": "application/json" },
-    method: "PUT",
-  });
-  if (!response.ok) {
-    throw new Error(`setting interests failed: ${response.status} ${await response.text()}`);
-  }
+  await fixtureRequest("/__fixture/interests", "PUT", rows);
 }
 
 export async function getUnsubscribeCalls(): Promise<{ session_id: string; topics: string[] }[]> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}/__fixture/unsubscribe-calls`);
-  if (!response.ok) {
-    throw new Error(
-      `reading unsubscribe calls failed: ${response.status} ${await response.text()}`
-    );
-  }
-  return (await response.json()) as { session_id: string; topics: string[] }[];
+  return (await fixtureRequest("/__fixture/unsubscribe-calls", "GET")).json() as Promise<
+    { session_id: string; topics: string[] }[]
+  >;
 }
 
 // The Agents page's keyboard rows, in `keyboard-agents.e2e.ts`, `keyboard-palette.e2e.ts` and the

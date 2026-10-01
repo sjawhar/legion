@@ -7,7 +7,8 @@ import { asUser } from "./users";
 import { seedWorkspace } from "./workspace";
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
+  await setLiveSessions([]);
 });
 
 // Every surface a human alone acts on has to come up non-empty from this one seed: an empty
