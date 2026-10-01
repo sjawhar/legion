@@ -92,11 +92,15 @@ RUN mkdir -p /out \
     && bun packages/daemon/src/daemon/omp-pin.ts > /out/omp-pin \
     && test -s /out/omp-pin
 ARG CODEGRAPH_VERSION
-# CodeGraph CLI (@colbymchenry/codegraph): bun's global add into a self-contained directory
-# (bin/ + install/global/node_modules), copied whole into the runtime stage below — its npm shim
-# resolves the per-platform bundle with require.resolve relative to its own node_modules, so the
-# bin/ symlink and the install/ tree must move together.
-RUN BUN_INSTALL=/out/codegraph bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
+# CodeGraph CLI (@colbymchenry/codegraph): `bin.codegraph` in the main npm package is a thin
+# `#!/usr/bin/env node` launcher shim that locates and execs the per-platform optionalDependency
+# (`@colbymchenry/codegraph-linux-x64`) — but this stage's base image has no system `node` (only
+# bun's own fallback shim, which the final runtime stage does not copy over), so the shim itself
+# cannot start. The platform package's own `bin/codegraph` is a `#!/bin/sh` wrapper that execs a
+# *bundled* Node 24 runtime sitting beside it — fully self-contained, no system node required
+# anywhere — so this copies that platform package alone, as `/opt/codegraph` in the runtime stage.
+RUN bun add -g "@colbymchenry/codegraph@${CODEGRAPH_VERSION}" \
+    && cp -a /root/.bun/install/global/node_modules/@colbymchenry/codegraph-linux-x64 /out/codegraph \
     && /out/codegraph/bin/codegraph --version
 # The plugin ships from this checkout with the steps release.yaml's pi_envoy job runs before
 # `bun pm pack` (prepack.sh refuses to pack with the source manifest). The tarball is unpacked into a
@@ -220,8 +224,8 @@ COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 COPY --from=cli /out/legion /opt/legion/bin/legion
 COPY --from=cli --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion-envoy
-# CodeGraph CLI (@colbymchenry/codegraph), self-contained: bin/ symlink plus the install/global
-# node_modules its npm shim resolves the per-platform bundle from.
+# CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
+# Node runtime + app), never the npm package's own launcher shim — see the cli stage's comment.
 COPY --from=cli /out/codegraph /opt/codegraph
 # The role prompt parts (`packages/pi-envoy/roles/core/*.md`, `mechanics/*.md`, and per-role
 # residues — not part of the packed plugin, whose `files` is `dist`): the in-cluster daemon reads the
