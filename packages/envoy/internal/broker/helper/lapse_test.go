@@ -285,9 +285,9 @@ func TestARenewThatFailsTransientlyKeepsTheLease(t *testing.T) {
 		t.Helper()
 		posts, deletes, _ := r.fake.snapshot()
 		enrolls := len(posts)
-		if sess.State() != "enrolled" || sess.EnrollmentID() != id || sess.lapsed() != "" || len(deletes) != 0 || enrolls != 1 {
+		if st := sess.snapshot(); st.State != "enrolled" || st.EnrollmentID != id || sess.lapsed() != "" || len(deletes) != 0 || enrolls != 1 {
 			t.Fatalf("%s: session %s under %q (lapsed id %q), revokes %q, %d enrolls; want enrolled under %q, no revoke, one enroll",
-				when, sess.State(), sess.EnrollmentID(), sess.lapsed(), deletes, enrolls, id)
+				when, st.State, st.EnrollmentID, sess.lapsed(), deletes, enrolls, id)
 		}
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -396,11 +396,11 @@ func blockedInRegisterReply() bool {
 func TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne(t *testing.T) {
 	r := startRig(t, "")
 	sess, _ := newSession(1, 1, "h:1:1", nil)
-	if got := r.srv.notEnrolled(sess); got.Code != CodeNotEnrolled || got.Error != "this session is not enrolled with the broker yet" {
+	if got := r.srv.notEnrolled(sess.snapshot()); got.Code != CodeNotEnrolled || got.Error != "this session is not enrolled with the broker yet" {
 		t.Fatalf("no attempt yet: %+v", got)
 	}
 	sess.setError("broker 503 DATABASE: postgres unreachable")
-	if got := r.srv.notEnrolled(sess); got.Error != "this session is not enrolled with the broker yet; last attempt: broker 503 DATABASE: postgres unreachable" {
+	if got := r.srv.notEnrolled(sess.snapshot()); got.Error != "this session is not enrolled with the broker yet; last attempt: broker 503 DATABASE: postgres unreachable" {
 		t.Fatalf("after a failed attempt: %+v", got)
 	}
 }
