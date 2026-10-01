@@ -1595,6 +1595,14 @@ async function openArtifactMarks(
   ];
 }
 
+/** Every ask the document's owner holds: an issue lists its document's asks under the issue, since
+ * the artifact route refuses an issue document. */
+function ownedAsks(client: DispatchClient, resolved: ResolvedArtifact): Promise<Ask[]> {
+  return resolved.issue === undefined
+    ? client.getArtifactAsks(resolved.artifact.id)
+    : client.listIssueAsks(resolved.issue.key);
+}
+
 /**
  * Refuses an approval request while the document holds an open decision block. A request names
  * the latest version, and a new version retracts it, so a request over a block the human has yet
@@ -1619,9 +1627,7 @@ async function refuseOpenDecisionBlocks(
   const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
   if (blocks.length === 0) return;
   const [owned, version] = await Promise.all([
-    resolved.issue === undefined
-      ? client.getArtifactAsks(artifact.id)
-      : client.listIssueAsks(resolved.issue.key),
+    ownedAsks(client, resolved),
     client.docRead(artifact.id, latest),
   ]);
   const asks = new Map(
@@ -1704,10 +1710,7 @@ async function refuseRemovingOpenDecisionBlocks(
     }
   }
   if (removed.size === 0) return;
-  const owned =
-    resolved.issue === undefined
-      ? await client.getArtifactAsks(artifact.id)
-      : await client.listIssueAsks(resolved.issue.key);
+  const owned = await ownedAsks(client, resolved);
   const open = owned.filter(
     (ask) =>
       ask.state === "open" &&

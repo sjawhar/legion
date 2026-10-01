@@ -40265,6 +40265,9 @@ async function openArtifactMarks(client, resolved) {
     ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
   ];
 }
+function ownedAsks(client, resolved) {
+  return resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id) : client.listIssueAsks(resolved.issue.key);
+}
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
   const latest = artifact.approval?.latest_version;
@@ -40274,7 +40277,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   if (blocks.length === 0)
     return;
   const [owned, version2] = await Promise.all([
-    resolved.issue === undefined ? client.getArtifactAsks(artifact.id) : client.listIssueAsks(resolved.issue.key),
+    ownedAsks(client, resolved),
     client.docRead(artifact.id, latest)
   ]);
   const asks = new Map(owned.filter((ask) => ask.block_id != null && ask.block_artifact?.id === artifact.id).map((ask) => [ask.block_id, ask]));
@@ -40328,7 +40331,7 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   }
   if (removed.size === 0)
     return;
-  const owned = resolved.issue === undefined ? await client.getArtifactAsks(artifact.id) : await client.listIssueAsks(resolved.issue.key);
+  const owned = await ownedAsks(client, resolved);
   const open = owned.filter((ask) => ask.state === "open" && ask.block_id != null && ask.block_artifact?.id === artifact.id && removed.has(ask.block_id));
   if (open.length === 0)
     return;
