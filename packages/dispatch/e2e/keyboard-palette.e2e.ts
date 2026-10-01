@@ -447,6 +447,38 @@ test("a query that holds a card move further in moves no card on Enter", async (
       await expect(dialog).toHaveCount(0);
       await expect(card).toBeFocused();
     }
+
+    // Nor can an arrow pressed while the search is still out: `next` leads no label, and Down
+    // then would have taken the move to the next status before any answer came.
+    const release = Promise.withResolvers<void>();
+    let held = 0;
+    await page.route(
+      (url) => url.pathname === "/api/v1/search",
+      async (route) => {
+        held += 1;
+        await release.promise;
+        await route.continue();
+      }
+    );
+    await page.keyboard.press("Control+k");
+    await input.fill("next");
+    const nextMove = actions.getByRole("option", { name: "Move card to the next status" });
+    await expect(nextMove).toHaveCount(1);
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    await expect(dialog).toBeVisible();
+    expect(writes).toEqual([]);
+    await expect.poll(() => held).toBeGreaterThan(0);
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    await expect(dialog).toBeVisible();
+    await expect(input).not.toHaveAttribute("aria-activedescendant");
+    release.resolve();
+    await expect(dialog.getByText("Searching…")).toHaveCount(0);
+    await expect(input).not.toHaveAttribute("aria-activedescendant");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(card).toBeFocused();
     expect(writes).toEqual([]);
     const [after, other] = await Promise.all([getIssue(first.key), getIssue(second.key)]);
     expect(after.status).toBe(first.status);
@@ -742,7 +774,7 @@ test("hits that arrive after the reader has arrowed keep the highlight on the ro
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Held issue search" });
+  const issue = await createIssue({ project: "CORE", title: "Go held search" });
   const context = await asUser(browser, "alice");
 
   try {
@@ -758,33 +790,93 @@ test("hits that arrive after the reader has arrowed keep the highlight on the ro
         await route.continue();
       }
     );
-    await openIssue(page, issue.key, "Held issue search");
+    await openIssue(page, issue.key, "Go held search");
     await page.keyboard.press("Control+k");
     const dialog = page.getByRole("dialog", { name: "Search" });
     const input = page.getByRole("combobox", { name: "Search" });
-    const rows = dialog.getByRole("group", { name: "Actions" }).getByRole("option");
-    await input.fill("issue");
-    const create = rows.filter({ hasText: "Create issue" });
-    await expect(create).toHaveCount(1);
-    const createId = await create.getAttribute("id");
-    // `issue` starts no action's label, so nothing is highlighted until the reader arrows, and the
-    // first arrow lands on the first row.
-    await expect(input).not.toHaveAttribute("aria-activedescendant");
+    // `go to` starts every `Go to …` label, so those rows lead and can be arrowed among while
+    // the search is out.
+    const rows = dialog.getByRole("group", { exact: true, name: "Actions" }).getByRole("option");
+    await input.fill("go to");
+    const documents = rows.filter({ hasText: "Go to Documents" });
+    await expect(documents).toHaveCount(1);
+    const documentsId = await documents.getAttribute("id");
     const ids = await rows.evaluateAll((options) => options.map((option) => option.id));
-    for (let step = 0; step <= ids.indexOf(createId ?? ""); step += 1) {
+    await expect(input).toHaveAttribute("aria-activedescendant", ids[0] ?? "");
+    for (let step = 0; step < ids.indexOf(documentsId ?? ""); step += 1) {
       await input.press("ArrowDown");
     }
-    await expect(input).toHaveAttribute("aria-activedescendant", createId as string);
+    await expect(input).toHaveAttribute("aria-activedescendant", documentsId as string);
     await expect.poll(() => held).toBeGreaterThan(0);
 
-    // The hits arrive above the rows the query found mid-label, and the chosen row keeps the
-    // highlight.
+    // The hits arrive below the rows the query leads to, and the chosen row keeps the highlight.
+    release.resolve();
+    await expect(dialog.getByRole("option", { name: /Go held search/ })).toHaveCount(1);
+    await expect(input).toHaveAttribute("aria-activedescendant", documentsId as string);
+    await input.press("Enter");
+    await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
+  } finally {
+    await context.close();
+  }
+});
+
+test("an arrow pressed before the search answers reaches no action the query finds mid-label", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Arrow before the issue search" });
+  await patchIssue(issue.key, { status: "in_progress" });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    const statusWrites: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+      ) {
+        statusWrites.push(request.postData() ?? "");
+      }
+    });
+    const release = Promise.withResolvers<void>();
+    let held = 0;
+    await page.route(
+      (url) => url.pathname === "/api/v1/search",
+      async (route) => {
+        held += 1;
+        await release.promise;
+        await route.continue();
+      }
+    );
+    await openIssue(page, issue.key, "Arrow before the issue search");
+    await page.keyboard.press("Control+k");
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const input = page.getByRole("combobox", { name: "Search" });
+    await input.fill("issue");
+    await expect(dialog.getByRole("option", { name: "Close issue" })).toHaveCount(1);
+    // Down and Enter in one burst, inside the debounce and again once the request is out: the
+    // list holds only the actions `issue` finds mid-label, `Close issue` first, and the hits are
+    // still to arrive above them, so the arrows move nothing yet.
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    await expect(dialog).toBeVisible();
+    expect(statusWrites).toEqual([]);
+    await expect.poll(() => held).toBeGreaterThan(0);
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    await expect(dialog).toBeVisible();
+    await expect(input).not.toHaveAttribute("aria-activedescendant");
+
     release.resolve();
     await expect(dialog.getByRole("option").first()).toHaveAttribute("id", /^search-option-issue-/);
-    await expect(input).toHaveAttribute("aria-activedescendant", createId as string);
-    await input.press("Enter");
-    await expect(page.getByRole("dialog", { name: "Create issue" })).toBeVisible();
-    expect((await getIssue(issue.key)).status).not.toBe("done");
+    await expect(input).toHaveAttribute("aria-activedescendant", /^search-option-issue-/);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole("button", { exact: true, name: "Close issue" })).toBeVisible();
+    expect(statusWrites).toEqual([]);
+    expect((await getIssue(issue.key)).status).toBe("in_progress");
   } finally {
     await context.close();
   }

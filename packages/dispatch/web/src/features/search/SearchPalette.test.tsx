@@ -406,7 +406,7 @@ test("a search that finds nothing still leaves an action found inside its label 
   }
 });
 
-test("an arrow from no highlight lands on the first row, which keeps the highlight when hits arrive above it", async () => {
+test("an arrow pressed before the search answers reaches no action found inside its label", async () => {
   const ran: string[] = [];
   const unregister = registerClose(ran);
   const hit = issueHit("LEGION-3");
@@ -417,15 +417,88 @@ test("an arrow from no highlight lands on the first row, which keeps the highlig
   try {
     const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
     fireEvent.change(input, { target: { value: "issue" } });
+    // Down and Enter in one burst, inside the debounce and again once the request is out.
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
     await waitFor(() => expect(search).toHaveBeenCalled());
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(ran).toEqual([]);
 
+    // The hits arrive above it and take the head; Enter opens the first one.
     await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
     await waitFor(() => expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]));
+    expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/LEGION-3");
+    expect(ran).toEqual([]);
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("once the search has answered with no hit, Down takes the first action found inside its label", async () => {
+  const ran: string[] = [];
+  const unregister = registerClose(ran);
+  const search = spyOn(api, "search").mockResolvedValue({ results: [], took_ms: 1 });
+  const view = renderPaletteHost();
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await screen.findByText('No results for "issue"');
+    fireEvent.keyDown(input, { key: "ArrowDown" });
     expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(ran).toEqual(["close"]));
+  } finally {
+    search.mockRestore();
+    unregister();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("while the search is out the arrows walk only the actions the query starts, which keep the highlight as hits arrive", async () => {
+  const ran: string[] = [];
+  const unregister = appKeymap.register("global", [
+    { id: "close", keys: [], label: "Close issue", run: () => ran.push("close") },
+    { id: "report", keys: [], label: "Issue the report", run: () => ran.push("report") },
+    { id: "triage", keys: [], label: "Issue triage", run: () => ran.push("triage") },
+  ]);
+  const hit = issueHit("LEGION-3");
+  const answer = Promise.withResolvers<{ results: SearchResult[]; took_ms: number }>();
+  const search = spyOn(api, "search").mockReturnValue(answer.promise);
+  const view = renderPaletteHost();
+  const [report, triage] = [
+    "search-option-action-global-report",
+    "search-option-action-global-triage",
+  ];
+
+  try {
+    const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
+    fireEvent.change(input, { target: { value: "issue" } });
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    expect(optionIds()).toEqual([report, triage, CLOSE_ROW]);
+    expect(input.getAttribute("aria-activedescendant")).toBe(report);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(triage);
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(report);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(triage);
+
+    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await waitFor(() => expect(optionIds()).toEqual([report, triage, optionId(hit), CLOSE_ROW]));
+    expect(input.getAttribute("aria-activedescendant")).toBe(triage);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(ran).toEqual(["triage"]));
   } finally {
     search.mockRestore();
     unregister();
