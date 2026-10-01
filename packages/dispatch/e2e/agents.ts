@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 
+import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
 import { fakeEnvoyPort } from "./harness-ports";
 
@@ -54,6 +55,38 @@ export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   return (await fixtureRequest("/__fixture/sends", "GET")).json() as Promise<
     Record<string, unknown>[]
   >;
+}
+
+/** Every broadcast request the page posts from here on, in order, as the body it sent - a route
+ *  that fulfils a request itself still lists it. */
+export function postedBroadcasts(page: Page): CreateBroadcastInput[] {
+  const posted: CreateBroadcastInput[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
+      posted.push(request.postDataJSON() as CreateBroadcastInput);
+    }
+  });
+  return posted;
+}
+
+/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
+ *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
+export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
+  let refusing = true;
+  await page.route("**/api/v1/broadcasts", (route) =>
+    refusing && route.request().method() === "POST"
+      ? route.fulfill({
+          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+          contentType: "application/json",
+          status: 503,
+        })
+      : route.fallback()
+  );
+  return {
+    allow: () => {
+      refusing = false;
+    },
+  };
 }
 
 export interface FakeInterest {

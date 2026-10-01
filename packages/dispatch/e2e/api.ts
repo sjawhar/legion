@@ -469,11 +469,18 @@ export function createAgentMessage(
   );
 }
 
+/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
+ *  the caller names its own, as a row that replays a request the page made does. */
 export function createBroadcast(
-  input: CreateBroadcastInput,
+  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
+  return request<BroadcastCreated>(
+    "/api/v1/broadcasts",
+    "POST",
+    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
+    options
+  );
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {

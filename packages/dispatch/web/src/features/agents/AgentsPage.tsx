@@ -67,7 +67,8 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { deliveryAttempts } from "./attempts";
 import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
-import { broadcastPlan, broadcastSendState } from "./broadcast-plan";
+import { useBroadcastComposition } from "./broadcast-composition";
+import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from "./broadcast-plan";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import {
   AGENT_ROW_SELECTOR,
@@ -1149,11 +1150,15 @@ function SelectionHeader({
  * the ones this mode leaves out. It follows the list and sticks to the viewport's bottom, so
  * appearing costs no layout above the rows: the checkbox that summoned it stays under the
  * pointer. A long recipient list scrolls inside it rather than growing it past half the screen.
- * Send hands the request to the page's queue (`onSend`) at the press.
+ * Send hands the request to the page's queue (`onSend`) at the press: `composed`, which
+ * `composedBroadcast` decides - the restored request word for word while one is kept, else the
+ * live plan under the composition's key - with the plan the composer shows for it, so a session
+ * that has come back since a refused send is shown as not in the request being re-sent.
  */
 function BroadcastComposer({
   agents,
   body,
+  composed,
   delivery,
   onBody,
   onDelivery,
@@ -1163,6 +1168,7 @@ function BroadcastComposer({
 }: {
   agents: readonly Agent[];
   body: string;
+  composed: ComposedBroadcast;
   delivery: MessageDeliveryMode;
   onBody: (body: string) => void;
   onDelivery: (delivery: MessageDeliveryMode) => void;
@@ -1170,7 +1176,7 @@ function BroadcastComposer({
   onSend: (send: BroadcastSend) => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
-  const plan = broadcastPlan(selected, agents, delivery);
+  const { plan } = composed;
   const { excluded, recipients } = plan;
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
   // and refuses a send over it; saying so before Send saves the round trip. The notice line is
@@ -1250,12 +1256,7 @@ function BroadcastComposer({
       <RefusableButton
         className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
         describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
-        onPress={() =>
-          onSend({
-            input: { body, delivery, session_ids: recipients.map((agent) => agent.session_id) },
-            selected: [...selected],
-          })
-        }
+        onPress={() => onSend({ input: composed.input, selected: [...selected] })}
         refusal={sendState.refusal}
         refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
       >
@@ -1294,15 +1295,13 @@ export function AgentsPage(): ReactNode {
   // Selection is what the human ticked, not what the filters currently show: narrowing the
   // list after ticking a row must not quietly drop that row from the send. Every selected
   // session is named in the composer, so nothing is hidden either way.
-  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
-  // The draft is page state too: the composer unmounts whenever the selection empties, and
-  // clearing a selection to pick again must not throw away a typed message or its mode. Send
-  // hands the message to the queue and clears it with the selection; Restore draft, on a send the
-  // server refused, puts the message, its mode and its selection back. Any message or selection
-  // here was started after that press cleared both, so Restore draft refuses rather than replace
-  // it - the same test the queue uses to hold off opening a broadcast while another is begun.
-  const [draft, setDraft] = useState("");
-  const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
+  // The draft (message and mode), the selection and a restored request are page state, in one
+  // owner (`useBroadcastComposition`). Restore draft, on a send the server refused, puts them
+  // back; any message or selection here was started after Send cleared both, so Restore draft
+  // refuses rather than replace it - the same test the queue uses to hold off opening a broadcast
+  // while another is begun.
+  const composition = useBroadcastComposition();
+  const { delivery, draft, selected, setSelected } = composition;
   const composing = draft.trim() !== "" || selected.size > 0;
   const queue = useBroadcastQueue(composing);
   const restoreRefusal = composing
@@ -1363,7 +1362,7 @@ export function AgentsPage(): ReactNode {
           <SelectionHeader
             listed={agents}
             matching={matching}
-            onClear={() => setSelected(new Set())}
+            onClear={() => setSelected(() => new Set())}
             onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}
           />
@@ -1419,9 +1418,7 @@ export function AgentsPage(): ReactNode {
               className="narrow-or-short:mt-3"
               onRestore={(row) => {
                 queue.dismiss(row);
-                setDraft(row.send.input.body);
-                setDelivery(row.send.input.delivery);
-                setSelected(new Set(row.send.selected));
+                composition.restore(row.send);
               }}
               onRetry={queue.retry}
               restoreRefusal={restoreRefusal}
@@ -1432,14 +1429,14 @@ export function AgentsPage(): ReactNode {
             <BroadcastComposer
               agents={agents}
               body={draft}
+              composed={composedBroadcast(composition, agents)}
               delivery={delivery}
-              onBody={setDraft}
-              onDelivery={setDelivery}
+              onBody={composition.setDraft}
+              onDelivery={composition.setDelivery}
               onDeselect={(sessionID) => select(sessionID, false)}
               onSend={(send) => {
                 queue.enqueue(send);
-                setSelected(new Set());
-                setDraft("");
+                composition.sent();
               }}
               selected={selected}
             />
