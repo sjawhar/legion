@@ -6,6 +6,7 @@ import type {
   Ask,
   AskRead,
   AskUrgency,
+  BlockPath,
   Comment,
   CommentRead,
   CreateAskInput,
@@ -1449,6 +1450,8 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
   ]);
   return [
     `Question: ${ask.question}`,
+    ...(ask.anchor?.quote === undefined ? [] : [`> ${ask.anchor.quote}`]),
+    ...(ask.anchor_block === undefined ? [] : [`Position: ${positionText(ask.anchor_block)}`]),
     "Options:",
     ...(ask.options.length === 0
       ? ["- none"]
@@ -1522,6 +1525,9 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
     ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
+    ...(comment.anchor_block === undefined
+      ? []
+      : [`Position: ${positionText(comment.anchor_block)}`]),
     `Body: ${comment.body}`,
   ];
   const chain = replies.flatMap((reply) => [
@@ -1536,6 +1542,30 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     ...(chain.length === 0 ? ["- none"] : chain),
     ...graph,
   ].join("\n");
+}
+
+/** Where an anchor's block stands, printed after its quote. Every node from the top-level block
+ *  down reads `type[index]`; in a table the row and cell read instead as
+ *  `row 5 (Red-teamer loop), column Due`: the row's index (0 is the header), labelled by its cells
+ *  before the anchored column — blank cells and bare numbers dropped, since a `#` column repeats
+ *  the index — and the column's header, or its index where the header row has no cell there. A
+ *  position whose path holds no table entry reads as its path alone. */
+export function positionText(block: BlockPath): string {
+  const table = block.table;
+  const tableAt = block.path.findIndex((entry) => entry.type === "table");
+  const placed =
+    table === undefined || tableAt === -1 ? block.path : block.path.slice(0, tableAt + 1);
+  const segments = placed.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || tableAt === -1 || table.row === null) return segments.join(" › ");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column))
+    .map((cell) => cell.trim())
+    .filter((cell) => cell !== "" && !/^\d+$/.test(cell))
+    .join(" · ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  if (table.column === null) return [...segments, row].join(" › ");
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [...segments, `${row}, column ${header}`].join(" › ");
 }
 
 function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {

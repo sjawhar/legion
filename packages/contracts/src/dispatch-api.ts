@@ -458,6 +458,39 @@ export interface ArtifactBlock {
   };
 }
 
+/** One node on a block's path from the document's top-level block down to the block: its type,
+ *  its block id ("" for a node the live document has not stamped yet) and its index among its
+ *  parent's children. */
+export interface BlockPathEntry {
+  readonly type: string;
+  readonly id: string;
+  readonly index: number;
+}
+
+/** Where a block stands in the table holding it. `row` is the row's index (0 is the header row)
+ *  and `column` the cell's index in its row — the indexes `delete_row` and `delete_column` take.
+ *  `row` is null for the table block itself; `column` and `header` are null for the table and for
+ *  a row block. `header` is the header row's cell text at `column`, "" where the header row has no
+ *  cell there. `cells` is each cell of the row as its opening words, by column; null for the table
+ *  block. */
+export interface TablePosition {
+  readonly id: string;
+  readonly row: number | null;
+  readonly column: number | null;
+  readonly header: string | null;
+  readonly cells: readonly string[] | null;
+}
+
+/** Where a block stands in its document: `GET /api/v1/artifacts/{id}/blocks/{block_id}`'s answer,
+ *  and a comment's or ask's `anchor_block`. `table` is present for a table block and for every
+ *  block inside one. */
+export interface BlockPath {
+  readonly id: string;
+  readonly type: string;
+  readonly path: readonly BlockPathEntry[];
+  readonly table?: TablePosition;
+}
+
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
 export interface EditBlockPrecondition {
   readonly id: string;
@@ -513,6 +546,10 @@ export interface Ask {
   readonly multiple: boolean;
   readonly urgency: AskUrgency;
   readonly anchor: Anchor | null;
+  /** Where `anchor.block_id` stands in the live document. Set on the single-record read alone
+   *  (`GET /api/v1/asks/{id}`); lists and events never carry it, and it is absent when the anchor
+   *  names no block, the block has left the document, or the server predates it. */
+  readonly anchor_block?: BlockPath;
   readonly state: "open" | "answered" | "resolved";
   readonly answer: AskAnswer | null;
   readonly resolution?: AskResolution;
@@ -733,6 +770,10 @@ export interface Comment {
   readonly author: Actor;
   readonly body: string;
   readonly anchor: Anchor | null;
+  /** Where `anchor.block_id` stands in the live document. Set on the single-record read alone
+   *  (`GET /api/v1/comments/{id}`); lists and events never carry it, and it is absent when the
+   *  anchor names no block, the block has left the document, or the server predates it. */
+  readonly anchor_block?: BlockPath;
   readonly reply_to: string | null;
   readonly ask_id: string | null;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is

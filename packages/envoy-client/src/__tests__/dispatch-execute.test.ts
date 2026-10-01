@@ -4,9 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   type Artifact,
+  type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
   SEARCH_QUERY_MAX,
+  type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
 import { z } from "zod";
@@ -14,6 +16,7 @@ import type { ExecFn } from "../dispatch-cwd";
 import {
   type DispatchToolResult,
   executeDispatchTool,
+  positionText,
   resolveIssueDocumentId,
 } from "../dispatch-execute";
 import { DispatchClient } from "../dispatch-http";
@@ -5456,6 +5459,128 @@ describe("executeDispatchTool", () => {
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
     ]);
   });
+  test("prints where an anchored comment's block stands after its quote", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/comments/cccccccc-0000-4000-8000-000000000042") {
+        return response({
+          comment: {
+            id: "cccccccc-0000-4000-8000-000000000042",
+            issue_key: "DSP-42",
+            author: { kind: "user", id: "sami" },
+            body: "I want this done today",
+            anchor: {
+              artifact_id: "artifact-42",
+              block_id: "p-5-2",
+              mark_id: "m-1",
+              version: 1,
+              quote: "Today, Oct 1",
+              orphaned: false,
+            },
+            anchor_block: anchoredCell,
+            reply_to: null,
+            resolved: false,
+            suggestion: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/comment/cccccccc-0000-4000-8000-000000000042" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      [
+        "Comment:",
+        "cccccccc-0000-4000-8000-000000000042 · user sami",
+        "> Today, Oct 1",
+        "Position: table[3] › row 5 (Red-teamer loop), column Due",
+        "Body: I want this done today",
+        "Reply chain:",
+        "- none",
+        "Referenced by:",
+        "- none",
+        "Links:",
+        "- none",
+      ].join("\n")
+    );
+  });
+
+  test("prints an anchored ask's quote and where its block stands after the question", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042") {
+        return response({
+          ask: {
+            id: "aaaaaaaa-0000-4000-8000-000000000042",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "author-1" },
+            question: "Which day is meant?",
+            options: [],
+            multiple: false,
+            urgency: "high",
+            anchor: {
+              artifact_id: "artifact-42",
+              block_id: "p-5-2",
+              mark_id: "m-1",
+              version: 1,
+              quote: "Today, Oct 1",
+              orphaned: false,
+            },
+            anchor_block: anchoredCell,
+            state: "open",
+            answer: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      [
+        "Question: Which day is meant?",
+        "> Today, Oct 1",
+        "Position: table[3] › row 5 (Red-teamer loop), column Due",
+        "Options:",
+        "- none",
+        "State: open",
+        "Answer:",
+        "- none",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        "- none",
+        "Links:",
+        "- none",
+      ].join("\n")
+    );
+  });
   test("reads the targeted message and its reply chain from a Dispatch message reference", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -7100,4 +7225,88 @@ test("a reference that is one document's slug and another's filename is refused 
   ] as const) {
     expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
   }
+});
+
+const anchoredRow: TablePosition = {
+  id: "t-1",
+  row: 5,
+  column: 2,
+  header: "Due",
+  cells: ["5", "Red-teamer loop", "Today, Oct 1", "Task delivery owns the full loop. Stagin…"],
+};
+
+const anchoredCell: BlockPath = {
+  id: "p-5-2",
+  type: "paragraph",
+  path: [
+    { type: "table", id: "t-1", index: 3 },
+    { type: "table_row", id: "r-5", index: 5 },
+    { type: "table_cell", id: "c-5-2", index: 2 },
+    { type: "paragraph", id: "p-5-2", index: 0 },
+  ],
+  table: anchoredRow,
+};
+
+describe("positionText", () => {
+  test("names a cell by its row, the cells before it, and its column header", () => {
+    expect(positionText(anchoredCell)).toBe("table[3] › row 5 (Red-teamer loop), column Due");
+  });
+
+  test("a first-column cell has no label, and a column the header row lacks reads by index", () => {
+    expect(
+      positionText({ ...anchoredCell, table: { ...anchoredRow, column: 0, header: "#" } })
+    ).toBe("table[3] › row 5, column #");
+    expect(positionText({ ...anchoredCell, table: { ...anchoredRow, header: "" } })).toBe(
+      "table[3] › row 5 (Red-teamer loop), column 2"
+    );
+  });
+
+  test("a row block reads by every cell, a table block by its place alone", () => {
+    expect(
+      positionText({
+        id: "r-5",
+        type: "table_row",
+        path: anchoredCell.path.slice(0, 2),
+        table: { ...anchoredRow, column: null, header: null },
+      })
+    ).toBe(
+      "table[3] › row 5 (Red-teamer loop · Today, Oct 1 · Task delivery owns the full loop. Stagin…)"
+    );
+    expect(
+      positionText({
+        id: "t-1",
+        type: "table",
+        path: anchoredCell.path.slice(0, 1),
+        table: { id: "t-1", row: null, column: null, header: null, cells: null },
+      })
+    ).toBe("table[3]");
+  });
+
+  test("a block outside a table reads as its path of types and child indexes", () => {
+    expect(
+      positionText({
+        id: "p",
+        type: "paragraph",
+        path: [
+          { type: "bullet_list", id: "l", index: 7 },
+          { type: "list_item", id: "i", index: 0 },
+          { type: "paragraph", id: "p", index: 0 },
+        ],
+      })
+    ).toBe("bullet_list[7] › list_item[0] › paragraph[0]");
+  });
+
+  test("a table position whose path holds no table entry reads as the path alone", () => {
+    expect(
+      positionText({
+        id: "p",
+        type: "paragraph",
+        path: [
+          { type: "table_cell", id: "c", index: 2 },
+          { type: "paragraph", id: "p", index: 0 },
+        ],
+        table: anchoredRow,
+      })
+    ).toBe("table_cell[2] › paragraph[0]");
+  });
 });

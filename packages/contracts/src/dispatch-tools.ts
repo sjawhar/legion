@@ -895,6 +895,8 @@ export const dispatchToolSpecs = [
       "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " +
       "or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). " +
+      "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
+      "and in a table the row (0 is the header), the cells before the anchored one, and the column's header. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       OWNER_REFERENCE,
