@@ -1751,6 +1751,13 @@ AGENTC-833), so concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
 
+`.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
+image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,
+smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
+`org.opencontainers.image.revision` with that sha. Its `release` job (moving `:latest`, the
+`legion-envoy-v*` tag and the GitHub release) runs only on `refs/heads/main`, so a branch
+dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
+
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of
 `agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
