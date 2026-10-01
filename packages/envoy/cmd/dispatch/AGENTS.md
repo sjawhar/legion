@@ -116,23 +116,33 @@ users through `Identity.Login` and write identity errors with
   (`routes.LoopbackHostPort`, which the route's peer check also uses), every
   `DATABASE_URL` host `pgx.ParseConfig` finds is loopback or a unix socket
   (`routes.LoopbackName`), `DISPATCH_SIGNING_KEY` is unset,
-  `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set
-  `DISPATCH_AGENT_SECRETS_URL` names a loopback host, and `ENVOY_URL` (the
-  listener mentions and messages are delivered through) names a loopback host.
-  `devSignInAppFence` (run by `main` as soon as it has loaded the App, from the
-  environment or `app.json`, before anything connects) refuses a loaded App
-  private key unless `DISPATCH_GITHUB_API_BASE` names a loopback host, naming
-  where the key came from: a signed-in session can save an architecture source,
-  which has the App probe and import the repository the caller names. The key is
-  the credential that acts (`githubapp.New` builds no client without it, and the
-  App JWT names the client ID), so neither the App ID nor the OAuth client pair,
-  which acts only on a code GitHub issues after a person signs in there, is
-  fenced.
-  `routes.BuildAppContext` (and `main`, before any connection) refuses a
-  dashboard origin that is not
-  `127.0.0.1`, `[::1]` or `localhost` (`routes.DevSignInOrigin`) and stores the
-  origin's host in the unexported `devSignInHost`, the only switch `New` reads,
-  so no caller can mount the route without that check. The signing key is then
+  `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, and a set
+  `DISPATCH_AGENT_SECRETS_URL` and `ENVOY_URL` (the listener mentions and
+  messages are delivered through) each name a loopback host
+  (`routes.LoopbackURL`, the one URL rule every fence item uses).
+  `devSignInLoadedFence` (run by `main` once it has read `envoy.json` and the
+  App, before anything connects) checks what the environment does not hold: the
+  dashboard origin must name `127.0.0.1`, `[::1]` or `localhost`
+  (`routes.DevSignInOrigin`), and a loaded App private key must come from
+  `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback
+  host. A key from `app.json`, where a developer keeps the real App's key, is
+  refused whatever the base, naming the file: a signed-in session can save an
+  architecture source, which has the App probe and import the repository the
+  caller names. The loopback check is on the host, not on what listens there,
+  and every App call hands a signed App JWT to whatever owns that port, so the
+  environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh`
+  generates one per run. The key is the credential that acts (`githubapp.New`
+  builds no client without it, and the App JWT names the client ID), so the App
+  ID is not fenced. This fence leaves the OAuth client pair alone too: an
+  exchange needs a code GitHub issues after a person signs in there, and the
+  pair's token refresh (`ProxyConfig.refresh`, `internal/dispatch/githubapi/proxy.go`)
+  needs a stored token pair, which only `requireUser`'s dev sign-in check
+  (`routes/router.go`) keeps from being read under the flag. A change to that
+  check unfences the pair.
+  `routes.BuildAppContext` also refuses a dashboard origin that is not
+  loopback and stores the origin's host in the unexported `devSignInHost`, the
+  only switch `New` reads, so no caller can mount the route without that check.
+  The signing key is then
   `auth.NewSigningKey`, generated per process and never the data-dir file, so a
   cookie it mints dies with the process. While it is on, the whole router
   answers a request whose `Host` is not the dashboard origin's

@@ -75,9 +75,8 @@ type bootConfig struct {
 	// ListenAddr is the address the server binds, from DISPATCH_LISTEN_HOST and DISPATCH_PORT
 	// (listenAddress). The dev sign-in fence checks this value, so what it checks is what binds.
 	ListenAddr string
-	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the fence
-	// resolveBootConfig, devSignInAppFence and routes.BuildAppContext apply; the signing key is
-	// then per process.
+	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
+	// fence; the signing key is then per process.
 	DevSignIn bool
 }
 
@@ -110,8 +109,8 @@ func main() {
 	if envoyConfig.Dispatch != nil {
 		serverURL = envoyConfig.Dispatch.ServerURL
 	}
-	// The App credentials are read before anything connects, so the dev sign-in fence's App half
-	// refuses a key that would reach GitHub before NATS or Postgres is dialled.
+	// The App credentials are read before anything connects, so the dev sign-in fence refuses a
+	// key it will not sign with before NATS or Postgres is dialled.
 	dataDir, err := defaultDataDir()
 	if err != nil {
 		slog.Error("dispatch: resolve data dir", "error", err)
@@ -122,20 +121,16 @@ func main() {
 		slog.Error("dispatch: load app credentials", "error", err)
 		os.Exit(1)
 	}
-	if err := devSignInAppFence(boot, appCfg, appSource); err != nil {
+	if err := devSignInLoadedFence(boot, serverURL, appCfg, appSource); err != nil {
 		slog.Error("dispatch: dev sign-in", "error", err)
 		os.Exit(1)
 	}
 	if appCfg == nil {
 		slog.Info("dispatch: no app credentials yet — dashboard will respond 503 until configured")
 	} else {
-		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource)
+		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		if _, err := routes.DevSignInOrigin(serverURL); err != nil {
-			slog.Error("dispatch: dev sign-in", "error", err)
-			os.Exit(1)
-		}
 		slog.Warn("dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only", "origin", serverURL)
 	}
 
@@ -266,7 +261,6 @@ func main() {
 		Docs:           documentService,
 		Events:         broker,
 		App:            appCfg,
-		AppSource:      appSource,
 		GitHubAPIBase:  boot.GitHubAPIBase,
 		OIDC:           serviceTokens,
 		AgentStream:    agentStream,
@@ -399,24 +393,38 @@ func defaultWebDistDir() (string, error) {
 	return filepath.Join(cwd, "packages", "dispatch", "web", "dist"), nil
 }
 
-// loadAppCredentials returns (cfg, source, err). source is "env" or
-// "file:<path>" for diagnostic logging. Env wins over file; either may be
-// absent (returns nil, "", nil).
-func loadAppCredentials(dataDir string) (*auth.AppConfig, string, error) {
+// appCredentialSource is where loadAppCredentials found the App: the environment, or the data
+// dir's app.json at Path. The dev sign-in fence decides on it; String is the form the boot log
+// prints.
+type appCredentialSource struct {
+	FromFile bool
+	Path     string
+}
+
+func (s appCredentialSource) String() string {
+	if s.FromFile {
+		return "file:" + s.Path
+	}
+	return "env"
+}
+
+// loadAppCredentials returns the App and where it came from. The environment wins over the file;
+// either may be absent, which returns a nil App.
+func loadAppCredentials(dataDir string) (*auth.AppConfig, appCredentialSource, error) {
 	if cfg, err := auth.LoadAppFromEnv(); err != nil {
-		return nil, "", fmt.Errorf("load app from env: %w", err)
+		return nil, appCredentialSource{}, fmt.Errorf("load app from env: %w", err)
 	} else if cfg != nil {
-		return cfg, "env", nil
+		return cfg, appCredentialSource{}, nil
 	}
 	path := filepath.Join(dataDir, "app.json")
 	cfg, err := auth.ReadApp(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("read %s: %w", path, err)
+		return nil, appCredentialSource{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	if cfg == nil {
-		return nil, "", nil
+		return nil, appCredentialSource{}, nil
 	}
-	return cfg, "file:" + path, nil
+	return cfg, appCredentialSource{FromFile: true, Path: path}, nil
 }
 
 func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
@@ -506,12 +514,11 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	return boot, nil
 }
 
-// devSignInFence is DISPATCH_DEV_SIGNIN=1's boot half. With the flag any loopback client signs in
-// as any allowlisted login, so the process must listen, keep its data and reach the services that
-// act on a human's word (NATS, the secrets broker, the Envoy listener that delivers mentions and
-// messages, GitHub as the App) on this machine alone, and sign its cookies with a key no other
-// process holds. devSignInAppFence checks the App once main has loaded it, and
-// routes.BuildAppContext checks the dashboard origin.
+// devSignInFence is the dev sign-in fence over the environment; devSignInLoadedFence covers what
+// main loads after it. With the flag any loopback client signs in as any allowlisted login, so the
+// process must listen, keep its data and reach the services that act on a human's word (NATS, the
+// secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
+// this machine alone, and sign its cookies with a key no other process holds.
 func devSignInFence(boot bootConfig, getenv func(string) string) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
@@ -529,35 +536,44 @@ func devSignInFence(boot bootConfig, getenv func(string) string) error {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
 	}
 	if boot.AgentSecretsURL != "" {
-		if parsed, err := url.Parse(boot.AgentSecretsURL); err != nil || !routes.LoopbackName(parsed.Hostname()) {
+		if !routes.LoopbackURL(boot.AgentSecretsURL) {
 			return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 decides credential requests on this machine's secrets broker only: DISPATCH_AGENT_SECRETS_URL=%q must name 127.0.0.1, [::1] or localhost", boot.AgentSecretsURL)
 		}
 	}
-	if parsed, err := url.Parse(boot.EnvoyURL); err != nil || !routes.LoopbackName(parsed.Hostname()) {
+	if !routes.LoopbackURL(boot.EnvoyURL) {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 delivers through this machine's Envoy listener only: ENVOY_URL=%q must name 127.0.0.1, [::1] or localhost", boot.EnvoyURL)
 	}
 	return nil
 }
 
-// devSignInAppFence is the fence's App half, run as soon as main has loaded the GitHub App
-// credentials, from the environment or the data dir's app.json, which resolveBootConfig cannot
-// see. With the flag a loopback client acts as an allowlisted human, and a human can make the App
-// act: saving an architecture source has the App probe and import the repository the caller
-// names. So the App's private key may sign calls only to a GitHub API on this machine, as the e2e
-// harness's fake is. The key is the credential that acts: githubapp.New builds no client without
-// it, the App JWT names the client ID, and nothing sends the numeric App ID.
-func devSignInAppFence(boot bootConfig, app *auth.AppConfig, source string) error {
-	if !boot.DevSignIn || app == nil || app.PEM == "" {
+// devSignInLoadedFence is the dev sign-in fence over what main loads after the environment: the
+// dashboard origin from envoy.json, and the GitHub App from the environment or the data dir's
+// app.json. With the flag a loopback client acts as an allowlisted human, and a human can make the
+// App act: saving an architecture source has the App probe and import the repository the caller
+// names. The private key is the credential that acts (githubapp.New builds no client without it,
+// the App JWT names the client ID, and nothing sends the numeric App ID), so:
+//   - a key from app.json, where a developer keeps the real App's key, is refused whatever the
+//     base;
+//   - a key from the environment may sign calls only to a loopback host. That checks the host, not
+//     what listens there: every App call hands a signed App JWT to whatever owns the port, so the
+//     key must be a throwaway, as the one packages/dispatch/e2e/run-server.sh generates.
+func devSignInLoadedFence(boot bootConfig, serverURL string, app *auth.AppConfig, source appCredentialSource) error {
+	if !boot.DevSignIn {
 		return nil
 	}
-	if parsed, err := url.Parse(boot.GitHubAPIBase); err == nil && routes.LoopbackName(parsed.Hostname()) {
+	if _, err := routes.DevSignInOrigin(serverURL); err != nil {
+		return err
+	}
+	if app == nil || app.PEM == "" {
 		return nil
 	}
-	key := "DISPATCH_APP_PEM_B64"
-	if path, ok := strings.CutPrefix(source, "file:"); ok {
-		key = "pem in " + path
+	if source.FromFile {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 refuses the App private key in %s, whatever DISPATCH_GITHUB_API_BASE names: that file is where the real App's key is kept, and with the flag any loopback client can have the App sign calls. Pass a throwaway App in the environment instead (DISPATCH_APP_CLIENT_ID, DISPATCH_APP_CLIENT_SECRET and a generated DISPATCH_APP_PEM_B64, which take precedence over app.json), with DISPATCH_GITHUB_API_BASE naming a GitHub fake on a loopback host, as packages/dispatch/e2e/run-server.sh does", source.Path)
 	}
-	return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 calls GitHub as the App only through a fake on this machine: the App private key (%s) would sign calls to DISPATCH_GITHUB_API_BASE=%q (empty is https://api.github.com), which must name 127.0.0.1, [::1] or localhost; remove the key, or point DISPATCH_GITHUB_API_BASE at a GitHub fake on this machine", key, boot.GitHubAPIBase)
+	if !routes.LoopbackURL(boot.GitHubAPIBase) {
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 lets the App private key (DISPATCH_APP_PEM_B64) sign calls only to a loopback host: DISPATCH_GITHUB_API_BASE=%q (empty is https://api.github.com) must name 127.0.0.1, [::1] or localhost. Use a throwaway key: every App call hands a signed App JWT to whatever listens there", boot.GitHubAPIBase)
+	}
+	return nil
 }
 
 // loopbackDatabase refuses a DATABASE_URL with a host that is not this machine: the data a

@@ -54,7 +54,6 @@ type AppContext struct {
 	HTTPClient     auth.HTTPClient
 	apiDeps        api.Deps
 	app            *auth.AppConfig // nil ⇒ not configured
-	appSource      string          // "env" | "file:<path>" | "" — for diagnostic logs
 	appMu          sync.RWMutex
 	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
 	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
@@ -81,7 +80,6 @@ type AppContextOptions struct {
 	Docs           docs.API
 	Events         *events.Broker
 	App            *auth.AppConfig
-	AppSource      string
 	GitHubAPIBase  string
 	OIDC           *oidc.Verifier
 	AgentStream    agentstream.Source
@@ -158,7 +156,6 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
 		app:            opts.App,
-		appSource:      opts.AppSource,
 	}, nil
 }
 
