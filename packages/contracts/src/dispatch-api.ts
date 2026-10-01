@@ -491,17 +491,18 @@ export interface BlockPath {
   readonly table?: TablePosition;
 }
 
-/** A comment's or ask's `anchor_block_error` when Dispatch could not read the anchor's document
- *  for `anchor_block`: the room or the store holding it could not be reached, which a later read
- *  can find recovered. Generated into Go as `contracts.AnchorBlockDocumentUnavailable`. */
-export const ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE = "document_unavailable";
-/** A comment's or ask's `anchor_block_error` when the anchor's live document is a tree Dispatch
- *  cannot read (outside the Proof schema), until someone repairs it. Generated into Go as
- *  `contracts.AnchorBlockDocumentUnreadable`. */
-export const ANCHOR_BLOCK_DOCUMENT_UNREADABLE = "document_unreadable";
-export type AnchorBlockError =
-  | typeof ANCHOR_BLOCK_DOCUMENT_UNAVAILABLE
-  | typeof ANCHOR_BLOCK_DOCUMENT_UNREADABLE;
+/** Where a comment's or an ask's anchor's block stands in the live document. Set on the
+ *  single-record reads alone (`GET /api/v1/comments/{id}`, `GET /api/v1/asks/{id}`); lists and
+ *  events never carry it. */
+export interface AnchorPosition {
+  /** Absent when the anchor names no block, the block has left the document, the document could
+   *  not be read (`anchor_block_error` then says why), or the server predates it. */
+  readonly anchor_block?: BlockPath;
+  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
+   *  document, named by the code the API answers that error with elsewhere. The read itself still
+   *  answers. */
+  readonly anchor_block_error?: "DOC_SERVICE_UNAVAILABLE" | "DOC_SCHEMA" | "INTERNAL";
+}
 
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
 export interface EditBlockPrecondition {
@@ -540,7 +541,7 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
-export interface Ask {
+export interface Ask extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
@@ -558,14 +559,6 @@ export interface Ask {
   readonly multiple: boolean;
   readonly urgency: AskUrgency;
   readonly anchor: Anchor | null;
-  /** Where `anchor.block_id` stands in the live document. Set on the single-record read alone
-   *  (`GET /api/v1/asks/{id}`); lists and events never carry it, and it is absent when the anchor
-   *  names no block, the block has left the document, the document could not be read
-   *  (`anchor_block_error` then says why), or the server predates it. */
-  readonly anchor_block?: BlockPath;
-  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
-   *  document. The ask's read still answers. */
-  readonly anchor_block_error?: AnchorBlockError;
   readonly state: "open" | "answered" | "resolved";
   readonly answer: AskAnswer | null;
   readonly resolution?: AskResolution;
@@ -779,21 +772,13 @@ export interface CommentDeliveryEventPayload {
   readonly error?: string;
   readonly reply_id: string | null;
 }
-export interface Comment {
+export interface Comment extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
   readonly author: Actor;
   readonly body: string;
   readonly anchor: Anchor | null;
-  /** Where `anchor.block_id` stands in the live document. Set on the single-record read alone
-   *  (`GET /api/v1/comments/{id}`); lists and events never carry it, and it is absent when the
-   *  anchor names no block, the block has left the document, the document could not be read
-   *  (`anchor_block_error` then says why), or the server predates it. */
-  readonly anchor_block?: BlockPath;
-  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
-   *  document. The comment's read still answers. */
-  readonly anchor_block_error?: AnchorBlockError;
   readonly reply_to: string | null;
   readonly ask_id: string | null;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is

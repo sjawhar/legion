@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -154,11 +156,11 @@ func TestCommentAndAskReadsStandWhenTheAnchorDocumentCannotBeRead(t *testing.T) 
 		store docs.VersionedStore
 		want  string
 	}{
-		{"the store cannot load the document", failingLoadStore{VersionedStore: docs.NewPgVersioned(database)}, "document_unavailable"},
-		{"the live tree leaves the schema", outsideSchemaStore{VersionedStore: docs.NewPgVersioned(database)}, "document_unreadable"},
+		{"the store cannot load the document", failingLoadStore{VersionedStore: docs.NewPgVersioned(database)}, codeDocServiceUnavailable},
+		{"the live tree leaves the schema", outsideSchemaStore{VersionedStore: docs.NewPgVersioned(database)}, codeDocSchema},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			reader := readingServer(t, database, test.store)
+			reader := readingServer(t, database, test.store, nil)
 			for _, read := range []struct{ path, record string }{
 				{"/api/v1/comments/" + comment, "comment"},
 				{"/api/v1/asks/" + ask, "ask"},
@@ -185,18 +187,91 @@ func TestCommentAndAskReadsStandWhenTheAnchorDocumentCannotBeRead(t *testing.T) 
 	}
 }
 
-// readingServer is a second server on database whose document service reads through persist.
-func readingServer(t *testing.T, database *store.Store, persist docs.VersionedStore) http.Handler {
+// A room fails with the cause that failed it, and a writer whose client went away during its
+// commit fails the room with a cause that holds context.Canceled. That cancellation is the
+// writer's, so a live read of the same document still answers 200 without the position, while a
+// read whose own request has gone away fails. The two reads meet the same error; only the request
+// differs.
+func TestAnAnchoredReadDecidesCancellationByItsOwnRequest(t *testing.T) {
+	writer, database, _ := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, writer, "TEST", "Cancelled writer", "Intro.\n\nThe quoted line.\n")
+	created := func(path string, body map[string]any) string {
+		t.Helper()
+		return decodeBody[struct {
+			ID string `json:"id"`
+		}](t, dispatchRequest(t, writer, http.MethodPost, path, body, "alice")).ID
+	}
+	anchor := map[string]any{"artifact": "spec", "quote": "The quoted line."}
+	reads := []struct{ path, record string }{
+		{"/api/v1/comments/" + created("/api/v1/issues/"+issue.Key+"/comments", map[string]any{"anchor": anchor, "body": "Quoted."}), "comment"},
+		{"/api/v1/asks/" + created("/api/v1/issues/"+issue.Key+"/asks", map[string]any{"anchor": anchor, "question": "Keep it?"}), "ask"},
+	}
+	// What a room failed by a writer's cancelled commit answers a read that may not wait for it.
+	failedRoom := fmt.Errorf("%w: %w", docs.ErrServiceUnavailable, fmt.Errorf("commit live document write: %w", context.Canceled))
+
+	for _, read := range reads {
+		live := readingServer(t, database, docs.NewPgVersioned(database), func(documents docs.API) docs.API {
+			return failingBlockPath{API: documents, err: failedRoom}
+		})
+		response := dispatchRequest(t, live, http.MethodGet, read.path, nil, "alice")
+		body := response.Body.String()
+		if response.Code != http.StatusOK {
+			t.Fatalf("live GET %s: status=%d body=%s, want 200", read.path, response.Code, body)
+		}
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal(decodeBody[map[string]json.RawMessage](t, response)[read.record], &record); err != nil {
+			t.Fatalf("live GET %s: decode %s: %v", read.path, read.record, err)
+		}
+		if _, carried := record["anchor_block"]; carried || string(record["anchor_block_error"]) != `"`+codeDocServiceUnavailable+`"` {
+			t.Fatalf("live GET %s: body=%s, want no anchor_block and anchor_block_error %q", read.path, body, codeDocServiceUnavailable)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		gone := readingServer(t, database, docs.NewPgVersioned(database), func(documents docs.API) docs.API {
+			return failingBlockPath{API: documents, err: failedRoom, during: cancel}
+		})
+		request := httptest.NewRequest(http.MethodGet, read.path, nil).WithContext(ctx)
+		request.Header.Set("X-Dispatch-User", "alice")
+		cancelled := httptest.NewRecorder()
+		gone.ServeHTTP(cancelled, request)
+		if cancelled.Code != http.StatusInternalServerError || !strings.Contains(cancelled.Body.String(), `"code":"`+codeInternal+`"`) {
+			t.Fatalf("cancelled GET %s: status=%d body=%s, want 500 %s", read.path, cancelled.Code, cancelled.Body.String(), codeInternal)
+		}
+	}
+}
+
+// failingBlockPath is a document service whose block placement fails with err, running during
+// first when it is set, as the reading request's own cancellation would land mid-read.
+type failingBlockPath struct {
+	docs.API
+	err    error
+	during func()
+}
+
+func (f failingBlockPath) BlockPath(context.Context, string, string) (model.BlockPath, error) {
+	if f.during != nil {
+		f.during()
+	}
+	return model.BlockPath{}, f.err
+}
+
+// readingServer is a second server on database whose document service reads through persist,
+// behind wrap's document service when wrap is set.
+func readingServer(t *testing.T, database *store.Store, persist docs.VersionedStore, wrap func(docs.API) docs.API) http.Handler {
 	t.Helper()
 	broker := events.NewBroker()
 	documents := docs.New(docs.Deps{Store: database, Persistence: persist, Events: broker})
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	var service docs.API = documents
+	if wrap != nil {
+		service = wrap(documents)
+	}
 	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
 		Store:         database,
 		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
 		AllowedLogins: allowed,
-		Docs:          documents,
+		Docs:          service,
 		Events:        broker,
 	})
 	if err != nil {

@@ -21,8 +21,9 @@ is the fourth top-level block, a table, its row 5 (row 0 is the header; the inde
 before the anchored one, in the column headed Due; outside a table it is the path of types and child indexes down to the block. The
 same facts are `anchor_block` on `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}`, and
 `GET /api/v1/artifacts/{id}/blocks/{block_id}` answers them for any block id a document holds. When Dispatch could not read the
-document, the read still answers and prints `Position: unavailable (document_unavailable)` (try again shortly) or
-`Position: unavailable (document_unreadable)` (the document needs repair); the API carries that reason as `anchor_block_error`.
+document, the read still answers and prints `Position: unavailable (DOC_SERVICE_UNAVAILABLE)` (try again shortly),
+`Position: unavailable (DOC_SCHEMA)` (the document needs repair) or `Position: unavailable (INTERNAL)`; the API carries that
+code as `anchor_block_error`.
 
 Every read ends with two sections from the reference graph. `Referenced by:` lists what points at the node — every document, ask,
 comment, or message that cites it, plus its structure: child issues, attached documents, anchored and owned asks and comments, replies,

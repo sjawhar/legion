@@ -354,7 +354,8 @@ unpinned.
 `GET /comments/{id}` and `GET /asks/{id}` add `anchor_block`, where that block stands (path; in a
 table the row, column, header and cells), and `dispatch_read` prints it as `Position:` after the
 quote. When Dispatch could not read the document, the read carries `anchor_block_error` instead
-and `dispatch_read` prints `Position: unavailable (<reason>)`; the read itself, and
+and `dispatch_read` prints `Position: unavailable (<code>)`, the code the API answers that error
+with elsewhere (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or `INTERNAL`); the read itself, and
 `dispatch_follow`, which reads the ask first, still succeed.
 
 `dispatch_doc_edit` may retype an identified paragraph or typed block into any schema-declared typed block with

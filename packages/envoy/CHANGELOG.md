@@ -48,8 +48,10 @@
   anchor's block as `anchor_block`, derived from the live document at read time and absent when
   the anchor names no block or the block has left the document; lists and events do not carry
   it. When the anchor's document cannot be read, those two reads still answer `200`, without
-  `anchor_block` and with `anchor_block_error` (`document_unavailable` or `document_unreadable`),
-  logged at WARN, and they do not wait for a failed document room's recovery (LEGION-460).
+  `anchor_block` and with `anchor_block_error` (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or
+  `INTERNAL`, the codes the API answers those errors with elsewhere), logged at WARN, and they do
+  not wait for a failed document room's recovery; only a request that has itself gone away fails
+  them (LEGION-460).
 
 ### Changed
 

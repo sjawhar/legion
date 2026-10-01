@@ -195,12 +195,13 @@ same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), c
 time and never stored or carried on lists and events; a block the live document no longer holds
 leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
 of those reads, so a document they cannot read does not fail them: the read answers 200 without
-`anchor_block` and with `anchor_block_error` (`document_unavailable` for a room or store that
-could not be reached, `document_unreadable` for a live tree outside the schema; generated from
-`packages/contracts` as `contracts.AnchorBlockDocumentUnavailable` and
-`contracts.AnchorBlockDocumentUnreadable`), logged at WARN, and only a request that has gone away
-fails. Nor does that read wait for a failed room's recovery (`docs.WithoutRecoveryWait`): it is
-`document_unavailable` at once, where `GET /text`, `GET /blocks` and the block route wait.
+`anchor_block` and with `anchor_block_error`, the code `writeHandlerError` answers that error with
+elsewhere (`DOC_SERVICE_UNAVAILABLE` for a room or store that could not be reached, `DOC_SCHEMA`
+for a live tree outside the schema, `INTERNAL` for anything else), logged at WARN. Only a request
+that has gone away fails, decided by that request's own context rather than the error, since a
+room a writer's cancelled commit failed carries that writer's `context.Canceled` in its cause.
+Nor does that read wait for a failed room's recovery (`docs.WithoutRecoveryWait`): it is
+`DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`, `GET /blocks` and the block route wait.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code

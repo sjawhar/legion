@@ -897,7 +897,8 @@ export const dispatchToolSpecs = [
       "reply to it (they belong to no issue). " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
-      "`Position: unavailable (<reason>)` when Dispatch could not read the document. " +
+      "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
+      "(try again shortly), `DOC_SCHEMA` (the document needs repair) or `INTERNAL`. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       OWNER_REFERENCE,

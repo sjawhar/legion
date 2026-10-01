@@ -5601,7 +5601,7 @@ describe("executeDispatchTool", () => {
             author: { kind: "user", id: "sami" },
             body: "I want this done today",
             anchor,
-            anchor_block_error: "document_unavailable",
+            anchor_block_error: "DOC_SERVICE_UNAVAILABLE",
             reply_to: null,
             resolved: false,
             suggestion: null,
@@ -5621,7 +5621,7 @@ describe("executeDispatchTool", () => {
             multiple: false,
             urgency: "high",
             anchor,
-            anchor_block_error: "document_unreadable",
+            anchor_block_error: "DOC_SCHEMA",
             state: "open",
             answer: null,
             created_at: "2026-09-09T00:00:00Z",
@@ -5650,7 +5650,7 @@ describe("executeDispatchTool", () => {
       "Comment:",
       "cccccccc-0000-4000-8000-000000000042 · user sami",
       "> Today, Oct 1",
-      "Position: unavailable (document_unavailable)",
+      "Position: unavailable (DOC_SERVICE_UNAVAILABLE)",
       "Body: I want this done today",
     ]);
     const ask = await executeDispatchTool({
@@ -5660,7 +5660,7 @@ describe("executeDispatchTool", () => {
     expect(ask.text.split("\n").slice(0, 4)).toEqual([
       "Question: Which day is meant?",
       "> Today, Oct 1",
-      "Position: unavailable (document_unreadable)",
+      "Position: unavailable (DOC_SCHEMA)",
       "Options:",
     ]);
   });

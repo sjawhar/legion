@@ -248,6 +248,14 @@ func errorf(status int, code, format string, args ...any) *apiError {
 	return &apiError{status: status, code: code, message: fmt.Sprintf(format, args...)}
 }
 
+// The codes writeHandlerError answers a document it cannot read and an unclassified failure
+// with, which a comment's or ask's single read also carries as anchor_block_error (anchorBlock).
+const (
+	codeDocSchema             = "DOC_SCHEMA"
+	codeDocServiceUnavailable = "DOC_SERVICE_UNAVAILABLE"
+	codeInternal              = "INTERNAL"
+)
+
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
@@ -356,7 +364,7 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		return
 	}
 	if errors.Is(err, docs.ErrDocSchema) {
-		writeError(w, "DOC_SCHEMA", http.StatusInternalServerError, err.Error())
+		writeError(w, codeDocSchema, http.StatusInternalServerError, err.Error())
 		slog.Error("dispatch: API document outside Proof schema", "error", err)
 		return
 	}
@@ -365,14 +373,14 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		return
 	}
 	if errors.Is(err, docs.ErrServiceUnavailable) {
-		writeError(w, "DOC_SERVICE_UNAVAILABLE", http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
+		writeError(w, codeDocServiceUnavailable, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
 		return
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, "NOT_FOUND", http.StatusNotFound, "not found")
 		return
 	}
-	writeError(w, "INTERNAL", http.StatusInternalServerError, "internal server error")
+	writeError(w, codeInternal, http.StatusInternalServerError, "internal server error")
 	slog.Error("dispatch: API handler failed", "error", err)
 }
 

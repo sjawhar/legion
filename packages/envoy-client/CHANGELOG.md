@@ -31,7 +31,7 @@
   quote's block stands: `table[3] › row 5 (Red-teamer loop), column Due` for a table cell (the
   row's index, 0 the header, labelled by its cells before the anchored one, and the column's
   header), or the path of types and child indexes outside a table (`positionText`), and
-  `Position: unavailable (<reason>)` when the read carries `anchor_block_error` instead. An ask's
+  `Position: unavailable (<code>)` when the read carries `anchor_block_error` instead. An ask's
   summary also prints its `> quote`, which it did not before (LEGION-460).
 - Added the shared nine-tool native Dispatch client, typed results, and per-issue event subscription details.
 - `setRole` takes `soft` and `previousSessionID` and returns `{ claimed: true, interest }` or `{ claimed: false, holder }`, so a caller can recover a role without displacing a live holder.
